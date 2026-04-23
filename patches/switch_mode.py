@@ -70,8 +70,23 @@ def switch_mode(mode: str) -> str:
     with open(claude_json, "w") as f:
         json.dump(data, f, indent=2)
 
+    # Build status summary
+    stt_label = "Local Whisper" if new_env.get("STT_BASE_URL") else "OpenAI (cloud)"
+    tts_url = new_env.get("TTS_BASE_URL", "")
+    if "8880" in tts_url:
+        tts_label = "Kokoro (local)"
+    elif "8881" in tts_url:
+        tts_label = "Piper (local)"
+    else:
+        tts_label = "OpenAI (cloud)"
+    voice = new_env.get("TTS_VOICE", "(default)")
+
     return (
         f"Switched to {mode} mode: {config['description']}\n\n"
+        f"Current config:\n"
+        f"  STT: {stt_label}\n"
+        f"  TTS: {tts_label}\n"
+        f"  Voice: {voice}\n\n"
         f"Settings updated in ~/.claude.json.\n"
         f"Please restart Claude Code for changes to take effect."
     )
