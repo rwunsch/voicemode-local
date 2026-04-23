@@ -39,6 +39,12 @@ if [ -f "$SCRIPT_DIR/converse.py" ]; then
     echo "[patches] Applied converse.py → $PROMPTS_DIR/converse.py"
 fi
 
+# Apply switch_mode prompt patch (adds /voicemode:switch-mode to slash menu)
+if [ -f "$SCRIPT_DIR/switch_mode_prompt.py" ]; then
+    cp "$SCRIPT_DIR/switch_mode_prompt.py" "$PROMPTS_DIR/switch_mode.py"
+    echo "[patches] Applied switch_mode_prompt.py → $PROMPTS_DIR/switch_mode.py"
+fi
+
 # Apply switch_mode tool patch
 if [ -f "$SCRIPT_DIR/switch_mode.py" ] && [ -d "$TOOLS_DIR" ]; then
     cp "$SCRIPT_DIR/switch_mode.py" "$TOOLS_DIR/switch_mode.py"
