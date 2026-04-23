@@ -19,6 +19,7 @@ CLAUDE_JSON="$HOME/.claude.json"
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 COMPOSE_FILE="$SCRIPT_DIR/docker-compose.yml"
 PROXY_PID_FILE="/tmp/whisper-proxy.pid"
+CONFIG_FILE="$HOME/.voicemode-local/config"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -28,6 +29,19 @@ NC='\033[0m'
 ok()   { echo -e "  ${GREEN}✓${NC} $1"; }
 fail() { echo -e "  ${RED}✗${NC} $1"; }
 warn() { echo -e "  ${YELLOW}!${NC} $1"; }
+
+docker_compose_cmd() {
+    # Build docker compose command with piper profile if enabled in config
+    local piper_enabled="false"
+    if [ -f "$CONFIG_FILE" ]; then
+        piper_enabled="$(grep -oP 'PIPER_ENABLED=\K.*' "$CONFIG_FILE" 2>/dev/null || echo "false")"
+    fi
+    if [ "$piper_enabled" = "true" ]; then
+        docker compose -f "$COMPOSE_FILE" --profile piper "$@"
+    else
+        docker compose -f "$COMPOSE_FILE" "$@"
+    fi
+}
 
 check_service() {
     local name="$1" url="$2"
@@ -93,6 +107,17 @@ cmd_status() {
     echo "Proxy:"
     check_proxy || true
     check_service "Whisper Proxy (OpenAI-compat)" "http://127.0.0.1:2022/health" || true
+
+    echo ""
+    echo "Piper:"
+    PIPER_PID_FILE="/tmp/piper-proxy.pid"
+    if [ -f "$PIPER_PID_FILE" ] && kill -0 "$(cat "$PIPER_PID_FILE")" 2>/dev/null; then
+        ok "Piper proxy is running (PID $(cat "$PIPER_PID_FILE"))"
+    else
+        fail "Piper proxy is not running"
+    fi
+    check_service "Piper Proxy (OpenAI-compat)" "http://127.0.0.1:8881/health" || true
+
     echo ""
     echo "Current config in ~/.claude.json:"
     python3 -c "
@@ -116,7 +141,7 @@ cmd_start() {
 
     echo ""
     echo "Starting Docker containers..."
-    docker compose -f "$COMPOSE_FILE" up -d 2>&1 | sed 's/^/  /'
+    docker_compose_cmd up -d 2>&1 | sed 's/^/  /'
 
     echo ""
     echo "Starting Whisper proxy..."
@@ -144,6 +169,25 @@ cmd_start() {
     fi
 
     echo ""
+    echo "Starting Piper proxy..."
+    PIPER_PID_FILE="/tmp/piper-proxy.pid"
+    if [ -f "$PIPER_PID_FILE" ] && kill -0 "$(cat "$PIPER_PID_FILE")" 2>/dev/null; then
+        warn "Piper proxy already running (PID $(cat "$PIPER_PID_FILE"))"
+    else
+        nohup python3 "$SCRIPT_DIR/piper-proxy.py" --port 8881 \
+            --voices-file "$SCRIPT_DIR/voices/piper-voices.json" \
+            --models-dir "$SCRIPT_DIR/models/piper" \
+            > /tmp/piper-proxy.log 2>&1 &
+        echo $! > "$PIPER_PID_FILE"
+        sleep 1
+        if kill -0 "$(cat "$PIPER_PID_FILE")" 2>/dev/null; then
+            ok "Piper proxy started (PID $(cat "$PIPER_PID_FILE"))"
+        else
+            fail "Piper proxy failed to start — check /tmp/piper-proxy.log"
+        fi
+    fi
+
+    echo ""
     cmd_status
 }
 
@@ -160,8 +204,18 @@ cmd_stop() {
     fi
 
     echo ""
+    echo "Stopping Piper proxy..."
+    PIPER_PID_FILE="/tmp/piper-proxy.pid"
+    if [ -f "$PIPER_PID_FILE" ]; then
+        kill "$(cat "$PIPER_PID_FILE")" 2>/dev/null && ok "Piper proxy stopped" || warn "Piper proxy was not running"
+        rm -f "$PIPER_PID_FILE"
+    else
+        warn "No Piper proxy PID file found"
+    fi
+
+    echo ""
     echo "Stopping Docker containers..."
-    docker compose -f "$COMPOSE_FILE" down 2>&1 | sed 's/^/  /'
+    docker_compose_cmd down 2>&1 | sed 's/^/  /'
 
     ok "All local services stopped"
 }
@@ -204,10 +258,24 @@ cmd_hybrid() {
     echo "  Make sure Kokoro is running: voicemode-switch start"
 }
 
+cmd_piper() {
+    echo "=== Switching to PIPER mode ==="
+    echo "  STT: Local Whisper (via proxy)"
+    echo "  TTS: Local Piper (port 8881)"
+    echo ""
+
+    update_env "http://127.0.0.1:2022/v1" "http://127.0.0.1:8881/v1" "p_de_thorsten"
+
+    echo ""
+    warn "Restart Claude Code for changes to take effect"
+    echo "  Make sure local services are running: voicemode-switch start"
+}
+
 case "${1:-}" in
     local)  cmd_local ;;
     openai) cmd_openai ;;
     hybrid) cmd_hybrid ;;
+    piper)  cmd_piper ;;
     status) cmd_status ;;
     start)  cmd_start ;;
     stop)   cmd_stop ;;
@@ -218,6 +286,7 @@ case "${1:-}" in
         echo "  local    Use local Whisper STT + Kokoro TTS (free, private)"
         echo "  openai   Use OpenAI for both STT and TTS (best quality)"
         echo "  hybrid   Use local Kokoro TTS + OpenAI STT (cheap, good quality)"
+        echo "  piper    Use local Whisper STT + Piper TTS (German support)"
         echo "  status   Show current config and service health"
         echo "  start    Start local Docker services + proxy"
         echo "  stop     Stop local services"

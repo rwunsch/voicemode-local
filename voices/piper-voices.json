@@ -1,0 +1,66 @@
+{
+  "voices": [
+    {
+      "id": "p_de_thorsten",
+      "language": "de",
+      "language_name": "German",
+      "gender": "male",
+      "name": "Thorsten",
+      "piper_model": "de_DE-thorsten-high",
+      "quality": "high",
+      "sample_rate": 22050
+    },
+    {
+      "id": "p_de_eva",
+      "language": "de",
+      "language_name": "German",
+      "gender": "female",
+      "name": "Eva",
+      "piper_model": "de_DE-eva_k-x_low",
+      "quality": "medium",
+      "sample_rate": 16000
+    },
+    {
+      "id": "p_nl_nathalie",
+      "language": "nl",
+      "language_name": "Dutch",
+      "gender": "female",
+      "name": "Nathalie",
+      "piper_model": "nl_NL-MLS_7432-low",
+      "quality": "medium",
+      "sample_rate": 16000
+    },
+    {
+      "id": "p_pl_gosia",
+      "language": "pl",
+      "language_name": "Polish",
+      "gender": "female",
+      "name": "Gosia",
+      "piper_model": "pl_PL-gosia-medium",
+      "quality": "medium",
+      "sample_rate": 22050
+    },
+    {
+      "id": "p_ru_dmitri",
+      "language": "ru",
+      "language_name": "Russian",
+      "gender": "male",
+      "name": "Dmitri",
+      "piper_model": "ru_RU-dmitri-medium",
+      "quality": "medium",
+      "sample_rate": 22050
+    },
+    {
+      "id": "p_ko_hana",
+      "language": "ko",
+      "language_name": "Korean",
+      "gender": "female",
+      "name": "Hana",
+      "piper_model": "ko_KR-x-medium",
+      "quality": "medium",
+      "sample_rate": 22050
+    }
+  ],
+  "default_voice": "p_de_thorsten",
+  "models_dir": "models/piper"
+}

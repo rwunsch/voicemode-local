@@ -37,6 +37,23 @@ class WhisperProxyHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "application/json")
             self.end_headers()
             self.wfile.write(json.dumps({"status": "ok"}).encode())
+        elif self.path == "/v1/models":
+            response = json.dumps({
+                "object": "list",
+                "data": [
+                    {
+                        "id": "whisper-1",
+                        "object": "model",
+                        "created": 1700000000,
+                        "owned_by": "local",
+                    }
+                ],
+            })
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(response)))
+            self.end_headers()
+            self.wfile.write(response.encode())
         else:
             self.send_error(404, "Not Found")
 
@@ -65,8 +82,11 @@ class WhisperProxyHandler(BaseHTTPRequestHandler):
 
         # Forward to whisper service (output=txt for plain text)
         url = f"{self.whisper_url}/asr?output=txt"
-        if fields.get("language"):
-            url += f"&language={fields['language']}"
+        language = fields.get("language", "")
+        # Filter out "auto" — the whisper ASR backend doesn't support it
+        # and returns 500. Omitting the param lets whisper auto-detect.
+        if language and language != "auto":
+            url += f"&language={language}"
 
         req = urllib.request.Request(
             url,
@@ -82,10 +102,16 @@ class WhisperProxyHandler(BaseHTTPRequestHandler):
             self.send_error(502, f"Whisper service error: {e}")
             return
 
-        # Return OpenAI-compatible JSON response
-        response = json.dumps({"text": result_text})
+        # Return response in the requested format
+        response_format = fields.get("response_format", "json")
+        if response_format == "text":
+            response = result_text
+            content_type = "text/plain"
+        else:
+            response = json.dumps({"text": result_text})
+            content_type = "application/json"
         self.send_response(200)
-        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(response)))
         self.end_headers()
         self.wfile.write(response.encode())
