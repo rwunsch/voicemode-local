@@ -44,8 +44,9 @@ If the user asks to change voice during a conversation, switch the `voice` param
 - Portuguese: `pf_dora` (F), `pm_alex` (M)
 - Chinese: `zf_xiaobei` (F), `zm_yunxi` (M)
 
-### German
-Not yet supported by Kokoro. Community work in progress (hexgrad/kokoro PR #316/#317).
+### German (Kokoro)
+Kokoro handles German well with existing voices — just switch to German language in conversation.
+No need to switch to Piper for German.
 
 ## Available Voices (Piper TTS)
 

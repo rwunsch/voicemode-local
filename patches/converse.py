@@ -38,17 +38,18 @@ Voices are identified by prefix. Use the correct `tts_provider` parameter based 
 
 When switching between Kokoro and Piper voices, the user may need to use `/voicemode:switch-mode` to change the TTS endpoint, or you can suggest it.
 
-## Language Fallback
+## Language Switching
 
-If the user requests a language not available in the current TTS engine:
-- Kokoro supports: English, French, Italian, Spanish, Hindi, Japanese, Portuguese, Chinese
-- Piper supports: German, Dutch, Polish, Russian, Korean (and many others)
-- OpenAI supports: Most languages
+When the user asks to switch languages (e.g. "switch to German", "sprich Deutsch"), simply switch
+the language of your responses. The current TTS engine handles the language change automatically —
+do NOT suggest switching to a different engine unless the user explicitly asks.
 
-When a language is requested that the current engine can't handle, explicitly ask:
-> "German isn't available in Kokoro. Want me to switch to Piper? I'd recommend p_de_thorsten, a natural-sounding German male voice."
+Kokoro supports: English, German, French, Italian, Spanish, Hindi, Japanese, Portuguese, Chinese
+Piper supports: German, Dutch, Polish, Russian, Korean (and many others)
+OpenAI supports: Most languages
 
-Do NOT silently switch engines.
+Piper is available as an alternative via `/voicemode:switch-mode` for languages Kokoro doesn't
+support well (e.g. Dutch, Polish, Russian, Korean).
 
 ## Voices by TTS Provider
 
