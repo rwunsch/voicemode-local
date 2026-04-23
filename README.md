@@ -30,6 +30,21 @@ Local voice services for [VoiceMode MCP](https://github.com/mbailey/voicemode) â
 libasound2-plugins libasound2-dev libportaudio2 portaudio19-dev alsa-utils sox python3-dev
 ```
 
+### Upstream Projects
+
+This project patches and orchestrates the following open-source projects:
+
+| Project | Role | License | Repository |
+|---------|------|---------|------------|
+| **VoiceMode** | MCP server for voice conversations | MIT | [mbailey/voicemode](https://github.com/mbailey/voicemode) |
+| **Kokoro-FastAPI** | Local TTS (Kokoro-82M model) | Apache-2.0 | [remsky/Kokoro-FastAPI](https://github.com/remsky/Kokoro-FastAPI) |
+| **Piper** | Local TTS (multilingual) | MIT | [rhasspy/piper](https://github.com/rhasspy/piper) |
+| **Wyoming Piper** | Piper Docker container | MIT | [rhasspy/wyoming-piper](https://github.com/rhasspy/wyoming-piper) |
+| **Whisper ASR Webservice** | Local STT (faster-whisper engine) | MIT | [ahmetoner/whisper-asr-webservice](https://github.com/ahmetoner/whisper-asr-webservice) |
+| **faster-whisper** | Whisper inference engine (inside Docker) | MIT | [SYSTRAN/faster-whisper](https://github.com/SYSTRAN/faster-whisper) |
+
+VoiceMode Local applies patches to the installed VoiceMode package to add voice selection, Piper routing, and mode switching. These patches need to be re-applied after upgrading VoiceMode (`./patches/apply.sh`).
+
 ## How To Use
 
 ### 1. Install

@@ -6,8 +6,8 @@ Registers /voicemode:switch-mode in Claude Code's slash menu.
 from voice_mode.server import mcp
 
 
-@mcp.prompt()
-def switch_mode() -> str:
+@mcp.prompt(name="switch-mode")
+def switch_mode_prompt() -> str:
     """Switch between voice engine modes (local, piper, openai, hybrid)."""
     return """Switch the VoiceMode TTS/STT engine. Available modes:
 
