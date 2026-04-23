@@ -210,14 +210,48 @@ Patches are applied by `./patches/apply.sh` (run automatically during install) a
 
 ## System Files Modified
 
-| File | What | Purpose |
-|------|------|---------|
-| `~/.asoundrc` | ALSA→PulseAudio config | Routes audio through WSLg |
-| `~/.claude.json` | MCP server registration | VoiceMode MCP + env vars (STT/TTS URLs) |
-| `~/.claude/settings.json` | Permission allow-list | Auto-allows converse, service, switch_mode tools |
-| `~/.bashrc` | OPENAI_API_KEY export | Makes key available in shell (optional) |
-| `~/.local/bin/voicemode-switch` | Symlink | Puts `voicemode-switch` in PATH |
-| `~/.voicemode-local/config` | Install config | Stores install mode and Piper preference |
+The installer creates or modifies these files outside the repo:
+
+**`~/.asoundrc`** — ALSA audio routing (created if missing)
+```
+pcm.!default { type pulse }
+ctl.!default { type pulse }
+```
+Routes audio through PulseAudio/WSLg so microphone and speakers work in WSL2.
+
+**`~/.claude.json`** — MCP server registration (key `mcpServers.voicemode`)
+```json
+{
+  "mcpServers": {
+    "voicemode": {
+      "command": "/path/to/voicemode-local/.venv/bin/voice-mode",
+      "args": [],
+      "env": {
+        "STT_BASE_URL": "http://127.0.0.1:2022/v1",
+        "TTS_BASE_URL": "http://127.0.0.1:8880/v1",
+        "TTS_VOICE": "af_sky",
+        "OPENAI_API_KEY": "sk-..."
+      }
+    }
+  }
+}
+```
+The `env` block is updated by `voicemode-switch` when you change modes. The `OPENAI_API_KEY` is only needed for openai/hybrid modes.
+
+**`~/.claude/settings.json`** — Permission allow-list (key `permissions.allow`)
+Adds `mcp__voicemode__converse`, `mcp__voicemode__service`, and `mcp__voicemode__switch_mode` so Claude Code doesn't prompt for permission on every voice call.
+
+**`~/.bashrc`** — Shell environment (optional)
+Adds `export OPENAI_API_KEY="sk-..."` if you provided a key during install. Only needed for openai/hybrid modes.
+
+**`~/.local/bin/voicemode-switch`** — Symlink to `voicemode-switch` in this repo, so the command is available in PATH.
+
+**`~/.voicemode-local/config`** — Install preferences
+```
+INSTALL_MODE=docker
+PIPER_ENABLED=true
+```
+Read by `voicemode-switch` to know whether to include the Piper Docker profile.
 
 ## Uninstall
 
