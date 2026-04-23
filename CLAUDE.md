@@ -1,6 +1,12 @@
 # VoiceMode Local
 
-Local voice services for Claude Code on WSL2, with Whisper STT and Kokoro TTS.
+Local voice services for Claude Code, with Whisper STT, Kokoro TTS, and Piper TTS.
+
+## Supported Environments
+
+- **WSL2 on Windows 11** (primary, tested on Ubuntu 22.04 LTS)
+- **Ubuntu 22.04+** (native Linux, should work with PulseAudio/PipeWire)
+- **macOS** (untested — Docker services should work, audio routing may differ)
 
 ## Voice Selection on Startup
 
@@ -58,11 +64,20 @@ Not yet supported by Kokoro. Community work in progress (hexgrad/kokoro PR #316/
 | voicemode-whisper | 9000 | Whisper ASR (Docker) |
 | voicemode-kokoro | 8880 | Kokoro TTS (Docker) |
 | piper-proxy | 8881 | OpenAI-compatible TTS via Piper |
+| voicemode-piper | 10200 | Piper TTS (Docker, optional profile) |
 
 ## In-Session Mode Switching
 
-Use `/voicemode:switch-mode` to switch between TTS engines (e.g. Kokoro ↔ Piper) without restarting Claude Code.
+Use `/voicemode:switch-mode` to switch between TTS engines (e.g. Kokoro <-> Piper) without leaving Claude Code. Restart Claude Code afterward for changes to take effect.
+
+Available modes: `local` (Kokoro), `piper`, `openai`, `hybrid`.
 
 ## Whisper Proxy Auto-Start
 
 The whisper proxy starts automatically on first WSL shell via `~/.bashrc`. It checks port 2022 to avoid duplicates.
+
+## Key Dependencies
+
+- Python 3.10+, Docker + Compose, Claude Code CLI, uv/uvx
+- For Piper native mode: `piper-tts` (pip)
+- For cloud modes: OpenAI API key
