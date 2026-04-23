@@ -67,6 +67,27 @@ Optionally pass your OpenAI key (only needed for openai/hybrid modes):
 ./install.sh --openai-key=sk-proj-...
 ```
 
+### OpenAI API Key
+
+The OpenAI key is only needed for `openai` and `hybrid` modes (cloud STT/TTS). It's stored in two places:
+
+1. **`~/.claude.json`** (under `mcpServers.voicemode.env.OPENAI_API_KEY`) — The VoiceMode MCP server reads it here at startup to authenticate with OpenAI's STT/TTS APIs. This is updated automatically by the installer and `voicemode-switch`.
+
+2. **`~/.bashrc`** (as `export OPENAI_API_KEY=...`) — Makes the key available in your shell for other tools that need it. This is optional and only added if you provide a key during install.
+
+**Why two places?** The MCP server runs in its own process and reads env vars from `~/.claude.json`, not from your shell. Your shell reads `~/.bashrc`. They don't share an environment, so the key needs to be in both.
+
+To set or update the key after install:
+```bash
+# Option 1: Re-run the installer
+./install.sh --openai-key=sk-proj-YOUR-KEY
+
+# Option 2: Set manually
+export OPENAI_API_KEY="sk-proj-YOUR-KEY"
+echo 'export OPENAI_API_KEY="sk-proj-YOUR-KEY"' >> ~/.bashrc
+voicemode-switch openai   # This writes the key into ~/.claude.json
+```
+
 ### 2. Choose a mode
 
 ```bash
