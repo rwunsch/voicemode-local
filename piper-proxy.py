@@ -109,7 +109,7 @@ class PiperProxyHandler(BaseHTTPRequestHandler):
             with open(tmp_path, "rb") as f:
                 wav_bytes = f.read()
         except FileNotFoundError:
-            self.send_error(500, "piper CLI not found — install piper-tts")
+            self.send_error(500, "piper CLI not found - install piper-tts")
             return
         except subprocess.TimeoutExpired:
             self.send_error(500, "piper timed out")
