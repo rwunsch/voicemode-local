@@ -90,6 +90,7 @@ class PiperProxyHandler(BaseHTTPRequestHandler):
                 return
 
         # Run piper CLI
+        tmp_path = None
         try:
             with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
                 tmp_path = tmp.name
@@ -114,7 +115,7 @@ class PiperProxyHandler(BaseHTTPRequestHandler):
             self.send_error(500, "piper timed out")
             return
         finally:
-            if os.path.exists(tmp_path):
+            if tmp_path and os.path.exists(tmp_path):
                 os.unlink(tmp_path)
 
         self.send_response(200)
@@ -133,15 +134,23 @@ class PiperProxyHandler(BaseHTTPRequestHandler):
           quality     = high
         """
         # Parse model name: <lang_REGION>-<name>-<quality>
-        # lang_REGION may be like de_DE or ko_KR
-        parts = piper_model.split("-", 1)  # ["de_DE", "thorsten-high"]
+        # Examples: de_DE-thorsten-high, de_DE-eva_k-x_low, ko_KR-x_medium
+        # The name and quality are everything between the first and last hyphen,
+        # but some models have underscores in names (eva_k) or single-segment
+        # names (x). We split from both ends to handle all cases.
+        parts = piper_model.split("-")
+        # First part is always lang_REGION
         lang_region = parts[0]             # de_DE
-        rest = parts[1] if len(parts) > 1 else ""
-
-        # Split rest into name and quality (quality is last segment)
-        rest_parts = rest.rsplit("-", 1)
-        name = rest_parts[0] if len(rest_parts) > 1 else rest
-        quality = rest_parts[1] if len(rest_parts) > 1 else "medium"
+        # Last part is always quality
+        quality = parts[-1] if len(parts) > 2 else (parts[1] if len(parts) == 2 else "medium")
+        # Middle parts (joined) are the name
+        if len(parts) > 2:
+            name = "-".join(parts[1:-1])
+        elif len(parts) == 2:
+            # ambiguous: could be name or quality. Treat as name with default quality.
+            name = parts[1]
+        else:
+            name = "unknown"
 
         lang = lang_region.split("_")[0]   # de
 

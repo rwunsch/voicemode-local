@@ -189,7 +189,7 @@ else:
 perms = settings.setdefault("permissions", {})
 allow = perms.setdefault("allow", [])
 
-needed = ["mcp__voicemode__converse", "mcp__voicemode__service"]
+needed = ["mcp__voicemode__converse", "mcp__voicemode__service", "mcp__voicemode__switch_mode"]
 for p in needed:
     if p not in allow:
         allow.append(p)
@@ -236,17 +236,22 @@ fi
 # ─── Step 7: Start services ──────────────────────────────────────────────────
 header "Step 7: Start local services"
 
-echo "  Starting Docker containers..."
 cd "$SCRIPT_DIR"
-docker compose up -d 2>&1 | sed 's/^/  /'
 
-echo "  Waiting for Whisper to be ready..."
-for i in $(seq 1 60); do
-    if curl -sf --max-time 2 "http://127.0.0.1:9000/docs" > /dev/null 2>&1; then
-        break
-    fi
-    sleep 1
-done
+if [ "$INSTALL_MODE" = "docker" ]; then
+    echo "  Starting Docker containers..."
+    docker compose up -d 2>&1 | sed 's/^/  /'
+
+    echo "  Waiting for Whisper to be ready..."
+    for i in $(seq 1 60); do
+        if curl -sf --max-time 2 "http://127.0.0.1:9000/docs" > /dev/null 2>&1; then
+            break
+        fi
+        sleep 1
+    done
+else
+    warn "Native mode: Docker containers skipped. Start STT/TTS services manually."
+fi
 
 echo "  Starting Whisper proxy..."
 if lsof -ti:2022 > /dev/null 2>&1; then

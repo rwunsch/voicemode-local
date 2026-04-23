@@ -56,7 +56,7 @@
       "language_name": "Korean",
       "gender": "female",
       "name": "Hana",
-      "piper_model": "ko_KR-x_medium",
+      "piper_model": "ko_KR-x-medium",
       "quality": "medium",
       "sample_rate": 22050
     }
