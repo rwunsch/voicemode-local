@@ -240,7 +240,11 @@ cd "$SCRIPT_DIR"
 
 if [ "$INSTALL_MODE" = "docker" ]; then
     echo "  Starting Docker containers..."
-    docker compose up -d 2>&1 | sed 's/^/  /'
+    if [ "$PIPER_ENABLED" = "true" ]; then
+        docker compose --profile piper up -d 2>&1 | sed 's/^/  /'
+    else
+        docker compose up -d 2>&1 | sed 's/^/  /'
+    fi
 
     echo "  Waiting for Whisper to be ready..."
     for i in $(seq 1 60); do
