@@ -27,14 +27,32 @@ The conversation flows naturally. Claude's responses are typically 1-3 seconds t
 
 **Engine switching** — Swap between Kokoro (fast, good English), Piper (multilingual), or OpenAI (best quality) on the fly using `/voicemode:switch-mode` without leaving your session.
 
+## What VoiceMode Local Adds
+
+The upstream [VoiceMode MCP](https://github.com/mbailey/voicemode) provides the core voice conversation framework for Claude Code. VoiceMode Local builds on it with local infrastructure:
+
+| Feature | VoiceMode (upstream) | VoiceMode Local |
+|---------|---------------------|-----------------|
+| STT | OpenAI Whisper API (cloud) | Local Whisper via Docker (free) |
+| TTS | OpenAI TTS (cloud) | Kokoro + Piper locally, OpenAI as fallback |
+| Cost | ~$0.01/min | Free (local modes) |
+| Privacy | Audio sent to OpenAI | Audio stays on your machine |
+| Voice engines | OpenAI only | Kokoro, Piper, OpenAI — switchable |
+| Voice selection | Fixed | Random or named voice per session |
+| Language switching | Via OpenAI | Automatic (Whisper detects language) |
+| Multi-session | Same voice everywhere | Different voice per session |
+| Mode switching | N/A | `/voicemode:switch-mode` in-session |
+
 ## Supported Environments
 
 | Environment | Status | Notes |
 |-------------|--------|-------|
 | **WSL2 on Windows 11** | Tested | Primary target. Requires WSLg for audio passthrough |
-| **Ubuntu 22.04+ (native)** | Should work | PulseAudio or PipeWire required for audio |
-| **macOS** | Untested | Docker services should work; audio routing may differ |
-| **Windows (native)** | Not supported | Use WSL2 instead |
+| **Ubuntu 22.04+** | Should work | PulseAudio or PipeWire required for audio. Skip `~/.asoundrc` step |
+| **Fedora / RHEL** | Should work | Same as Ubuntu; use `dnf` instead of `apt` for system packages |
+| **macOS** | Untested | Docker services should work. Audio uses CoreAudio, not ALSA — skip `~/.asoundrc`. Microphone access may need System Settings approval |
+| **NixOS** | Untested | Docker works. System packages need a Nix derivation instead of `apt install` |
+| **Windows (native)** | Not supported | Use WSL2 — our proxies assume Unix and ALSA doesn't exist on Windows |
 
 **Tested on:** Ubuntu 22.04 LTS under WSL2 (kernel 6.6.x), Windows 11 24H2.
 
