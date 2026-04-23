@@ -10,7 +10,7 @@ services:
     restart: unless-stopped
 
   kokoro:
-    image: ghcr.io/remsky/kokoro-fastapi-cpu:latest
+    image: ghcr.io/remsky/kokoro-fastapi-cpu:v0.1.5
     container_name: voicemode-kokoro
     ports:
       - "8880:8880"
