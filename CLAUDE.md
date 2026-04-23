@@ -63,7 +63,8 @@ No need to switch to Piper for German.
 |---------|------|---------|
 | whisper-proxy | 2022 | Translates OpenAI-compatible STT to Whisper `/asr` |
 | voicemode-whisper | 9000 | Whisper ASR (Docker) |
-| voicemode-kokoro | 8880 | Kokoro TTS (Docker) |
+| voicemode-kokoro | 8880 | Kokoro TTS (Docker mode, Kokoro-FastAPI) |
+| kokoro-onnx-server | 8880 | Kokoro TTS (native mode, lightweight ONNX ~92MB) |
 | piper-proxy | 8881 | OpenAI-compatible TTS via Piper |
 | voicemode-piper | 10200 | Piper TTS (Docker, optional profile) |
 

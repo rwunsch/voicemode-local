@@ -249,9 +249,12 @@ alloy (default), echo, fable, nova, onyx, shimmer
 |---------|------|------|---------|
 | whisper-proxy | 2022 | Python process | Translates OpenAI STT API → Whisper `/asr` |
 | voicemode-whisper | 9000 | Docker container | Whisper ASR (faster-whisper engine) |
-| voicemode-kokoro | 8880 | Docker container | Kokoro TTS (82M parameter model) |
+| voicemode-kokoro | 8880 | Docker container | Kokoro TTS (Docker mode, Kokoro-FastAPI) |
+| kokoro-onnx-server | 8880 | Python process | Kokoro TTS (native mode, lightweight ONNX) |
 | piper-proxy | 8881 | Python process | OpenAI-compatible TTS via piper-tts CLI |
 | voicemode-piper | 10200 | Docker container | Piper TTS (optional, profile: piper) |
+
+**Kokoro TTS options:** Docker mode uses Kokoro-FastAPI (multi-GB image, fast inference). Native mode uses kokoro-onnx (~92MB model, CPU-only, no Docker needed). Both serve the same OpenAI-compatible API on port 8880 with identical voice quality.
 
 ## Patches
 

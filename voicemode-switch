@@ -100,8 +100,19 @@ PYEOF
 cmd_status() {
     echo "=== VoiceMode Service Status ==="
     echo ""
-    echo "Docker containers:"
-    check_service "Kokoro TTS" "http://127.0.0.1:8880/v1/models" || true
+    if is_kokoro_onnx; then
+        echo "Kokoro ONNX (native):"
+        KOKORO_ONNX_PID_FILE="/tmp/kokoro-onnx-server.pid"
+        if [ -f "$KOKORO_ONNX_PID_FILE" ] && kill -0 "$(cat "$KOKORO_ONNX_PID_FILE")" 2>/dev/null; then
+            ok "Kokoro ONNX server running (PID $(cat "$KOKORO_ONNX_PID_FILE"))"
+        else
+            fail "Kokoro ONNX server not running"
+        fi
+        check_service "Kokoro ONNX TTS" "http://127.0.0.1:8880/health" || true
+    else
+        echo "Docker containers:"
+        check_service "Kokoro TTS" "http://127.0.0.1:8880/v1/models" || true
+    fi
     check_service "Whisper ASR" "http://127.0.0.1:9000/docs" || true
     echo ""
     echo "Proxy:"
@@ -136,12 +147,44 @@ print(f'  OpenAI key: {\"set\" if has_key else \"NOT SET\"} ')
 "
 }
 
+is_kokoro_onnx() {
+    local onnx="false"
+    if [ -f "$CONFIG_FILE" ]; then
+        onnx="$(grep -oP 'KOKORO_ONNX=\K.*' "$CONFIG_FILE" 2>/dev/null || echo "false")"
+    fi
+    [ "$onnx" = "true" ]
+}
+
 cmd_start() {
     echo "=== Starting Local VoiceMode Services ==="
 
-    echo ""
-    echo "Starting Docker containers..."
-    docker_compose_cmd up -d 2>&1 | sed 's/^/  /'
+    if is_kokoro_onnx; then
+        echo ""
+        echo "Starting Kokoro ONNX server (native)..."
+        KOKORO_ONNX_PID_FILE="/tmp/kokoro-onnx-server.pid"
+        if [ -f "$KOKORO_ONNX_PID_FILE" ] && kill -0 "$(cat "$KOKORO_ONNX_PID_FILE")" 2>/dev/null; then
+            warn "Kokoro ONNX server already running (PID $(cat "$KOKORO_ONNX_PID_FILE"))"
+        else
+            if lsof -ti:8880 > /dev/null 2>&1; then
+                kill "$(lsof -ti:8880)" 2>/dev/null
+                sleep 1
+            fi
+            nohup python3 "$SCRIPT_DIR/kokoro-onnx-server.py" --port 8880 \
+                --model-dir "$SCRIPT_DIR/models/kokoro" \
+                > /tmp/kokoro-onnx-server.log 2>&1 &
+            echo $! > "$KOKORO_ONNX_PID_FILE"
+            sleep 2
+            if kill -0 "$(cat "$KOKORO_ONNX_PID_FILE")" 2>/dev/null; then
+                ok "Kokoro ONNX server started (PID $(cat "$KOKORO_ONNX_PID_FILE"))"
+            else
+                fail "Kokoro ONNX server failed - check /tmp/kokoro-onnx-server.log"
+            fi
+        fi
+    else
+        echo ""
+        echo "Starting Docker containers..."
+        docker_compose_cmd up -d 2>&1 | sed 's/^/  /'
+    fi
 
     echo ""
     echo "Starting Whisper proxy..."
@@ -211,6 +254,14 @@ cmd_stop() {
         rm -f "$PIPER_PID_FILE"
     else
         warn "No Piper proxy PID file found"
+    fi
+
+    echo ""
+    KOKORO_ONNX_PID_FILE="/tmp/kokoro-onnx-server.pid"
+    if [ -f "$KOKORO_ONNX_PID_FILE" ]; then
+        echo "Stopping Kokoro ONNX server..."
+        kill "$(cat "$KOKORO_ONNX_PID_FILE")" 2>/dev/null && ok "Kokoro ONNX server stopped" || warn "Kokoro ONNX was not running"
+        rm -f "$KOKORO_ONNX_PID_FILE"
     fi
 
     echo ""

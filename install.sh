@@ -72,6 +72,25 @@ else
     ok "Install mode: docker"
 fi
 
+# Ask about TTS engine for native mode
+KOKORO_ONNX="false"
+if [ "$INSTALL_MODE" = "native" ]; then
+    echo ""
+    echo "  TTS engine for native mode:"
+    echo ""
+    echo "    1) Kokoro ONNX (lightweight, ~92MB model, CPU-only)"
+    echo "    2) None (use Docker for TTS, or OpenAI cloud)"
+    echo ""
+    read -r -p "  Choice [1]: " tts_choice
+    tts_choice="${tts_choice:-1}"
+    if [ "$tts_choice" = "1" ]; then
+        KOKORO_ONNX="true"
+        ok "TTS engine: Kokoro ONNX (native)"
+    else
+        ok "TTS engine: none (use Docker or cloud)"
+    fi
+fi
+
 # Ask about Piper
 echo ""
 read -r -p "  Install Piper TTS for multilingual voices (German, Dutch, etc)? [Y/n]: " piper_choice
@@ -88,6 +107,7 @@ fi
 cat > "$CONFIG_FILE" << EOF
 INSTALL_MODE=$INSTALL_MODE
 PIPER_ENABLED=$PIPER_ENABLED
+KOKORO_ONNX=$KOKORO_ONNX
 EOF
 ok "Config saved to $CONFIG_FILE"
 
@@ -270,6 +290,39 @@ if [ "$INSTALL_MODE" = "docker" ]; then
     done
 else
     warn "Native mode: Docker containers skipped. Start STT/TTS services manually."
+fi
+
+# ─── Step 7a: Kokoro ONNX (native TTS) ─────────────────────────────────────
+if [ "$KOKORO_ONNX" = "true" ]; then
+    header "Step 7a: Kokoro ONNX (native TTS)"
+
+    echo "  Installing kokoro-onnx..."
+    pip3 install --user kokoro-onnx soundfile numpy 2>&1 | tail -1 | sed 's/^/  /'
+    ok "kokoro-onnx installed"
+
+    mkdir -p "$SCRIPT_DIR/models/kokoro"
+
+    echo "  Starting Kokoro ONNX server..."
+    KOKORO_ONNX_PID_FILE="/tmp/kokoro-onnx-server.pid"
+    if [ -f "$KOKORO_ONNX_PID_FILE" ] && kill -0 "$(cat "$KOKORO_ONNX_PID_FILE")" 2>/dev/null; then
+        warn "Kokoro ONNX server already running"
+    else
+        if lsof -ti:8880 > /dev/null 2>&1; then
+            kill "$(lsof -ti:8880)" 2>/dev/null
+            sleep 1
+        fi
+        nohup python3 "$SCRIPT_DIR/kokoro-onnx-server.py" --port 8880 \
+            --model-dir "$SCRIPT_DIR/models/kokoro" \
+            > /tmp/kokoro-onnx-server.log 2>&1 &
+        echo $! > "$KOKORO_ONNX_PID_FILE"
+        echo "  Model will download on first request (~326 MB)..."
+        sleep 2
+        if kill -0 "$(cat "$KOKORO_ONNX_PID_FILE")" 2>/dev/null; then
+            ok "Kokoro ONNX server started on port 8880"
+        else
+            fail "Kokoro ONNX server failed - check /tmp/kokoro-onnx-server.log"
+        fi
+    fi
 fi
 
 echo "  Starting Whisper proxy..."
