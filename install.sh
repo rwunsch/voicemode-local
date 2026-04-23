@@ -130,20 +130,35 @@ fi
 # ─── Step 3: Register VoiceMode MCP server ────────────────────────────────────
 header "Step 3: VoiceMode MCP server"
 
+# Create local venv with voice-mode (patches are applied to this venv)
+VENV_DIR="$SCRIPT_DIR/.venv"
+if [ ! -d "$VENV_DIR" ]; then
+    echo "  Creating local venv..."
+    uv venv "$VENV_DIR" 2>&1 | sed 's/^/  /'
+fi
+echo "  Installing voice-mode into local venv..."
+uv pip install --python "$VENV_DIR/bin/python3" voice-mode 2>&1 | tail -1 | sed 's/^/  /'
+ok "voice-mode installed in $VENV_DIR"
+
 if command -v claude >/dev/null 2>&1; then
-    # Check if voicemode already registered
+    # Register using local venv binary (not uvx) so patches persist
+    VOICE_MODE_BIN="$VENV_DIR/bin/voice-mode"
     if python3 -c "
 import json, os
 with open(os.path.expanduser('~/.claude.json')) as f:
     d = json.load(f)
-if 'voicemode' in d.get('mcpServers', {}):
+vm = d.get('mcpServers', {}).get('voicemode', {})
+# Check if already registered with the correct command
+if vm.get('command') == '$VOICE_MODE_BIN':
     exit(0)
 exit(1)
 " 2>/dev/null; then
-        ok "VoiceMode MCP already registered"
+        ok "VoiceMode MCP already registered (local venv)"
     else
-        claude mcp add --scope user voicemode -- uvx --refresh voice-mode
-        ok "VoiceMode MCP registered"
+        # Remove old registration if it exists (might be uvx-based)
+        claude mcp remove voicemode 2>/dev/null
+        claude mcp add --scope user voicemode -- "$VOICE_MODE_BIN"
+        ok "VoiceMode MCP registered (local venv)"
     fi
 
     # Set env vars
