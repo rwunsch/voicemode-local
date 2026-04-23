@@ -1,6 +1,31 @@
 # VoiceMode Local
 
-Local voice services for [VoiceMode MCP](https://github.com/mbailey/voicemode) — enabling two-way voice conversations with Claude Code using fully local STT and TTS, with optional cloud fallback.
+Talk to Claude Code with your voice — fully local, private, and free.
+
+VoiceMode Local sets up local speech-to-text (Whisper) and text-to-speech (Kokoro, Piper) services so you can have real-time two-way voice conversations with Claude Code without sending audio to the cloud. It extends the [VoiceMode MCP](https://github.com/mbailey/voicemode) server with local voice infrastructure and multi-engine support.
+
+## How It Works
+
+1. **You speak** — hold Space to record, release to send
+2. **Silence detection** stops recording automatically when you pause
+3. **A chime plays** to confirm your input was captured
+4. **Whisper transcribes** your speech locally (no cloud)
+5. **Claude responds in voice** — you hear the reply through Kokoro or Piper TTS
+6. **Another chime** signals it's your turn again
+
+The conversation flows naturally. Claude's responses are typically 1-3 seconds to start speaking, and the full round-trip (speak, transcribe, think, synthesize, play) takes 10-20 seconds depending on response length.
+
+## Why Use This?
+
+**Privacy** — Your voice never leaves your machine. STT and TTS run locally via Docker containers.
+
+**Cost** — Fully local mode is free. No API charges for voice, no per-minute billing.
+
+**Multi-session voice** — Run multiple Claude Code sessions and give each a different voice. When three terminals are talking to you, you can tell which is which by the voice alone. This is the killer feature for power users running parallel Claude Code sessions.
+
+**Language switching** — Say "sprich Deutsch" and Claude switches to German mid-conversation. Whisper auto-detects your language, no manual configuration needed. Switch back with "speak English". The TTS voices handle multiple languages naturally.
+
+**Engine switching** — Swap between Kokoro (fast, good English), Piper (multilingual), or OpenAI (best quality) on the fly using `/voicemode:switch-mode` without leaving your session.
 
 ## Supported Environments
 
