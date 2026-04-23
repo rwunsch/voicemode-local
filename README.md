@@ -401,3 +401,20 @@ cat /tmp/piper-proxy.log
 curl -L -o /tmp/test.onnx \
   "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/de/de_DE/thorsten/high/de_DE-thorsten-high.onnx"
 ```
+
+## License & Attribution
+
+This project is licensed under the [MIT License](LICENSE).
+
+VoiceMode Local orchestrates and extends these open-source projects:
+
+| Project | License | Role |
+|---------|---------|------|
+| [VoiceMode](https://github.com/mbailey/voicemode) | MIT | MCP server for Claude Code voice conversations |
+| [Kokoro-FastAPI](https://github.com/remsky/Kokoro-FastAPI) | Apache-2.0 | OpenAI-compatible TTS server (Docker mode) |
+| [kokoro-onnx](https://github.com/thewh1teagle/kokoro-onnx) | MIT | Lightweight ONNX TTS runtime (native mode) |
+| [Piper](https://github.com/rhasspy/piper) | MIT | Multilingual TTS engine |
+| [Wyoming Piper](https://github.com/rhasspy/wyoming-piper) | MIT | Piper Docker container |
+| [Whisper ASR Webservice](https://github.com/ahmetoner/whisper-asr-webservice) | MIT | Whisper STT Docker container |
+| [faster-whisper](https://github.com/SYSTRAN/faster-whisper) | MIT | Optimized Whisper inference engine |
+| [Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M) | Apache-2.0 | TTS model (82M parameters, finetuned from StyleTTS2) |
