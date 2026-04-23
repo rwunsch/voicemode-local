@@ -43,6 +43,54 @@ for arg in "$@"; do
     esac
 done
 
+# ─── Install mode selection ─────────────────────────────────────────────────
+header "Install mode"
+
+CONFIG_DIR="$HOME/.voicemode-local"
+CONFIG_FILE="$CONFIG_DIR/config"
+mkdir -p "$CONFIG_DIR"
+
+INSTALL_MODE=""
+if command -v docker >/dev/null 2>&1; then
+    echo "  Docker detected. How would you like to install voice services?"
+    echo ""
+    echo "    1) Docker (recommended) — uses Docker containers"
+    echo "    2) Native — installs directly on your system"
+    echo ""
+    read -r -p "  Choice [1]: " install_choice
+    install_choice="${install_choice:-1}"
+else
+    warn "Docker not found. Using native install mode."
+    install_choice="2"
+fi
+
+if [ "$install_choice" = "2" ]; then
+    INSTALL_MODE="native"
+    ok "Install mode: native"
+else
+    INSTALL_MODE="docker"
+    ok "Install mode: docker"
+fi
+
+# Ask about Piper
+echo ""
+read -r -p "  Install Piper TTS for multilingual voices (German, Dutch, etc)? [Y/n]: " piper_choice
+piper_choice="${piper_choice:-y}"
+if [[ "$piper_choice" =~ ^[Yy] ]]; then
+    PIPER_ENABLED="true"
+    ok "Piper TTS: enabled"
+else
+    PIPER_ENABLED="false"
+    ok "Piper TTS: disabled"
+fi
+
+# Save config
+cat > "$CONFIG_FILE" << EOF
+INSTALL_MODE=$INSTALL_MODE
+PIPER_ENABLED=$PIPER_ENABLED
+EOF
+ok "Config saved to $CONFIG_FILE"
+
 # ─── Step 1: System packages ─────────────────────────────────────────────────
 header "Step 1: System packages"
 
@@ -216,11 +264,58 @@ else
     fail "Proxy failed — check /tmp/whisper-proxy.log"
 fi
 
+# ─── Step 7b: Install Piper TTS ────────────────────────────────────────────
+if [ "$PIPER_ENABLED" = "true" ]; then
+    header "Step 7b: Piper TTS"
+
+    if [ "$INSTALL_MODE" = "native" ]; then
+        if command -v pip3 >/dev/null 2>&1; then
+            pip3 install --user piper-tts 2>&1 | tail -1
+            ok "piper-tts installed"
+        else
+            fail "pip3 not found — install Python packages first"
+        fi
+    fi
+
+    # Create models directory
+    mkdir -p "$SCRIPT_DIR/models/piper"
+    ok "Piper models directory created"
+
+    # Start piper proxy
+    echo "  Starting Piper proxy..."
+    PIPER_PID_FILE="/tmp/piper-proxy.pid"
+    if [ -f "$PIPER_PID_FILE" ] && kill -0 "$(cat "$PIPER_PID_FILE")" 2>/dev/null; then
+        warn "Piper proxy already running"
+    else
+        nohup python3 "$SCRIPT_DIR/piper-proxy.py" --port 8881 \
+            --voices-file "$SCRIPT_DIR/voices/piper-voices.json" \
+            --models-dir "$SCRIPT_DIR/models/piper" \
+            > /tmp/piper-proxy.log 2>&1 &
+        echo $! > "$PIPER_PID_FILE"
+        sleep 1
+        if kill -0 "$(cat "$PIPER_PID_FILE")" 2>/dev/null; then
+            ok "Piper proxy started"
+        else
+            fail "Piper proxy failed — check /tmp/piper-proxy.log"
+        fi
+    fi
+fi
+
+# ─── Step 8: Apply patches ──────────────────────────────────────────────────
+header "Step 8: Apply voicemode-local patches"
+
+if [ -x "$SCRIPT_DIR/patches/apply.sh" ]; then
+    "$SCRIPT_DIR/patches/apply.sh" 2>&1 | sed 's/^/  /'
+    ok "Patches applied"
+else
+    warn "No patches found (patches/apply.sh not found)"
+fi
+
 # ─── Done ─────────────────────────────────────────────────────────────────────
 header "Installation complete!"
 echo ""
 echo "  Next steps:"
-echo "    1. Switch mode:    voicemode-switch local|hybrid|openai"
+echo "    1. Switch mode:    voicemode-switch local|piper|hybrid|openai"
 echo "    2. Restart Claude Code"
 echo "    3. Use:            /voicemode:converse"
 echo ""
