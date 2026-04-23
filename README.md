@@ -88,6 +88,14 @@ echo 'export OPENAI_API_KEY="sk-proj-YOUR-KEY"' >> ~/.bashrc
 voicemode-switch openai   # This writes the key into ~/.claude.json
 ```
 
+> **Security note:** Storing API keys directly in `~/.bashrc` is convenient but not ideal — the key is visible in plain text. A more secure approach is to keep keys in a separate file with restricted permissions and source it:
+> ```bash
+> echo 'OPENAI_API_KEY="sk-proj-YOUR-KEY"' > ~/.config/voicemode-local/secrets
+> chmod 600 ~/.config/voicemode-local/secrets
+> echo 'source ~/.config/voicemode-local/secrets' >> ~/.bashrc
+> ```
+> Note: `~/.claude.json` always requires the actual key value (no variable references) — this is a Claude Code limitation.
+
 ### 2. Choose a mode
 
 ```bash
