@@ -52,7 +52,8 @@ The upstream [VoiceMode MCP](https://github.com/mbailey/voicemode) provides the 
 | **Fedora / RHEL** | Should work | Same as Ubuntu; use `dnf` instead of `apt` for system packages |
 | **macOS** | Untested | Docker services should work. Audio uses CoreAudio, not ALSA — skip `~/.asoundrc`. Microphone access may need System Settings approval |
 | **NixOS** | Untested | Docker works. System packages need a Nix derivation instead of `apt install` |
-| **Windows (native)** | Not supported | Use WSL2 — our proxies assume Unix and ALSA doesn't exist on Windows |
+| **Windows + WSL2 (Windows Claude Code)** | Tested | Windows Claude Code's MCP entry invokes `voice-mode` inside WSL via `wsl.exe`; audio routes through WSLg. Set up via `install.ps1`. Same containers + proxies are shared with WSL Claude Code. |
+| **Windows (native)** | In progress | Install scripts (`install.ps1`, `voicemode-services.ps1`) exist but voice-mode 8.6.1 has open Windows-side bugs (recording loop hangs, etc.). See [docs/windows-issues.md](docs/windows-issues.md). The wsl.exe bridge above is the recommended path until those land upstream. |
 
 **Tested on:** Ubuntu 22.04 LTS under WSL2 (kernel 6.6.x), Windows 11 24H2.
 
@@ -157,6 +158,26 @@ claude
 ```
 
 Claude will offer you a voice selection, then start a two-way voice conversation.
+
+### Using from Windows Claude Code (via WSL)
+
+If you also use Claude Code on the Windows host (in addition to the one inside WSL), you can drive the same voice stack from there. The Windows Claude Code MCP entry launches `voice-mode` *inside* WSL via `wsl.exe`, so audio capture and playback go through WSLg — exactly the path that already works for WSL Claude Code. Docker containers and proxies are shared, so both clients hit the same backends.
+
+**Setup (Windows side, after the WSL install above is done):**
+
+```powershell
+cd C:\path\to\voicemode-local
+.\install.ps1                # detects WSL voicemode-local, picks wsl-mcp mode by default
+```
+
+`install.ps1` registers the MCP entry, propagates env vars across the WSL boundary (`WSLENV`), and adds Claude permissions. Then restart Windows Claude Code and use `/voicemode:converse` as usual.
+
+The installer offers three modes:
+- **wsl-mcp** (recommended) — voice-mode runs in WSL, invoked from Windows via `wsl.exe`. Audio via WSLg. No Windows venv needed.
+- **wsl-shared** — voice-mode runs natively on Windows, talks to WSL's whisper/piper proxies via localhost forwarding.
+- **windows-native** — everything on Windows, no WSL dependency.
+
+`wsl-shared` and `windows-native` currently hit voice-mode 8.6.1's Windows-side bugs (recording loop hang, etc.). Use `wsl-mcp` until those are fixed upstream — see [docs/windows-issues.md](docs/windows-issues.md) for the full list and patches.
 
 ### Switching modes mid-session
 
@@ -268,7 +289,9 @@ Patches are applied by `./patches/apply.sh` (run automatically during install) a
 
 | File | Purpose |
 |------|---------|
-| `install.sh` | One-time setup (Docker or native mode, Piper opt-in) |
+| `install.sh` | One-time setup on Linux/WSL (Docker or native mode, Piper opt-in) |
+| `install.ps1` | Windows-side setup: registers Windows Claude Code MCP entry (default mode bridges to WSL via `wsl.exe`) |
+| `voicemode-services.ps1` | Windows proxy manager (`start`/`stop`/`status`) — only used in `windows-native` install mode |
 | `docker-compose.yml` | Whisper + Kokoro + Piper (optional) container definitions |
 | `whisper-proxy.py` | OpenAI `/v1/audio/transcriptions` → Whisper `/asr` translator |
 | `piper-proxy.py` | OpenAI `/v1/audio/speech` → piper-tts CLI wrapper |
@@ -277,7 +300,10 @@ Patches are applied by `./patches/apply.sh` (run automatically during install) a
 | `patches/converse.py` | Extended conversation prompt (voice selection, routing, fallback) |
 | `patches/switch_mode.py` | MCP tool for in-session mode switching |
 | `patches/switch_mode_prompt.py` | MCP prompt for `/voicemode:switch-mode` slash menu entry |
-| `patches/apply.sh` | Copies patches into the installed voice_mode package |
+| `patches/fcntl_shim.py` | Windows-only: stub `fcntl` module dropped into site-packages so voice-mode's POSIX imports succeed (dormant on Linux) |
+| `patches/resource_shim.py` | Windows-only: stub `resource` module (same idea) |
+| `patches/apply.sh` | Copies patches into the installed voice_mode package; installs Windows shims when run against a Windows venv |
+| `docs/windows-issues.md` | Catalogues the open voice-mode Windows-side bugs and their workarounds |
 | `tests/` | Test suite (42 tests: proxies, voice catalog, mode switching) |
 
 ## System Files Modified

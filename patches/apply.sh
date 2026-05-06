@@ -33,6 +33,24 @@ fi
 PROMPTS_DIR="$VM_DIR/prompts"
 TOOLS_DIR="$VM_DIR/tools"
 
+# Windows-only shims for POSIX-only stdlib modules that voice-mode imports.
+# Installed into site-packages so Python's normal import resolution finds the
+# real stdlib module first on Linux/macOS — the shims are dormant there.
+# On Windows, stdlib lookup fails for these modules and Python falls through
+# to site-packages, where the shim takes over. Zero modifications to
+# voice-mode source files.
+if [ -d "$VENV_DIR/Lib/site-packages" ]; then
+    SITE_PKGS="$VENV_DIR/Lib/site-packages"
+    if [ -f "$SCRIPT_DIR/fcntl_shim.py" ]; then
+        cp "$SCRIPT_DIR/fcntl_shim.py" "$SITE_PKGS/fcntl.py"
+        echo "[patches] Installed Windows fcntl shim → $SITE_PKGS/fcntl.py"
+    fi
+    if [ -f "$SCRIPT_DIR/resource_shim.py" ]; then
+        cp "$SCRIPT_DIR/resource_shim.py" "$SITE_PKGS/resource.py"
+        echo "[patches] Installed Windows resource shim → $SITE_PKGS/resource.py"
+    fi
+fi
+
 # Apply converse prompt patch
 if [ -f "$SCRIPT_DIR/converse.py" ]; then
     cp "$SCRIPT_DIR/converse.py" "$PROMPTS_DIR/converse.py"
