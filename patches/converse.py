@@ -13,6 +13,13 @@ def converse() -> str:
 - End the chat when the user indicates they want to end it
 - Keep your utterances brief unless a longer response is requested or necessary
 
+## Listening Parameters (pass on every converse call)
+
+To avoid cutting the user off mid-thought, always pass these parameters:
+- `listen_duration_max=240` (4 minutes — double the default 120s)
+- `vad_aggressiveness=2` (less strict than default 3 — tolerates longer natural pauses)
+- `listen_duration_min=3` (give user time to start speaking)
+
 ## Voice Selection (on first message of a new conversation)
 
 When starting a NEW voice conversation (no prior voice context), offer voice selection:
