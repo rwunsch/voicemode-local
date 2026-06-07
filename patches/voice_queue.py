@@ -345,3 +345,135 @@ def release_floor(base: Path) -> None:
         os.replace(snap, fpath)  # not ours — put the rightful floor back
         return
     snap.unlink(missing_ok=True)
+
+
+# ---------- session API (used by the patched converse tool) ----------
+
+HEARTBEAT_INTERVAL = 10.0  # seconds: call-scoped floor heartbeat cadence
+
+# One lock per process: Claude Code can issue parallel tool calls and converse
+# is async — all ticket/floor mutations must be serialized within the process
+# in addition to the cross-process file protocol.
+_process_lock = asyncio.Lock()
+
+
+def session_project() -> str:
+    return os.getenv("VOICEMODE_SESSION_NAME") or Path(os.getcwd()).name
+
+
+def voice_short_name(voice: Optional[str]) -> str:
+    if not voice:
+        return "default voice"
+    return voice.split("_")[-1].capitalize()
+
+
+@dataclass
+class AcquireResult:
+    status: str                      # "acquired" | "queued"
+    waited: bool = False             # True -> speak the handoff intro
+    ticket: Optional[str] = None     # set when status == "queued"
+    queued_message: str = ""
+
+
+class QueueSession:
+    """Per-converse-call facade over the ticket/floor protocol."""
+
+    def __init__(self, project: Optional[str] = None,
+                 voice: Optional[str] = None, base: Optional[Path] = None):
+        self.base = Path(base) if base else DEFAULT_BASE
+        self.project = project or session_project()
+        self.voice = voice or "default"
+        self._hb_task: Optional[asyncio.Task] = None
+        self._acquired = False
+
+    @property
+    def intro(self) -> str:
+        return f"This is {self.project}, {voice_short_name(self.voice)} —"
+
+    async def acquire(self, ticket: Optional[str] = None) -> AcquireResult:
+        """Take the floor or report QUEUED after one wait slice.
+
+        Burst continuation (we already hold the floor) returns immediately.
+        A passed `ticket` resumes a previous wait (FIFO position preserved);
+        if its file vanished, we re-queue at the back and say so.
+        """
+        requeued = False
+        async with _process_lock:
+            if floor_is_mine(self.base):
+                heartbeat_floor(self.base)
+                self._acquired = True
+                return AcquireResult(status="acquired", waited=False)
+            resumed = ticket is not None
+            if ticket is None or not ticket_exists(self.base, ticket):
+                if resumed:
+                    requeued = True
+                ticket = create_ticket(self.base, self.project, self.voice)
+
+        waited = resumed
+        deadline = time.monotonic() + WAIT_SLICE
+        while True:
+            async with _process_lock:
+                heartbeat_ticket(self.base, ticket)
+                if head_is_me(self.base) and try_claim_floor(
+                        self.base, self.project, self.voice):
+                    delete_ticket(self.base, ticket)
+                    self._acquired = True
+                    return AcquireResult(status="acquired", waited=waited)
+            if time.monotonic() >= deadline:
+                return AcquireResult(
+                    status="queued", ticket=ticket,
+                    queued_message=self._queued_message(ticket, requeued))
+            waited = True
+            await asyncio.sleep(CHECK_INTERVAL)
+
+    def _queued_message(self, ticket: str, requeued: bool) -> str:
+        tickets = list_tickets(self.base)
+        names = [t[0] for t in tickets]
+        total = len(tickets)
+        pos = names.index(ticket) + 1 if ticket in names else total + 1
+        holder = _read_json(_floor_path(self.base)) or {}
+        holder_str = f"{holder.get('project', 'unknown')}/{holder.get('voice', '?')}"
+        note = (" (your previous ticket had expired; you have been re-queued"
+                " at the back)" if requeued else "")
+        return (
+            f"QUEUED — position {pos} of {total}.{note} "
+            f"The user is speaking with {holder_str}. "
+            f"You MUST immediately call converse again with the same message "
+            f'and ticket="{ticket}". Your queue position is preserved. '
+            f"Do NOT print your question as text. Do NOT give up."
+        )
+
+    def start_heartbeat(self) -> None:
+        """Call-scoped background heartbeat: keeps the floor live during TTS
+        and long recordings. Cancelled by finish(). Self-terminates on
+        demotion (floor stolen via grace expiry)."""
+        if self._hb_task is not None and not self._hb_task.done():
+            return  # already beating — don't spawn a second heartbeat task
+        async def beat():
+            while True:
+                await asyncio.sleep(HEARTBEAT_INTERVAL)
+                async with _process_lock:
+                    if not heartbeat_floor(self.base):
+                        return  # demoted — never write again
+        self._hb_task = asyncio.get_running_loop().create_task(beat())
+
+    async def finish(self, end_burst: bool = False) -> None:
+        """End of one converse call. end_burst releases the floor; otherwise
+        a final heartbeat starts the inter-call grace window.
+
+        No-op on the floor if this session never acquired it (e.g. acquire
+        returned QUEUED)."""
+        if self._hb_task is not None:
+            self._hb_task.cancel()
+            try:
+                await self._hb_task
+            except asyncio.CancelledError:
+                pass
+            self._hb_task = None
+        if not self._acquired:
+            return
+        async with _process_lock:
+            if end_burst:
+                release_floor(self.base)
+            else:
+                heartbeat_floor(self.base)

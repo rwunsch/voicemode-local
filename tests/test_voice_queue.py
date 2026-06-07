@@ -271,3 +271,139 @@ def test_toctou_heartbeating_holder_not_stolen(tmp_path, monkeypatch):
         assert voice_queue.try_claim_floor(tmp_path, "thief", "v") is True
     finally:
         holder.kill()
+
+
+# ---------- QueueSession ----------
+import asyncio
+
+
+def test_voice_short_name():
+    assert voice_queue.voice_short_name("af_bella") == "Bella"
+    assert voice_queue.voice_short_name("p_de_thorsten") == "Thorsten"
+    assert voice_queue.voice_short_name("nova") == "Nova"
+    assert voice_queue.voice_short_name(None) == "default voice"
+
+
+def test_session_project_env_override(monkeypatch):
+    monkeypatch.setenv("VOICEMODE_SESSION_NAME", "my-session")
+    assert voice_queue.session_project() == "my-session"
+    monkeypatch.delenv("VOICEMODE_SESSION_NAME")
+    assert voice_queue.session_project() == Path(os.getcwd()).name
+
+
+def test_acquire_instant_when_free(tmp_path):
+    s = voice_queue.QueueSession(project="p", voice="af_bella", base=tmp_path)
+    r = asyncio.run(s.acquire())
+    assert r.status == "acquired"
+    assert r.waited is False           # no intro
+    assert voice_queue.floor_is_mine(tmp_path)
+    assert voice_queue.list_tickets(tmp_path) == []  # ticket consumed
+
+
+def test_burst_continuation_and_end_burst(tmp_path):
+    s = voice_queue.QueueSession(project="p", voice="af_bella", base=tmp_path)
+
+    async def flow():
+        r1 = await s.acquire()
+        await s.finish(end_burst=False)
+        assert voice_queue.floor_is_mine(tmp_path)   # floor kept across calls
+        r2 = await s.acquire()                        # burst continuation
+        assert r2.status == "acquired" and r2.waited is False
+        await s.finish(end_burst=True)
+    asyncio.run(flow())
+    assert not (tmp_path / "floor.json").exists()     # floor released
+
+
+def test_acquire_queued_when_floor_busy(tmp_path, monkeypatch):
+    monkeypatch.setattr(voice_queue, "WAIT_SLICE", 0.3)
+    monkeypatch.setattr(voice_queue, "CHECK_INTERVAL", 0.05)
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        _fake_floor(tmp_path, proc.pid,
+                    voice_queue.process_start_time(proc.pid), time.time())
+        s = voice_queue.QueueSession(project="p", voice="af_bella", base=tmp_path)
+        r = asyncio.run(s.acquire())
+        assert r.status == "queued"
+        assert r.ticket is not None
+        assert "QUEUED" in r.queued_message
+        assert f'ticket="{r.ticket}"' in r.queued_message
+        assert "Do NOT" in r.queued_message
+        # Ticket persists for the re-call
+        assert voice_queue.ticket_exists(tmp_path, r.ticket)
+    finally:
+        proc.kill()
+        proc.wait()
+
+
+def test_recall_with_ticket_preserves_position_and_intro(tmp_path, monkeypatch):
+    monkeypatch.setattr(voice_queue, "WAIT_SLICE", 0.3)
+    monkeypatch.setattr(voice_queue, "CHECK_INTERVAL", 0.05)
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    s = voice_queue.QueueSession(project="p", voice="af_bella", base=tmp_path)
+    try:
+        _fake_floor(tmp_path, proc.pid,
+                    voice_queue.process_start_time(proc.pid), time.time())
+        r1 = asyncio.run(s.acquire())
+        assert r1.status == "queued"
+    finally:
+        proc.kill()
+        proc.wait()
+    # Floor holder died; re-call with the ticket must acquire WITH intro
+    r2 = asyncio.run(s.acquire(ticket=r1.ticket))
+    assert r2.status == "acquired"
+    assert r2.waited is True
+    assert s.intro == "This is p, Bella —"
+
+
+def test_recall_with_vanished_ticket_requeues(tmp_path, monkeypatch):
+    monkeypatch.setattr(voice_queue, "WAIT_SLICE", 0.2)
+    monkeypatch.setattr(voice_queue, "CHECK_INTERVAL", 0.05)
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        _fake_floor(tmp_path, proc.pid,
+                    voice_queue.process_start_time(proc.pid), time.time())
+        s = voice_queue.QueueSession(project="p", voice="v", base=tmp_path)
+        r = asyncio.run(s.acquire(ticket="0000000000000001-424242"))
+        assert r.status == "queued"
+        assert r.ticket != "0000000000000001-424242"   # fresh ticket
+        assert "re-queued" in r.queued_message
+    finally:
+        proc.kill()
+        proc.wait()
+
+
+def test_heartbeat_task_keeps_floor_alive(tmp_path, monkeypatch):
+    monkeypatch.setattr(voice_queue, "QUEUE_GRACE", 0.3)
+    monkeypatch.setattr(voice_queue, "HEARTBEAT_INTERVAL", 0.05)
+    s = voice_queue.QueueSession(project="p", voice="v", base=tmp_path)
+
+    async def flow():
+        await s.acquire()
+        s.start_heartbeat()
+        await asyncio.sleep(0.6)  # > grace; heartbeats must keep us live
+        data = voice_queue._read_json(tmp_path / "floor.json")
+        assert voice_queue.floor_is_live(data)
+        await s.finish(end_burst=True)
+    asyncio.run(flow())
+
+
+def test_finish_after_queued_touches_nothing(tmp_path, monkeypatch):
+    monkeypatch.setattr(voice_queue, "WAIT_SLICE", 0.2)
+    monkeypatch.setattr(voice_queue, "CHECK_INTERVAL", 0.05)
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        _fake_floor(tmp_path, proc.pid,
+                    voice_queue.process_start_time(proc.pid), time.time())
+        before = voice_queue._read_json(tmp_path / "floor.json")
+        s = voice_queue.QueueSession(project="p", voice="v", base=tmp_path)
+
+        async def flow():
+            r = await s.acquire()
+            assert r.status == "queued"
+            await s.finish(end_burst=True)   # must not touch the holder's floor
+        asyncio.run(flow())
+        after = voice_queue._read_json(tmp_path / "floor.json")
+        assert after == before
+    finally:
+        proc.kill()
+        proc.wait()

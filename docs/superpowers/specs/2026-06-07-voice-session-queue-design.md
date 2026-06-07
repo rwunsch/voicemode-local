@@ -135,6 +135,8 @@ Claude Code can issue parallel tool calls; `converse` is async. All ticket/floor
 mutations go through one **process-local `asyncio.Lock`** in `voice_queue.py`, in
 addition to the cross-process file protocol.
 
+Note: floor *ownership* is per-process — two parallel converse calls in the same session both see floor_is_mine() and proceed; actual audio I/O is still serialized by voice-mode's own audio_operation_lock, so the worst case is back-to-back utterances within one session. Whether to serialize whole converse calls per process is an integration decision.
+
 ## Converse protocol
 
 `converse` gains two parameters: `ticket` (string, optional) and `end_burst`
