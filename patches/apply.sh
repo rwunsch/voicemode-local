@@ -58,7 +58,11 @@ if [ -f "$SCRIPT_DIR/switch_mode.py" ] && [ -d "$TOOLS_DIR" ]; then
     fi
 fi
 
-# Install the session queue module and patch converse.py to use it
+# Install the session queue module and patch converse.py to use it.
+# If the patcher aborts on upstream drift (set -e), voice_queue.py is left
+# copied but converse.py unpatched — converse then falls back to its own
+# conch arbitration and the install stays functional. Fix the anchors in
+# patch_converse_queue.py and re-run.
 if [ -f "$SCRIPT_DIR/voice_queue.py" ]; then
     cp "$SCRIPT_DIR/voice_queue.py" "$VM_DIR/voice_queue.py"
     echo "[patches] Applied voice_queue.py → $VM_DIR/voice_queue.py"
