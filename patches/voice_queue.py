@@ -132,6 +132,12 @@ def _write_json_atomic(path: Path, data: dict) -> None:
     os.replace(tmp, path)
 
 
+# NOTE concurrency contract: the ticket/floor primitives below are synchronous
+# and NOT safe against concurrent calls from multiple asyncio tasks in the SAME
+# process. Production code must go through QueueSession (added in a later task),
+# which serializes all mutations behind one process-local asyncio.Lock. The
+# cross-PROCESS safety comes from O_EXCL / os.replace / os.link semantics.
+
 # ---------- tickets ----------
 
 def _queue_dir(base: Path) -> Path:
@@ -210,4 +216,6 @@ def delete_ticket(base: Path, name: str) -> None:
 
 def head_is_me(base: Path) -> bool:
     tickets = list_tickets(base)
+    # pid-only comparison is safe ONLY because list_tickets has already GC'd
+    # recycled-pid tickets (start_time mismatch); callers must not bypass it.
     return bool(tickets) and tickets[0][1].get("pid") == os.getpid()

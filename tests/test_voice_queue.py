@@ -121,6 +121,12 @@ def test_heartbeat_missing_ticket(tmp_path):
     assert voice_queue.heartbeat_ticket(tmp_path, "000000000000001-1") is False
 
 
+def test_ticket_exists(tmp_path):
+    assert voice_queue.ticket_exists(tmp_path, "0000000000000001-1") is False
+    name = voice_queue.create_ticket(tmp_path, "p", "v")
+    assert voice_queue.ticket_exists(tmp_path, name) is True
+
+
 def test_fifo_order_and_head(tmp_path):
     # Foreign ticket older than ours (fake but live: our own pid+st)
     qdir = tmp_path / "queue"
@@ -131,6 +137,6 @@ def test_fifo_order_and_head(tmp_path):
     voice_queue.create_ticket(tmp_path, "me", "v")
     tickets = voice_queue.list_tickets(tmp_path)
     assert tickets[0][1]["project"] == "older"
-    assert voice_queue.head_is_me(tmp_path) is True  # head pid == ours (faked)
+    assert voice_queue.head_is_me(tmp_path) is True  # foreign ticket's pid is faked to ours so head_is_me returns True
     names = [t[0] for t in tickets]
     assert names == sorted(names)
