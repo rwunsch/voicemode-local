@@ -50,7 +50,7 @@ the independent voice-mode MCP server processes (one per Claude Code session):
 ```
 ~/.voicemode/
 ├── queue/                           # FIFO of waiting sessions
-│   └── <epoch-ms zero-padded>-<pid>.json   # one ticket per waiting session
+│   └── <epoch-µs, 16-digit>-<pid>.json   # one ticket per waiting session
 └── floor.json                       # current floor holder ("talking stick")
 ```
 
@@ -71,8 +71,8 @@ immortal):
 
 ### Tickets
 
-- Filename `001749301234567-41023.json`: zero-padded epoch-milliseconds makes
-  lexicographic order == chronological order; PID suffix guarantees uniqueness.
+- Filename `1749301234567890-41023.json`: zero-padded 16-digit epoch-microseconds
+  makes lexicographic order == chronological order; PID suffix guarantees uniqueness.
   (Wall-clock steps backward could let a new ticket sort earlier — accepted as
   negligible on a single-user desktop; positions never re-sort after creation.)
 - Created with `O_CREAT|O_EXCL` — atomic on Linux/macOS/Windows. **No flock

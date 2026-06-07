@@ -4,7 +4,7 @@ Replaces voice-mode's conch (fcntl flock) with a portable ticket-file FIFO
 queue + atomic floor file. No fcntl anywhere — works unchanged on Windows.
 
 Coordination state (must be on a LOCAL disk):
-    ~/.voicemode/queue/<epoch-ms zero-padded>-<pid>.json   one ticket per waiter
+    ~/.voicemode/queue/<epoch-µs, 16-digit>-<pid>.json   one ticket per waiter
     ~/.voicemode/floor.json                                 current floor holder
 
 Design: docs/superpowers/specs/2026-06-07-voice-session-queue-design.md
@@ -171,7 +171,7 @@ def create_ticket(base: Path, project: str, voice: str) -> str:
     pid = os.getpid()
     for old in qdir.glob(f"*-{pid}.json"):
         old.unlink(missing_ok=True)
-    name = f"{int(time.time() * 1_000_000):015d}-{pid}"
+    name = f"{int(time.time() * 1_000_000):016d}-{pid}"
     data = {
         "pid": pid,
         "start_time": process_start_time(pid),
