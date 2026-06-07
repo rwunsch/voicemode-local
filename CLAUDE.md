@@ -7,6 +7,11 @@ Local voice services for Claude Code, with Whisper STT, Kokoro TTS, and Piper TT
 - **WSL2 on Windows 11** (primary, tested on Ubuntu 22.04 LTS)
 - **Ubuntu 22.04+** (native Linux, should work with PulseAudio/PipeWire)
 - **macOS** (untested — Docker services should work, audio routing may differ)
+- **Windows (native)** — work in progress, see below
+
+## Windows Working Copy
+
+A second checkout lives at `C:\git\voicemode-local` (from WSL: `/mnt/c/git/voicemode-local`) holding the Windows port work on branch `feature/piper-integration` (commit `c03c099`, pushed but not merged to main). It adds `install.ps1` (modes: `wsl-mcp` / `wsl-shared` / `windows-native`), `voicemode-services.ps1`, Windows stdlib shims (`patches/fcntl_shim.py`, `patches/resource_shim.py`), and `docs/windows-issues.md` — a catalogue of 6 upstream voice-mode/Claude Code issues blocking native Windows. The `wsl-mcp` bridge mode works; true native mode is blocked mainly by issue #5 (recording loop hangs when sounddevice callbacks starve). When editing files in that copy, expect CRLF line endings.
 
 ## Voice Selection on Startup
 
@@ -24,6 +29,20 @@ Pass the selected voice as the `voice` parameter on every `mcp__voicemode__conve
 ## Switching Voices Mid-Conversation
 
 If the user asks to change voice during a conversation, switch the `voice` parameter on the next `mcp__voicemode__converse` call. Acknowledge the switch briefly.
+
+## Session Queue (multiple concurrent voice sessions)
+
+Concurrent Claude Code sessions take strict FIFO turns on the voice channel.
+Two non-negotiable rules when using `mcp__voicemode__converse`:
+
+1. **QUEUED status**: if converse returns "QUEUED — position N of M ...",
+   immediately call converse again with the same message and the given
+   `ticket` value. Repeat as long as needed. Never degrade the question to
+   text; never give up.
+2. **`end_burst=true`** on your final exchange of a conversation burst, so the
+   next waiting session gets the floor. Forgetting costs ~90s (auto-release).
+
+Inspect the queue anytime with `./voicemode-switch queue`.
 
 ## Available Voices (Kokoro TTS)
 

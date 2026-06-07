@@ -20,6 +20,21 @@ To avoid cutting the user off mid-thought, always pass these parameters:
 - `vad_aggressiveness=2` (less strict than default 3 — tolerates longer natural pauses)
 - `listen_duration_min=3` (give user time to start speaking)
 
+## Session Queue (multiple Claude Code sessions sharing the microphone)
+
+Concurrent voice sessions take strict FIFO turns. Two rules are NON-NEGOTIABLE:
+
+1. **If converse returns a QUEUED status**: immediately call converse again with
+   the SAME message and the `ticket` value from the status. Repeat for as long
+   as it takes — your queue position is preserved. NEVER print the question as
+   text instead, and NEVER drop it.
+2. **On your final exchange of a conversation burst** (you have no immediate
+   follow-up question): pass `end_burst=true` so the next waiting session gets
+   its turn. If you forget, the floor auto-releases after ~90s of silence.
+
+When you acquire the floor after waiting, your first message is automatically
+prefixed with "This is <project>, <voice> —" so the user knows who is speaking.
+
 ## Voice Selection (on first message of a new conversation)
 
 When starting a NEW voice conversation (no prior voice context), offer voice selection:
