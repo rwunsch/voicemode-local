@@ -121,7 +121,11 @@ immortal):
   worst cause one overlapping utterance and self-heals on the next call —
   accepted for a human-timescale voice protocol.
 - Heartbeat points: burst-continuation entry (every converse call while
-  holding), TTS start, recording start, recording chunks, exchange end.
+  holding), plus a **call-scoped background asyncio task** that heartbeats every
+  ~10s for the duration of each converse call (covers TTS and recording with a
+  single injection point instead of per-phase hooks), cancelled when the call
+  ends. Between calls there are no heartbeats — grace measures exactly the
+  inter-call silence.
 
 ### Intra-process concurrency
 
@@ -204,7 +208,9 @@ waiter poll. No grace wait, no stale-lock window (replaces conch's 300s expiry).
 - **`voicemode-switch queue`**: read-only subcommand printing floor holder, queue
   order with ages and staleness, and cleaning dead tickets.
 - **Env config** (all optional):
-  - `VOICEMODE_QUEUE_ENABLED` (default `true`; `false` restores old conch behavior)
+  - `VOICEMODE_QUEUE_ENABLED` (default `true`; `false` disables cross-session
+    arbitration entirely — the legacy conch path is not preserved, since keeping
+    both code paths would double the surgical-patch surface)
   - `VOICEMODE_QUEUE_GRACE` (default `90`)
   - `VOICEMODE_QUEUE_WAIT_SLICE` (default `50`)
   - `VOICEMODE_QUEUE_CHECK_INTERVAL` (default `0.5`)
