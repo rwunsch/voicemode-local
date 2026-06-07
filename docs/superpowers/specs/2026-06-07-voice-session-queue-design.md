@@ -235,10 +235,11 @@ waiter poll. No grace wait, no stale-lock window (replaces conch's 300s expiry).
 - **Prompt + CLAUDE.md** — LLM contract (kept deliberately tiny, two parameters
   and two rules): re-call immediately on QUEUED with the ticket; pass
   `end_burst=true` on the final exchange; never degrade a queued question to text.
-- **Old `Conch`** — no longer arbitrates. Check during implementation whether
-  anything external reads `~/.voicemode/conch` (e.g. sound-effect hooks); if so,
-  mirror it best-effort while the floor is held (readers may briefly observe
-  conch and floor out of sync — acceptable, both are advisory for externals).
+- **Old `Conch`** — no longer arbitrates. Checked during implementation
+  (2026-06-07): nothing external reads `~/.voicemode/conch` (no repo files, no
+  hooks; only voice_mode's own modules reference it), so no compatibility
+  mirroring is needed. The patched converse retains harmless unused conch
+  imports by design (smaller patch surface).
 - Windows later: `install.ps1` Step 4 must run the same patch set (its current
   failure to invoke `apply.sh`'s shim installs is a known bug from the
   2026-06-07 review).
