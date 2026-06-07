@@ -130,3 +130,84 @@ def _write_json_atomic(path: Path, data: dict) -> None:
     tmp = path.with_name(f"{path.name}.tmp.{os.getpid()}.{uuid.uuid4().hex}")
     tmp.write_text(json.dumps(data, indent=2))
     os.replace(tmp, path)
+
+
+# ---------- tickets ----------
+
+def _queue_dir(base: Path) -> Path:
+    return base / "queue"
+
+
+def list_tickets(base: Path) -> list:
+    """All live tickets as [(name, data)] in FIFO order.
+
+    Garbage-collects on the way: dead/recycled pids, stale last_seen
+    (> TICKET_STALE, covers waiters whose LLM never re-called), corrupt JSON.
+    """
+    qdir = _queue_dir(base)
+    if not qdir.is_dir():
+        return []
+    out = []
+    for path in sorted(qdir.glob("*.json")):
+        data = _read_json(path)  # removes corrupt files itself
+        if data is None:
+            continue
+        if not pid_alive(data.get("pid"), data.get("start_time")):
+            path.unlink(missing_ok=True)
+            continue
+        if time.time() - data.get("last_seen", 0) > TICKET_STALE:
+            path.unlink(missing_ok=True)
+            continue
+        out.append((path.stem, data))
+    return out
+
+
+def create_ticket(base: Path, project: str, voice: str) -> str:
+    """Create our ticket (one per pid — older same-pid tickets are removed to
+    prevent the orphan-ticket deadlock when an LLM re-calls without `ticket`).
+    Returns the ticket name (filename stem)."""
+    qdir = _queue_dir(base)
+    qdir.mkdir(parents=True, exist_ok=True)
+    pid = os.getpid()
+    for old in qdir.glob(f"*-{pid}.json"):
+        old.unlink(missing_ok=True)
+    name = f"{int(time.time() * 1_000_000):015d}-{pid}"
+    data = {
+        "pid": pid,
+        "start_time": process_start_time(pid),
+        "project": project,
+        "voice": voice,
+        "created": _now_iso(),
+        "last_seen": time.time(),
+    }
+    fd = os.open(str(qdir / f"{name}.json"),
+                 os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+    try:
+        os.write(fd, json.dumps(data, indent=2).encode())
+    finally:
+        os.close(fd)
+    return name
+
+
+def ticket_exists(base: Path, name: str) -> bool:
+    return (_queue_dir(base) / f"{name}.json").is_file()
+
+
+def heartbeat_ticket(base: Path, name: str) -> bool:
+    """Update our ticket's last_seen. False if the ticket vanished."""
+    path = _queue_dir(base) / f"{name}.json"
+    data = _read_json(path)
+    if data is None:
+        return False
+    data["last_seen"] = time.time()
+    _write_json_atomic(path, data)
+    return True
+
+
+def delete_ticket(base: Path, name: str) -> None:
+    (_queue_dir(base) / f"{name}.json").unlink(missing_ok=True)
+
+
+def head_is_me(base: Path) -> bool:
+    tickets = list_tickets(base)
+    return bool(tickets) and tickets[0][1].get("pid") == os.getpid()
