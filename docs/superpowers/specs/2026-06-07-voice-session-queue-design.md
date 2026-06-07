@@ -1,7 +1,7 @@
 # Voice Session Queue — Design
 
 **Date:** 2026-06-07
-**Status:** Approved by user (brainstorming session)
+**Status:** Approved by user (brainstorming session); hardened after external review (Cursor, 2026-06-07)
 **Scope:** voicemode-local patch overlay on voice-mode; portable to Windows-native
 
 ## Problem
@@ -54,54 +54,102 @@ the independent voice-mode MCP server processes (one per Claude Code session):
 └── floor.json                       # current floor holder ("talking stick")
 ```
 
+The queue directory must live on a **local disk** (atomicity guarantees below do
+not hold on SMB/NFS); `~/.voicemode` satisfies this on all target setups.
+
+### Process identity
+
+Liveness checks use **pid + process start-time** (never pid alone — PIDs are
+recycled by the OS and a recycled pid would make a dead session's ticket
+immortal):
+
+- `process_identity(pid)` → start-time: `/proc/<pid>/stat` field 22 on Linux,
+  `GetProcessTimes` via ctypes on Windows.
+- `pid_alive(pid, start_time)`: `os.kill(pid, 0)` on POSIX
+  (**`PermissionError` ⇒ alive**), `OpenProcess` via ctypes on Windows; then
+  start-time must match.
+
 ### Tickets
 
 - Filename `001749301234567-41023.json`: zero-padded epoch-milliseconds makes
   lexicographic order == chronological order; PID suffix guarantees uniqueness.
+  (Wall-clock steps backward could let a new ticket sort earlier — accepted as
+  negligible on a single-user desktop; positions never re-sort after creation.)
 - Created with `O_CREAT|O_EXCL` — atomic on Linux/macOS/Windows. **No flock
   anywhere in the design.**
-- Content: `{ "pid", "project", "voice", "created" }`.
-- **Head of queue** = oldest ticket whose PID is alive. Dead-PID tickets are
-  garbage-collected by any process that notices them.
+- Content: `{ "pid", "start_time", "project", "voice", "created", "last_seen" }`.
+- **One ticket per PID**: ticket creation first deletes any existing tickets with
+  the same pid (prevents the orphan-ticket deadlock when an LLM re-calls without
+  the `ticket` param). Head determination compares pid, not filename.
+- **Ticket heartbeat**: the owner updates `last_seen` (atomic temp +
+  `os.replace`) on every poll of its wait loop. Any process may GC a ticket
+  whose pid+start_time is dead **or** whose `last_seen` is older than
+  `TICKET_STALE` (default 30s — covers abandoned tickets whose LLM never
+  re-called; an over-slow re-call merely re-enqueues at the back, the question
+  itself is not lost).
+- **Head of queue** = oldest non-stale ticket. With an empty queue, a new ticket
+  is trivially head and the floor is acquired instantly (no intro).
+- The `ticket` tool parameter is the **filename stem** (e.g.
+  `001749301234567-41023`). If it no longer exists, a fresh ticket is created at
+  the back and the next QUEUED status says so.
 
 ### Floor
 
-- `floor.json`, written atomically (temp file + `os.replace`).
-- Content: `{ "pid", "project", "voice", "acquired", "last_activity" }`.
-- `last_activity` is heartbeat-updated by the holder during activity (TTS start,
-  recording start, recording chunks, exchange end). Active exchanges can run
-  arbitrarily long without the floor becoming stealable.
-- Floor is **dead** when: holder PID no longer exists (instant detection), or
-  `last_activity` older than the grace period (default 45s).
-- Acquisition: only the head-of-queue waiter attempts it. If the floor file is
-  absent or dead, claim via `O_EXCL` create (after removing a dead file). If two
-  processes ever race the claim, `O_EXCL` picks exactly one winner.
+- `floor.json`. Content: `{ "pid", "start_time", "project", "voice", "acquired",
+  "last_activity" }`.
+- Floor is **dead** when: holder pid+start_time no longer matches a live process
+  (instant detection), or `last_activity` is older than `QUEUE_GRACE`
+  (default 90s).
+- **Claim protocol** (only the head waiter attempts it):
+  1. If a `floor.json` exists and looks dead: atomically
+     `os.rename(floor.json, floor.stale.<uuid>)`, then re-verify the renamed
+     snapshot. If it was actually live (heartbeat raced the read), rename it
+     back and resume waiting. If dead, delete the snapshot.
+  2. Claim: write the full new floor content to a private temp file, then
+     `os.link(tmp, floor.json)` — atomic fail-if-exists **with complete
+     content** (readers can never observe an empty/partial floor). Works on
+     ext4 and NTFS (same volume). `FileExistsError` ⇒ lost the race, resume
+     waiting.
+  3. On success: delete own ticket. **The floor file is the record of holding;
+     a holder never sits in the queue**, so "head" always means the oldest
+     waiting session.
+- **Conditional heartbeats**: before each `last_activity` update, the holder
+  re-reads `floor.json`; if `pid != me`, the floor was stolen (grace expiry) —
+  the holder demotes itself: it is no longer in a burst, must not write
+  heartbeats, and re-queues with a new ticket on its next converse call.
+  A microsecond-scale write race remains theoretically possible; it can at
+  worst cause one overlapping utterance and self-heals on the next call —
+  accepted for a human-timescale voice protocol.
+- Heartbeat points: burst-continuation entry (every converse call while
+  holding), TTS start, recording start, recording chunks, exchange end.
 
-### PID liveness
+### Intra-process concurrency
 
-`pid_alive(pid)` helper: `os.kill(pid, 0)` on POSIX; `ctypes`/`OpenProcess` on
-Windows. Together with `O_EXCL`, this is the entire portability surface.
+Claude Code can issue parallel tool calls; `converse` is async. All ticket/floor
+mutations go through one **process-local `asyncio.Lock`** in `voice_queue.py`, in
+addition to the cross-process file protocol.
 
 ## Converse protocol
 
 `converse` gains two parameters: `ticket` (string, optional) and `end_burst`
-(bool, default false).
+(bool, default false). When the queue is enabled, the legacy `wait_for_conch`
+parameter is **ignored** (queue semantics always apply); it remains meaningful
+only under `VOICEMODE_QUEUE_ENABLED=false`.
 
 ```
 converse called
 │
-├─ This process already holds the floor (burst continuation; detected by
-│    floor.json pid == os.getpid()):
-│    speak/listen normally, heartbeat last_activity.
+├─ This process already holds the floor (floor.json pid+start_time == me):
+│    heartbeat last_activity, speak/listen normally (burst continuation).
 │    If end_burst=true: after the exchange, delete floor.json.
 │
 └─ Floor not held:
-   ├─ Ensure ticket exists (reuse `ticket` param if given — preserves FIFO
-   │  position across re-calls; create new ticket otherwise)
-   ├─ Wait loop (max WAIT_SLICE ≈ 50s per call, poll every 0.5s):
-   │    floor dead/free AND we are head?  → acquire floor, DELETE own ticket
-   │    (the floor file itself is the record of holding; a holder never sits
-   │    in the queue, so "head" always means the oldest *waiting* session)
+   ├─ Ensure ticket exists (reuse `ticket` param if its file still exists —
+   │  preserves FIFO position across re-calls; else create new, deleting any
+   │  same-pid leftovers)
+   ├─ Wait loop (max WAIT_SLICE ≈ 50s per call, poll every 0.5s,
+   │  heartbeat own ticket's last_seen each poll):
+   │    floor dead/free AND we are head?  → run claim protocol
    │      ├─ acquired after waiting   → prepend handoff intro to TTS
    │      └─ acquired instantly       → no intro (queue was empty)
    └─ Still waiting at 50s → return structured QUEUED status (not an error):
@@ -109,6 +157,8 @@ converse called
          You MUST immediately call converse again with the same message and
          ticket=<id>. Your queue position is preserved. Do NOT print your
          question as text. Do NOT give up."
+        (N of M is computed from a directory scan and is approximate under
+         concurrent GC — cosmetic only.)
 ```
 
 ### Why the 50s slice + mandatory re-call
@@ -118,22 +168,29 @@ many minutes risks being killed, losing the question — the original bug. Slici
 keeps every individual call short while the **ticket** preserves queue position
 across any number of re-calls. Each QUEUED return also re-states the protocol in
 the tool result itself, so even a context-degraded LLM is re-told what to do.
-"Wait indefinitely" is therefore a property of the ticket, not of any single call.
+"Wait indefinitely" is therefore a property of the ticket, not of any single
+call. Residual risk: an LLM that ignores the instruction entirely; its ticket
+then ages out via `TICKET_STALE` instead of blocking the queue, and the failure
+is visible in `voicemode-switch queue`.
 
 ### Burst release (two-tier)
 
 1. **Explicit:** the LLM passes `end_burst=true` on its final exchange
    (instructed by the patched prompt and CLAUDE.md).
 2. **Grace timeout:** if `last_activity` is older than `VOICEMODE_QUEUE_GRACE`
-   (default 45s), the head waiter declares the floor stale and claims it. 45s is
-   longer than realistic LLM thinking-time between burst exchanges, but bounds the
-   damage of a forgotten `end_burst` to ~45s. Grace measures only silence
+   (default **90s** — sized to cover slow LLM generation between exchanges),
+   the head waiter runs the claim protocol. Grace measures only silence
    *between* exchanges — never an in-progress exchange (heartbeats cover those).
+
+**Intended semantics, not a bug:** a session that goes quiet longer than grace
+(e.g. runs tests for 5 minutes mid-conversation) *yields the floor by design* —
+other sessions get their turns; the slow session re-queues with a fresh intro
+when it returns. A forgotten `end_burst` jams the queue for at most ~90s.
 
 ### Session death
 
-Holder process exits/crashes → PID dead → floor free on the next waiter poll.
-No grace wait, no stale-lock window (replaces conch's 300s expiry).
+Holder process exits/crashes → pid+start_time dead → floor free on the next
+waiter poll. No grace wait, no stale-lock window (replaces conch's 300s expiry).
 
 ## Identity, visibility, config
 
@@ -145,12 +202,13 @@ No grace wait, no stale-lock window (replaces conch's 300s expiry).
   (voice short name derived from the voice id, e.g. `af_bella` → "Bella").
   Never repeated within a burst.
 - **`voicemode-switch queue`**: read-only subcommand printing floor holder, queue
-  order with ages, and cleaning dead tickets.
+  order with ages and staleness, and cleaning dead tickets.
 - **Env config** (all optional):
   - `VOICEMODE_QUEUE_ENABLED` (default `true`; `false` restores old conch behavior)
-  - `VOICEMODE_QUEUE_GRACE` (default `45`)
+  - `VOICEMODE_QUEUE_GRACE` (default `90`)
   - `VOICEMODE_QUEUE_WAIT_SLICE` (default `50`)
   - `VOICEMODE_QUEUE_CHECK_INTERVAL` (default `0.5`)
+  - `VOICEMODE_QUEUE_TICKET_STALE` (default `30`)
   - `VOICEMODE_SESSION_NAME` (default: cwd basename)
 
 ## Patching strategy
@@ -169,7 +227,8 @@ No grace wait, no stale-lock window (replaces conch's 300s expiry).
   `end_burst=true` on the final exchange; never degrade a queued question to text.
 - **Old `Conch`** — no longer arbitrates. Check during implementation whether
   anything external reads `~/.voicemode/conch` (e.g. sound-effect hooks); if so,
-  keep writing it for compatibility while the floor is held.
+  mirror it best-effort while the floor is held (readers may briefly observe
+  conch and floor out of sync — acceptable, both are advisory for externals).
 - Windows later: `install.ps1` Step 4 must run the same patch set (its current
   failure to invoke `apply.sh`'s shim installs is a known bug from the
   2026-06-07 review).
@@ -177,19 +236,21 @@ No grace wait, no stale-lock window (replaces conch's 300s expiry).
 ## Error handling
 
 - Corrupted/unparsable ticket or floor JSON → treated as dead, cleaned up by
-  whoever reads it.
-- `ticket` param refers to a file that no longer exists (e.g. cleaned up after a
-  transient PID-liveness misread) → create a fresh ticket at the back and say so
-  in the next QUEUED status.
+  whoever reads it (the link()-based claim guarantees a *valid* floor is never
+  observed partially written, so unparsable ⇒ genuinely broken).
+- `ticket` param refers to a file that no longer exists → create a fresh ticket
+  at the back and say so in the next QUEUED status.
 - Queue dir missing → created on demand.
-- Wall-clock changes are harmless: ordering is fixed at filename creation;
-  positions never re-sort.
 
 ## Testing
 
-- **Unit** (joins existing `tests/`): FIFO ordering; `O_EXCL` contention with real
-  subprocesses racing for the floor; dead-PID cleanup; grace expiry; burst
-  hold/release; ticket reuse across re-calls; corrupted-JSON recovery.
+- **Unit** (joins existing `tests/`): FIFO ordering; claim contention with real
+  subprocesses racing for the floor; dead-PID and pid-reuse (start-time
+  mismatch) cleanup; grace expiry; **TOCTOU steal vs concurrent heartbeat**
+  (holder heartbeats while waiter runs claim protocol — exactly one holder
+  survives); **duplicate same-pid tickets** (re-call without ticket param must
+  not deadlock); burst hold/release; ticket reuse across re-calls; ticket
+  staleness GC; corrupted-JSON recovery.
 - **Integration**: two scripted fake sessions driving `voice_queue` end-to-end,
   asserting strict turn order and intro-exactly-once.
 - **Manual acceptance**: 2–3 real Claude Code sessions; ask each for something;
