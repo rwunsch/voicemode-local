@@ -407,3 +407,23 @@ def test_finish_after_queued_touches_nothing(tmp_path, monkeypatch):
     finally:
         proc.kill()
         proc.wait()
+
+
+# ---------- status ----------
+
+def test_print_status(tmp_path, capsys):
+    voice_queue.print_status(tmp_path)
+    out = capsys.readouterr().out
+    assert "Floor: free" in out
+    assert "Queue: empty" in out
+
+    voice_queue.try_claim_floor(tmp_path, "projA", "af_bella")
+    qdir = tmp_path / "queue"
+    qdir.mkdir(exist_ok=True)
+    (qdir / "0000000000000001-77777.json").write_text(json.dumps(
+        {"pid": os.getpid(), "start_time": _my_st(), "project": "projB",
+         "voice": "bm_daniel", "created": "now", "last_seen": time.time()}))
+    voice_queue.print_status(tmp_path)
+    out = capsys.readouterr().out
+    assert "projA/af_bella" in out
+    assert "projB/bm_daniel" in out

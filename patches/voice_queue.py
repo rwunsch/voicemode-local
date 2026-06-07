@@ -477,3 +477,29 @@ class QueueSession:
                 release_floor(self.base)
             else:
                 heartbeat_floor(self.base)
+
+
+# ---------- CLI status (voicemode-switch queue) ----------
+
+def print_status(base: Optional[Path] = None) -> None:
+    base = Path(base) if base else DEFAULT_BASE
+    floor = _read_json(_floor_path(base))
+    if floor is None:
+        print("Floor: free")
+    elif floor_is_live(floor):
+        age = time.time() - floor.get("last_activity", 0)
+        print(f"Floor: {floor.get('project', 'unknown')}/{floor.get('voice', '?')} "
+              f"(pid {floor.get('pid')}, last activity {age:.0f}s ago)")
+    else:
+        print(f"Floor: STALE — dead holder {floor.get('project', 'unknown')}/"
+              f"{floor.get('voice', '?')} (pid {floor.get('pid')}); "
+              f"next waiter will claim it")
+    tickets = list_tickets(base)  # GCs dead/stale tickets as a side effect
+    if not tickets:
+        print("Queue: empty")
+        return
+    print(f"Queue ({len(tickets)} waiting):")
+    for i, (name, t) in enumerate(tickets, 1):
+        seen = time.time() - t.get("last_seen", 0)
+        print(f"  {i}. {t.get('project', 'unknown')}/{t.get('voice', '?')} "
+              f"(pid {t.get('pid')}, ticket {name}, last seen {seen:.0f}s ago)")

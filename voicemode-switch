@@ -9,6 +9,7 @@
 #   voicemode-switch status   # Show current config and service health
 #   voicemode-switch start    # Start local services (Docker + proxy)
 #   voicemode-switch stop     # Stop local services
+#   voicemode-switch queue    # Show voice session queue (floor holder + waiters)
 #
 # After switching, restart Claude Code for changes to take effect.
 
@@ -330,6 +331,11 @@ case "${1:-}" in
     status) cmd_status ;;
     start)  cmd_start ;;
     stop)   cmd_stop ;;
+    queue)
+        PYBIN="$SCRIPT_DIR/.venv/bin/python"
+        [ -x "$PYBIN" ] || PYBIN="python3"
+        "$PYBIN" -c "import sys; sys.path.insert(0, '$SCRIPT_DIR/patches'); import voice_queue; voice_queue.print_status()"
+        ;;
     *)
         echo "Usage: voicemode-switch <command>"
         echo ""
@@ -341,6 +347,7 @@ case "${1:-}" in
         echo "  status   Show current config and service health"
         echo "  start    Start local Docker services + proxy"
         echo "  stop     Stop local services"
+        echo "  queue    Show voice session queue (floor holder + waiters)"
         echo ""
         echo "After switching modes, restart Claude Code for changes to take effect."
         ;;
