@@ -58,4 +58,16 @@ if [ -f "$SCRIPT_DIR/switch_mode.py" ] && [ -d "$TOOLS_DIR" ]; then
     fi
 fi
 
+# Install the session queue module and patch converse.py to use it
+if [ -f "$SCRIPT_DIR/voice_queue.py" ]; then
+    cp "$SCRIPT_DIR/voice_queue.py" "$VM_DIR/voice_queue.py"
+    echo "[patches] Applied voice_queue.py → $VM_DIR/voice_queue.py"
+fi
+if [ -f "$SCRIPT_DIR/patch_converse_queue.py" ]; then
+    PYBIN="$VENV_DIR/bin/python"
+    [ -x "$PYBIN" ] || PYBIN="$VENV_DIR/Scripts/python.exe"
+    [ -x "$PYBIN" ] || PYBIN="python3"
+    "$PYBIN" "$SCRIPT_DIR/patch_converse_queue.py" "$VM_DIR/tools/converse.py"
+fi
+
 echo "[patches] Done. Restart Claude Code for changes to take effect."
