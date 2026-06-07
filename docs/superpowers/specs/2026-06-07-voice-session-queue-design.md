@@ -119,7 +119,9 @@ immortal):
   heartbeats, and re-queues with a new ticket on its next converse call.
   A microsecond-scale write race remains theoretically possible; it can at
   worst cause one overlapping utterance and self-heals on the next call —
-  accepted for a human-timescale voice protocol.
+  accepted for a human-timescale voice protocol. The same put-back residual
+  applies to the rename-based release path; all variants are bounded to one
+  overlapping utterance and self-heal on the next call.
 - Heartbeat points: burst-continuation entry (every converse call while
   holding), plus a **call-scoped background asyncio task** that heartbeats every
   ~10s for the duration of each converse call (covers TTS and recording with a

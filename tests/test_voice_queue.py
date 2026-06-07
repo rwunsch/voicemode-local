@@ -140,3 +140,134 @@ def test_fifo_order_and_head(tmp_path):
     assert voice_queue.head_is_me(tmp_path) is True  # foreign ticket's pid is faked to ours so head_is_me returns True
     names = [t[0] for t in tickets]
     assert names == sorted(names)
+
+
+# ---------- floor ----------
+
+def _fake_floor(tmp_path, pid, start_time, last_activity):
+    voice_queue._write_json_atomic(tmp_path / "floor.json", {
+        "pid": pid, "start_time": start_time, "project": "other",
+        "voice": "v", "acquired": "now", "last_activity": last_activity})
+
+
+def test_claim_empty_floor(tmp_path):
+    assert voice_queue.try_claim_floor(tmp_path, "p", "v") is True
+    floor = voice_queue._read_json(tmp_path / "floor.json")
+    assert floor["pid"] == os.getpid()
+    assert floor["start_time"] == _my_st()
+    # No leftover temp/stale files
+    leftovers = [p.name for p in tmp_path.iterdir() if p.name != "floor.json"]
+    assert leftovers in ([], ["queue"])
+
+
+def test_claim_blocked_by_live_floor(tmp_path):
+    # Use a real other live process: spawn a sleeper.
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        _fake_floor(tmp_path, proc.pid,
+                    voice_queue.process_start_time(proc.pid), time.time())
+        assert voice_queue.try_claim_floor(tmp_path, "p", "v") is False
+    finally:
+        proc.kill()
+        proc.wait()
+
+
+def test_claim_dead_pid_floor(tmp_path):
+    proc = subprocess.Popen([sys.executable, "-c", "pass"])
+    pid = proc.pid
+    st = voice_queue.process_start_time(pid)
+    proc.wait()
+    _fake_floor(tmp_path, pid, st if st is not None else -1, time.time())
+    assert voice_queue.try_claim_floor(tmp_path, "p", "v") is True
+
+
+def test_claim_grace_expired_floor(tmp_path, monkeypatch):
+    monkeypatch.setattr(voice_queue, "QUEUE_GRACE", 0.1)
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        _fake_floor(tmp_path, proc.pid,
+                    voice_queue.process_start_time(proc.pid),
+                    time.time() - 1.0)  # last_activity 1s ago > 0.1s grace
+        assert voice_queue.try_claim_floor(tmp_path, "p", "v") is True
+    finally:
+        proc.kill()
+        proc.wait()
+
+
+def test_floor_is_mine_and_release(tmp_path):
+    assert voice_queue.floor_is_mine(tmp_path) is False
+    voice_queue.try_claim_floor(tmp_path, "p", "v")
+    assert voice_queue.floor_is_mine(tmp_path) is True
+    voice_queue.release_floor(tmp_path)
+    assert voice_queue.floor_is_mine(tmp_path) is False
+    assert not (tmp_path / "floor.json").exists()
+
+
+def test_heartbeat_floor_conditional(tmp_path):
+    voice_queue.try_claim_floor(tmp_path, "p", "v")
+    before = voice_queue._read_json(tmp_path / "floor.json")["last_activity"]
+    time.sleep(0.05)
+    assert voice_queue.heartbeat_floor(tmp_path) is True
+    after = voice_queue._read_json(tmp_path / "floor.json")["last_activity"]
+    assert after > before
+    # Floor stolen (someone else's pid): heartbeat must refuse (demotion)
+    _fake_floor(tmp_path, 999999999, 1, time.time())
+    assert voice_queue.heartbeat_floor(tmp_path) is False
+    # And must NOT have overwritten the thief's floor
+    assert voice_queue._read_json(tmp_path / "floor.json")["pid"] == 999999999
+
+
+def test_release_only_own_floor(tmp_path):
+    _fake_floor(tmp_path, 999999999, 1, time.time())
+    voice_queue.release_floor(tmp_path)  # not ours -> no-op
+    assert (tmp_path / "floor.json").exists()
+
+
+def test_release_puts_back_stolen_floor(tmp_path):
+    # We think we hold it, but a thief replaced floor.json before our release
+    _fake_floor(tmp_path, 999999999, 1, time.time())
+    voice_queue.release_floor(tmp_path)
+    floor = voice_queue._read_json(tmp_path / "floor.json")
+    assert floor is not None and floor["pid"] == 999999999
+
+
+def test_claim_contention_exactly_one_winner(tmp_path):
+    """8 subprocesses race to claim a free floor: exactly one succeeds.
+    The winner stays alive until killed — a dead winner's floor would be
+    legitimately re-claimable via the dead-pid path, breaking the count."""
+    helper = Path(__file__).parent / "queue_helper.py"
+    procs = [subprocess.Popen(
+        [sys.executable, str(helper), "claim", str(tmp_path)],
+        stdout=subprocess.PIPE) for _ in range(8)]
+    try:
+        results = [p.stdout.readline().decode().strip() for p in procs]
+    finally:
+        for p in procs:
+            p.kill()
+            p.wait()
+    assert results.count("WON") == 1
+    assert results.count("LOST") == 7
+
+
+def test_toctou_heartbeating_holder_not_stolen(tmp_path, monkeypatch):
+    """A live holder that heartbeats faster than grace cannot be stolen;
+    once it stops, the claim succeeds."""
+    monkeypatch.setattr(voice_queue, "QUEUE_GRACE", 0.3)
+    helper = Path(__file__).parent / "queue_helper.py"
+    holder = subprocess.Popen(
+        [sys.executable, str(helper), "hold", str(tmp_path), "1.0", "0.05"],
+        env={**os.environ, "VOICEMODE_QUEUE_GRACE": "0.3"})
+    try:
+        time.sleep(0.2)  # holder has claimed and is heartbeating
+        deadline = time.monotonic() + 0.8
+        stolen = False
+        while time.monotonic() < deadline:
+            if voice_queue.try_claim_floor(tmp_path, "thief", "v"):
+                stolen = True
+                break
+            time.sleep(0.05)
+        assert stolen is False, "claimed a floor whose holder was heartbeating"
+        holder.wait(timeout=5)  # holder releases after 1.0s
+        assert voice_queue.try_claim_floor(tmp_path, "thief", "v") is True
+    finally:
+        holder.kill()

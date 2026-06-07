@@ -219,3 +219,129 @@ def head_is_me(base: Path) -> bool:
     # pid-only comparison is safe ONLY because list_tickets has already GC'd
     # recycled-pid tickets (start_time mismatch); callers must not bypass it.
     return bool(tickets) and tickets[0][1].get("pid") == os.getpid()
+
+
+# ---------- floor ----------
+
+def _floor_path(base: Path) -> Path:
+    return base / FLOOR_NAME
+
+
+def floor_is_live(data: dict) -> bool:
+    """A floor is live if its holder process exists (same incarnation) and has
+    shown activity within QUEUE_GRACE seconds."""
+    if not pid_alive(data.get("pid"), data.get("start_time")):
+        return False
+    return (time.time() - data.get("last_activity", 0)) <= QUEUE_GRACE
+
+
+def try_claim_floor(base: Path, project: str, voice: str) -> bool:
+    """Attempt to take the floor. True iff we are now the holder.
+
+    Claim protocol (spec: 'Floor / Claim protocol'):
+      1. Live floor -> False.
+      2. Dead floor -> atomically rename it aside, re-verify the snapshot
+         (a concurrent heartbeat may have raced our read; if the snapshot is
+         live, put it back), else discard it.
+      3. Claim by os.link(tmp, floor.json): atomic fail-if-exists WITH full
+         content — readers can never observe a partial floor.
+    """
+    base.mkdir(parents=True, exist_ok=True)
+    fpath = _floor_path(base)
+
+    # Opportunistic GC: floor.stale/.tmp/.release orphans left by claimers
+    # that crashed mid-protocol. In-flight files live for milliseconds, so
+    # a 60s mtime threshold can never hit a live one.
+    for orphan in base.glob("floor.*"):
+        if orphan.name == FLOOR_NAME:
+            continue
+        try:
+            if time.time() - orphan.stat().st_mtime > 60:
+                orphan.unlink()
+        except OSError:
+            pass
+
+    data = _read_json(fpath)
+    if data is not None and floor_is_live(data):
+        return False
+
+    if fpath.exists():
+        stale = base / f"floor.stale.{uuid.uuid4().hex}"
+        try:
+            os.rename(fpath, stale)
+        except FileNotFoundError:
+            pass  # someone else cleaned it up first
+        else:
+            snap = _read_json(stale)
+            if snap is not None and floor_is_live(snap):
+                # Heartbeat raced our read — the holder is alive. Put it back.
+                # (Microsecond window where a third claimer could have linked a
+                # new floor; rename overwrites it. Accepted residual race —
+                # self-heals on the next call. See spec.)
+                os.replace(stale, fpath)
+                return False
+            stale.unlink(missing_ok=True)
+
+    me = {
+        "pid": os.getpid(),
+        "start_time": process_start_time(os.getpid()),
+        "project": project,
+        "voice": voice,
+        "acquired": _now_iso(),
+        "last_activity": time.time(),
+    }
+    tmp = base / f"floor.tmp.{os.getpid()}.{uuid.uuid4().hex}"
+    tmp.write_text(json.dumps(me, indent=2))
+    try:
+        os.link(tmp, fpath)
+        return True
+    except FileExistsError:
+        return False  # lost the race
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def floor_is_mine(base: Path) -> bool:
+    data = _read_json(_floor_path(base))
+    return (data is not None
+            and data.get("pid") == os.getpid()
+            and data.get("start_time") == process_start_time(os.getpid()))
+
+
+def heartbeat_floor(base: Path) -> bool:
+    """Conditionally update last_activity. False == we no longer hold the
+    floor (stolen via grace expiry) — caller must demote itself and never
+    write again."""
+    fpath = _floor_path(base)
+    data = _read_json(fpath)
+    if data is None or data.get("pid") != os.getpid() \
+            or data.get("start_time") != process_start_time(os.getpid()):
+        return False
+    # RMW is safe ONLY because the holder process is the floor's sole
+    # field-writer (QueueSession serializes within the process); release is an
+    # unlink, not a field write.
+    data["last_activity"] = time.time()
+    _write_json_atomic(fpath, data)
+    return True
+
+
+def release_floor(base: Path) -> None:
+    """Delete the floor iff we hold it.
+
+    Rename-based: atomically capture whatever floor.json currently is, then
+    inspect the snapshot. If it was ours, discard it (released). If a thief
+    had already claimed (grace-expiry race), put theirs back. Same residual
+    put-back race class as try_claim_floor — documented in the spec.
+    """
+    fpath = _floor_path(base)
+    snap = base / f"floor.release.{uuid.uuid4().hex}"
+    try:
+        os.rename(fpath, snap)
+    except FileNotFoundError:
+        return  # nothing to release
+    data = _read_json(snap)
+    if data is not None and (data.get("pid") != os.getpid()
+            or data.get("start_time") != process_start_time(os.getpid())):
+        os.replace(snap, fpath)  # not ours — put the rightful floor back
+        return
+    snap.unlink(missing_ok=True)
