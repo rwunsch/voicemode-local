@@ -90,7 +90,7 @@ immortal):
 - **Head of queue** = oldest non-stale ticket. With an empty queue, a new ticket
   is trivially head and the floor is acquired instantly (no intro).
 - The `ticket` tool parameter is the **filename stem** (e.g.
-  `001749301234567-41023`). If it no longer exists, a fresh ticket is created at
+  `1749301234567890-41023`). If it no longer exists, a fresh ticket is created at
   the back and the next QUEUED status says so.
 
 ### Floor
