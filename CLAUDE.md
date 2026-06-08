@@ -39,10 +39,23 @@ Two non-negotiable rules when using `mcp__voicemode__converse`:
    immediately call converse again with the same message and the given
    `ticket` value. Repeat as long as needed. Never degrade the question to
    text; never give up.
-2. **`end_burst=true`** on your final exchange of a conversation burst, so the
-   next waiting session gets the floor. Forgetting costs ~90s (auto-release).
+2. **`end_burst=true`** hands the mic to the next waiting session — it does NOT
+   end the conversation. Use it when pausing so a queued session gets the floor,
+   or before stepping away for longer work; then continue the same conversation
+   by calling converse again. Forgetting costs ~90s (auto-release).
 
 Inspect the queue anytime with `./voicemode-switch queue`.
+
+## Never End a Voice Conversation on Your Own Initiative
+
+Only the **user** ends a voice conversation (e.g. "goodbye", "that's all",
+"we're done", "stop voice mode"). After every exchange, keep the line open by
+calling `mcp__voicemode__converse` again with `wait_for_response=true` — even
+when you have nothing to add (then ask a short open question or just listen).
+Finishing a thought, a natural pause, running out of things to say, or "the
+burst is over" are NEVER reasons to stop. Do not wander off to write memory or
+files in a way that drops the voice loop; if you must pause for longer work, say
+so out loud and keep the conversation open.
 
 ## Available Voices (Kokoro TTS)
 
