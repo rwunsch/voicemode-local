@@ -336,6 +336,15 @@ case "${1:-}" in
         [ -x "$PYBIN" ] || PYBIN="python3"
         "$PYBIN" -c "import sys; sys.path.insert(0, '$SCRIPT_DIR/patches'); import voice_queue; voice_queue.print_status()"
         ;;
+    queue-log)
+        LOG="$HOME/.voicemode/logs/queue.log"
+        if [ ! -f "$LOG" ]; then
+            warn "No queue log yet at $LOG (no session has run the queue since logging was added)"
+            exit 0
+        fi
+        echo "Tailing $LOG (Ctrl-C to stop)..."
+        tail -n 40 -f "$LOG"
+        ;;
     *)
         echo "Usage: voicemode-switch <command>"
         echo ""
@@ -348,6 +357,7 @@ case "${1:-}" in
         echo "  start    Start local Docker services + proxy"
         echo "  stop     Stop local services"
         echo "  queue    Show voice session queue (floor holder + waiters)"
+        echo "  queue-log Tail the per-session queue event log (debug)"
         echo ""
         echo "After switching modes, restart Claude Code for changes to take effect."
         ;;

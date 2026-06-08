@@ -31,6 +31,29 @@ DEFAULT_BASE = Path.home() / ".voicemode"
 
 FLOOR_NAME = "floor.json"
 
+# Structured per-session logging — one JSONL line per queue event, appended to
+# <base>/logs/queue.log by every session so all concurrent sessions interleave
+# in a single tailable file (`tail -f ~/.voicemode/logs/queue.log` or
+# `voicemode-switch queue-log`). Best-effort: logging never raises into the
+# voice path. Disable with VOICEMODE_QUEUE_LOG=false.
+QUEUE_LOG = os.getenv("VOICEMODE_QUEUE_LOG", "true").lower() in ("true", "1", "yes", "on")
+LOG_NAME = "queue.log"
+
+
+def _log(event: str, base: Path, **fields) -> None:
+    """Append one JSONL event line; swallow all errors (debug aid, never fatal)."""
+    if not QUEUE_LOG:
+        return
+    try:
+        logdir = base / "logs"
+        logdir.mkdir(parents=True, exist_ok=True)
+        rec = {"ts": _now_iso(), "pid": os.getpid(), "event": event}
+        rec.update(fields)
+        with open(logdir / LOG_NAME, "a") as f:
+            f.write(json.dumps(rec) + "\n")
+    except Exception:
+        pass
+
 
 # ---------- process identity (pid + start time; PIDs get recycled) ----------
 
@@ -398,16 +421,22 @@ class QueueSession:
         if its file vanished, we re-queue at the back and say so.
         """
         requeued = False
+        _log("acquire_call", self.base, project=self.project, voice=self.voice,
+             ticket_in=ticket)
         async with _process_lock:
             if floor_is_mine(self.base):
                 heartbeat_floor(self.base)
                 self._acquired = True
+                _log("acquired_burst", self.base, project=self.project,
+                     voice=self.voice)
                 return AcquireResult(status="acquired", waited=False)
             resumed = ticket is not None
             if ticket is None or not ticket_exists(self.base, ticket):
                 if resumed:
                     requeued = True
                 ticket = create_ticket(self.base, self.project, self.voice)
+                _log("ticket_created", self.base, project=self.project,
+                     voice=self.voice, ticket=ticket, requeued=requeued)
 
         waited = resumed
         deadline = time.monotonic() + WAIT_SLICE
@@ -418,11 +447,17 @@ class QueueSession:
                         self.base, self.project, self.voice):
                     delete_ticket(self.base, ticket)
                     self._acquired = True
+                    _log("acquired_floor", self.base, project=self.project,
+                         voice=self.voice, ticket=ticket, waited=waited)
                     return AcquireResult(status="acquired", waited=waited)
             if time.monotonic() >= deadline:
-                return AcquireResult(
-                    status="queued", ticket=ticket,
-                    queued_message=self._queued_message(ticket, requeued))
+                msg = self._queued_message(ticket, requeued)
+                holder = _read_json(_floor_path(self.base)) or {}
+                _log("queued", self.base, project=self.project, voice=self.voice,
+                     ticket=ticket, holder=holder.get("project"),
+                     waiting=len(list_tickets(self.base)))
+                return AcquireResult(status="queued", ticket=ticket,
+                                     queued_message=msg)
             waited = True
             await asyncio.sleep(CHECK_INTERVAL)
 
@@ -454,6 +489,8 @@ class QueueSession:
                 await asyncio.sleep(HEARTBEAT_INTERVAL)
                 async with _process_lock:
                     if not heartbeat_floor(self.base):
+                        _log("demoted", self.base, project=self.project,
+                             voice=self.voice)
                         return  # demoted — never write again
         self._hb_task = asyncio.get_running_loop().create_task(beat())
 
@@ -475,8 +512,12 @@ class QueueSession:
         async with _process_lock:
             if end_burst:
                 release_floor(self.base)
+                _log("released", self.base, project=self.project,
+                     voice=self.voice)
             else:
                 heartbeat_floor(self.base)
+                _log("burst_pause", self.base, project=self.project,
+                     voice=self.voice)
 
 
 # ---------- CLI status (voicemode-switch queue) ----------

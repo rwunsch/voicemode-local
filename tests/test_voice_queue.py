@@ -427,3 +427,38 @@ def test_print_status(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "projA/af_bella" in out
     assert "projB/bm_daniel" in out
+
+
+# ---------- logging ----------
+
+def test_log_writes_jsonl(tmp_path, monkeypatch):
+    monkeypatch.setattr(voice_queue, "QUEUE_LOG", True)
+    voice_queue._log("unit_event", tmp_path, project="p", voice="v", extra=1)
+    logfile = tmp_path / "logs" / "queue.log"
+    assert logfile.exists()
+    rec = json.loads(logfile.read_text().strip())
+    assert rec["event"] == "unit_event"
+    assert rec["pid"] == os.getpid()
+    assert rec["project"] == "p" and rec["voice"] == "v" and rec["extra"] == 1
+    assert "ts" in rec
+
+
+def test_log_disabled_writes_nothing(tmp_path, monkeypatch):
+    monkeypatch.setattr(voice_queue, "QUEUE_LOG", False)
+    voice_queue._log("unit_event", tmp_path, project="p")
+    assert not (tmp_path / "logs").exists()
+
+
+def test_acquire_emits_log_events(tmp_path, monkeypatch):
+    monkeypatch.setattr(voice_queue, "QUEUE_LOG", True)
+    s = voice_queue.QueueSession(project="p", voice="af_bella", base=tmp_path)
+
+    async def flow():
+        await s.acquire()
+        await s.finish(end_burst=True)
+    asyncio.run(flow())
+    events = [json.loads(l)["event"]
+              for l in (tmp_path / "logs" / "queue.log").read_text().splitlines()]
+    assert "acquire_call" in events
+    assert "acquired_floor" in events
+    assert "released" in events
