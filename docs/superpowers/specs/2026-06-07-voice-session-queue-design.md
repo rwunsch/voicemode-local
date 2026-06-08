@@ -181,19 +181,53 @@ call. Residual risk: an LLM that ignores the instruction entirely; its ticket
 then ages out via `TICKET_STALE` instead of blocking the queue, and the failure
 is visible in `voicemode-switch queue`.
 
-### Burst release (two-tier)
+### Burst release (three-tier)
 
 1. **Explicit:** the LLM passes `end_burst=true` on its final exchange
    (instructed by the patched prompt and CLAUDE.md).
-2. **Grace timeout:** if `last_activity` is older than `VOICEMODE_QUEUE_GRACE`
-   (default **90s** — sized to cover slow LLM generation between exchanges),
+2. **Max-hold rotation (fairness):** a holder may continue its burst only while
+   it has held the floor for less than `VOICEMODE_QUEUE_MAX_HOLD` (default
+   **0s** = strict FIFO; measured from the *current* floor acquisition via
+   `acquired_epoch`). Once the budget is spent **and at least one other session
+   is waiting**, the holder yields and the head waiter takes over. The yield is
+   evaluated at **two points**, both safe (never mid-recording):
+   - **At the pause between exchanges** (`finish(end_burst=False)`): this is the
+     one that matters when a session pauses to go do long off-channel work (a
+     multi-minute tool call). Instead of holding the mic through the whole grace
+     window while it is away, it releases *at the pause* so a waiting session
+     speaks immediately; the away session re-queues at the back and gets a fresh
+     intro when it returns with results.
+   - **At the next exchange boundary** (`acquire()`): covers a waiter that
+     appeared while we held, and prevents a stale-floor self-refresh.
+
+   With **no** waiters the holder always keeps talking regardless of budget (the
+   solo conversation is never interrupted; grace covers its thinking gaps).
+   `MAX_HOLD=0` ⇒ strict FIFO (hand off to any waiter the moment we pause); a
+   larger value ⇒ sustained bursts up to that many seconds; very large ⇒ pure
+   burst-until-grace. Worst-case starvation for a waiter already queued when the
+   holder pauses is ~one exchange; for a waiter that arrives *after* the holder
+   has gone off-channel (no pause left to trigger the handoff), it is bounded by
+   `QUEUE_GRACE`.
+3. **Grace timeout:** if `last_activity` is older than `VOICEMODE_QUEUE_GRACE`
+   (default **30s** — covers slow LLM generation between exchanges while keeping
+   the off-channel handoff latency low; must stay above `HEARTBEAT_INTERVAL`),
    the head waiter runs the claim protocol. Grace measures only silence
    *between* exchanges — never an in-progress exchange (heartbeats cover those).
 
 **Intended semantics, not a bug:** a session that goes quiet longer than grace
 (e.g. runs tests for 5 minutes mid-conversation) *yields the floor by design* —
 other sessions get their turns; the slow session re-queues with a fresh intro
-when it returns. A forgotten `end_burst` jams the queue for at most ~90s.
+when it returns. A forgotten `end_burst` jams the queue for at most ~`MAX_HOLD`
+(when others wait) or ~`QUEUE_GRACE` (the silence safety net), whichever fires
+first.
+
+**Burst-continuation must honour grace.** `floor_is_mine()` is a pure identity
+check (pid + start_time) and deliberately does *not* test liveness, so the
+burst-continuation branch in `acquire()` must itself verify the floor is still
+live before resuming. Otherwise a holder returning after its grace expired would
+illegitimately self-refresh its own stale floor — beating waiters who can only
+win a poll race — and the grace tier above would never actually hand off. The
+yield-when-`not live`-and-waiters-exist rule closes that hole.
 
 ### Session death
 
@@ -215,7 +249,8 @@ waiter poll. No grace wait, no stale-lock window (replaces conch's 300s expiry).
   - `VOICEMODE_QUEUE_ENABLED` (default `true`; `false` disables cross-session
     arbitration entirely — the legacy conch path is not preserved, since keeping
     both code paths would double the surgical-patch surface)
-  - `VOICEMODE_QUEUE_GRACE` (default `90`)
+  - `VOICEMODE_QUEUE_GRACE` (default `30`; must stay > `HEARTBEAT_INTERVAL` 10s)
+  - `VOICEMODE_QUEUE_MAX_HOLD` (default `0` = strict FIFO; higher = sustained bursts up to N s)
   - `VOICEMODE_QUEUE_WAIT_SLICE` (default `50`)
   - `VOICEMODE_QUEUE_CHECK_INTERVAL` (default `0.5`)
   - `VOICEMODE_QUEUE_TICKET_STALE` (default `30`)

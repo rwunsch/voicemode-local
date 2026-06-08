@@ -23,7 +23,16 @@ from typing import Optional
 
 QUEUE_ENABLED = os.getenv("VOICEMODE_QUEUE_ENABLED", "true").lower() in ("true", "1", "yes", "on")
 # Timing constants below are all in seconds.
-QUEUE_GRACE = float(os.getenv("VOICEMODE_QUEUE_GRACE", "90"))  # seconds
+QUEUE_GRACE = float(os.getenv("VOICEMODE_QUEUE_GRACE", "30"))  # seconds (must stay > HEARTBEAT_INTERVAL)
+# Max continuous floor hold before a session yields to waiters. The yield is
+# evaluated both at the next exchange boundary (acquire) AND when the holder
+# pauses between exchanges (finish/burst_pause) — the latter is what lets a
+# session that pauses to run a long tool call hand the mic off immediately
+# instead of holding through the whole grace window. No effect when nobody is
+# queued. Default 0 = strict FIFO (hand off to any waiter the moment we pause);
+# set higher to allow sustained bursts up to that many seconds; set very high to
+# restore pure burst-until-grace behavior.
+MAX_HOLD = float(os.getenv("VOICEMODE_QUEUE_MAX_HOLD", "0"))  # seconds
 WAIT_SLICE = float(os.getenv("VOICEMODE_QUEUE_WAIT_SLICE", "50"))  # seconds
 CHECK_INTERVAL = float(os.getenv("VOICEMODE_QUEUE_CHECK_INTERVAL", "0.5"))  # seconds
 TICKET_STALE = float(os.getenv("VOICEMODE_QUEUE_TICKET_STALE", "30"))  # seconds
@@ -311,6 +320,7 @@ def try_claim_floor(base: Path, project: str, voice: str) -> bool:
         "project": project,
         "voice": voice,
         "acquired": _now_iso(),
+        "acquired_epoch": time.time(),  # hold-start for MAX_HOLD; fixed across a burst
         "last_activity": time.time(),
     }
     tmp = base / f"floor.tmp.{os.getpid()}.{uuid.uuid4().hex}"
@@ -413,6 +423,26 @@ class QueueSession:
     def intro(self) -> str:
         return f"This is {self.project}, {voice_short_name(self.voice)} —"
 
+    def _should_yield_floor(self):
+        """For a floor we currently hold, decide whether to hand it off.
+
+        Returns (yield: bool, reason: str|None, held: float, waiters: int).
+        Keep the floor iff nobody else is waiting, OR the floor is still live and
+        we are within the MAX_HOLD budget. Otherwise yield — either the budget is
+        spent ("max_hold") or the floor went stale ("grace") while someone waits.
+        Caller must hold _process_lock. `held` is measured from the current floor
+        acquisition (acquired_epoch), so it spans the whole burst, not one call.
+        """
+        floor = _read_json(_floor_path(self.base)) or {}
+        waiters = [t for t in list_tickets(self.base)
+                   if t[1].get("pid") != os.getpid()]
+        live = floor_is_live(floor)
+        held = time.time() - floor.get(
+            "acquired_epoch", floor.get("last_activity", 0))
+        if not waiters or (live and held < MAX_HOLD):
+            return False, None, round(held, 1), len(waiters)
+        return True, ("max_hold" if live else "grace"), round(held, 1), len(waiters)
+
     async def acquire(self, ticket: Optional[str] = None) -> AcquireResult:
         """Take the floor or report QUEUED after one wait slice.
 
@@ -425,11 +455,22 @@ class QueueSession:
              ticket_in=ticket)
         async with _process_lock:
             if floor_is_mine(self.base):
-                heartbeat_floor(self.base)
-                self._acquired = True
-                _log("acquired_burst", self.base, project=self.project,
-                     voice=self.voice)
-                return AcquireResult(status="acquired", waited=False)
+                # Burst continuation — but yield at this exchange boundary if a
+                # waiter exists and our hold budget is spent (max_hold) or our
+                # grace already expired (a stale floor we must not illegitimately
+                # self-refresh). With no waiters we always keep talking.
+                yld, reason, held, nwait = self._should_yield_floor()
+                if not yld:
+                    heartbeat_floor(self.base)
+                    self._acquired = True
+                    _log("acquired_burst", self.base, project=self.project,
+                         voice=self.voice, held=held, waiting=nwait)
+                    return AcquireResult(status="acquired", waited=False)
+                # Hand off the floor and fall through to re-queue at the back.
+                _log("burst_yield", self.base, project=self.project,
+                     voice=self.voice, held=held, waiting=nwait, reason=reason)
+                release_floor(self.base)
+                self._acquired = False
             resumed = ticket is not None
             if ticket is None or not ticket_exists(self.base, ticket):
                 if resumed:
@@ -514,10 +555,23 @@ class QueueSession:
                 release_floor(self.base)
                 _log("released", self.base, project=self.project,
                      voice=self.voice)
+                return
+            # Not an explicit end: normally we keep the floor and let the grace
+            # window cover the gap to our next exchange. But if another session
+            # is waiting and our hold budget is spent, hand off NOW — at the
+            # pause — rather than holding the mic through a long off-channel
+            # excursion (e.g. a multi-minute tool call) until grace expires.
+            yld, reason, held, nwait = self._should_yield_floor()
+            if yld:
+                release_floor(self.base)
+                self._acquired = False
+                _log("burst_yield", self.base, project=self.project,
+                     voice=self.voice, held=held, waiting=nwait,
+                     reason=f"pause_{reason}")
             else:
                 heartbeat_floor(self.base)
                 _log("burst_pause", self.base, project=self.project,
-                     voice=self.voice)
+                     voice=self.voice, held=held, waiting=nwait)
 
 
 # ---------- CLI status (voicemode-switch queue) ----------

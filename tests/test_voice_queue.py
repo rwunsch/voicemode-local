@@ -462,3 +462,143 @@ def test_acquire_emits_log_events(tmp_path, monkeypatch):
     assert "acquire_call" in events
     assert "acquired_floor" in events
     assert "released" in events
+
+
+# ---------- Option B: max-hold rotation + grace-expiry yield ----------
+
+def _live_foreign_waiter(tmp_path, proc, project="waiter"):
+    """Write a queue ticket owned by a live foreign process (sorts to head)."""
+    qdir = tmp_path / "queue"
+    qdir.mkdir(exist_ok=True)
+    (qdir / f"0000000000000001-{proc.pid}.json").write_text(json.dumps(
+        {"pid": proc.pid, "start_time": voice_queue.process_start_time(proc.pid),
+         "project": project, "voice": "v", "created": "now",
+         "last_seen": time.time()}))
+
+
+def test_burst_yields_to_waiter_after_max_hold(tmp_path, monkeypatch):
+    # MAX_HOLD=0 => any continuous hold has exhausted its budget, so a waiting
+    # session preempts at the next exchange boundary (the monopoly fix).
+    monkeypatch.setattr(voice_queue, "MAX_HOLD", 0.0)
+    monkeypatch.setattr(voice_queue, "WAIT_SLICE", 0.2)
+    monkeypatch.setattr(voice_queue, "CHECK_INTERVAL", 0.05)
+    s = voice_queue.QueueSession(project="p", voice="af_bella", base=tmp_path)
+    assert asyncio.run(s.acquire()).status == "acquired"
+    assert voice_queue.floor_is_mine(tmp_path)
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        _live_foreign_waiter(tmp_path, proc)
+        r = asyncio.run(s.acquire())                 # next boundary: must yield
+        assert r.status == "queued"
+        assert r.ticket is not None
+        assert not voice_queue.floor_is_mine(tmp_path)   # floor freed for waiter
+    finally:
+        proc.kill()
+        proc.wait()
+
+
+def test_burst_continues_past_max_hold_when_no_waiters(tmp_path, monkeypatch):
+    # Even with the budget exhausted, a holder keeps the floor if nobody waits.
+    monkeypatch.setattr(voice_queue, "MAX_HOLD", 0.0)
+    s = voice_queue.QueueSession(project="p", voice="af_bella", base=tmp_path)
+
+    async def flow():
+        await s.acquire()
+        await s.finish(end_burst=False)
+        r = await s.acquire()                        # no waiters -> keep floor
+        assert r.status == "acquired" and r.waited is False
+        assert voice_queue.floor_is_mine(tmp_path)
+        await s.finish(end_burst=True)
+    asyncio.run(flow())
+    assert not (tmp_path / "floor.json").exists()
+
+
+def test_burst_continues_within_budget_even_with_waiters(tmp_path, monkeypatch):
+    # Inside the hold budget, an active conversation is NOT chopped up.
+    monkeypatch.setattr(voice_queue, "MAX_HOLD", 100.0)
+    s = voice_queue.QueueSession(project="p", voice="af_bella", base=tmp_path)
+    assert asyncio.run(s.acquire()).status == "acquired"
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        _live_foreign_waiter(tmp_path, proc)
+        r = asyncio.run(s.acquire())                 # within budget -> keep floor
+        assert r.status == "acquired" and r.waited is False
+        assert voice_queue.floor_is_mine(tmp_path)
+    finally:
+        proc.kill()
+        proc.wait()
+
+
+def test_grace_expired_holder_yields_to_waiter(tmp_path, monkeypatch):
+    # Bug #2: a holder whose grace has expired must NOT self-refresh its stale
+    # floor when others are waiting — it yields (independent of MAX_HOLD).
+    monkeypatch.setattr(voice_queue, "QUEUE_GRACE", 0.1)
+    monkeypatch.setattr(voice_queue, "MAX_HOLD", 100.0)
+    monkeypatch.setattr(voice_queue, "WAIT_SLICE", 0.2)
+    monkeypatch.setattr(voice_queue, "CHECK_INTERVAL", 0.05)
+    s = voice_queue.QueueSession(project="p", voice="af_bella", base=tmp_path)
+    assert asyncio.run(s.acquire()).status == "acquired"
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        _live_foreign_waiter(tmp_path, proc)
+        time.sleep(0.2)                              # let our floor go stale
+        r = asyncio.run(s.acquire())                 # stale + waiter -> yield
+        assert r.status == "queued"
+        assert not voice_queue.floor_is_mine(tmp_path)
+    finally:
+        proc.kill()
+        proc.wait()
+
+
+def test_grace_expired_holder_keeps_floor_when_alone(tmp_path, monkeypatch):
+    # Stale floor but nobody waiting: harmless to resume the burst.
+    monkeypatch.setattr(voice_queue, "QUEUE_GRACE", 0.1)
+    s = voice_queue.QueueSession(project="p", voice="af_bella", base=tmp_path)
+    assert asyncio.run(s.acquire()).status == "acquired"
+    time.sleep(0.2)                                  # grace expires, no waiters
+    r = asyncio.run(s.acquire())
+    assert r.status == "acquired" and r.waited is False
+    assert voice_queue.floor_is_mine(tmp_path)
+
+
+def test_pause_hands_off_to_waiter_under_fifo(tmp_path, monkeypatch):
+    # The away-doing-work fix: finish(end_burst=False) RELEASES the floor when
+    # another session is waiting (MAX_HOLD=0), so a session that pauses to run a
+    # long tool call hands the mic off immediately instead of holding through the
+    # full grace window.
+    monkeypatch.setattr(voice_queue, "MAX_HOLD", 0.0)
+    s = voice_queue.QueueSession(project="p", voice="af_bella", base=tmp_path)
+    assert asyncio.run(s.acquire()).status == "acquired"
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        _live_foreign_waiter(tmp_path, proc)
+        asyncio.run(s.finish(end_burst=False))
+        assert not (tmp_path / "floor.json").exists()   # released at the pause
+    finally:
+        proc.kill()
+        proc.wait()
+
+
+def test_pause_keeps_floor_when_alone(tmp_path, monkeypatch):
+    # No waiters: a pause keeps the floor (grace covers brief thinking gaps), so
+    # a solo conversation is never interrupted.
+    monkeypatch.setattr(voice_queue, "MAX_HOLD", 0.0)
+    s = voice_queue.QueueSession(project="p", voice="af_bella", base=tmp_path)
+    assert asyncio.run(s.acquire()).status == "acquired"
+    asyncio.run(s.finish(end_burst=False))
+    assert voice_queue.floor_is_mine(tmp_path)
+
+
+def test_pause_keeps_floor_within_budget(tmp_path, monkeypatch):
+    # With a non-zero budget, an active burst is not handed off at every pause.
+    monkeypatch.setattr(voice_queue, "MAX_HOLD", 100.0)
+    s = voice_queue.QueueSession(project="p", voice="af_bella", base=tmp_path)
+    assert asyncio.run(s.acquire()).status == "acquired"
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        _live_foreign_waiter(tmp_path, proc)
+        asyncio.run(s.finish(end_burst=False))
+        assert voice_queue.floor_is_mine(tmp_path)       # within budget -> keep
+    finally:
+        proc.kill()
+        proc.wait()
