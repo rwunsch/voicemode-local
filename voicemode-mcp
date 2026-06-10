@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+#
+# voicemode-mcp — MCP launcher wrapper.
+#
+# Point the Claude Code MCP `command` at this script instead of the raw
+# `voice-mode` binary. On every session start it ensures the proxies the current
+# config needs are up (started DETACHED so they outlive this session and stay up
+# for the others), then exec's the real voice-mode server.
+#
+# Used by both native WSL sessions and the cross-OS bridge (the bridge runs this
+# same WSL script), so proxy lifecycle is shared and consistent.
+set -uo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+LOG_DIR="$HOME/.voicemode/logs"
+mkdir -p "$LOG_DIR" 2>/dev/null || true
+
+# Best-effort: never let proxy startup block or fail the MCP launch.
+"$SCRIPT_DIR/voicemode-switch" ensure --quiet >> "$LOG_DIR/ensure.log" 2>&1 || true
+
+exec "$SCRIPT_DIR/.venv/bin/voice-mode" "$@"

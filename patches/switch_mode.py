@@ -13,7 +13,57 @@ citizens and keeps OpenAI strictly last-resort.
 
 import json
 import os
+import re
 from voice_mode.server import mcp
+
+VOICEMODE_ENV = os.path.expanduser("~/.voicemode/voicemode.env")
+_BEGIN = "# >>> voicemode-switch managed (do not edit inside this block) >>>"
+_END = "# <<< voicemode-switch managed <<<"
+
+
+def _write_voicemode_env(mode: str, stt: str, tts: str, voices: str) -> None:
+    """Write the routing config as a managed block in ~/.voicemode/voicemode.env
+    (the stable source of truth voice-mode loads at startup). Env vars override
+    this file, so routing must NOT also live in ~/.claude.json."""
+    os.makedirs(os.path.dirname(VOICEMODE_ENV), exist_ok=True)
+    txt = ""
+    if os.path.exists(VOICEMODE_ENV):
+        txt = open(VOICEMODE_ENV).read()
+        txt = re.sub(re.escape(_BEGIN) + r".*?" + re.escape(_END) + r"\n?", "", txt, flags=re.S)
+    block = [_BEGIN, f"# mode: {mode}"]
+    if stt:
+        block.append(f"VOICEMODE_STT_BASE_URLS={stt}")
+    if tts:
+        block.append(f"VOICEMODE_TTS_BASE_URLS={tts}")
+    if voices:
+        block.append(f"VOICEMODE_VOICES={voices}")
+    block.append(_END)
+    body = txt.rstrip("\n")
+    open(VOICEMODE_ENV, "w").write((body + "\n\n" if body else "") + "\n".join(block) + "\n")
+    os.chmod(VOICEMODE_ENV, 0o600)
+
+
+def _strip_claude_json_routing() -> None:
+    """Remove routing vars from ~/.claude.json so they don't override
+    voicemode.env. Keeps OPENAI_API_KEY and a key-only WSLENV."""
+    p = os.path.expanduser("~/.claude.json")
+    if not os.path.exists(p):
+        return
+    data = json.load(open(p))
+    vm = data.get("mcpServers", {}).get("voicemode")
+    if not vm:
+        return
+    env = vm.get("env", {})
+    for k in ("VOICEMODE_STT_BASE_URLS", "VOICEMODE_TTS_BASE_URLS", "VOICEMODE_VOICES",
+              "STT_BASE_URL", "TTS_BASE_URL", "TTS_VOICE"):
+        env.pop(k, None)
+    if "WSLENV" in env:
+        keep = [x for x in env["WSLENV"].split(":") if x.startswith("OPENAI_API_KEY")]
+        env["WSLENV"] = ":".join(keep)
+        if not env["WSLENV"]:
+            env.pop("WSLENV")
+    vm["env"] = env
+    json.dump(data, open(p, "w"), indent=2)
 
 KOKORO = "http://127.0.0.1:8880/v1"
 PIPER = "http://127.0.0.1:8881/v1"
@@ -72,27 +122,17 @@ def switch_mode(mode: str) -> str:
         return f"Unknown mode: {mode}. Available modes: {available}"
 
     config = MODES[mode]
-    claude_json = os.path.expanduser("~/.claude.json")
 
     try:
-        with open(claude_json) as f:
-            data = json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return f"Error: Could not read {claude_json}"
-
-    env = data.get("mcpServers", {}).get("voicemode", {}).get("env", {})
-    # Preserve OPENAI_API_KEY and any WSLENV passthrough (cross-OS bridge).
-    new_env = {"OPENAI_API_KEY": env.get("OPENAI_API_KEY", "")}
-    if env.get("WSLENV"):
-        new_env["WSLENV"] = env["WSLENV"]
-    for key in _LIST_KEYS:
-        if config[key]:
-            new_env[key] = config[key]
-
-    data["mcpServers"]["voicemode"]["env"] = new_env
-
-    with open(claude_json, "w") as f:
-        json.dump(data, f, indent=2)
+        _write_voicemode_env(
+            mode,
+            config["VOICEMODE_STT_BASE_URLS"],
+            config["VOICEMODE_TTS_BASE_URLS"],
+            config["VOICEMODE_VOICES"],
+        )
+        _strip_claude_json_routing()
+    except Exception as e:  # pragma: no cover - defensive
+        return f"Error writing config: {e}"
 
     tts = config["VOICEMODE_TTS_BASE_URLS"]
     stt = config["VOICEMODE_STT_BASE_URLS"]
@@ -115,6 +155,6 @@ def switch_mode(mode: str) -> str:
         f"  STT: {label(stt)}\n"
         f"  TTS: {label(tts)}\n"
         f"  Default voice: {config['VOICEMODE_VOICES']}\n\n"
-        f"Settings updated in ~/.claude.json.\n"
+        f"Settings written to ~/.voicemode/voicemode.env.\n"
         f"Please restart Claude Code for changes to take effect."
     )

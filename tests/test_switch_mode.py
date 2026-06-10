@@ -37,41 +37,41 @@ def _load_modes():
     return namespace["MODES"]
 
 
-def _apply_mode(claude_json_path: str, mode: str, modes: dict) -> str:
-    """Replicate switch_mode()'s env transform against a temp file."""
-    config = modes[mode]
-    with open(claude_json_path) as f:
-        data = json.load(f)
-    env = data.get("mcpServers", {}).get("voicemode", {}).get("env", {})
-    new_env = {"OPENAI_API_KEY": env.get("OPENAI_API_KEY", "")}
-    if env.get("WSLENV"):
-        new_env["WSLENV"] = env["WSLENV"]
+import re
+
+_BEGIN = "# >>> voicemode-switch managed (do not edit inside this block) >>>"
+_END = "# <<< voicemode-switch managed <<<"
+
+
+def _write_voicemode_env(envfile: str, mode: str, config: dict) -> None:
+    """Replicate switch_mode._write_voicemode_env: managed block in voicemode.env."""
+    txt = ""
+    if os.path.exists(envfile):
+        txt = open(envfile).read()
+        txt = re.sub(re.escape(_BEGIN) + r".*?" + re.escape(_END) + r"\n?", "", txt, flags=re.S)
+    block = [_BEGIN, f"# mode: {mode}"]
     for key in LIST_KEYS:
         if config[key]:
-            new_env[key] = config[key]
-    data["mcpServers"]["voicemode"]["env"] = new_env
-    with open(claude_json_path, "w") as f:
-        json.dump(data, f, indent=2)
-    return mode
+            block.append(f"{key}={config[key]}")
+    block.append(_END)
+    body = txt.rstrip("\n")
+    open(envfile, "w").write((body + "\n\n" if body else "") + "\n".join(block) + "\n")
 
 
-def _make_claude_json(env=None):
-    data = {
-        "mcpServers": {
-            "voicemode": {
-                "command": "uvx",
-                "args": ["voice-mode"],
-                "env": env or {
-                    "VOICEMODE_STT_BASE_URLS": "http://127.0.0.1:2022/v1",
-                    "VOICEMODE_TTS_BASE_URLS": "http://127.0.0.1:8880/v1",
-                    "VOICEMODE_VOICES": "af_sky",
-                    "OPENAI_API_KEY": "sk-test-key-12345",
-                },
-            }
-        }
-    }
-    tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False)
-    json.dump(data, tmp, indent=2)
+def _managed_values(envfile: str) -> dict:
+    """Parse the active VOICEMODE_* keys from voicemode.env."""
+    out = {}
+    for line in open(envfile):
+        line = line.strip()
+        if line and not line.startswith("#") and "=" in line:
+            k, v = line.split("=", 1)
+            out[k] = v
+    return out
+
+
+def _make_envfile():
+    tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".env", delete=False)
+    tmp.write("# Voice Mode Configuration File\n# VOICEMODE_DEBUG=false\n")
     tmp.close()
     return tmp.name
 
@@ -128,82 +128,75 @@ def test_openai_mode_is_cloud_only():
     assert modes["openai"]["VOICEMODE_STT_BASE_URLS"] == "https://api.openai.com/v1"
 
 
-# ── Mode switching logic ──────────────────────────────────────────────────
+# ── voicemode.env writing (switch_mode writes the stable file, not .claude.json) ──
 
-def test_switch_to_piper_sets_correct_env():
+def test_switch_to_piper_writes_voicemode_env():
     modes = _load_modes()
-    path = _make_claude_json()
+    path = _make_envfile()
     try:
-        _apply_mode(path, "piper", modes)
-        env = json.load(open(path))["mcpServers"]["voicemode"]["env"]
-        assert "8881" in env["VOICEMODE_TTS_BASE_URLS"]
-        assert env["VOICEMODE_VOICES"].startswith("p_")
+        _write_voicemode_env(path, "piper", modes["piper"])
+        vals = _managed_values(path)
+        assert "8881" in vals["VOICEMODE_TTS_BASE_URLS"]
+        assert vals["VOICEMODE_VOICES"].startswith("p_")
     finally:
         os.unlink(path)
 
 
-def test_switch_preserves_openai_key():
+def test_write_preserves_other_env_lines():
+    """The managed block must not clobber the rest of voicemode.env."""
     modes = _load_modes()
-    path = _make_claude_json()
+    path = _make_envfile()
     try:
-        _apply_mode(path, "local", modes)
-        env = json.load(open(path))["mcpServers"]["voicemode"]["env"]
-        assert env["OPENAI_API_KEY"] == "sk-test-key-12345"
-    finally:
-        os.unlink(path)
-
-
-def test_switch_preserves_wslenv_bridge():
-    """Cross-OS bridge: a WSLENV passthrough must survive a mode switch."""
-    modes = _load_modes()
-    path = _make_claude_json(env={
-        "OPENAI_API_KEY": "sk-test",
-        "VOICEMODE_TTS_BASE_URLS": "http://127.0.0.1:8880/v1",
-        "WSLENV": "OPENAI_API_KEY/u:VOICEMODE_TTS_BASE_URLS/u",
-    })
-    try:
-        _apply_mode(path, "piper", modes)
-        env = json.load(open(path))["mcpServers"]["voicemode"]["env"]
-        assert env["WSLENV"] == "OPENAI_API_KEY/u:VOICEMODE_TTS_BASE_URLS/u"
+        _write_voicemode_env(path, "local", modes["local"])
+        body = open(path).read()
+        assert "# Voice Mode Configuration File" in body  # pre-existing content kept
+        assert "VOICEMODE_DEBUG=false" in body
     finally:
         os.unlink(path)
 
 
 def test_switch_to_openai_drops_local_urls():
     modes = _load_modes()
-    path = _make_claude_json()
+    path = _make_envfile()
     try:
-        _apply_mode(path, "openai", modes)
-        env = json.load(open(path))["mcpServers"]["voicemode"]["env"]
-        assert "127.0.0.1" not in env["VOICEMODE_TTS_BASE_URLS"]
-        assert "127.0.0.1" not in env["VOICEMODE_STT_BASE_URLS"]
+        _write_voicemode_env(path, "openai", modes["openai"])
+        vals = _managed_values(path)
+        assert "127.0.0.1" not in vals["VOICEMODE_TTS_BASE_URLS"]
+        assert "127.0.0.1" not in vals["VOICEMODE_STT_BASE_URLS"]
     finally:
         os.unlink(path)
 
 
-def test_switch_preserves_other_mcp_servers():
-    path = _make_claude_json()
-    try:
-        data = json.load(open(path))
-        data["mcpServers"]["other-server"] = {"command": "other"}
-        json.dump(data, open(path, "w"))
-        _apply_mode(path, "piper", _load_modes())
-        data = json.load(open(path))
-        assert data["mcpServers"]["other-server"]["command"] == "other"
-    finally:
-        os.unlink(path)
-
-
-def test_roundtrip_local_to_piper_and_back():
+def test_roundtrip_local_to_piper_and_back_is_idempotent():
+    """Switching modes replaces the managed block cleanly (no duplication)."""
     modes = _load_modes()
-    path = _make_claude_json()
+    path = _make_envfile()
     try:
-        _apply_mode(path, "piper", modes)
-        piper_env = json.load(open(path))["mcpServers"]["voicemode"]["env"]
-        assert piper_env["VOICEMODE_TTS_BASE_URLS"].split(",")[0].endswith("8881/v1")
-        _apply_mode(path, "local", modes)
-        local_env = json.load(open(path))["mcpServers"]["voicemode"]["env"]
-        assert local_env["VOICEMODE_TTS_BASE_URLS"].split(",")[0].endswith("8880/v1")
-        assert local_env["OPENAI_API_KEY"] == "sk-test-key-12345"
+        _write_voicemode_env(path, "piper", modes["piper"])
+        _write_voicemode_env(path, "local", modes["local"])
+        body = open(path).read()
+        assert body.count(_BEGIN) == 1 and body.count(_END) == 1  # exactly one block
+        vals = _managed_values(path)
+        assert vals["VOICEMODE_TTS_BASE_URLS"].split(",")[0].endswith("8880/v1")
     finally:
         os.unlink(path)
+
+
+def test_strip_claude_json_routing_keeps_key_and_wslenv():
+    """The .claude.json cleanup drops routing vars but keeps the key and a
+    key-only WSLENV (for the cross-OS bridge)."""
+    import importlib.util
+    # Replicate _strip_claude_json_routing's contract directly on a temp file.
+    data = {"mcpServers": {"voicemode": {"env": {
+        "OPENAI_API_KEY": "sk-test",
+        "VOICEMODE_TTS_BASE_URLS": "http://127.0.0.1:8880/v1",
+        "TTS_BASE_URL": "http://127.0.0.1:8881/v1",
+        "WSLENV": "OPENAI_API_KEY/u:VOICEMODE_TTS_BASE_URLS/u",
+    }}}}
+    env = data["mcpServers"]["voicemode"]["env"]
+    for k in ("VOICEMODE_STT_BASE_URLS", "VOICEMODE_TTS_BASE_URLS", "VOICEMODE_VOICES",
+              "STT_BASE_URL", "TTS_BASE_URL", "TTS_VOICE"):
+        env.pop(k, None)
+    keep = [x for x in env["WSLENV"].split(":") if x.startswith("OPENAI_API_KEY")]
+    env["WSLENV"] = ":".join(keep)
+    assert env == {"OPENAI_API_KEY": "sk-test", "WSLENV": "OPENAI_API_KEY/u"}
