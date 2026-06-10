@@ -123,6 +123,10 @@ R_ARBITRATE = '''        # voicemode-local session queue: FIFO arbitration repla
                 # Handoff intro: announce which session is speaking now
                 message = f"{queue_session.intro} {message}"
             queue_session.start_heartbeat()
+            # When other sessions are queued, cap the listen window so a silent
+            # holder yields the mic sooner instead of gripping it for the full
+            # duration (VAD still ends recording early when the user speaks).
+            listen_duration_max = queue_session.effective_listen_seconds(listen_duration_max)
             if event_logger:
                 event_logger.log_event("QUEUE_ACQUIRE", {
                     "pid": os.getpid(),

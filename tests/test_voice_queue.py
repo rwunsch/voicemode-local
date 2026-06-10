@@ -753,3 +753,49 @@ def test_in_exchange_past_ceiling_is_reclaimable(tmp_path, monkeypatch):
         assert voice_queue.try_claim_floor(tmp_path, "thief", "v") is True
     finally:
         proc.kill(); proc.wait()
+
+
+# ---------- listen-window cap under contention ----------
+# When other sessions are waiting, a holder that is merely LISTENING to a silent
+# user should not grip the mic for the full listen window. effective_listen_seconds
+# shortens it to LISTEN_CAP so the holder yields sooner; VAD still ends recording
+# early when the user actually speaks, so the cap only bites on silence. No cap
+# when nobody is waiting (a solo conversation is never cut short).
+
+def test_listen_cap_no_waiters_unchanged(tmp_path, monkeypatch):
+    monkeypatch.setattr(voice_queue, "LISTEN_CAP", 8.0)
+    s = voice_queue.QueueSession(project="p", voice="v", base=tmp_path)
+    assert s.effective_listen_seconds(120.0) == 120.0   # solo: full window
+
+
+def test_listen_cap_applies_with_waiter(tmp_path, monkeypatch):
+    monkeypatch.setattr(voice_queue, "LISTEN_CAP", 8.0)
+    s = voice_queue.QueueSession(project="p", voice="v", base=tmp_path)
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        _live_foreign_waiter(tmp_path, proc)
+        assert s.effective_listen_seconds(120.0) == 8.0   # capped while contended
+    finally:
+        proc.kill(); proc.wait()
+
+
+def test_listen_cap_does_not_extend_short_window(tmp_path, monkeypatch):
+    monkeypatch.setattr(voice_queue, "LISTEN_CAP", 8.0)
+    s = voice_queue.QueueSession(project="p", voice="v", base=tmp_path)
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        _live_foreign_waiter(tmp_path, proc)
+        assert s.effective_listen_seconds(5.0) == 5.0   # already under cap -> unchanged
+    finally:
+        proc.kill(); proc.wait()
+
+
+def test_listen_cap_disabled(tmp_path, monkeypatch):
+    monkeypatch.setattr(voice_queue, "LISTEN_CAP", 0.0)  # 0 disables
+    s = voice_queue.QueueSession(project="p", voice="v", base=tmp_path)
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        _live_foreign_waiter(tmp_path, proc)
+        assert s.effective_listen_seconds(120.0) == 120.0   # disabled -> no cap
+    finally:
+        proc.kill(); proc.wait()
