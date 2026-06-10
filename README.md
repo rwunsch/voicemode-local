@@ -114,7 +114,7 @@ Optionally pass your OpenAI key (only needed for openai/hybrid modes):
 
 The OpenAI key is only needed for `openai` and `hybrid` modes (cloud STT/TTS). It's stored in two places:
 
-1. **`~/.claude.json`** (under `mcpServers.voicemode.env.OPENAI_API_KEY`) — The VoiceMode MCP server reads it here at startup to authenticate with OpenAI's STT/TTS APIs. This is updated automatically by the installer and `voicemode-switch`.
+1. **`~/.claude.json`** (under `mcpServers.voicemode.env.OPENAI_API_KEY`) — The VoiceMode MCP server reads it here at startup to authenticate with OpenAI's STT/TTS APIs. (`voicemode-switch` preserves this key when it changes modes; it does not manage routing here anymore.) On native WSL it may be `"${OPENAI_API_KEY}"`, which Claude Code expands from your shell at launch; the cross-OS bridge needs the literal value (passed into WSL via `WSLENV=OPENAI_API_KEY/u`).
 
 2. **`~/.bashrc`** (as `export OPENAI_API_KEY=...`) — Makes the key available in your shell for other tools that need it. This is optional and only added if you provide a key during install.
 
@@ -125,10 +125,9 @@ To set or update the key after install:
 # Option 1: Re-run the installer
 ./install.sh --openai-key=sk-proj-YOUR-KEY
 
-# Option 2: Set manually
+# Option 2: Set manually (then ensure it's in ~/.claude.json's voicemode env)
 export OPENAI_API_KEY="sk-proj-YOUR-KEY"
 echo 'export OPENAI_API_KEY="sk-proj-YOUR-KEY"' >> ~/.bashrc
-voicemode-switch openai   # This writes the key into ~/.claude.json
 ```
 
 > **Security note:** Storing API keys directly in `~/.bashrc` is convenient but not ideal — the key is visible in plain text. A more secure approach is to keep keys in a separate file with restricted permissions and source it:
@@ -137,16 +136,19 @@ voicemode-switch openai   # This writes the key into ~/.claude.json
 > chmod 600 ~/.config/voicemode-local/secrets
 > echo 'source ~/.config/voicemode-local/secrets' >> ~/.bashrc
 > ```
-> Note: `~/.claude.json` always requires the actual key value (no variable references) — this is a Claude Code limitation.
+> Note: on native WSL, `~/.claude.json` may use `"${OPENAI_API_KEY}"` (Claude Code expands it from your shell at launch). The cross-OS bridge passes the value into WSL via `WSLENV`, so there it needs the literal key.
 
 ### 2. Choose a mode
 
 ```bash
-voicemode-switch local    # Kokoro TTS + local Whisper (free, private)
-voicemode-switch piper    # Piper TTS + local Whisper (free, multilingual)
-voicemode-switch openai   # OpenAI cloud TTS + STT (best quality, ~$0.01/min)
-voicemode-switch hybrid   # Local Kokoro TTS + cloud STT (~$0.006/min)
+voicemode-switch local      # Kokoro + Piper TTS (equal) & local Whisper, OpenAI last resort (recommended)
+voicemode-switch localonly  # Local Kokoro + Piper + Whisper only — no cloud, fails loud if down
+voicemode-switch piper      # Piper TTS primary (German etc.), Kokoro + OpenAI behind
+voicemode-switch openai     # OpenAI cloud TTS + STT (best quality, ~$0.01/min)
+voicemode-switch hybrid     # Local Kokoro + Piper TTS + cloud STT (~$0.006/min)
 ```
+
+Modes write the routing config to `~/.voicemode/voicemode.env` (see [Configuration](#configuration-voicemodeenv)). **Kokoro and Piper are equal first-class local engines** — each requested voice is routed to whichever engine owns it; **OpenAI is strictly last-resort** and is never silently substituted for a local voice. Restart Claude Code after switching.
 
 ### 3. Restart Claude Code and start talking
 
@@ -165,19 +167,36 @@ From within Claude Code, use `/voicemode:switch-mode` to change between engines 
 ### Managing services
 
 ```bash
-voicemode-switch start    # Start Docker containers + proxies
-voicemode-switch stop     # Stop everything
-voicemode-switch status   # Health check all services
+voicemode-switch start     # Start Docker containers + all proxies
+voicemode-switch ensure    # Start (detached) ONLY the proxies the current config needs
+voicemode-switch health    # Probe configured local proxies (exit 0 iff all up)
+voicemode-switch stop      # Stop everything
+voicemode-switch status    # Full status + current routing config
+voicemode-switch test-tts  # Show which engine serves each voice (fallback demo)
+```
+
+You usually don't need to start proxies by hand: the MCP launcher wrapper
+(`voicemode-mcp`, the command Claude Code runs) calls `ensure` on every session
+start. It starts only the proxies your config needs, **detached** (own session),
+so the first session brings them up and they stay running for the others even
+after that first session closes. Proxies are not auto-stopped; use `stop`.
+
+**Test the fallback chain** without guessing — `test-tts` walks your configured
+engine list per voice and can simulate an engine being offline:
+
+```bash
+voicemode-switch test-tts                         # af_sky→Kokoro, p_de_thorsten→Piper, nova→OpenAI
+voicemode-switch test-tts af_sky --down kokoro    # Kokoro offline → no silent swap, fails loud
 ```
 
 ## Architecture
 
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
-│  Claude Code + VoiceMode MCP                                         │
-│    STT_BASE_URL → http://127.0.0.1:2022/v1  (local mode)            │
-│    TTS_BASE_URL → http://127.0.0.1:8880/v1  (kokoro/local mode)     │
-│    TTS_BASE_URL → http://127.0.0.1:8881/v1  (piper mode)            │
+│  Claude Code + VoiceMode MCP (routing from ~/.voicemode/voicemode.env)│
+│    VOICEMODE_STT_BASE_URLS → 2022/v1, openai            (priority)   │
+│    VOICEMODE_TTS_BASE_URLS → 8880/v1, 8881/v1, openai   (priority)   │
+│    each voice → first engine that owns it; OpenAI last-resort       │
 └──────┬────────────────────────────┬──────────────────┬───────────────┘
        │                            │                  │
        ▼                            ▼                  ▼
@@ -205,12 +224,86 @@ voicemode-switch status   # Health check all services
 
 ## Modes
 
-| Mode | STT | TTS | Cost | Best for |
-|------|-----|-----|------|----------|
-| `local` | Local Whisper (via proxy) | Local Kokoro | Free | English, French, Italian, Spanish, Japanese |
-| `piper` | Local Whisper (via proxy) | Local Piper | Free | German, Dutch, Polish, Russian, Korean |
-| `openai` | OpenAI Whisper API | OpenAI TTS | ~$0.01/min | Best quality, any language |
-| `hybrid` | OpenAI Whisper API | Local Kokoro | ~$0.006/min | Best STT accuracy + free TTS |
+Each mode is an ordered endpoint list (priority order); a requested voice goes to
+the first engine that owns it, so Kokoro + Piper are co-equal locals and OpenAI is
+strictly last.
+
+| Mode | STT chain | TTS chain | Cost | Best for |
+|------|-----------|-----------|------|----------|
+| `local` | Whisper → OpenAI | Kokoro + Piper → OpenAI | Free* | Recommended default; any voice, cloud only as last resort |
+| `localonly` | Whisper | Kokoro + Piper | Free | Max privacy; fails loud if locals down (no cloud) |
+| `piper` | Whisper → OpenAI | Piper → Kokoro → OpenAI | Free* | Piper-primary (German, Dutch, Polish, Russian, Korean) |
+| `openai` | OpenAI | OpenAI | ~$0.01/min | Cloud only, best quality |
+| `hybrid` | OpenAI → Whisper | Kokoro + Piper → OpenAI | ~$0.006/min | Best STT accuracy + free local TTS |
+
+\* OpenAI only used if all local engines fail, and never as a silent voice
+substitution — a local voice that can't be served locally fails loudly. Request
+an OpenAI voice (alloy/echo/fable/nova/onyx/shimmer/…) to use OpenAI TTS.
+
+## Configuration (`voicemode.env`)
+
+Routing lives in **`~/.voicemode/voicemode.env`** (a stable file voice-mode loads
+at startup), written by `voicemode-switch`/`switch_mode` as a managed block:
+
+```ini
+# >>> voicemode-switch managed (do not edit inside this block) >>>
+# mode: local
+VOICEMODE_STT_BASE_URLS=http://127.0.0.1:2022/v1,https://api.openai.com/v1
+VOICEMODE_TTS_BASE_URLS=http://127.0.0.1:8880/v1,http://127.0.0.1:8881/v1,https://api.openai.com/v1
+VOICEMODE_VOICES=af_sky
+# <<< voicemode-switch managed <<<
+```
+
+Why not `~/.claude.json`? That file is rewritten by Claude Code (races) and is
+per-machine; `voicemode.env` is stable and is read by both native WSL sessions
+**and** the cross-OS bridge (which runs the same WSL binary), so it's a single
+source of truth. Only `OPENAI_API_KEY` stays in `~/.claude.json`. Note: real
+environment variables override `voicemode.env`, so the routing vars must not also
+be set in `~/.claude.json`'s `env` block (the switcher strips them).
+
+## Session Queue (multiple concurrent sessions)
+
+Multiple Claude Code sessions share **one** physical voice channel (one mic, one
+speaker). The session queue makes them take **strict FIFO turns** so they never
+talk over each other.
+
+- Arbitration is file-based (`~/.voicemode/floor.json` "talking stick" + per-session
+  ticket files in `~/.voicemode/queue/`), with process-liveness via PID + start-time
+  — **no `fcntl`/`flock`**, so it is Windows-portable. The cross-OS bridge shares
+  the same WSL queue automatically.
+- When a session asks for the mic while another holds it, `converse` returns
+  `QUEUED — position N of M`; the LLM re-calls with the same `ticket` until it
+  gets the floor. The holder keeps the floor through its whole turn (it can't be
+  interrupted mid-speech) and hands off at the next pause.
+- A holder that crashes, or wedges for longer than `VOICEMODE_QUEUE_IN_EXCHANGE_MAX`
+  (180s), is reclaimable so a stuck session can't starve the others.
+
+Inspect it anytime:
+
+```bash
+voicemode-switch queue       # floor holder + waiting sessions
+voicemode-switch queue-log   # tail the per-session queue event log
+```
+
+Tunables (env, all seconds): `VOICEMODE_QUEUE_GRACE` (30, inter-turn idle before a
+paused holder is reclaimable), `VOICEMODE_QUEUE_MAX_HOLD` (0 = strict FIFO),
+`VOICEMODE_QUEUE_IN_EXCHANGE_MAX` (180), `VOICEMODE_QUEUE_WAIT_SLICE` (50),
+`VOICEMODE_QUEUE_TICKET_STALE` (30). Set `VOICEMODE_QUEUE_ENABLED=false` to disable.
+
+## Run Modes (Windows / WSL / cross-OS)
+
+VoiceMode Local can run three ways:
+
+| Run mode | What runs where | Status |
+|----------|-----------------|--------|
+| **WSL-only** | Everything (Claude Code, voice-mode, proxies, audio) inside WSL2. | Primary, fully supported. Install with `./install.sh` in WSL. |
+| **Cross-OS bridge** | Claude Code on **Windows**, but its MCP command is `wsl.exe … voicemode-mcp` — it runs the **WSL** voice-mode binary, sharing the WSL install, proxies, and queue. Audio via WSLg. | Supported and recommended for Windows users today. |
+| **Windows-native** | Everything on Windows, no WSL. | Work in progress — blocked by a sounddevice recording-loop hang (see `docs/windows-issues.md`). Use the bridge until resolved. |
+
+The cross-OS bridge means a "Windows voice session" is really the WSL binary, so
+it automatically uses the same `voicemode.env`, the same proxies (auto-started by
+the wrapper), and the same session queue as your WSL sessions — no separate
+config, no `WSLENV` routing plumbing.
 
 ## Available Voices
 
@@ -299,19 +392,25 @@ Routes audio through PulseAudio/WSLg so microphone and speakers work in WSL2.
 {
   "mcpServers": {
     "voicemode": {
-      "command": "/path/to/voicemode-local/.venv/bin/voice-mode",
+      "command": "/path/to/voicemode-local/voicemode-mcp",
       "args": [],
       "env": {
-        "STT_BASE_URL": "http://127.0.0.1:2022/v1",
-        "TTS_BASE_URL": "http://127.0.0.1:8880/v1",
-        "TTS_VOICE": "af_sky",
-        "OPENAI_API_KEY": "sk-..."
+        "OPENAI_API_KEY": "${OPENAI_API_KEY}"
       }
     }
   }
 }
 ```
-The `env` block is updated by `voicemode-switch` when you change modes. The `OPENAI_API_KEY` is only needed for openai/hybrid modes.
+The `command` is the `voicemode-mcp` wrapper (ensures proxies, then launches
+voice-mode). **Routing config no longer lives here** — it's in
+`~/.voicemode/voicemode.env` (see [Configuration](#configuration-voicemodeenv)); only
+`OPENAI_API_KEY` stays in `~/.claude.json`. For the cross-OS bridge the entry
+instead runs `wsl.exe -d Ubuntu -e bash -c /path/to/voicemode-mcp` with
+`WSLENV=OPENAI_API_KEY/u`.
+
+**`~/.voicemode/voicemode.env`** — the stable routing config (managed block written
+by `voicemode-switch`). This is the single source of truth for both WSL and the
+cross-OS bridge.
 
 **`~/.claude/settings.json`** — Permission allow-list (key `permissions.allow`)
 Adds `mcp__voicemode__converse`, `mcp__voicemode__service`, and `mcp__voicemode__switch_mode` so Claude Code doesn't prompt for permission on every voice call.
@@ -371,14 +470,18 @@ arecord -D default -f S16_LE -r 44100 -c 1 -d 1 /tmp/test.wav  # test recording
 # Windows: Settings → Privacy → Microphone → Allow desktop apps
 ```
 
-### STT silently falling back to OpenAI
-VoiceMode tries each STT endpoint in order and falls back silently on errors:
+### A voice fails / falls back unexpectedly
+VoiceMode tries each endpoint in the configured list in order. **TTS for a local
+voice never silently swaps to an OpenAI voice** — if Kokoro and Piper can't serve
+it, it fails loudly. STT falls through to OpenAI if the local proxy is down. Use
+`test-tts` to see exactly what happens, and check the proxies:
 ```bash
-curl -s http://127.0.0.1:2022/health               # proxy running?
-curl -s http://127.0.0.1:2022/v1/models             # responds to discovery?
-curl -s http://127.0.0.1:9000/docs > /dev/null && echo OK  # backend reachable?
+voicemode-switch test-tts <voice>     # which engine serves it (and why a fallback)
+voicemode-switch health               # are the configured local proxies up?
+curl -s http://127.0.0.1:2022/health  # whisper proxy?
+curl -s http://127.0.0.1:9000/docs > /dev/null && echo OK  # whisper backend reachable?
 ```
-**Common cause**: VoiceMode sends `language=auto` for local providers, but the Whisper ASR backend returns HTTP 500. The whisper-proxy filters this automatically.
+**Common STT cause**: VoiceMode sends `language=auto` for local providers, but the Whisper ASR backend returns HTTP 500. The whisper-proxy filters this automatically.
 
 ### VoiceMode not connecting
 ```bash

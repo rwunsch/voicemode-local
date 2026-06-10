@@ -5,3 +5,4 @@ __pycache__/
 *.pyc
 .env
 skills/
+voicetest_*.log

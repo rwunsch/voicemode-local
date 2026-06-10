@@ -9,6 +9,7 @@
 #   voicemode-switch status   # Show current config and service health
 #   voicemode-switch start    # Start local services (Docker + proxy)
 #   voicemode-switch stop     # Stop local services
+#   voicemode-switch queue    # Show voice session queue (floor holder + waiters)
 #
 # After switching, restart Claude Code for changes to take effect.
 
@@ -65,35 +66,74 @@ check_proxy() {
 }
 
 update_env() {
-    local stt_url="$1" tts_url="$2" tts_voice="$3"
-    python3 << PYEOF
+    # Args are COMMA-SEPARATED endpoint LISTS (priority order, OpenAI last).
+    # We write the *plural* VOICEMODE_*_BASE_URLS vars into the STABLE config
+    # file ~/.voicemode/voicemode.env (NOT ~/.claude.json). voice-mode loads
+    # this file at startup and it is the single source of truth for both native
+    # WSL sessions and the cross-OS bridge (which runs the same WSL binary), so
+    # no .claude.json env / WSLENV plumbing is needed. NOTE: real environment
+    # variables override this file, so the routing vars must NOT also be set in
+    # ~/.claude.json's env block (we keep only secrets like OPENAI_API_KEY there).
+    local stt_urls="$1" tts_urls="$2" voices="$3" mode="${4:-custom}"
+    python3 - "$stt_urls" "$tts_urls" "$voices" "$mode" << 'PYEOF'
+import os, re, sys
+
+stt, tts, voices, mode = sys.argv[1:5]
+envfile = os.path.expanduser("~/.voicemode/voicemode.env")
+os.makedirs(os.path.dirname(envfile), exist_ok=True)
+
+BEGIN = "# >>> voicemode-switch managed (do not edit inside this block) >>>"
+END = "# <<< voicemode-switch managed <<<"
+
+txt = ""
+if os.path.exists(envfile):
+    txt = open(envfile).read()
+    txt = re.sub(re.escape(BEGIN) + r".*?" + re.escape(END) + r"\n?", "", txt, flags=re.S)
+
+block = [BEGIN, f"# mode: {mode}"]
+if stt:
+    block.append(f"VOICEMODE_STT_BASE_URLS={stt}")
+if tts:
+    block.append(f"VOICEMODE_TTS_BASE_URLS={tts}")
+if voices:
+    block.append(f"VOICEMODE_VOICES={voices}")
+block.append(END)
+
+body = txt.rstrip("\n")
+out = (body + "\n\n" if body else "") + "\n".join(block) + "\n"
+open(envfile, "w").write(out)
+os.chmod(envfile, 0o600)
+print(f"  Updated {envfile} (mode: {mode})")
+PYEOF
+    strip_claude_json_routing
+}
+
+# Remove routing vars from ~/.claude.json so they don't override voicemode.env
+# (env vars take precedence). Keeps OPENAI_API_KEY and any WSLENV (trimmed to
+# the key only). Safe no-op if the file/keys are absent.
+strip_claude_json_routing() {
+    python3 << 'PYEOF'
 import json, os
-
-claude_json = os.path.expanduser("~/.claude.json")
-with open(claude_json) as f:
-    data = json.load(f)
-
-env = data["mcpServers"]["voicemode"]["env"]
-openai_key = env.get("OPENAI_API_KEY", "")
-
-new_env = {"OPENAI_API_KEY": openai_key}
-stt_url = "${stt_url}"
-tts_url = "${tts_url}"
-tts_voice = "${tts_voice}"
-
-if stt_url:
-    new_env["STT_BASE_URL"] = stt_url
-if tts_url:
-    new_env["TTS_BASE_URL"] = tts_url
-if tts_voice:
-    new_env["TTS_VOICE"] = tts_voice
-
-data["mcpServers"]["voicemode"]["env"] = new_env
-
-with open(claude_json, "w") as f:
-    json.dump(data, f, indent=2)
-
-print("  Updated ~/.claude.json")
+p = os.path.expanduser("~/.claude.json")
+if not os.path.exists(p):
+    raise SystemExit(0)
+data = json.load(open(p))
+vm = data.get("mcpServers", {}).get("voicemode")
+if not vm:
+    raise SystemExit(0)
+env = vm.get("env", {})
+for k in ("VOICEMODE_STT_BASE_URLS", "VOICEMODE_TTS_BASE_URLS", "VOICEMODE_VOICES",
+          "STT_BASE_URL", "TTS_BASE_URL", "TTS_VOICE"):
+    env.pop(k, None)
+if "WSLENV" in env:
+    keep = [p for p in env["WSLENV"].split(":") if p.startswith("OPENAI_API_KEY")]
+    if keep:
+        env["WSLENV"] = ":".join(keep)
+    else:
+        env.pop("WSLENV", None)
+vm["env"] = env
+json.dump(data, open(p, "w"), indent=2)
+print("  Cleaned routing vars from ~/.claude.json (now sourced from voicemode.env)")
 PYEOF
 }
 
@@ -130,20 +170,22 @@ cmd_status() {
     check_service "Piper Proxy (OpenAI-compat)" "http://127.0.0.1:8881/health" || true
 
     echo ""
-    echo "Current config in ~/.claude.json:"
+    echo "Current routing config (~/.voicemode/voicemode.env):"
     python3 -c "
-import json, os
-with open(os.path.expanduser('~/.claude.json')) as f:
-    data = json.load(f)
-env = data.get('mcpServers', {}).get('voicemode', {}).get('env', {})
-stt = env.get('STT_BASE_URL', '(not set — using OpenAI)')
-tts = env.get('TTS_BASE_URL', '(not set — using OpenAI)')
-voice = env.get('TTS_VOICE', '(not set — using default)')
-print(f'  STT: {stt}')
-print(f'  TTS: {tts}')
-print(f'  Voice: {voice}')
-has_key = bool(env.get('OPENAI_API_KEY', ''))
-print(f'  OpenAI key: {\"set\" if has_key else \"NOT SET\"} ')
+import os, re
+envfile = os.path.expanduser('~/.voicemode/voicemode.env')
+text = open(envfile).read() if os.path.exists(envfile) else ''
+def val(k, default='(not set — voice-mode default)'):
+    m = re.search(rf'^{re.escape(k)}=(.*)\$', text, re.M)
+    return m.group(1) if m else default
+mode = re.search(r'^# mode: (.*)\$', text, re.M)
+print(f'  Mode: {mode.group(1) if mode else \"(unset)\"}')
+print(f'  STT:   {val(\"VOICEMODE_STT_BASE_URLS\")}')
+print(f'  TTS:   {val(\"VOICEMODE_TTS_BASE_URLS\")}')
+print(f'  Voice: {val(\"VOICEMODE_VOICES\")}')
+import json
+ce = json.load(open(os.path.expanduser('~/.claude.json'))).get('mcpServers', {}).get('voicemode', {}).get('env', {}) if os.path.exists(os.path.expanduser('~/.claude.json')) else {}
+print(f'  OpenAI key (in .claude.json): {\"set\" if ce.get(\"OPENAI_API_KEY\") else \"NOT SET\"}')
 "
 }
 
@@ -153,6 +195,87 @@ is_kokoro_onnx() {
         onnx="$(grep -oP 'KOKORO_ONNX=\K.*' "$CONFIG_FILE" 2>/dev/null || echo "false")"
     fi
     [ "$onnx" = "true" ]
+}
+
+# Which local proxy ports the *current* config (voicemode.env) actually uses.
+configured_local_ports() {
+    python3 - << 'PYEOF'
+import os, re
+envfile = os.path.expanduser("~/.voicemode/voicemode.env")
+text = open(envfile).read() if os.path.exists(envfile) else ""
+def val(key):
+    m = re.search(rf"^{re.escape(key)}=(.*)$", text, re.M)
+    return m.group(1) if m else ""
+urls = val("VOICEMODE_TTS_BASE_URLS") + "," + val("VOICEMODE_STT_BASE_URLS")
+# Fall back to the local default if nothing is configured yet.
+if not urls.strip(","):
+    urls = "8880,8881,2022"
+print(" ".join(p for p in ("8880", "8881", "2022") if p in urls))
+PYEOF
+}
+
+healthy() {
+    # $1 = port. True if the local service answers /health or /v1/models.
+    curl -sf --max-time 2 "http://127.0.0.1:$1/health"     > /dev/null 2>&1 && return 0
+    curl -sf --max-time 2 "http://127.0.0.1:$1/v1/models"  > /dev/null 2>&1 && return 0
+    return 1
+}
+
+# Start a proxy DETACHED (own session via setsid) so it outlives the Claude
+# session / MCP wrapper that launched it. Idempotent via PID file.
+start_detached() {
+    local label="$1" pidfile="$2"; shift 2
+    if [ -f "$pidfile" ] && kill -0 "$(cat "$pidfile")" 2>/dev/null; then return 0; fi
+    setsid nohup "$@" >> "/tmp/${label}.log" 2>&1 < /dev/null &
+    echo $! > "$pidfile"
+}
+
+# Ensure exactly the proxies the current config needs are up. Started detached,
+# so they survive the launching session and stay up for the others. Idempotent
+# and serialized across concurrent session starts via a lock.
+cmd_ensure() {
+    local quiet="${1:-}"
+    exec 9>"/tmp/voicemode-ensure.lock"
+    flock 9 2>/dev/null || true
+    for port in $(configured_local_ports); do
+        if healthy "$port"; then continue; fi
+        case "$port" in
+            8880)
+                if is_kokoro_onnx; then
+                    start_detached kokoro-onnx-server /tmp/kokoro-onnx-server.pid \
+                        python3 "$SCRIPT_DIR/kokoro-onnx-server.py" --port 8880 \
+                        --model-dir "$SCRIPT_DIR/models/kokoro"
+                else
+                    docker_compose_cmd up -d > /dev/null 2>&1 || true
+                fi
+                [ -n "$quiet" ] || echo "  ensured Kokoro (8880)" ;;
+            8881)
+                start_detached piper-proxy /tmp/piper-proxy.pid \
+                    python3 "$SCRIPT_DIR/piper-proxy.py" --port 8881 \
+                    --voices-file "$SCRIPT_DIR/voices/piper-voices.json" \
+                    --models-dir "$SCRIPT_DIR/models/piper"
+                [ -n "$quiet" ] || echo "  ensured Piper (8881)" ;;
+            2022)
+                start_detached whisper-proxy /tmp/whisper-proxy.pid \
+                    python3 "$SCRIPT_DIR/whisper-proxy.py" --port 2022 \
+                    --whisper-url http://127.0.0.1:9000
+                [ -n "$quiet" ] || echo "  ensured Whisper proxy (2022)" ;;
+        esac
+    done
+    flock -u 9 2>/dev/null || true
+}
+
+# Structured health probe of the configured endpoints (exit 0 iff all up).
+cmd_health() {
+    local all_up=0
+    echo "=== VoiceMode health (configured local proxies) ==="
+    local ports; ports="$(configured_local_ports)"
+    [ -n "$ports" ] || { echo "  (no local proxies configured)"; return 0; }
+    for port in $ports; do
+        case "$port" in 8880) n="Kokoro TTS";; 8881) n="Piper TTS";; 2022) n="Whisper STT";; *) n="port $port";; esac
+        if healthy "$port"; then ok "$n ($port) up"; else fail "$n ($port) DOWN"; all_up=1; fi
+    done
+    return $all_up
 }
 
 cmd_start() {
@@ -271,13 +394,32 @@ cmd_stop() {
     ok "All local services stopped"
 }
 
+# Endpoint building blocks (priority order matters; OpenAI is always last)
+KOKORO_URL="http://127.0.0.1:8880/v1"
+PIPER_URL="http://127.0.0.1:8881/v1"
+WHISPER_URL="http://127.0.0.1:2022/v1"
+OPENAI_URL="https://api.openai.com/v1"
+
 cmd_local() {
-    echo "=== Switching to LOCAL mode ==="
-    echo "  STT: Local Whisper (via proxy on port 2022)"
-    echo "  TTS: Local Kokoro (port 8880)"
+    echo "=== Switching to LOCAL mode (Kokoro + Piper, OpenAI last resort) ==="
+    echo "  STT: Local Whisper (2022) -> OpenAI fallback"
+    echo "  TTS: Local Kokoro (8880) + Piper (8881), equal -> OpenAI last resort"
     echo ""
 
-    update_env "http://127.0.0.1:2022/v1" "http://127.0.0.1:8880/v1" "af_sky"
+    update_env "$WHISPER_URL,$OPENAI_URL" "$KOKORO_URL,$PIPER_URL,$OPENAI_URL" "af_sky" "local"
+
+    echo ""
+    warn "Restart Claude Code for changes to take effect"
+    echo "  Make sure local services are running: voicemode-switch start"
+}
+
+cmd_localonly() {
+    echo "=== Switching to LOCAL-ONLY mode (no cloud, fails loud if locals down) ==="
+    echo "  STT: Local Whisper (2022) only"
+    echo "  TTS: Local Kokoro (8880) + Piper (8881) only"
+    echo ""
+
+    update_env "$WHISPER_URL" "$KOKORO_URL,$PIPER_URL" "af_sky" "localonly"
 
     echo ""
     warn "Restart Claude Code for changes to take effect"
@@ -285,24 +427,24 @@ cmd_local() {
 }
 
 cmd_openai() {
-    echo "=== Switching to OPENAI mode ==="
+    echo "=== Switching to OPENAI mode (cloud only) ==="
     echo "  STT: OpenAI Whisper (cloud)"
     echo "  TTS: OpenAI TTS (cloud)"
     echo ""
 
-    update_env "" "" ""
+    update_env "$OPENAI_URL" "$OPENAI_URL" "nova" "openai"
 
     echo ""
     warn "Restart Claude Code for changes to take effect"
 }
 
 cmd_hybrid() {
-    echo "=== Switching to HYBRID mode ==="
-    echo "  STT: OpenAI Whisper (cloud)"
-    echo "  TTS: Local Kokoro (port 8880)"
+    echo "=== Switching to HYBRID mode (cloud STT, local TTS) ==="
+    echo "  STT: OpenAI Whisper (cloud) -> local Whisper fallback"
+    echo "  TTS: Local Kokoro (8880) + Piper (8881) -> OpenAI last resort"
     echo ""
 
-    update_env "" "http://127.0.0.1:8880/v1" "af_sky"
+    update_env "$OPENAI_URL,$WHISPER_URL" "$KOKORO_URL,$PIPER_URL,$OPENAI_URL" "af_sky" "hybrid"
 
     echo ""
     warn "Restart Claude Code for changes to take effect"
@@ -310,12 +452,12 @@ cmd_hybrid() {
 }
 
 cmd_piper() {
-    echo "=== Switching to PIPER mode ==="
-    echo "  STT: Local Whisper (via proxy)"
-    echo "  TTS: Local Piper (port 8881)"
+    echo "=== Switching to PIPER mode (Piper primary, Kokoro + OpenAI behind) ==="
+    echo "  STT: Local Whisper (2022) -> OpenAI fallback"
+    echo "  TTS: Local Piper (8881) primary + Kokoro (8880) -> OpenAI last resort"
     echo ""
 
-    update_env "http://127.0.0.1:2022/v1" "http://127.0.0.1:8881/v1" "p_de_thorsten"
+    update_env "$WHISPER_URL,$OPENAI_URL" "$PIPER_URL,$KOKORO_URL,$OPENAI_URL" "p_de_thorsten" "piper"
 
     echo ""
     warn "Restart Claude Code for changes to take effect"
@@ -323,24 +465,58 @@ cmd_piper() {
 }
 
 case "${1:-}" in
-    local)  cmd_local ;;
-    openai) cmd_openai ;;
-    hybrid) cmd_hybrid ;;
-    piper)  cmd_piper ;;
-    status) cmd_status ;;
+    local)     cmd_local ;;
+    localonly) cmd_localonly ;;
+    openai)    cmd_openai ;;
+    hybrid)    cmd_hybrid ;;
+    piper)     cmd_piper ;;
+    status)    cmd_status ;;
     start)  cmd_start ;;
     stop)   cmd_stop ;;
+    ensure) cmd_ensure "${2:-}" ;;
+    health) cmd_health ;;
+    queue)
+        PYBIN="$SCRIPT_DIR/.venv/bin/python"
+        [ -x "$PYBIN" ] || PYBIN="python3"
+        "$PYBIN" -c "import sys; sys.path.insert(0, '$SCRIPT_DIR/patches'); import voice_queue; voice_queue.print_status()"
+        ;;
+    queue-log)
+        LOG="$HOME/.voicemode/logs/queue.log"
+        if [ ! -f "$LOG" ]; then
+            warn "No queue log yet at $LOG (no session has run the queue since logging was added)"
+            exit 0
+        fi
+        echo "Tailing $LOG (Ctrl-C to stop)..."
+        tail -n 40 -f "$LOG"
+        ;;
+    sysaudio)
+        PYBIN="$SCRIPT_DIR/.venv/bin/python"
+        [ -x "$PYBIN" ] || PYBIN="python3"
+        PYTHONPATH="$SCRIPT_DIR${PYTHONPATH:+:$PYTHONPATH}" \
+            "$PYBIN" -m voicemode_sysaudio "${2:-status}"
+        ;;
+    test-tts)
+        shift
+        python3 "$SCRIPT_DIR/voicemode-test-tts.py" "$@"
+        ;;
     *)
         echo "Usage: voicemode-switch <command>"
         echo ""
         echo "Commands:"
-        echo "  local    Use local Whisper STT + Kokoro TTS (free, private)"
-        echo "  openai   Use OpenAI for both STT and TTS (best quality)"
-        echo "  hybrid   Use local Kokoro TTS + OpenAI STT (cheap, good quality)"
-        echo "  piper    Use local Whisper STT + Piper TTS (German support)"
+        echo "  local     Local Kokoro+Piper TTS & Whisper STT, OpenAI last resort (recommended)"
+        echo "  localonly Local Kokoro+Piper+Whisper only, no cloud (fails loud if down)"
+        echo "  openai    Use OpenAI for both STT and TTS (cloud only)"
+        echo "  hybrid    Local Kokoro+Piper TTS + OpenAI STT"
+        echo "  piper     Piper TTS primary (German etc.), Kokoro+OpenAI behind"
         echo "  status   Show current config and service health"
         echo "  start    Start local Docker services + proxy"
         echo "  stop     Stop local services"
+        echo "  ensure   Start (detached) only the proxies the current config needs"
+        echo "  health   Probe configured local proxies (exit 0 iff all up)"
+        echo "  test-tts Show which engine serves each voice (fallback demo)"
+        echo "  queue    Show voice session queue (floor holder + waiters)"
+        echo "  queue-log Tail the per-session queue event log (debug)"
+        echo "  sysaudio  Fold system output into voice input: on|off|status|setup|teardown"
         echo ""
         echo "After switching modes, restart Claude Code for changes to take effect."
         ;;

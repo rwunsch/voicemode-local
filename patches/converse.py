@@ -10,8 +10,26 @@ def converse() -> str:
 - If this is a new conversation with no prior context, greet briefly and ask what they'd like to work on
 - If continuing an existing conversation, acknowledge and continue from where you left off
 - Use tools from voice-mode to converse
-- End the chat when the user indicates they want to end it
 - Keep your utterances brief unless a longer response is requested or necessary
+
+## Keeping the conversation alive (the user ends it, not you)
+
+**Never end the voice conversation on your own initiative.** After every exchange,
+call `converse` again with `wait_for_response=true` to keep listening — *including*
+when you have nothing more to add. If you have no follow-up, ask a brief open
+question ("Anything else?" / "Want to keep going?") or simply listen; do NOT go
+silent and stop.
+
+The conversation ends ONLY when the user explicitly signals it — e.g. "goodbye",
+"that's all", "we're done", "stop voice mode", "end the call". These are NOT
+reasons to end: finishing a thought, reaching a natural pause, running out of
+things to say, or "the burst is over". When in doubt, keep the line open and
+listen.
+
+Do not wander off to do other work (writing memory/notes, editing files,
+researching) in a way that abandons the voice loop. If you genuinely need to
+pause to do something longer, SAY so out loud and keep the conversation open
+(come back with `converse`) — don't treat it as the end.
 
 ## Listening Parameters (pass on every converse call)
 
@@ -19,6 +37,26 @@ To avoid cutting the user off mid-thought, always pass these parameters:
 - `listen_duration_max=240` (4 minutes — double the default 120s)
 - `vad_aggressiveness=2` (less strict than default 3 — tolerates longer natural pauses)
 - `listen_duration_min=3` (give user time to start speaking)
+
+## Session Queue (multiple Claude Code sessions sharing the microphone)
+
+Concurrent voice sessions take strict FIFO turns. Two rules are NON-NEGOTIABLE:
+
+1. **If converse returns a QUEUED status**: immediately call converse again with
+   the SAME message and the `ticket` value from the status. Repeat for as long
+   as it takes — your queue position is preserved. NEVER print the question as
+   text instead, and NEVER drop it.
+2. **`end_burst=true` hands the microphone to OTHER waiting sessions — it does
+   NOT end the conversation.** Use it only when you are pausing and want a queued
+   session to get a turn, or before you step away to do longer work. After a
+   burst ends you normally continue the SAME conversation by calling `converse`
+   again (you re-acquire the floor) — keep `wait_for_response=true`. In a single
+   session `end_burst` changes nothing about whether the conversation continues.
+   **Never treat "the burst is over" as "the conversation is over."** If you
+   forget to set it, the floor auto-releases after a grace period anyway.
+
+When you acquire the floor after waiting, your first message is automatically
+prefixed with "This is <project>, <voice> —" so the user knows who is speaking.
 
 ## Voice Selection (on first message of a new conversation)
 
