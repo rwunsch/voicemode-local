@@ -102,9 +102,11 @@ No need to switch to Piper for German.
 
 ## In-Session Mode Switching
 
-Use `/voicemode:switch-mode` to switch between TTS engines (e.g. Kokoro <-> Piper) without leaving Claude Code. Restart Claude Code afterward for changes to take effect.
+Use `/voicemode:switch-mode` to switch backends without leaving Claude Code. Restart Claude Code afterward for changes to take effect.
 
-Available modes: `local` (Kokoro), `piper`, `openai`, `hybrid`.
+Available modes: `local` (Kokoro+Piper equal, OpenAI last — recommended), `localonly` (no cloud), `piper` (Piper-primary), `openai` (cloud), `hybrid` (cloud STT + local TTS).
+
+**Routing config lives in `~/.voicemode/voicemode.env`** (plural `VOICEMODE_TTS_BASE_URLS`/`VOICEMODE_STT_BASE_URLS`/`VOICEMODE_VOICES`), NOT `~/.claude.json` (which holds only `OPENAI_API_KEY`). voice-mode reads ONLY the plural list vars; the singular `TTS_BASE_URL`/etc. are ignored. Each requested voice routes to the first engine that owns it (Kokoro and Piper reject foreign voices fast); OpenAI is strictly last-resort and is **never** silently substituted for a local voice. The MCP command is the `voicemode-mcp` wrapper, which auto-starts (detached) the needed proxies on session load. Test routing with `voicemode-switch test-tts`.
 
 ## Whisper Proxy Auto-Start
 
