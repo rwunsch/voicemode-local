@@ -4,75 +4,56 @@
 Upstream simple_tts_failover maps a local voice (e.g. af_sky) to an OpenAI voice
 (nova) when it falls through to the OpenAI endpoint, so a Kokoro/Piper outage
 silently switches the user to a cloud voice mid-conversation. voicemode-local
-policy is "OpenAI last-resort, no silent swaps": OpenAI only serves voices it
-owns; a local voice that can't be served locally fails loudly.
+policy is "OpenAI last-resort, no silent swaps": pass the requested voice through
+unchanged — if OpenAI doesn't own it the request fails loudly instead of quietly
+becoming a surprise cloud voice.
 
-Anchor-based and idempotent — fails loudly if the upstream block drifts.
+The OpenAI voice-mapping block is replaced between two short, stable marker
+lines (robust to the surrounding restructuring upstream does). Idempotent;
+fails loudly if the markers drift. Verified against voice-mode 8.7.1.
+
+Usage: patch_simple_failover.py [<path-to-simple_failover.py>]
 """
 import sys
 from pathlib import Path
 
 MARKER = "NO SILENT SWAP (voicemode-local)"
 
-OLD = '''        # Select appropriate voice for this provider
-        if provider_type == "openai":
-            # Map Kokoro voices to OpenAI equivalents, or use OpenAI default
-            openai_voices = ["alloy", "echo", "fable", "nova", "onyx", "shimmer"]
-            if voice in openai_voices:
-                selected_voice = voice
-            else:
-                # Map common Kokoro voices to OpenAI equivalents
-                voice_mapping = {
-                    "af_sky": "nova",
-                    "af_sarah": "nova",
-                    "af_alloy": "alloy",
-                    "am_adam": "onyx",
-                    "am_echo": "echo",
-                    "am_onyx": "onyx",
-                    "bm_fable": "fable"
-                }
-                selected_voice = voice_mapping.get(voice, "alloy")  # Default to alloy
-                logger.info(f"Mapped voice {voice} to {selected_voice} for OpenAI")
-        else:
-            selected_voice = voice  # Use original voice for Kokoro'''
-
-NEW = '''        # Select appropriate voice for this provider.
-        # NO SILENT SWAP (voicemode-local): never substitute a local (Kokoro/Piper)
-        # voice with an OpenAI one. OpenAI is strictly last-resort and only serves
-        # voices it actually owns. A local voice that can't be served locally fails
-        # loudly rather than quietly becoming a surprise cloud voice mid-conversation.
-        # To use OpenAI TTS, request an OpenAI voice (alloy/echo/fable/nova/onyx/
-        # shimmer/...) explicitly.
-        openai_voices = ["alloy", "echo", "fable", "nova", "onyx", "shimmer",
-                         "ash", "ballad", "coral", "sage", "verse"]
-        if provider_type == "openai" and voice not in openai_voices:
-            logger.info(
-                f"Skipping OpenAI for non-OpenAI voice '{voice}' (no silent swap)")
-            attempted_endpoints.append({
-                'endpoint': f"{base_url}/audio/speech",
-                'provider': provider_type,
-                'voice': voice,
-                'model': model,
-                'error': (f"voice '{voice}' is a local voice; not substituting with "
-                          f"an OpenAI voice. Request an OpenAI voice to use OpenAI TTS."),
-                'error_details': None,
-            })
-            continue
-        selected_voice = voice'''
+# Start: the OpenAI voice-mapping intro comment. End: the Kokoro else-branch we
+# keep. Everything between (the openai_voices list + if/else voice_mapping) is
+# replaced with a straight pass-through.
+B_START = "            # Map Kokoro voices to OpenAI equivalents, or use OpenAI default\n"
+B_END = "        else:\n            selected_voice = voice  # Use original voice for Kokoro"
+B_REPLACE = (
+    "            # NO SILENT SWAP (voicemode-local): never substitute a local\n"
+    "            # voice with an OpenAI one. Pass the requested voice through\n"
+    "            # unchanged; if OpenAI does not own it the request fails loudly\n"
+    "            # rather than quietly becoming a surprise cloud voice. Request an\n"
+    "            # OpenAI voice (alloy/echo/fable/nova/onyx/shimmer/...) to use it.\n"
+    "            selected_voice = voice\n"
+)
 
 
-def apply(target: Path) -> bool:
+def apply(target: Path) -> int:
     src = target.read_text()
     if MARKER in src:
         print(f"  already patched: {target}")
-        return True
-    if OLD not in src:
-        raise SystemExit(
-            f"ANCHOR DRIFT: expected voice-mapping block not found in {target}. "
-            "Upstream simple_failover.py changed — update patch_simple_failover.py.")
-    target.write_text(src.replace(OLD, NEW, 1))
+        return 0
+    for name, marker in (("start", B_START), ("end", B_END)):
+        if src.count(marker) != 1:
+            print(f"ANCHOR DRIFT: marker '{name}' matched {src.count(marker)} "
+                  f"times (expected 1) in {target}. Upstream simple_failover.py "
+                  f"changed — update patch_simple_failover.py.", file=sys.stderr)
+            return 1
+    si, ei = src.index(B_START), src.index(B_END)
+    if not si < ei:
+        print("ANCHOR DRIFT: start marker not before end marker.", file=sys.stderr)
+        return 1
+    out = src[:si] + B_REPLACE + src[ei:]
+    compile(out, str(target), "exec")
+    target.write_text(out)
     print(f"  patched (no silent swap): {target}")
-    return True
+    return 0
 
 
 if __name__ == "__main__":
@@ -81,4 +62,4 @@ if __name__ == "__main__":
     else:
         import voice_mode
         target = Path(voice_mode.__file__).parent / "simple_failover.py"
-    apply(target)
+    sys.exit(apply(target))
