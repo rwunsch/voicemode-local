@@ -74,4 +74,27 @@ if [ -f "$SCRIPT_DIR/patch_converse_queue.py" ]; then
     "$PYBIN" "$SCRIPT_DIR/patch_converse_queue.py" "$VM_DIR/tools/converse.py"
 fi
 
+# Apply the "no silent OpenAI voice swap" patch to simple_failover.py.
+if [ -f "$SCRIPT_DIR/patch_simple_failover.py" ]; then
+    PYBIN="$VENV_DIR/bin/python"
+    [ -x "$PYBIN" ] || PYBIN="$VENV_DIR/Scripts/python.exe"
+    [ -x "$PYBIN" ] || PYBIN="python3"
+    "$PYBIN" "$SCRIPT_DIR/patch_simple_failover.py" "$VM_DIR/simple_failover.py"
+fi
+
+# Windows-only shims for POSIX-only stdlib modules voice-mode imports (fcntl,
+# resource). Dormant on Linux/macOS (the real stdlib wins import resolution); on
+# Windows, stdlib lookup fails and Python falls through to these in site-packages.
+if [ -d "$VENV_DIR/Lib/site-packages" ]; then
+    SITE_PKGS="$VENV_DIR/Lib/site-packages"
+    if [ -f "$SCRIPT_DIR/fcntl_shim.py" ]; then
+        cp "$SCRIPT_DIR/fcntl_shim.py" "$SITE_PKGS/fcntl.py"
+        echo "[patches] Installed Windows fcntl shim → $SITE_PKGS/fcntl.py"
+    fi
+    if [ -f "$SCRIPT_DIR/resource_shim.py" ]; then
+        cp "$SCRIPT_DIR/resource_shim.py" "$SITE_PKGS/resource.py"
+        echo "[patches] Installed Windows resource shim → $SITE_PKGS/resource.py"
+    fi
+fi
+
 echo "[patches] Done. Restart Claude Code for changes to take effect."
