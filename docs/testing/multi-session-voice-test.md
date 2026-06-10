@@ -83,6 +83,55 @@ cat ~/.voicemode/logs/ensure.log     # proxy auto-start trace
     ~/.voicemode/logs/events/voicemode_events_$(date +%F).jsonl | tail -30
   ```
 
+## Self-executed (hands-off) variant — agent launches the sessions
+
+Instead of you opening 3 terminals, the agent can launch 3 **headless** Claude
+sessions that drive the voice loop autonomously (silence → continue), so the
+whole test runs and self-reports with no human in the loop. Validated on
+voice-mode 8.7.1 (2026-06-10): clean FIFO rotation, non-overlapping speech.
+
+**1. Readiness** (proxies up + expected version):
+```bash
+./voicemode-switch ensure && ./voicemode-switch health
+.venv/bin/python -c "import importlib.metadata as m; print(m.version('voice-mode'))"
+rm -f voicetest_*.log
+```
+
+**2. Write one prompt file per session** (`/tmp/vmtest_<L>.txt`), substituting
+LABEL + VOICE. Key: instruct N rounds of `mcp__voicemode__converse`
+(`wait_for_response=true`, short `listen_duration_max`), the QUEUED-retry contract,
+"silence/timeout = continue", and `printf '%s | <L> | ...' "$(date -Ins)" >> ./voicetest_<L>.log`
+START / per-round SPOKE / FINISHED lines. (Template: this repo's git history of
+`/tmp/vmtest_A.txt`, or reconstruct from the paste-prompt above.)
+
+**3. Launch headless, staggered** (each in the background, from the repo dir):
+```bash
+claude -p "$(cat /tmp/vmtest_A.txt)" --dangerously-skip-permissions &   # voice af_sky
+sleep 3
+claude -p "$(cat /tmp/vmtest_B.txt)" --dangerously-skip-permissions &   # voice am_puck
+sleep 3
+claude -p "$(cat /tmp/vmtest_C.txt)" --dangerously-skip-permissions &   # voice bf_emma
+```
+Notes: `-p` (print mode) runs the prompt agentically to completion then exits —
+no `--max-turns` needed. `--dangerously-skip-permissions` avoids prompts. Use
+`"$(cat file)"` so literal `$(date -Ins)` inside the prompt is NOT expanded by
+the launching shell (it reaches Claude verbatim, run by Claude's Bash tool).
+Stagger by a few seconds so they arrive in a defined order.
+
+**4. Monitor & verify** (the agent polls these):
+```bash
+./voicemode-switch queue          # one holder + waiters, rotating FIFO
+sort voicetest_*.log              # non-overlapping SPOKE windows in arrival order
+pgrep -af "claude -p" | wc -l     # sessions still running (0 when all finished)
+```
+PASS = sequential (non-overlapping) SPOKE timestamps across the 3 files, queue
+shows FIFO rotation, sessions exit cleanly.
+
+**5. Clean up:**
+```bash
+pkill -f "claude -p" 2>/dev/null; rm -f voicetest_*.log /tmp/vmtest_*.txt
+```
+
 ## Notes / known behavior
 
 - TTS generation should be ~5s (first request per voice ~12s cold-start). If it's

@@ -30,33 +30,12 @@ if [ -z "$VM_DIR" ]; then
     exit 1
 fi
 
-PROMPTS_DIR="$VM_DIR/prompts"
-TOOLS_DIR="$VM_DIR/tools"
-
-# Apply converse prompt patch
-if [ -f "$SCRIPT_DIR/converse.py" ]; then
-    cp "$SCRIPT_DIR/converse.py" "$PROMPTS_DIR/converse.py"
-    echo "[patches] Applied converse.py → $PROMPTS_DIR/converse.py"
-fi
-
-# Apply switch_mode prompt patch (adds /voicemode:switch-mode to slash menu)
-if [ -f "$SCRIPT_DIR/switch_mode_prompt.py" ]; then
-    cp "$SCRIPT_DIR/switch_mode_prompt.py" "$PROMPTS_DIR/switch_mode.py"
-    echo "[patches] Applied switch_mode_prompt.py → $PROMPTS_DIR/switch_mode.py"
-fi
-
-# Apply switch_mode tool patch
-if [ -f "$SCRIPT_DIR/switch_mode.py" ] && [ -d "$TOOLS_DIR" ]; then
-    cp "$SCRIPT_DIR/switch_mode.py" "$TOOLS_DIR/switch_mode.py"
-    echo "[patches] Applied switch_mode.py → $TOOLS_DIR/switch_mode.py"
-
-    # Add switch_mode to default tools list so it loads without env var config
-    TOOLS_INIT="$TOOLS_DIR/__init__.py"
-    if [ -f "$TOOLS_INIT" ] && ! grep -q "switch_mode" "$TOOLS_INIT"; then
-        sed -i 's/default_tools = {"converse", "service", "connect_status"}/default_tools = {"converse", "service", "connect_status", "switch_mode"}/' "$TOOLS_INIT"
-        echo "[patches] Added switch_mode to default tools in __init__.py"
-    fi
-fi
+# NOTE: as of voice-mode 8.7.x we no longer patch the converse PROMPT or ship a
+# switch_mode tool/slash-command. Upstream now provides native config tools
+# (configuration_management: update_config/config_reload) that write
+# voicemode.env, and the session-queue LLM contract lives in the QUEUED status
+# message + the converse tool docstring (added by patch_converse_queue.py) +
+# the project CLAUDE.md. Mode switching is the `voicemode-switch` CLI.
 
 # Install the session queue module and patch converse.py to use it.
 # If the patcher aborts on upstream drift (set -e), voice_queue.py is left

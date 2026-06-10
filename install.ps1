@@ -176,7 +176,7 @@ if (-not (Test-Path $venvPy)) {
     $pyExe = (& py -3.12 -c "import sys; print(sys.executable)").Trim()
     uv venv $venv --python $pyExe | Out-Null
 }
-$pkgs = @("voice-mode")
+$pkgs = @("voice-mode==8.7.1")  # pinned: patch anchors target this version
 if ($Mode -eq "windows-native" -and $EnablePiper) { $pkgs += "piper-tts" }
 Write-Host "  Installing: $($pkgs -join ', ')..."
 uv pip install --python $venvPy @pkgs 2>&1 | Out-Null
