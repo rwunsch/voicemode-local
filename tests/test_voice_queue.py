@@ -532,6 +532,9 @@ def test_burst_continues_within_budget_even_with_waiters(tmp_path, monkeypatch):
 def test_grace_expired_holder_yields_to_waiter(tmp_path, monkeypatch):
     # Bug #2: a holder whose grace has expired must NOT self-refresh its stale
     # floor when others are waiting — it yields (independent of MAX_HOLD).
+    # This is the *inter-exchange* case: the holder paused (finish leaves the
+    # exchange -> in_exchange False) and then went quiet past grace. A holder
+    # still mid-exchange is never stale (see in_exchange tests).
     monkeypatch.setattr(voice_queue, "QUEUE_GRACE", 0.1)
     monkeypatch.setattr(voice_queue, "MAX_HOLD", 100.0)
     monkeypatch.setattr(voice_queue, "WAIT_SLICE", 0.2)
@@ -541,7 +544,8 @@ def test_grace_expired_holder_yields_to_waiter(tmp_path, monkeypatch):
     proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
     try:
         _live_foreign_waiter(tmp_path, proc)
-        time.sleep(0.2)                              # let our floor go stale
+        asyncio.run(s.finish(end_burst=False))       # pause -> leave the exchange
+        time.sleep(0.2)                              # then go quiet past grace
         r = asyncio.run(s.acquire())                 # stale + waiter -> yield
         assert r.status == "queued"
         assert not voice_queue.floor_is_mine(tmp_path)
@@ -602,3 +606,150 @@ def test_pause_keeps_floor_within_budget(tmp_path, monkeypatch):
     finally:
         proc.kill()
         proc.wait()
+
+
+# ---------- in_exchange phase flag (2026-06-10 barge-in fix) ----------
+# Root cause: floor_is_live required last_activity within QUEUE_GRACE, refreshed
+# by a call-scoped asyncio heartbeat. During a long TTS turn the heartbeat is
+# starved (blocking sd.OutputStream.write on the event loop), last_activity
+# freezes, the floor goes stale, and a FIFO waiter steals it mid-speech.
+# Fix: a holder actively in an exchange (in_exchange=True) is live as long as its
+# process is alive, regardless of last_activity age. Grace only judges the
+# inter-exchange gap (in_exchange=False).
+
+def test_in_exchange_holder_not_stale_despite_frozen_activity(tmp_path, monkeypatch):
+    """A holder mid-exchange stays live even when last_activity is far older than
+    grace (heartbeat starved during a long TTS turn). Reproduces the barge-in."""
+    monkeypatch.setattr(voice_queue, "QUEUE_GRACE", 0.1)
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        st = voice_queue.process_start_time(proc.pid)
+        voice_queue._write_json_atomic(tmp_path / "floor.json", {
+            "pid": proc.pid, "start_time": st, "project": "p", "voice": "v",
+            "acquired": "now", "last_activity": time.time() - 100.0,
+            "in_exchange": True})
+        floor = voice_queue._read_json(tmp_path / "floor.json")
+        assert voice_queue.floor_is_live(floor) is True
+        assert voice_queue.try_claim_floor(tmp_path, "thief", "v") is False
+    finally:
+        proc.kill()
+        proc.wait()
+
+
+def test_in_exchange_false_falls_back_to_grace(tmp_path, monkeypatch):
+    """Between exchanges (in_exchange=False), a holder idle past grace is stale
+    and claimable — preserves the inter-exchange handoff."""
+    monkeypatch.setattr(voice_queue, "QUEUE_GRACE", 0.1)
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        st = voice_queue.process_start_time(proc.pid)
+        voice_queue._write_json_atomic(tmp_path / "floor.json", {
+            "pid": proc.pid, "start_time": st, "project": "p", "voice": "v",
+            "acquired": "now", "last_activity": time.time() - 1.0,
+            "in_exchange": False})
+        assert voice_queue.try_claim_floor(tmp_path, "thief", "v") is True
+    finally:
+        proc.kill()
+        proc.wait()
+
+
+def test_in_exchange_dead_holder_still_claimable(tmp_path):
+    """in_exchange=True must NOT protect a dead holder — process death frees it."""
+    proc = subprocess.Popen([sys.executable, "-c", "pass"])
+    pid = proc.pid
+    st = voice_queue.process_start_time(pid)
+    proc.wait()
+    voice_queue._write_json_atomic(tmp_path / "floor.json", {
+        "pid": pid, "start_time": st if st is not None else -1, "project": "p",
+        "voice": "v", "acquired": "now", "last_activity": time.time(),
+        "in_exchange": True})
+    assert voice_queue.try_claim_floor(tmp_path, "thief", "v") is True
+
+
+def test_claim_marks_in_exchange(tmp_path):
+    """Claiming the floor means a converse exchange is starting."""
+    assert voice_queue.try_claim_floor(tmp_path, "p", "v") is True
+    floor = voice_queue._read_json(tmp_path / "floor.json")
+    assert floor.get("in_exchange") is True
+
+
+def test_heartbeat_floor_can_set_in_exchange(tmp_path):
+    """heartbeat_floor(in_exchange=...) toggles the phase flag while refreshing."""
+    voice_queue.try_claim_floor(tmp_path, "p", "v")
+    assert voice_queue._read_json(tmp_path / "floor.json")["in_exchange"] is True
+    assert voice_queue.heartbeat_floor(tmp_path, in_exchange=False) is True
+    assert voice_queue._read_json(tmp_path / "floor.json")["in_exchange"] is False
+    assert voice_queue.heartbeat_floor(tmp_path, in_exchange=True) is True
+    assert voice_queue._read_json(tmp_path / "floor.json")["in_exchange"] is True
+
+
+def test_finish_pause_clears_in_exchange(tmp_path):
+    """A normal pause (finish without end_burst) leaves the exchange so the
+    inter-exchange grace window applies until the next call."""
+    s = voice_queue.QueueSession(project="p", voice="v", base=tmp_path)
+
+    async def flow():
+        await s.acquire()
+        assert voice_queue._read_json(tmp_path / "floor.json")["in_exchange"] is True
+        await s.finish(end_burst=False)
+    asyncio.run(flow())
+    floor = voice_queue._read_json(tmp_path / "floor.json")
+    assert floor is not None and floor["in_exchange"] is False
+
+
+def test_finish_pause_demoted_marks_not_acquired(tmp_path):
+    """If the floor was stolen mid-exchange (residual race), finish must notice
+    the demotion, drop _acquired, and not clobber the thief's floor."""
+    s = voice_queue.QueueSession(project="p", voice="v", base=tmp_path)
+
+    async def flow():
+        await s.acquire()
+        _fake_floor(tmp_path, 999999999, 1, time.time())  # thief steals it
+        await s.finish(end_burst=False)
+    asyncio.run(flow())
+    assert s._acquired is False
+    assert voice_queue._read_json(tmp_path / "floor.json")["pid"] == 999999999
+
+
+# ---------- in_exchange freshness ceiling (wedged-holder safety) ----------
+# in_exchange keeps the floor live during a call even when last_activity is
+# stale (a long TTS blocks the event loop so the heartbeat can't refresh). But
+# it must NOT be unbounded: a live-but-WEDGED process (loop stuck forever) would
+# otherwise hold the floor permanently and starve every waiter. So in_exchange is
+# honored only while last_activity is within IN_EXCHANGE_MAX; beyond that the
+# holder is treated as wedged and the floor becomes reclaimable.
+
+def _in_exchange_floor(tmp_path, pid, st, last_activity):
+    voice_queue._write_json_atomic(tmp_path / "floor.json", {
+        "pid": pid, "start_time": st, "project": "p", "voice": "v",
+        "acquired": "now", "last_activity": last_activity, "in_exchange": True})
+
+
+def test_in_exchange_within_ceiling_still_live(tmp_path, monkeypatch):
+    """A long-but-progressing TTS turn (last_activity stale but under the
+    ceiling) stays live — no barge-in."""
+    monkeypatch.setattr(voice_queue, "QUEUE_GRACE", 0.1)
+    monkeypatch.setattr(voice_queue, "IN_EXCHANGE_MAX", 5.0)
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        st = voice_queue.process_start_time(proc.pid)
+        _in_exchange_floor(tmp_path, proc.pid, st, time.time() - 2.0)  # 2s < 5s ceiling
+        assert voice_queue.floor_is_live(voice_queue._read_json(tmp_path / "floor.json")) is True
+        assert voice_queue.try_claim_floor(tmp_path, "thief", "v") is False
+    finally:
+        proc.kill(); proc.wait()
+
+
+def test_in_exchange_past_ceiling_is_reclaimable(tmp_path, monkeypatch):
+    """A wedged-but-alive holder (last_activity older than IN_EXCHANGE_MAX) is
+    NOT live — the floor can be reclaimed so waiters aren't starved forever."""
+    monkeypatch.setattr(voice_queue, "QUEUE_GRACE", 0.1)
+    monkeypatch.setattr(voice_queue, "IN_EXCHANGE_MAX", 5.0)
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        st = voice_queue.process_start_time(proc.pid)
+        _in_exchange_floor(tmp_path, proc.pid, st, time.time() - 10.0)  # 10s > 5s ceiling
+        assert voice_queue.floor_is_live(voice_queue._read_json(tmp_path / "floor.json")) is False
+        assert voice_queue.try_claim_floor(tmp_path, "thief", "v") is True
+    finally:
+        proc.kill(); proc.wait()

@@ -36,6 +36,13 @@ MAX_HOLD = float(os.getenv("VOICEMODE_QUEUE_MAX_HOLD", "0"))  # seconds
 WAIT_SLICE = float(os.getenv("VOICEMODE_QUEUE_WAIT_SLICE", "50"))  # seconds
 CHECK_INTERVAL = float(os.getenv("VOICEMODE_QUEUE_CHECK_INTERVAL", "0.5"))  # seconds
 TICKET_STALE = float(os.getenv("VOICEMODE_QUEUE_TICKET_STALE", "30"))  # seconds
+# Upper bound on how long an in-exchange floor stays live without a heartbeat
+# refresh. in_exchange keeps the floor live through a long TTS turn that blocks
+# the event loop (so the heartbeat can't run), but a process that is alive yet
+# WEDGED (loop stuck forever) must not hold the floor permanently. Beyond this,
+# the holder is treated as wedged and the floor becomes reclaimable. Must exceed
+# the longest legitimate single call (TTS + listen_duration_max + STT).
+IN_EXCHANGE_MAX = float(os.getenv("VOICEMODE_QUEUE_IN_EXCHANGE_MAX", "180"))  # seconds
 DEFAULT_BASE = Path.home() / ".voicemode"
 
 FLOOR_NAME = "floor.json"
@@ -260,11 +267,26 @@ def _floor_path(base: Path) -> Path:
 
 
 def floor_is_live(data: dict) -> bool:
-    """A floor is live if its holder process exists (same incarnation) and has
-    shown activity within QUEUE_GRACE seconds."""
+    """A floor is live if its holder process exists (same incarnation) AND is
+    either mid-exchange or has shown activity within QUEUE_GRACE seconds.
+
+    `in_exchange` marks a holder actively inside a converse call (speaking or
+    recording). Such a holder stays live even when last_activity is stale up to
+    IN_EXCHANGE_MAX — a long TTS turn blocks the event loop so the heartbeat that
+    refreshes last_activity may not run. Past that ceiling the holder is treated
+    as wedged (loop stuck) and the floor is reclaimable, so a hung-but-alive
+    process can't starve waiters forever. QUEUE_GRACE judges the *inter-exchange*
+    gap (in_exchange False), where the holder is off the channel between turns
+    and a waiter should take over once it goes quiet.
+    """
     if not pid_alive(data.get("pid"), data.get("start_time")):
         return False
-    return (time.time() - data.get("last_activity", 0)) <= QUEUE_GRACE
+    age = time.time() - data.get("last_activity", 0)
+    if data.get("in_exchange"):
+        # Live through a long (loop-blocking) TTS turn, but not forever: a
+        # wedged-but-alive holder past IN_EXCHANGE_MAX is reclaimable.
+        return age <= IN_EXCHANGE_MAX
+    return age <= QUEUE_GRACE
 
 
 def try_claim_floor(base: Path, project: str, voice: str) -> bool:
@@ -322,6 +344,7 @@ def try_claim_floor(base: Path, project: str, voice: str) -> bool:
         "acquired": _now_iso(),
         "acquired_epoch": time.time(),  # hold-start for MAX_HOLD; fixed across a burst
         "last_activity": time.time(),
+        "in_exchange": True,  # claimed inside a converse call about to do audio
     }
     tmp = base / f"floor.tmp.{os.getpid()}.{uuid.uuid4().hex}"
     tmp.write_text(json.dumps(me, indent=2))
@@ -341,10 +364,11 @@ def floor_is_mine(base: Path) -> bool:
             and data.get("start_time") == process_start_time(os.getpid()))
 
 
-def heartbeat_floor(base: Path) -> bool:
+def heartbeat_floor(base: Path, in_exchange: Optional[bool] = None) -> bool:
     """Conditionally update last_activity. False == we no longer hold the
     floor (stolen via grace expiry) — caller must demote itself and never
-    write again."""
+    write again. `in_exchange`, when not None, also sets the exchange-phase flag
+    (True on enter, False on the pause between exchanges)."""
     fpath = _floor_path(base)
     data = _read_json(fpath)
     if data is None or data.get("pid") != os.getpid() \
@@ -354,6 +378,8 @@ def heartbeat_floor(base: Path) -> bool:
     # field-writer (QueueSession serializes within the process); release is an
     # unlink, not a field write.
     data["last_activity"] = time.time()
+    if in_exchange is not None:
+        data["in_exchange"] = in_exchange
     _write_json_atomic(fpath, data)
     return True
 
@@ -461,7 +487,7 @@ class QueueSession:
                 # self-refresh). With no waiters we always keep talking.
                 yld, reason, held, nwait = self._should_yield_floor()
                 if not yld:
-                    heartbeat_floor(self.base)
+                    heartbeat_floor(self.base, in_exchange=True)
                     self._acquired = True
                     _log("acquired_burst", self.base, project=self.project,
                          voice=self.voice, held=held, waiting=nwait)
@@ -568,10 +594,17 @@ class QueueSession:
                 _log("burst_yield", self.base, project=self.project,
                      voice=self.voice, held=held, waiting=nwait,
                      reason=f"pause_{reason}")
-            else:
-                heartbeat_floor(self.base)
+            elif heartbeat_floor(self.base, in_exchange=False):
+                # Leave the exchange: from here the inter-call grace window (not
+                # in_exchange) governs liveness until our next converse call.
                 _log("burst_pause", self.base, project=self.project,
                      voice=self.voice, held=held, waiting=nwait)
+            else:
+                # Floor was stolen mid-exchange (residual claim race): demote
+                # ourselves so we never write to the thief's floor again.
+                self._acquired = False
+                _log("demoted", self.base, project=self.project,
+                     voice=self.voice)
 
 
 # ---------- CLI status (voicemode-switch queue) ----------
