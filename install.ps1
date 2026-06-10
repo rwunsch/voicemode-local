@@ -224,10 +224,11 @@ Copy-Item $claudeJson $backup -Force
 ok "Backup: $backup"
 
 if ($Mode -eq "wsl-mcp") {
-    # Windows-side MCP entry that invokes voice-mode INSIDE WSL.
-    # WSLENV propagates the env vars from Windows into the WSL bash session
-    # so they reach the spawned voice-mode process (/u = Unix-side only).
-    $wslVoiceMode = "$WslPath/.venv/bin/voice-mode"
+    # Windows-side MCP entry that invokes the voicemode-mcp WRAPPER inside WSL.
+    # The wrapper auto-starts the needed proxies (detached) then exec's voice-mode.
+    # Routing config is read from the WSL ~/.voicemode/voicemode.env (the same file
+    # native WSL sessions use), so only OPENAI_API_KEY is passed across via WSLENV.
+    $wslMcp = "$WslPath/voicemode-mcp"
     $pyScript = @"
 import json, os, pathlib
 p = pathlib.Path(r"$claudeJson")
@@ -238,17 +239,14 @@ key = r"$OpenAIKey".strip() or existing_env.get('OPENAI_API_KEY', '')
 mcp['voicemode'] = {
     'type': 'stdio',
     'command': 'wsl.exe',
-    'args': ['-d', 'Ubuntu', '-e', 'bash', '-c', '$wslVoiceMode'],
+    'args': ['-d', 'Ubuntu', '-e', 'bash', '-c', '$wslMcp'],
     'env': {
         'OPENAI_API_KEY': key,
-        'STT_BASE_URL': 'http://127.0.0.1:2022/v1',
-        'TTS_BASE_URL': 'http://127.0.0.1:8881/v1',
-        'TTS_VOICE': 'p_de_thorsten',
-        'WSLENV': 'OPENAI_API_KEY/u:STT_BASE_URL/u:TTS_BASE_URL/u:TTS_VOICE/u',
+        'WSLENV': 'OPENAI_API_KEY/u',
     },
 }
 with p.open('w', encoding='utf-8') as f: json.dump(d, f, indent=2)
-print('voicemode MCP registered (wsl-mcp mode: invokes voice-mode in WSL via wsl.exe)')
+print('voicemode MCP registered (wsl-mcp: runs voicemode-mcp wrapper in WSL; routing from voicemode.env)')
 "@
     Invoke-Py -Source $pyScript
     return  # Skip the rest — Windows-side install steps don't apply
@@ -264,8 +262,8 @@ $voiceModeBin = Join-Path $venv "Scripts\voice-mode.exe"
 $wingetLinks = Join-Path $env:LOCALAPPDATA "Microsoft\WinGet\Links"
 $mcpPath = "$wingetLinks;" + $env:Path
 
-# STT/TTS endpoints are the same in both modes — proxies always answer on
-# 127.0.0.1:2022 and 127.0.0.1:8881 (whether they live in WSL or on Windows).
+# Routing config (STT/TTS endpoints, voices) is read from voicemode.env at
+# startup — see Configuration in the README. Only the secret + PATH go here.
 $pyScript = @"
 import json, os, pathlib
 p = pathlib.Path(r"$claudeJson")
@@ -279,14 +277,11 @@ mcp['voicemode'] = {
     'args': [],
     'env': {
         'OPENAI_API_KEY': key,
-        'STT_BASE_URL': 'http://127.0.0.1:2022/v1',
-        'TTS_BASE_URL': 'http://127.0.0.1:8881/v1',
-        'TTS_VOICE': 'p_de_thorsten',
         'PATH': r"$mcpPath",
     },
 }
 with p.open('w', encoding='utf-8') as f: json.dump(d, f, indent=2)
-print('voicemode MCP registered')
+print('voicemode MCP registered (windows-native; routing from voicemode.env)')
 "@
 Invoke-Py -Source $pyScript
 
@@ -355,8 +350,6 @@ Write-Host ""
 if ($Mode -eq "windows-native") {
     Write-Host "  Manage Windows proxies with: .\voicemode-services.ps1 [start|stop|status]"
 }
-Write-Host "  Switch TTS modes by editing %USERPROFILE%\.claude.json mcpServers.voicemode.env"
-Write-Host "    local  -> STT 2022, TTS http://127.0.0.1:8880/v1, voice af_sky"
-Write-Host "    piper  -> STT 2022, TTS http://127.0.0.1:8881/v1, voice p_de_thorsten"
-Write-Host "    openai -> remove STT_BASE_URL, TTS_BASE_URL, TTS_VOICE"
+Write-Host "  Switch TTS modes with: voicemode-switch local|localonly|piper|openai|hybrid"
+Write-Host "    (writes ~/.voicemode/voicemode.env; run it in WSL for the bridge)"
 Write-Host ""
