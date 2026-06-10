@@ -2,7 +2,7 @@
 
 Reproducible test for the cross-session voice queue: proxy auto-start, multi-voice
 routing, strict FIFO turn-taking, no talk-over (barge-in fix), and the
-listen-window cap under contention.
+no-speech timeout under contention.
 
 ## What it verifies
 
@@ -15,8 +15,9 @@ listen-window cap under contention.
    turns, audio windows never overlap (a holder can't be interrupted mid-turn).
 4. **QUEUED retry contract** — a waiting session re-calls with its `ticket`, never
    degrades to text.
-5. **Listen-window cap** — under contention a silent holder yields in
-   ~`VOICEMODE_QUEUE_LISTEN_CAP` (8s) instead of the full window.
+5. **No-speech timeout** — under contention a SILENT holder yields in
+   ~`VOICEMODE_QUEUE_LISTEN_CAP` (8s) instead of the full window. A user who
+   IS speaking is never cut off (the timeout only fires before speech starts).
 
 ## Setup
 
@@ -137,7 +138,7 @@ pkill -f "claude -p" 2>/dev/null; rm -f voicetest_*.log /tmp/vmtest_*.txt
 - TTS generation should be ~5s (first request per voice ~12s cold-start). If it's
   tens of seconds, the routing/`voicemode.env` config is wrong — run
   `./voicemode-switch test-tts`.
-- Without the listen cap, a silent holder holds ~15–40s/turn (full listen window);
-  with the cap (default 8s) rotation roughly halves. Tune with
-  `VOICEMODE_QUEUE_LISTEN_CAP`.
+- Without the no-speech timeout, a silent holder holds ~15–40s/turn (full listen
+  window); with it (default 8s) rotation roughly halves. Tune with
+  `VOICEMODE_QUEUE_LISTEN_CAP`. Active speech is never truncated by it.
 - Clean up artifacts afterward: `rm -f voicetest_*.log`.

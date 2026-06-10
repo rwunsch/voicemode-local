@@ -94,13 +94,82 @@ R_RELEASE = '''        # voicemode-local session queue: stop heartbeat; release 
                     "end_burst": bool(end_burst)
                 })'''
 
+# ---- anchors: no-speech timeout in the recording loop ----
+# Under queue contention the holder must yield the mic when the user never
+# starts speaking — WITHOUT truncating active speech. Capping
+# listen_duration_max instead (a hard ceiling in the recording loop) was the
+# 2026-06-11 bug that cut the user off mid-sentence at ~8s.
+A_REC_SIG = (
+    "def record_audio_with_silence_detection(max_duration: float, "
+    "disable_silence_detection: bool = False, min_duration: float = 0.0, "
+    "vad_aggressiveness: Optional[int] = None) -> Tuple[np.ndarray, bool]:"
+)
+R_REC_SIG = (
+    "def record_audio_with_silence_detection(max_duration: float, "
+    "disable_silence_detection: bool = False, min_duration: float = 0.0, "
+    "vad_aggressiveness: Optional[int] = None, "
+    "no_speech_timeout: Optional[float] = None) -> Tuple[np.ndarray, bool]:"
+)
+
+A_REC_DOC = (
+    "        vad_aggressiveness: VAD aggressiveness level (0-3). "
+    "If None, uses VAD_AGGRESSIVENESS from config\n"
+)
+R_REC_DOC = (
+    "        vad_aggressiveness: VAD aggressiveness level (0-3). "
+    "If None, uses VAD_AGGRESSIVENESS from config\n"
+    "        no_speech_timeout: If set, stop after this many seconds ONLY if\n"
+    "            speech never started (voicemode-local session queue contention);\n"
+    "            never truncates active speech\n"
+)
+
+A_REC_WAIT = (
+    "                            # No timeout in this state - just keep waiting\n"
+    "                            # The only exit is speech detection or max_duration\n"
+)
+R_REC_WAIT = (
+    "                            # voicemode-local session queue: sessions are\n"
+    "                            # waiting and nobody has spoken yet — yield the\n"
+    "                            # mic. Cannot fire once speech has started.\n"
+    "                            elif no_speech_timeout is not None and recording_duration >= no_speech_timeout:\n"
+    "                                logger.info(f\"No speech within {no_speech_timeout:.1f}s and sessions are waiting - yielding mic\")\n"
+    "                                stop_recording = True\n"
+)
+
+A_REC_RETRY = (
+    "                    return record_audio_with_silence_detection(max_duration, "
+    "disable_silence_detection, min_duration, vad_aggressiveness)"
+)
+R_REC_RETRY = (
+    "                    return record_audio_with_silence_detection(max_duration, "
+    "disable_silence_detection, min_duration, vad_aggressiveness, no_speech_timeout)"
+)
+
+# All three recording call sites in converse() are textually identical, hence
+# expected_count=3 (replaced everywhere).
+A_REC_CALL = (
+    "record_audio_with_silence_detection, listen_duration_max, "
+    "disable_silence_detection, listen_duration_min, vad_aggressiveness\n"
+)
+R_REC_CALL = (
+    "record_audio_with_silence_detection, listen_duration_max, "
+    "disable_silence_detection, listen_duration_min, vad_aggressiveness, "
+    "_queue_no_speech_timeout\n"
+)
+
+# (name, anchor, replacement, expected_count) — every occurrence is replaced.
 EXACT_PATCHES = [
-    ("import", A_IMPORT, R_IMPORT),
-    ("signature", A_SIG, R_SIG),
-    ("docstring", A_DOC, R_DOC),
-    ("bool-conversion", A_CONV, R_CONV),
-    ("conch-construction", A_CONSTRUCT, R_CONSTRUCT),
-    ("conch-release", A_RELEASE, R_RELEASE),
+    ("import", A_IMPORT, R_IMPORT, 1),
+    ("signature", A_SIG, R_SIG, 1),
+    ("docstring", A_DOC, R_DOC, 1),
+    ("bool-conversion", A_CONV, R_CONV, 1),
+    ("conch-construction", A_CONSTRUCT, R_CONSTRUCT, 1),
+    ("conch-release", A_RELEASE, R_RELEASE, 1),
+    ("record-signature", A_REC_SIG, R_REC_SIG, 1),
+    ("record-docstring", A_REC_DOC, R_REC_DOC, 1),
+    ("record-waiting-timeout", A_REC_WAIT, R_REC_WAIT, 1),
+    ("record-device-retry", A_REC_RETRY, R_REC_RETRY, 1),
+    ("record-call-sites", A_REC_CALL, R_REC_CALL, 3),
 ]
 
 # ---- block: the whole conch arbitration block (between two stable markers) ----
@@ -111,6 +180,7 @@ EXACT_PATCHES = [
 B_START = "        # Try to acquire conch atomically (no race condition)\n"
 B_END = "        # Local microphone approach with timing\n"
 B_REPLACE = '''        # voicemode-local session queue: FIFO arbitration replaces conch
+        _queue_no_speech_timeout = None
         if voice_queue.QUEUE_ENABLED:
             _q = await queue_session.acquire(ticket=ticket)
             if _q.status == "queued":
@@ -119,10 +189,11 @@ B_REPLACE = '''        # voicemode-local session queue: FIFO arbitration replace
                 # Handoff intro: announce which session is speaking now
                 message = f"{queue_session.intro} {message}"
             queue_session.start_heartbeat()
-            # When other sessions are queued, cap the listen window so a silent
-            # holder yields the mic sooner instead of gripping it for the full
-            # duration (VAD still ends recording early when the user speaks).
-            listen_duration_max = queue_session.effective_listen_seconds(listen_duration_max)
+            # When other sessions are queued, stop listening after LISTEN_CAP
+            # seconds ONLY if the user never starts speaking (no-speech
+            # timeout). Active speech is never truncated; normal silence
+            # detection ends the recording once the user has spoken.
+            _queue_no_speech_timeout = queue_session.effective_no_speech_timeout()
             if event_logger:
                 event_logger.log_event("QUEUE_ACQUIRE", {
                     "pid": os.getpid(),
@@ -146,11 +217,11 @@ def main() -> int:
         print(f"[patch_converse_queue] {path}: already patched — skipping")
         return 0
 
-    for name, anchor, _ in EXACT_PATCHES:
+    for name, anchor, _, expected in EXACT_PATCHES:
         count = text.count(anchor)
-        if count != 1:
+        if count != expected:
             print(f"[patch_converse_queue] ERROR: anchor '{name}' matched "
-                  f"{count} times (expected exactly 1) in {path}.\n"
+                  f"{count} times (expected exactly {expected}) in {path}.\n"
                   f"Upstream voice-mode has likely changed — update the anchors "
                   f"in patches/patch_converse_queue.py.", file=sys.stderr)
             return 1
@@ -171,7 +242,7 @@ def main() -> int:
 
     # Apply: block replacement first, then exact-string edits.
     text = text[:si] + B_REPLACE + text[ei:]
-    for _, anchor, replacement in EXACT_PATCHES:
+    for _, anchor, replacement, _expected in EXACT_PATCHES:
         text = text.replace(anchor, replacement)
 
     compile(text, str(path), "exec")  # syntax safety net before writing

@@ -43,10 +43,11 @@ TICKET_STALE = float(os.getenv("VOICEMODE_QUEUE_TICKET_STALE", "30"))  # seconds
 # the holder is treated as wedged and the floor becomes reclaimable. Must exceed
 # the longest legitimate single call (TTS + listen_duration_max + STT).
 IN_EXCHANGE_MAX = float(os.getenv("VOICEMODE_QUEUE_IN_EXCHANGE_MAX", "180"))  # seconds
-# When other sessions are waiting, cap how long a holder will LISTEN to a silent
-# user before yielding the mic, so it doesn't grip the floor for the full
-# listen_duration_max while others queue. VAD still ends recording early when the
-# user actually speaks, so this only shortens silence. 0 disables (full window).
+# When other sessions are waiting, how long a holder will LISTEN to a SILENT
+# user before yielding the mic (no-speech timeout), so it doesn't grip the
+# floor for the full listen_duration_max while others queue. Applies ONLY while
+# speech has not started — once the user speaks, the recording is never cut
+# short by this (normal silence detection ends it). 0 disables (full window).
 LISTEN_CAP = float(os.getenv("VOICEMODE_QUEUE_LISTEN_CAP", "8"))  # seconds
 DEFAULT_BASE = Path.home() / ".voicemode"
 
@@ -550,16 +551,20 @@ class QueueSession:
             f"Do NOT print your question as text. Do NOT give up."
         )
 
-    def effective_listen_seconds(self, requested: float) -> float:
-        """Cap the listen window when other sessions are queued (see LISTEN_CAP).
-        Returns `requested` unchanged for a solo conversation or when already
-        under the cap; VAD still ends recording early on speech, so the cap only
-        shortens silence. Caller holds the floor when this is called."""
-        if LISTEN_CAP <= 0 or requested <= LISTEN_CAP:
-            return requested
+    def effective_no_speech_timeout(self) -> Optional[float]:
+        """No-speech timeout for the recording loop (see LISTEN_CAP).
+
+        Returns LISTEN_CAP when other sessions are queued, else None (solo
+        conversation, or feature disabled). The timeout may only end a
+        recording in which speech NEVER started; once the user speaks, normal
+        silence detection ends the recording — active speech is never
+        truncated (capping listen_duration_max instead was the 2026-06-11
+        mid-sentence cutoff bug). Caller holds the floor when this is called."""
+        if LISTEN_CAP <= 0:
+            return None
         waiters = [t for t in list_tickets(self.base)
                    if t[1].get("pid") != os.getpid()]
-        return LISTEN_CAP if waiters else requested
+        return LISTEN_CAP if waiters else None
 
     def start_heartbeat(self) -> None:
         """Call-scoped background heartbeat: keeps the floor live during TTS

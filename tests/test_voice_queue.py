@@ -755,47 +755,37 @@ def test_in_exchange_past_ceiling_is_reclaimable(tmp_path, monkeypatch):
         proc.kill(); proc.wait()
 
 
-# ---------- listen-window cap under contention ----------
-# When other sessions are waiting, a holder that is merely LISTENING to a silent
-# user should not grip the mic for the full listen window. effective_listen_seconds
-# shortens it to LISTEN_CAP so the holder yields sooner; VAD still ends recording
-# early when the user actually speaks, so the cap only bites on silence. No cap
-# when nobody is waiting (a solo conversation is never cut short).
+# ---------- no-speech timeout under contention ----------
+# When other sessions are waiting, a holder listening to a SILENT user should
+# not grip the mic for the full listen window. effective_no_speech_timeout()
+# returns LISTEN_CAP so the recording loop stops early — but ONLY if speech
+# never started. Active speech is never truncated (that was the 2026-06-11
+# truncation bug: the cap used to land on listen_duration_max, a hard ceiling,
+# cutting the user off mid-sentence at ~8s). Solo conversation: no timeout.
 
-def test_listen_cap_no_waiters_unchanged(tmp_path, monkeypatch):
+def test_no_speech_timeout_none_without_waiters(tmp_path, monkeypatch):
     monkeypatch.setattr(voice_queue, "LISTEN_CAP", 8.0)
     s = voice_queue.QueueSession(project="p", voice="v", base=tmp_path)
-    assert s.effective_listen_seconds(120.0) == 120.0   # solo: full window
+    assert s.effective_no_speech_timeout() is None   # solo: wait full window
 
 
-def test_listen_cap_applies_with_waiter(tmp_path, monkeypatch):
-    monkeypatch.setattr(voice_queue, "LISTEN_CAP", 8.0)
-    s = voice_queue.QueueSession(project="p", voice="v", base=tmp_path)
-    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
-    try:
-        _live_foreign_waiter(tmp_path, proc)
-        assert s.effective_listen_seconds(120.0) == 8.0   # capped while contended
-    finally:
-        proc.kill(); proc.wait()
-
-
-def test_listen_cap_does_not_extend_short_window(tmp_path, monkeypatch):
+def test_no_speech_timeout_applies_with_waiter(tmp_path, monkeypatch):
     monkeypatch.setattr(voice_queue, "LISTEN_CAP", 8.0)
     s = voice_queue.QueueSession(project="p", voice="v", base=tmp_path)
     proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
     try:
         _live_foreign_waiter(tmp_path, proc)
-        assert s.effective_listen_seconds(5.0) == 5.0   # already under cap -> unchanged
+        assert s.effective_no_speech_timeout() == 8.0   # contended: yield if silent
     finally:
         proc.kill(); proc.wait()
 
 
-def test_listen_cap_disabled(tmp_path, monkeypatch):
+def test_no_speech_timeout_disabled(tmp_path, monkeypatch):
     monkeypatch.setattr(voice_queue, "LISTEN_CAP", 0.0)  # 0 disables
     s = voice_queue.QueueSession(project="p", voice="v", base=tmp_path)
     proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
     try:
         _live_foreign_waiter(tmp_path, proc)
-        assert s.effective_listen_seconds(120.0) == 120.0   # disabled -> no cap
+        assert s.effective_no_speech_timeout() is None   # disabled -> no timeout
     finally:
         proc.kill(); proc.wait()
