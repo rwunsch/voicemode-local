@@ -25,7 +25,7 @@ The conversation flows naturally. Claude's responses are typically 1-3 seconds t
 
 **Language switching** — Say "sprich Deutsch" and Claude switches to German mid-conversation. Whisper auto-detects your language, no manual configuration needed. Switch back with "speak English". The TTS voices handle multiple languages naturally.
 
-**Engine switching** — Swap between Kokoro (fast, good English), Piper (multilingual), or OpenAI (best quality) on the fly using `/voicemode:switch-mode` without leaving your session.
+**Engine switching** — Swap between Kokoro (fast, good English), Piper (multilingual), or OpenAI (best quality) on the fly with the `voicemode-switch` CLI.
 
 ## What VoiceMode Local Adds
 
@@ -41,7 +41,7 @@ The upstream [VoiceMode MCP](https://github.com/mbailey/voicemode) provides the 
 | Voice selection | Fixed | Random or named voice per session |
 | Language switching | Via OpenAI | Automatic (Whisper detects language) |
 | Multi-session | Same voice everywhere | Different voice per session |
-| Mode switching | N/A | `/voicemode:switch-mode` in-session |
+| Mode switching | N/A | `voicemode-switch` CLI / upstream `update_config` |
 
 ## Supported Environments
 
@@ -162,7 +162,7 @@ Claude will offer you a voice selection, then start a two-way voice conversation
 
 ### Switching modes mid-session
 
-From within Claude Code, use `/voicemode:switch-mode` to change between engines without leaving the session. Claude Code needs a restart afterward for the new settings to take effect.
+Switch engines with `voicemode-switch <mode>` (writes `~/.voicemode/voicemode.env`); restart Claude Code afterward. (voice-mode 8.7+ also exposes `update_config`/`config_reload` MCP tools.)
 
 ### Managing services
 
@@ -243,7 +243,7 @@ an OpenAI voice (alloy/echo/fable/nova/onyx/shimmer/…) to use OpenAI TTS.
 ## Configuration (`voicemode.env`)
 
 Routing lives in **`~/.voicemode/voicemode.env`** (a stable file voice-mode loads
-at startup), written by `voicemode-switch`/`switch_mode` as a managed block:
+at startup), written by `voicemode-switch` as a managed block:
 
 ```ini
 # >>> voicemode-switch managed (do not edit inside this block) >>>
@@ -356,7 +356,7 @@ VoiceMode Local extends the upstream VoiceMode MCP server through patches applie
 - **Voice selection** — on conversation start, Claude offers to pick a random voice or let you choose
 - **Voice routing** — voices are routed to the correct engine by prefix (`af_` → Kokoro, `p_` → Piper, `alloy` → OpenAI)
 - **Language fallback** — if a requested language isn't available in the current engine, Claude suggests switching
-- **Mode switching** — `/voicemode:switch-mode` lets you change engines from within Claude Code
+- **Mode switching** — `voicemode-switch <mode>` changes engines (writes voicemode.env)
 
 Patches are applied by `./patches/apply.sh` (run automatically during install) and need to be re-applied after upgrading the VoiceMode package.
 
@@ -370,11 +370,14 @@ Patches are applied by `./patches/apply.sh` (run automatically during install) a
 | `piper-proxy.py` | OpenAI `/v1/audio/speech` → piper-tts CLI wrapper |
 | `voicemode-switch` | CLI for mode switching and service management |
 | `voices/piper-voices.json` | Curated Piper voice catalog with model metadata |
-| `patches/converse.py` | Extended conversation prompt (voice selection, routing, fallback) |
-| `patches/switch_mode.py` | MCP tool for in-session mode switching |
-| `patches/switch_mode_prompt.py` | MCP prompt for `/voicemode:switch-mode` slash menu entry |
-| `patches/apply.sh` | Copies patches into the installed voice_mode package |
-| `tests/` | Test suite (42 tests: proxies, voice catalog, mode switching) |
+| `patches/voice_queue.py` | Multi-session FIFO voice queue module (no upstream equivalent) |
+| `patches/patch_converse_queue.py` | Splices the queue into `tools/converse.py` (anchor-based) |
+| `patches/patch_simple_failover.py` | Removes upstream's silent OpenAI voice swap |
+| `patches/fcntl_shim.py`, `resource_shim.py` | Windows stdlib shims (dormant on Linux) |
+| `patches/apply.sh` | Applies the patches into the installed voice_mode package |
+| `tests/` | Test suite (118 tests: queue, routing patchers, sysaudio) |
+
+Pinned to upstream `voice-mode==8.7.1`; mode switching, voicemode.env config, and voice discovery are now native upstream, so those patches were retired.
 
 ## System Files Modified
 
@@ -413,7 +416,7 @@ by `voicemode-switch`). This is the single source of truth for both WSL and the
 cross-OS bridge.
 
 **`~/.claude/settings.json`** — Permission allow-list (key `permissions.allow`)
-Adds `mcp__voicemode__converse`, `mcp__voicemode__service`, and `mcp__voicemode__switch_mode` so Claude Code doesn't prompt for permission on every voice call.
+Adds `mcp__voicemode__converse` and `mcp__voicemode__service` so Claude Code doesn't prompt for permission on every voice call.
 
 **`~/.bashrc`** — Shell environment (optional)
 Adds `export OPENAI_API_KEY="sk-..."` if you provided a key during install. Only needed for openai/hybrid modes.

@@ -100,9 +100,9 @@ No need to switch to Piper for German.
 | piper-proxy | 8881 | OpenAI-compatible TTS via Piper |
 | voicemode-piper | 10200 | Piper TTS (Docker, optional profile) |
 
-## In-Session Mode Switching
+## Mode Switching
 
-Use `/voicemode:switch-mode` to switch backends without leaving Claude Code. Restart Claude Code afterward for changes to take effect.
+Switch backends with the `voicemode-switch <mode>` CLI (writes `~/.voicemode/voicemode.env`); restart Claude Code afterward for changes to take effect. (Upstream voice-mode 8.7+ also exposes `update_config`/`config_reload` MCP tools that write the same file.) Our standalone `switch_mode` MCP tool/slash-command was retired in the 8.7.1 integration since upstream now does it natively.
 
 Available modes: `local` (Kokoro+Piper equal, OpenAI last — recommended), `localonly` (no cloud), `piper` (Piper-primary), `openai` (cloud), `hybrid` (cloud STT + local TTS).
 
