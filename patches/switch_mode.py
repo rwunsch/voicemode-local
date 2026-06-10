@@ -1,47 +1,71 @@
-"""Mode switching tool for VoiceMode (patched by voicemode-local)."""
+"""Mode switching tool for VoiceMode (patched by voicemode-local).
+
+IMPORTANT: voice-mode only reads the *plural* endpoint-list env vars
+(VOICEMODE_TTS_BASE_URLS / VOICEMODE_STT_BASE_URLS / VOICEMODE_VOICES). The
+older singular TTS_BASE_URL / STT_BASE_URL / TTS_VOICE are NOT read by this
+version, so writing them is a silent no-op. Always write the plural lists.
+
+Routing is priority-ordered: a requested voice goes to the first endpoint that
+serves it (each local engine rejects voices it does not own in a few ms), so
+listing Kokoro + Piper before OpenAI makes both locals equal first-class
+citizens and keeps OpenAI strictly last-resort.
+"""
 
 import json
 import os
 from voice_mode.server import mcp
 
+KOKORO = "http://127.0.0.1:8880/v1"
+PIPER = "http://127.0.0.1:8881/v1"
+WHISPER = "http://127.0.0.1:2022/v1"
+OPENAI = "https://api.openai.com/v1"
+
 MODES = {
     "local": {
-        "description": "Local Whisper STT + Kokoro TTS (free, private)",
-        "STT_BASE_URL": "http://127.0.0.1:2022/v1",
-        "TTS_BASE_URL": "http://127.0.0.1:8880/v1",
-        "TTS_VOICE": "af_sky",
+        "description": "Local Kokoro+Piper TTS & Whisper STT, OpenAI last resort (recommended)",
+        "VOICEMODE_STT_BASE_URLS": f"{WHISPER},{OPENAI}",
+        "VOICEMODE_TTS_BASE_URLS": f"{KOKORO},{PIPER},{OPENAI}",
+        "VOICEMODE_VOICES": "af_sky",
+    },
+    "localonly": {
+        "description": "Local Kokoro+Piper+Whisper only, no cloud (fails loud if down)",
+        "VOICEMODE_STT_BASE_URLS": WHISPER,
+        "VOICEMODE_TTS_BASE_URLS": f"{KOKORO},{PIPER}",
+        "VOICEMODE_VOICES": "af_sky",
     },
     "piper": {
-        "description": "Local Whisper STT + Piper TTS (free, multilingual)",
-        "STT_BASE_URL": "http://127.0.0.1:2022/v1",
-        "TTS_BASE_URL": "http://127.0.0.1:8881/v1",
-        "TTS_VOICE": "p_de_thorsten",
+        "description": "Piper TTS primary (German etc.), Kokoro + OpenAI behind",
+        "VOICEMODE_STT_BASE_URLS": f"{WHISPER},{OPENAI}",
+        "VOICEMODE_TTS_BASE_URLS": f"{PIPER},{KOKORO},{OPENAI}",
+        "VOICEMODE_VOICES": "p_de_thorsten",
     },
     "openai": {
         "description": "OpenAI cloud STT + TTS (best quality, ~$0.01/min)",
-        "STT_BASE_URL": "",
-        "TTS_BASE_URL": "",
-        "TTS_VOICE": "",
+        "VOICEMODE_STT_BASE_URLS": OPENAI,
+        "VOICEMODE_TTS_BASE_URLS": OPENAI,
+        "VOICEMODE_VOICES": "nova",
     },
     "hybrid": {
-        "description": "OpenAI STT + local Kokoro TTS (~$0.006/min)",
-        "STT_BASE_URL": "",
-        "TTS_BASE_URL": "http://127.0.0.1:8880/v1",
-        "TTS_VOICE": "af_sky",
+        "description": "OpenAI STT + local Kokoro+Piper TTS (~$0.006/min)",
+        "VOICEMODE_STT_BASE_URLS": f"{OPENAI},{WHISPER}",
+        "VOICEMODE_TTS_BASE_URLS": f"{KOKORO},{PIPER},{OPENAI}",
+        "VOICEMODE_VOICES": "af_sky",
     },
 }
+
+_LIST_KEYS = ("VOICEMODE_STT_BASE_URLS", "VOICEMODE_TTS_BASE_URLS", "VOICEMODE_VOICES")
 
 
 @mcp.tool()
 def switch_mode(mode: str) -> str:
-    """Switch VoiceMode between local, piper, openai, and hybrid modes.
+    """Switch VoiceMode between local, localonly, piper, openai, and hybrid modes.
 
-    Changes the STT/TTS configuration in ~/.claude.json.
-    After switching, Claude Code needs to reconnect the MCP server
-    for the new settings to take effect.
+    Changes the STT/TTS endpoint lists in ~/.claude.json. After switching,
+    Claude Code needs to reconnect the MCP server for the new settings to
+    take effect.
 
     Args:
-        mode: One of 'local', 'piper', 'openai', 'hybrid'
+        mode: One of 'local', 'localonly', 'piper', 'openai', 'hybrid'
     """
     if mode not in MODES:
         available = ", ".join(MODES.keys())
@@ -57,36 +81,40 @@ def switch_mode(mode: str) -> str:
         return f"Error: Could not read {claude_json}"
 
     env = data.get("mcpServers", {}).get("voicemode", {}).get("env", {})
-    openai_key = env.get("OPENAI_API_KEY", "")
-
-    new_env = {"OPENAI_API_KEY": openai_key}
-    for key in ("STT_BASE_URL", "TTS_BASE_URL", "TTS_VOICE"):
-        value = config[key]
-        if value:
-            new_env[key] = value
+    # Preserve OPENAI_API_KEY and any WSLENV passthrough (cross-OS bridge).
+    new_env = {"OPENAI_API_KEY": env.get("OPENAI_API_KEY", "")}
+    if env.get("WSLENV"):
+        new_env["WSLENV"] = env["WSLENV"]
+    for key in _LIST_KEYS:
+        if config[key]:
+            new_env[key] = config[key]
 
     data["mcpServers"]["voicemode"]["env"] = new_env
 
     with open(claude_json, "w") as f:
         json.dump(data, f, indent=2)
 
-    # Build status summary
-    stt_label = "Local Whisper" if new_env.get("STT_BASE_URL") else "OpenAI (cloud)"
-    tts_url = new_env.get("TTS_BASE_URL", "")
-    if "8880" in tts_url:
-        tts_label = "Kokoro (local)"
-    elif "8881" in tts_url:
-        tts_label = "Piper (local)"
-    else:
-        tts_label = "OpenAI (cloud)"
-    voice = new_env.get("TTS_VOICE", "(default)")
+    tts = config["VOICEMODE_TTS_BASE_URLS"]
+    stt = config["VOICEMODE_STT_BASE_URLS"]
+
+    def label(urls):
+        parts = []
+        if "8880" in urls:
+            parts.append("Kokoro")
+        if "8881" in urls:
+            parts.append("Piper")
+        if "2022" in urls:
+            parts.append("Whisper")
+        if "openai.com" in urls:
+            parts.append("OpenAI")
+        return " -> ".join(parts) if parts else "(none)"
 
     return (
         f"Switched to {mode} mode: {config['description']}\n\n"
-        f"Current config:\n"
-        f"  STT: {stt_label}\n"
-        f"  TTS: {tts_label}\n"
-        f"  Voice: {voice}\n\n"
+        f"Current config (priority order):\n"
+        f"  STT: {label(stt)}\n"
+        f"  TTS: {label(tts)}\n"
+        f"  Default voice: {config['VOICEMODE_VOICES']}\n\n"
         f"Settings updated in ~/.claude.json.\n"
         f"Please restart Claude Code for changes to take effect."
     )
