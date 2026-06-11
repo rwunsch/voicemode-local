@@ -64,6 +64,16 @@ if [ -f "$SCRIPT_DIR/patch_converse_cancel.py" ]; then
     "$PYBIN" "$SCRIPT_DIR/patch_converse_cancel.py" "$VM_DIR/tools/converse.py"
 fi
 
+# Never truncate active speech at listen_duration_max: once the user has
+# started speaking, the listen window extends until the normal silence exit
+# (bounded by VOICEMODE_LISTEN_OVERRUN). See patch_listen_overrun.py.
+if [ -f "$SCRIPT_DIR/patch_listen_overrun.py" ]; then
+    PYBIN="$VENV_DIR/bin/python"
+    [ -x "$PYBIN" ] || PYBIN="$VENV_DIR/Scripts/python.exe"
+    [ -x "$PYBIN" ] || PYBIN="python3"
+    "$PYBIN" "$SCRIPT_DIR/patch_listen_overrun.py" "$VM_DIR/tools/converse.py"
+fi
+
 # Apply the "no silent OpenAI voice swap" patch to simple_failover.py.
 if [ -f "$SCRIPT_DIR/patch_simple_failover.py" ]; then
     PYBIN="$VENV_DIR/bin/python"
