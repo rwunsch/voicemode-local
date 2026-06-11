@@ -51,6 +51,15 @@ IN_EXCHANGE_MAX = float(os.getenv("VOICEMODE_QUEUE_IN_EXCHANGE_MAX", "180"))  # 
 LISTEN_CAP = float(os.getenv("VOICEMODE_QUEUE_LISTEN_CAP", "8"))  # seconds
 DEFAULT_BASE = Path.home() / ".voicemode"
 
+# Per-session human label: Claude writes a short name to
+# <base>/session_names/<CLAUDE_CODE_SESSION_ID>.txt at voice-mode start so
+# concurrent sessions in the same repo are distinguishable on handoff. The MCP
+# server inherits its launching session's CLAUDE_CODE_SESSION_ID, so it reads
+# the same file. session_project() resolves env → this file → folder name.
+SESSION_NAMES_DIR = "session_names"
+SESSION_NAME_MAX_AGE = float(
+    os.getenv("VOICEMODE_SESSION_NAME_MAX_AGE", str(7 * 24 * 3600)))  # seconds
+
 FLOOR_NAME = "floor.json"
 
 # Structured per-session logging — one JSONL line per queue event, appended to
@@ -422,8 +431,48 @@ HEARTBEAT_INTERVAL = 10.0  # seconds: call-scoped floor heartbeat cadence
 _process_lock = asyncio.Lock()
 
 
-def session_project() -> str:
-    return os.getenv("VOICEMODE_SESSION_NAME") or Path(os.getcwd()).name
+def _gc_session_names(base: Path) -> None:
+    """Best-effort: drop label files older than SESSION_NAME_MAX_AGE so the
+    directory doesn't accumulate one file per historical session. Never raises."""
+    try:
+        d = base / SESSION_NAMES_DIR
+        if not d.is_dir():
+            return
+        cutoff = time.time() - SESSION_NAME_MAX_AGE
+        for f in d.glob("*.txt"):
+            try:
+                if f.stat().st_mtime < cutoff:
+                    f.unlink(missing_ok=True)
+            except OSError:
+                pass
+    except Exception:
+        pass
+
+
+def session_project(base: Optional[Path] = None) -> str:
+    """Resolve this session's voice label.
+
+    1. VOICEMODE_SESSION_NAME env (explicit / launch-time override) — wins.
+    2. <base>/session_names/<CLAUDE_CODE_SESSION_ID>.txt — the label Claude
+       wrote at voice-mode start; the MCP server inherited the same session id
+       at spawn, so it keys on its own CLAUDE_CODE_SESSION_ID.
+    3. cwd folder name (previous behaviour).
+    File read is best-effort and never raises into the voice path.
+    """
+    name = os.getenv("VOICEMODE_SESSION_NAME")
+    if name and name.strip():
+        return name.strip()
+    sid = os.getenv("CLAUDE_CODE_SESSION_ID")
+    if sid:
+        base = Path(base) if base else DEFAULT_BASE
+        _gc_session_names(base)
+        try:
+            label = (base / SESSION_NAMES_DIR / f"{sid}.txt").read_text().strip()
+            if label:
+                return label
+        except OSError:
+            pass
+    return Path(os.getcwd()).name
 
 
 def voice_short_name(voice: Optional[str]) -> str:
@@ -446,7 +495,7 @@ class QueueSession:
     def __init__(self, project: Optional[str] = None,
                  voice: Optional[str] = None, base: Optional[Path] = None):
         self.base = Path(base) if base else DEFAULT_BASE
-        self.project = project or session_project()
+        self.project = project or session_project(self.base)
         self.voice = voice or "default"
         self._hb_task: Optional[asyncio.Task] = None
         self._acquired = False
