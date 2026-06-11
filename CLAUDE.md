@@ -26,6 +26,20 @@ When starting a voice conversation via `/voicemode:converse`, offer voice select
 
 Pass the selected voice as the `voice` parameter on every `mcp__voicemode__converse` call for that session.
 
+**Also set a session label** so concurrent voice sessions are distinguishable when they
+hand off the mic. At voice-mode start, derive a short 1–3 word label for what this session
+is about (e.g. `queue-naming`, `windows-port`); fall back to the repo name if nothing
+specific stands out. Write it once:
+
+```bash
+mkdir -p ~/.voicemode/session_names && \
+  printf '%s' '<label>' > ~/.voicemode/session_names/"$CLAUDE_CODE_SESSION_ID".txt
+```
+
+This label is what a session announces on handoff ("This is <label>, <voice> —") and is
+spoken only when another session is waiting. If the user later says "call this session X",
+rewrite the file with the new label — it takes effect on the next exchange, no restart.
+
 ## Switching Voices Mid-Conversation
 
 If the user asks to change voice during a conversation, switch the `voice` parameter on the next `mcp__voicemode__converse` call. Acknowledge the switch briefly.
