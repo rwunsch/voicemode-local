@@ -53,6 +53,17 @@ if [ -f "$SCRIPT_DIR/patch_converse_queue.py" ]; then
     "$PYBIN" "$SCRIPT_DIR/patch_converse_queue.py" "$VM_DIR/tools/converse.py"
 fi
 
+# Re-raise client cancellations in converse.py. Upstream 8.7.1 swallows
+# CancelledError and returns a result; under fastmcp 3.x/mcp>=1.26 that
+# double-responds and kills the MCP server (next call: -32000 Connection
+# closed). See patch_converse_cancel.py for details.
+if [ -f "$SCRIPT_DIR/patch_converse_cancel.py" ]; then
+    PYBIN="$VENV_DIR/bin/python"
+    [ -x "$PYBIN" ] || PYBIN="$VENV_DIR/Scripts/python.exe"
+    [ -x "$PYBIN" ] || PYBIN="python3"
+    "$PYBIN" "$SCRIPT_DIR/patch_converse_cancel.py" "$VM_DIR/tools/converse.py"
+fi
+
 # Apply the "no silent OpenAI voice swap" patch to simple_failover.py.
 if [ -f "$SCRIPT_DIR/patch_simple_failover.py" ]; then
     PYBIN="$VENV_DIR/bin/python"
