@@ -666,6 +666,93 @@ def test_in_exchange_dead_holder_still_claimable(tmp_path):
     assert voice_queue.try_claim_floor(tmp_path, "thief", "v") is True
 
 
+# ---------- wall-clock wedge bound (2026-06-14 starved-queue fix) ----------
+# Root cause: a converse coroutine wedged mid-exchange (a recording loop that
+# never returns) while the event loop stayed ALIVE. The call-scoped heartbeat
+# kept refreshing last_activity every HEARTBEAT_INTERVAL, so the IN_EXCHANGE_MAX
+# staleness bound never tripped and the floor was held 9+ min, starving two FIFO
+# waiters. Fix: EXCHANGE_WEDGE_MAX bounds a single in_exchange period by
+# wall-clock (exchange_started), independent of heartbeat freshness.
+
+def test_live_loop_wedged_holder_reclaimable_despite_fresh_heartbeat(tmp_path):
+    """in_exchange holder with FRESH last_activity (loop alive, heartbeat running)
+    but exchange_started past EXCHANGE_WEDGE_MAX is wedged -> reclaimable."""
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        st = voice_queue.process_start_time(proc.pid)
+        voice_queue._write_json_atomic(tmp_path / "floor.json", {
+            "pid": proc.pid, "start_time": st, "project": "p", "voice": "v",
+            "acquired": "now", "last_activity": time.time(),  # heartbeat fresh
+            "in_exchange": True,
+            "exchange_started": time.time() - voice_queue.EXCHANGE_WEDGE_MAX - 1})
+        floor = voice_queue._read_json(tmp_path / "floor.json")
+        assert voice_queue.floor_is_live(floor) is False
+        assert voice_queue.try_claim_floor(tmp_path, "thief", "v") is True
+    finally:
+        proc.kill()
+        proc.wait()
+
+
+def test_healthy_long_exchange_within_wedge_bound_stays_live(tmp_path):
+    """A genuinely long but healthy single exchange (exchange_started within
+    EXCHANGE_WEDGE_MAX, heartbeat fresh) is NOT reclaimed."""
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        st = voice_queue.process_start_time(proc.pid)
+        voice_queue._write_json_atomic(tmp_path / "floor.json", {
+            "pid": proc.pid, "start_time": st, "project": "p", "voice": "v",
+            "acquired": "now", "last_activity": time.time(),
+            "in_exchange": True,
+            "exchange_started": time.time() - voice_queue.EXCHANGE_WEDGE_MAX + 30})
+        floor = voice_queue._read_json(tmp_path / "floor.json")
+        assert voice_queue.floor_is_live(floor) is True
+        assert voice_queue.try_claim_floor(tmp_path, "thief", "v") is False
+    finally:
+        proc.kill()
+        proc.wait()
+
+
+def test_legacy_floor_without_exchange_started_uses_staleness_only(tmp_path):
+    """A pre-upgrade floor.json lacking exchange_started must not be falsely
+    reclaimed by the wall-clock bound — fall back to staleness liveness."""
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        st = voice_queue.process_start_time(proc.pid)
+        voice_queue._write_json_atomic(tmp_path / "floor.json", {
+            "pid": proc.pid, "start_time": st, "project": "p", "voice": "v",
+            "acquired": "now", "last_activity": time.time(),
+            "in_exchange": True})  # no exchange_started
+        floor = voice_queue._read_json(tmp_path / "floor.json")
+        assert voice_queue.floor_is_live(floor) is True
+    finally:
+        proc.kill()
+        proc.wait()
+
+
+def test_claim_stamps_exchange_started(tmp_path):
+    """Fresh claim records exchange_started for the wedge bound."""
+    assert voice_queue.try_claim_floor(tmp_path, "p", "v") is True
+    floor = voice_queue._read_json(tmp_path / "floor.json")
+    assert isinstance(floor.get("exchange_started"), (int, float))
+
+
+def test_heartbeat_in_exchange_true_resets_exchange_started(tmp_path):
+    """Each converse call's burst-continuation heartbeat(in_exchange=True) starts
+    a fresh wedge window; in_exchange=False / None leaves it untouched."""
+    voice_queue.try_claim_floor(tmp_path, "p", "v")
+    voice_queue._write_json_atomic(tmp_path / "floor.json", {
+        **voice_queue._read_json(tmp_path / "floor.json"),
+        "exchange_started": time.time() - 1000})
+    # in_exchange=None must not touch the timer
+    voice_queue.heartbeat_floor(tmp_path)
+    assert voice_queue._read_json(tmp_path / "floor.json")["exchange_started"] \
+        < time.time() - 500
+    # in_exchange=True resets it to now
+    voice_queue.heartbeat_floor(tmp_path, in_exchange=True)
+    assert voice_queue._read_json(tmp_path / "floor.json")["exchange_started"] \
+        > time.time() - 5
+
+
 def test_claim_marks_in_exchange(tmp_path):
     """Claiming the floor means a converse exchange is starting."""
     assert voice_queue.try_claim_floor(tmp_path, "p", "v") is True

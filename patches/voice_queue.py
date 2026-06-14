@@ -38,11 +38,21 @@ CHECK_INTERVAL = float(os.getenv("VOICEMODE_QUEUE_CHECK_INTERVAL", "0.5"))  # se
 TICKET_STALE = float(os.getenv("VOICEMODE_QUEUE_TICKET_STALE", "30"))  # seconds
 # Upper bound on how long an in-exchange floor stays live without a heartbeat
 # refresh. in_exchange keeps the floor live through a long TTS turn that blocks
-# the event loop (so the heartbeat can't run), but a process that is alive yet
-# WEDGED (loop stuck forever) must not hold the floor permanently. Beyond this,
-# the holder is treated as wedged and the floor becomes reclaimable. Must exceed
-# the longest legitimate single call (TTS + listen_duration_max + STT).
+# the event loop (so the heartbeat can't run), but a process whose loop is stuck
+# forever must not hold the floor permanently. Past this staleness the holder is
+# treated as loop-WEDGED and the floor becomes reclaimable.
 IN_EXCHANGE_MAX = float(os.getenv("VOICEMODE_QUEUE_IN_EXCHANGE_MAX", "180"))  # seconds
+# Wall-clock ceiling on a SINGLE in-exchange period, measured from exchange_started
+# (reset at the top of every converse call) — independent of heartbeat freshness.
+# IN_EXCHANGE_MAX only fires when the loop is BLOCKED (heartbeat starved, so
+# last_activity ages). The complementary failure is a LIVE loop whose converse
+# coroutine is wedged (e.g. a recording loop that never returns): the background
+# heartbeat keeps refreshing last_activity every HEARTBEAT_INTERVAL, so staleness
+# never accumulates and the floor would starve waiters forever (observed 2026-06-14
+# — a hung listen held the floor 9+ min while two sessions queued). This bound caps
+# such a holder. Must exceed the longest legitimate single call (TTS playback +
+# listen_duration_max + STT), hence comfortably above IN_EXCHANGE_MAX.
+EXCHANGE_WEDGE_MAX = float(os.getenv("VOICEMODE_QUEUE_EXCHANGE_WEDGE_MAX", "240"))  # seconds
 # When other sessions are waiting, how long a holder will LISTEN to a SILENT
 # user before yielding the mic (no-speech timeout), so it doesn't grip the
 # floor for the full listen_duration_max while others queue. Applies ONLY while
@@ -298,9 +308,19 @@ def floor_is_live(data: dict) -> bool:
         return False
     age = time.time() - data.get("last_activity", 0)
     if data.get("in_exchange"):
-        # Live through a long (loop-blocking) TTS turn, but not forever: a
-        # wedged-but-alive holder past IN_EXCHANGE_MAX is reclaimable.
-        return age <= IN_EXCHANGE_MAX
+        # Live through a long (loop-blocking) TTS turn, but not forever. Two
+        # independent wedge bounds — EITHER tripping makes the floor reclaimable:
+        #   1. staleness: no heartbeat for IN_EXCHANGE_MAX -> the event loop is
+        #      BLOCKED (sd write) and can't run the beat task.
+        #   2. wall-clock: this single exchange has run past EXCHANGE_WEDGE_MAX ->
+        #      the loop is alive (heartbeat keeps last_activity fresh) but the
+        #      converse coroutine is wedged, so staleness never accumulates.
+        if age > IN_EXCHANGE_MAX:
+            return False
+        started = data.get("exchange_started")
+        if started is not None and time.time() - started > EXCHANGE_WEDGE_MAX:
+            return False
+        return True
     return age <= QUEUE_GRACE
 
 
@@ -360,6 +380,7 @@ def try_claim_floor(base: Path, project: str, voice: str) -> bool:
         "acquired_epoch": time.time(),  # hold-start for MAX_HOLD; fixed across a burst
         "last_activity": time.time(),
         "in_exchange": True,  # claimed inside a converse call about to do audio
+        "exchange_started": time.time(),  # wall-clock start of this exchange (EXCHANGE_WEDGE_MAX)
     }
     tmp = base / f"floor.tmp.{os.getpid()}.{uuid.uuid4().hex}"
     tmp.write_text(json.dumps(me, indent=2))
@@ -395,6 +416,11 @@ def heartbeat_floor(base: Path, in_exchange: Optional[bool] = None) -> bool:
     data["last_activity"] = time.time()
     if in_exchange is not None:
         data["in_exchange"] = in_exchange
+        # Entering an exchange (re)starts its wall-clock wedge timer. Burst
+        # continuation calls heartbeat_floor(in_exchange=True) at the top of each
+        # converse call, so each fresh call gets a fresh EXCHANGE_WEDGE_MAX window.
+        if in_exchange:
+            data["exchange_started"] = data["last_activity"]
     _write_json_atomic(fpath, data)
     return True
 
