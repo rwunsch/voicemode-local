@@ -76,7 +76,13 @@ class PiperProxyHandler(BaseHTTPRequestHandler):
             })
         elif self.path == "/v1/audio/voices":
             voices = self.voices_config.get("voices", [])
-            self._json_response({"object": "list", "data": voices})
+            # Emit BOTH shapes: "data" for OpenAI-style clients, and "voices"
+            # for voice-mode's discovery probe (voice_mode/voices.py only
+            # accepts a {"voices": [...]} wrapper or a bare list — an
+            # {"object","data"} envelope is rejected as "malformed", which
+            # silently hides every Piper voice from the voice://voices
+            # resource and makes callers fall back to OpenAI for German).
+            self._json_response({"object": "list", "data": voices, "voices": voices})
         else:
             self.send_error(404, "Not Found")
 
