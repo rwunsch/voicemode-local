@@ -15,17 +15,49 @@ import argparse
 import json
 import os
 import pathlib
+import shutil
 import subprocess
+import sys
 import tempfile
 import urllib.request
 import urllib.error
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 
+def resolve_piper_bin():
+    """Locate the piper executable without relying on the launcher's PATH.
+
+    The proxy is auto-started by voicemode-mcp from Claude Code's MCP
+    environment, whose PATH does not include this project's .venv/bin. Trusting
+    a bare "piper" on PATH therefore fails with FileNotFoundError. Resolve it
+    explicitly, in priority order, falling back to "piper" so the original
+    error message still surfaces if nothing is found.
+    """
+    # 1. Explicit override
+    env_bin = os.environ.get("PIPER_BIN")
+    if env_bin and os.path.exists(env_bin):
+        return env_bin
+    # 2. On PATH (works when launched from an activated venv / proper shell)
+    found = shutil.which("piper")
+    if found:
+        return found
+    # 3. The venv that sits next to this script (the canonical install spot)
+    script_dir = pathlib.Path(__file__).resolve().parent
+    cand = script_dir / ".venv" / "bin" / "piper"
+    if cand.exists():
+        return str(cand)
+    # 4. Alongside the python interpreter running us (venv python case)
+    cand = pathlib.Path(sys.executable).resolve().parent / "piper"
+    if cand.exists():
+        return str(cand)
+    return "piper"
+
+
 class PiperProxyHandler(BaseHTTPRequestHandler):
 
     voices_config = {}
     models_dir = pathlib.Path("models/piper")
+    piper_bin = "piper"
 
     def do_GET(self):
         if self.path == "/health":
@@ -96,7 +128,7 @@ class PiperProxyHandler(BaseHTTPRequestHandler):
                 tmp_path = tmp.name
 
             result = subprocess.run(
-                ["piper", "--model", str(model_path), "--output_file", tmp_path],
+                [self.piper_bin, "--model", str(model_path), "--output_file", tmp_path],
                 input=text.encode(),
                 capture_output=True,
                 timeout=60,
@@ -109,7 +141,11 @@ class PiperProxyHandler(BaseHTTPRequestHandler):
             with open(tmp_path, "rb") as f:
                 wav_bytes = f.read()
         except FileNotFoundError:
-            self.send_error(500, "piper CLI not found - install piper-tts")
+            self.send_error(
+                500,
+                f"piper CLI not found at '{self.piper_bin}' - install piper-tts "
+                "(pip install piper-tts) or set PIPER_BIN",
+            )
             return
         except subprocess.TimeoutExpired:
             self.send_error(500, "piper timed out")
@@ -210,11 +246,13 @@ def main():
 
     PiperProxyHandler.voices_config = voices_config
     PiperProxyHandler.models_dir = models_dir
+    PiperProxyHandler.piper_bin = resolve_piper_bin()
 
     server = HTTPServer(("127.0.0.1", args.port), PiperProxyHandler)
     print(f"[piper-proxy] Listening on http://127.0.0.1:{args.port}")
     print(f"[piper-proxy] Voices file: {voices_path}")
     print(f"[piper-proxy] Models dir:  {models_dir}")
+    print(f"[piper-proxy] Piper binary: {PiperProxyHandler.piper_bin}")
     print(f"[piper-proxy] OpenAI endpoint: POST /v1/audio/speech")
     try:
         server.serve_forever()
