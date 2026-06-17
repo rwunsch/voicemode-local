@@ -18,6 +18,16 @@ set -euo pipefail
 CLAUDE_JSON="$HOME/.claude.json"
 # Resolve symlinks to find the real project directory
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+# Python from the project venv. Proxies that import heavy deps (piper-tts,
+# kokoro-onnx) MUST run under this, NOT the ambient `python3`. When a proxy is
+# auto-started from Claude Code's MCP environment, bare `python3` resolves to a
+# system/linuxbrew interpreter WITHOUT those packages — piper-proxy then falls
+# back to spawning the piper CLI, which reloads its 100MB+ model on every
+# request (~7-34s), blowing past voice-mode's client timeout and silently
+# routing German to OpenAI (English voice). The venv python enables the warm
+# in-process path (~0.5s/request).
+VENV_PY="$SCRIPT_DIR/.venv/bin/python"
+[ -x "$VENV_PY" ] || VENV_PY="python3"
 COMPOSE_FILE="$SCRIPT_DIR/docker-compose.yml"
 PROXY_PID_FILE="/tmp/whisper-proxy.pid"
 CONFIG_FILE="$HOME/.voicemode-local/config"
@@ -243,7 +253,7 @@ cmd_ensure() {
             8880)
                 if is_kokoro_onnx; then
                     start_detached kokoro-onnx-server /tmp/kokoro-onnx-server.pid \
-                        python3 "$SCRIPT_DIR/kokoro-onnx-server.py" --port 8880 \
+                        "$VENV_PY" "$SCRIPT_DIR/kokoro-onnx-server.py" --port 8880 \
                         --model-dir "$SCRIPT_DIR/models/kokoro"
                 else
                     docker_compose_cmd up -d > /dev/null 2>&1 || true
@@ -251,7 +261,7 @@ cmd_ensure() {
                 [ -n "$quiet" ] || echo "  ensured Kokoro (8880)" ;;
             8881)
                 start_detached piper-proxy /tmp/piper-proxy.pid \
-                    python3 "$SCRIPT_DIR/piper-proxy.py" --port 8881 \
+                    "$VENV_PY" "$SCRIPT_DIR/piper-proxy.py" --port 8881 \
                     --voices-file "$SCRIPT_DIR/voices/piper-voices.json" \
                     --models-dir "$SCRIPT_DIR/models/piper"
                 [ -n "$quiet" ] || echo "  ensured Piper (8881)" ;;
@@ -292,7 +302,7 @@ cmd_start() {
                 kill "$(lsof -ti:8880)" 2>/dev/null
                 sleep 1
             fi
-            nohup python3 "$SCRIPT_DIR/kokoro-onnx-server.py" --port 8880 \
+            nohup "$VENV_PY" "$SCRIPT_DIR/kokoro-onnx-server.py" --port 8880 \
                 --model-dir "$SCRIPT_DIR/models/kokoro" \
                 > /tmp/kokoro-onnx-server.log 2>&1 &
             echo $! > "$KOKORO_ONNX_PID_FILE"
@@ -340,7 +350,7 @@ cmd_start() {
     if [ -f "$PIPER_PID_FILE" ] && kill -0 "$(cat "$PIPER_PID_FILE")" 2>/dev/null; then
         warn "Piper proxy already running (PID $(cat "$PIPER_PID_FILE"))"
     else
-        nohup python3 "$SCRIPT_DIR/piper-proxy.py" --port 8881 \
+        nohup "$VENV_PY" "$SCRIPT_DIR/piper-proxy.py" --port 8881 \
             --voices-file "$SCRIPT_DIR/voices/piper-voices.json" \
             --models-dir "$SCRIPT_DIR/models/piper" \
             > /tmp/piper-proxy.log 2>&1 &

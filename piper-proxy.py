@@ -53,6 +53,45 @@ def resolve_piper_bin():
     return "piper"
 
 
+# Warm cache of loaded PiperVoice models, keyed by model path. Loading the
+# ONNX model is the expensive part (thorsten-high is ~114MB). A fresh `piper`
+# CLI subprocess reloads it on EVERY request — ~7s cold start even for "Guten
+# Tag." — which blows past voice-mode's ~30s client timeout on longer text and
+# silently triggers a fallback to OpenAI (German spoken with an English voice).
+# Keeping the model resident makes warm synthesis sub-second.
+_VOICE_CACHE = {}
+
+
+def load_piper_voice(model_path):
+    """Return a cached in-process PiperVoice for model_path.
+
+    Loads once, then reuses. Returns None if the piper Python API is not
+    importable, so the caller falls back to the CLI path.
+    """
+    key = str(model_path)
+    cached = _VOICE_CACHE.get(key)
+    if cached is not None:
+        return cached
+    try:
+        from piper import PiperVoice
+    except Exception:
+        return None
+    voice = PiperVoice.load(str(model_path))
+    _VOICE_CACHE[key] = voice
+    return voice
+
+
+def synthesize_wav_bytes(voice, text):
+    """Synthesize text to WAV bytes using a loaded PiperVoice (in-process)."""
+    import io
+    import wave
+
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as wav_file:
+        voice.synthesize_wav(text, wav_file)
+    return buf.getvalue()
+
+
 class PiperProxyHandler(BaseHTTPRequestHandler):
 
     voices_config = {}
@@ -127,7 +166,34 @@ class PiperProxyHandler(BaseHTTPRequestHandler):
                 self.send_error(502, f"Failed to download model: {e}")
                 return
 
-        # Run piper CLI
+        # Synthesize. Prefer the in-process piper Python API (model stays warm
+        # across requests); fall back to the CLI only if the API is unavailable.
+        voice = load_piper_voice(model_path)
+        if voice is not None:
+            try:
+                wav_bytes = synthesize_wav_bytes(voice, text)
+            except Exception as e:
+                self.send_error(500, f"piper synthesis failed: {str(e)[:200]}")
+                return
+        else:
+            wav_bytes = self._synthesize_cli(model_path, text)
+            if wav_bytes is None:
+                return  # error already sent by _synthesize_cli
+
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", "audio/wav")
+            self.send_header("Content-Length", str(len(wav_bytes)))
+            self.end_headers()
+            self.wfile.write(wav_bytes)
+        except BrokenPipeError:
+            # Client (voice-mode) gave up before we finished writing. Nothing to
+            # recover — just don't crash the handler with a traceback.
+            print("[piper-proxy] client closed connection before audio sent")
+
+    def _synthesize_cli(self, model_path, text):
+        """Fallback: shell out to the piper CLI. Returns WAV bytes, or None
+        after sending an error response."""
         tmp_path = None
         try:
             with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
@@ -142,29 +208,23 @@ class PiperProxyHandler(BaseHTTPRequestHandler):
 
             if result.returncode != 0:
                 self.send_error(500, f"piper failed: {result.stderr.decode()[:200]}")
-                return
+                return None
 
             with open(tmp_path, "rb") as f:
-                wav_bytes = f.read()
+                return f.read()
         except FileNotFoundError:
             self.send_error(
                 500,
                 f"piper CLI not found at '{self.piper_bin}' - install piper-tts "
                 "(pip install piper-tts) or set PIPER_BIN",
             )
-            return
+            return None
         except subprocess.TimeoutExpired:
             self.send_error(500, "piper timed out")
-            return
+            return None
         finally:
             if tmp_path and os.path.exists(tmp_path):
                 os.unlink(tmp_path)
-
-        self.send_response(200)
-        self.send_header("Content-Type", "audio/wav")
-        self.send_header("Content-Length", str(len(wav_bytes)))
-        self.end_headers()
-        self.wfile.write(wav_bytes)
 
     def _download_model(self, piper_model, model_path):
         """Download .onnx and .onnx.json from HuggingFace rhasspy/piper-voices.
@@ -260,6 +320,26 @@ def main():
     print(f"[piper-proxy] Models dir:  {models_dir}")
     print(f"[piper-proxy] Piper binary: {PiperProxyHandler.piper_bin}")
     print(f"[piper-proxy] OpenAI endpoint: POST /v1/audio/speech")
+
+    # Pre-warm the default voice so the FIRST request isn't a cold model load
+    # (which would time out the caller and trigger an OpenAI fallback).
+    default_voice = voices_config.get("default_voice", "")
+    default_entry = next(
+        (v for v in voices_config.get("voices", []) if v["id"] == default_voice),
+        None,
+    )
+    if default_entry is not None:
+        model_path = models_dir / f"{default_entry['piper_model']}.onnx"
+        if model_path.exists():
+            print(f"[piper-proxy] Pre-warming default voice '{default_voice}'...")
+            try:
+                if load_piper_voice(model_path) is not None:
+                    print(f"[piper-proxy] Default voice warm.")
+                else:
+                    print("[piper-proxy] piper Python API unavailable; using CLI per request.")
+            except Exception as e:
+                print(f"[piper-proxy] Pre-warm failed ({e}); will load on first request.")
+
     try:
         server.serve_forever()
     except KeyboardInterrupt:
