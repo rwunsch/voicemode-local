@@ -889,10 +889,23 @@ def force_reset(base: Optional[Path] = None) -> str:
                 n_tickets += 1
             except OSError:
                 pass
+    # Also clear the audio-device token — a wedged holder owns BOTH, and leaving
+    # the token would make the next speaker wait out AUDIO_TOKEN_WAIT for nothing.
+    apath = _audio_path(base)
+    audio = _read_json(apath)
+    audio_who = ""
+    if apath.exists():
+        try:
+            apath.unlink()
+            audio_who = (f"; cleared audio device (was: "
+                         f"{audio.get('project', '?')}/{audio.get('voice', '?')} "
+                         f"pid {audio.get('pid')})") if audio else "; cleared audio device"
+        except OSError:
+            pass
     who = (f"{floor.get('project', '?')}/{floor.get('voice', '?')} "
            f"(pid {floor.get('pid')})") if floor else "none"
     return (f"floor reset: cleared floor (was: {who}) and {n_tickets} "
-            f"queued ticket(s). Channel is now free.")
+            f"queued ticket(s){audio_who}. Channel is now free.")
 
 
 def print_status(base: Optional[Path] = None) -> None:
