@@ -284,6 +284,9 @@ class PiperProxyHandler(BaseHTTPRequestHandler):
 def main():
     parser = argparse.ArgumentParser(description="Piper OpenAI-compatible TTS proxy")
     parser.add_argument("--port", type=int, default=8881, help="Port to listen on (default: 8881)")
+    # Bind 0.0.0.0 so the proxy is reachable from Windows via localhost under WSL
+    # NAT + localhostForwarding (a 127.0.0.1 bind is only reachable inside WSL).
+    parser.add_argument("--host", default="0.0.0.0", help="Address to bind (default: 0.0.0.0)")
     parser.add_argument(
         "--voices-file",
         default="voices/piper-voices.json",
@@ -314,8 +317,8 @@ def main():
     PiperProxyHandler.models_dir = models_dir
     PiperProxyHandler.piper_bin = resolve_piper_bin()
 
-    server = HTTPServer(("127.0.0.1", args.port), PiperProxyHandler)
-    print(f"[piper-proxy] Listening on http://127.0.0.1:{args.port}")
+    server = HTTPServer((args.host, args.port), PiperProxyHandler)
+    print(f"[piper-proxy] Listening on http://{args.host}:{args.port}")
     print(f"[piper-proxy] Voices file: {voices_path}")
     print(f"[piper-proxy] Models dir:  {models_dir}")
     print(f"[piper-proxy] Piper binary: {PiperProxyHandler.piper_bin}")

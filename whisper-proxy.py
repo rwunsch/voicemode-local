@@ -176,6 +176,9 @@ class WhisperProxyHandler(BaseHTTPRequestHandler):
 def main():
     parser = argparse.ArgumentParser(description="Whisper OpenAI-compatible proxy")
     parser.add_argument("--port", type=int, default=2022, help="Port to listen on (default: 2022)")
+    # Bind 0.0.0.0 so the proxy is reachable from Windows via localhost under WSL
+    # NAT + localhostForwarding (a 127.0.0.1 bind is only reachable inside WSL).
+    parser.add_argument("--host", default="0.0.0.0", help="Address to bind (default: 0.0.0.0)")
     parser.add_argument(
         "--whisper-url",
         default="http://127.0.0.1:9000",
@@ -184,8 +187,8 @@ def main():
     args = parser.parse_args()
 
     WhisperProxyHandler.whisper_url = args.whisper_url
-    server = HTTPServer(("127.0.0.1", args.port), WhisperProxyHandler)
-    print(f"[whisper-proxy] Listening on http://127.0.0.1:{args.port}")
+    server = HTTPServer((args.host, args.port), WhisperProxyHandler)
+    print(f"[whisper-proxy] Listening on http://{args.host}:{args.port}")
     print(f"[whisper-proxy] Forwarding to {args.whisper_url}/asr")
     print(f"[whisper-proxy] OpenAI endpoint: POST /v1/audio/transcriptions")
     try:
