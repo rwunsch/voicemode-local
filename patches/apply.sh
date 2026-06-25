@@ -74,6 +74,17 @@ if [ -f "$SCRIPT_DIR/patch_listen_overrun.py" ]; then
     "$PYBIN" "$SCRIPT_DIR/patch_listen_overrun.py" "$VM_DIR/tools/converse.py"
 fi
 
+# Root fix for the issue-#5 recording hang: bound the VAD capture loop by a
+# wall-clock frame-arrival gap so a starved audio callback (WSLg capture hang)
+# ends the recording instead of looping forever and wedging the converse.
+# Builds on the overrun patch's loop structure, so it runs after it.
+if [ -f "$SCRIPT_DIR/patch_listen_stall.py" ]; then
+    PYBIN="$VENV_DIR/bin/python"
+    [ -x "$PYBIN" ] || PYBIN="$VENV_DIR/Scripts/python.exe"
+    [ -x "$PYBIN" ] || PYBIN="python3"
+    "$PYBIN" "$SCRIPT_DIR/patch_listen_stall.py" "$VM_DIR/tools/converse.py"
+fi
+
 # Force-exit voice-mode on shutdown so a mid-playback audio stream can't keep
 # the process alive as an orphan holding its WSLg RDPSink sink-input — the cause
 # of the "two streams mixing -> stutter + stale trailing audio" failure on WSL.
