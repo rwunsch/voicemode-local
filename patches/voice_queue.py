@@ -470,143 +470,9 @@ def release_floor(base: Path) -> None:
     snap.unlink(missing_ok=True)
 
 
-# ---------- cross-process AUDIO TOKEN (physical-device exclusivity) ----------
-# The floor serializes who may SPEAK, but on WSL all sessions share one PulseAudio
-# RDPSink with a ~1s+ tunnel buffer, so two processes opening output streams close
-# together overlap acoustically -> stutter (observed 2026-06-25: a wedged holder
-# plus sessions taking turns on a reclaimable floor produced 3 concurrent streams).
-# The audio token is a second, NARROWER guard layered under the floor: a process
-# acquires it right after taking the floor and releases it at finish(), so only one
-# voice-mode at a time holds the audio device — independent of any floor race. It is
-# self-limiting: a holder that wedges past AUDIO_TOKEN_MAX is reclaimable (can't
-# deadlock the device), and a waiter only blocks up to AUDIO_TOKEN_WAIT before it
-# proceeds anyway (it already owns the floor, so it is the rightful speaker).
-AUDIO_TOKEN_NAME = "audio.token"
-# Max a token stays valid without release — must exceed the longest legit single
-# converse (TTS + listen_duration_max + STT); past it the holder is wedged and the
-# device is reclaimable. Mirrors IN_EXCHANGE_MAX.
-AUDIO_TOKEN_MAX = float(os.getenv("VOICEMODE_AUDIO_TOKEN_MAX", "180"))  # seconds
-# How long a floor-owner waits for the previous holder's token (and its RDP-buffer
-# drain) to clear before proceeding regardless. Covers the ~1.3s tunnel drain.
-AUDIO_TOKEN_WAIT = float(os.getenv("VOICEMODE_AUDIO_TOKEN_WAIT", "3"))  # seconds
-
-
-def _audio_path(base: Path) -> Path:
-    return base / AUDIO_TOKEN_NAME
-
-
-def audio_token_is_live(data: dict) -> bool:
-    """A token is live iff its holder exists (same incarnation) AND has held it
-    less than AUDIO_TOKEN_MAX — so a wedged holder can never own the device
-    forever."""
-    if not pid_alive(data.get("pid"), data.get("start_time")):
-        return False
-    return time.time() - data.get("acquired_epoch", 0) <= AUDIO_TOKEN_MAX
-
-
-def try_acquire_audio(base: Path, project: str, voice: str) -> bool:
-    """One atomic attempt to take the audio token. True iff we now hold it.
-
-    Idempotent: if we already hold it, refresh acquired_epoch and return True.
-    Same claim protocol as try_claim_floor (rename-aside-verify + os.link)."""
-    base.mkdir(parents=True, exist_ok=True)
-    apath = _audio_path(base)
-
-    for orphan in base.glob("audio.token.*"):
-        try:
-            if time.time() - orphan.stat().st_mtime > 60:
-                orphan.unlink()
-        except OSError:
-            pass
-
-    data = _read_json(apath)
-    if (data is not None and data.get("pid") == os.getpid()
-            and data.get("start_time") == process_start_time(os.getpid())):
-        data["acquired_epoch"] = time.time()  # refresh our own hold
-        _write_json_atomic(apath, data)
-        return True
-    if data is not None and audio_token_is_live(data):
-        return False  # someone else holds a live token
-
-    if apath.exists():
-        stale = base / f"audio.token.stale.{uuid.uuid4().hex}"
-        try:
-            os.rename(apath, stale)
-        except FileNotFoundError:
-            pass
-        else:
-            snap = _read_json(stale)
-            if snap is not None and audio_token_is_live(snap):
-                os.replace(stale, apath)  # raced a live refresh — put it back
-                return False
-            stale.unlink(missing_ok=True)
-
-    me = {
-        "pid": os.getpid(),
-        "start_time": process_start_time(os.getpid()),
-        "project": project,
-        "voice": voice,
-        "acquired_epoch": time.time(),
-    }
-    tmp = base / f"audio.token.tmp.{os.getpid()}.{uuid.uuid4().hex}"
-    tmp.write_text(json.dumps(me, indent=2))
-    try:
-        os.link(tmp, apath)
-        return True
-    except FileExistsError:
-        return False
-    finally:
-        tmp.unlink(missing_ok=True)
-
-
-def release_audio(base: Path) -> None:
-    """Release the audio token iff we hold it (rename-aside-verify, like
-    release_floor). Safe to call when we never held it."""
-    apath = _audio_path(base)
-    snap = base / f"audio.token.release.{uuid.uuid4().hex}"
-    try:
-        os.rename(apath, snap)
-    except FileNotFoundError:
-        return
-    data = _read_json(snap)
-    if data is not None and (data.get("pid") != os.getpid()
-            or data.get("start_time") != process_start_time(os.getpid())):
-        os.replace(snap, apath)  # not ours — put it back
-        return
-    snap.unlink(missing_ok=True)
-
-
 # ---------- session API (used by the patched converse tool) ----------
 
 HEARTBEAT_INTERVAL = 10.0  # seconds: call-scoped floor heartbeat cadence
-
-# ---- converse watchdog: self-heal a wedged in-exchange call ----------------
-# A converse can wedge two ways, and a wedged holder blocks every other session
-# until the slow IN_EXCHANGE_MAX/EXCHANGE_WEDGE_MAX reclaim bounds (3-4 min):
-#   (1) event loop BLOCKED (e.g. issue-#5 sounddevice hang) -> the heartbeat task
-#       can't run, so floor.last_activity ages. Detected by WATCHDOG_STALL.
-#   (2) coroutine wedged but loop ALIVE (e.g. a hung API/STT await) -> heartbeat
-#       keeps last_activity fresh, so staleness never trips. Caught by the
-#       wall-clock WATCHDOG_HARD ceiling on a single exchange.
-# The watchdog runs in a daemon THREAD (so it fires even when the asyncio loop is
-# fully blocked); on trip it releases the floor+token (unblock others NOW) and
-# hard-exits so the voicemode-mcp wrapper restarts a clean server. A HEALTHY long
-# call never trips: its heartbeat stays fresh (no STALL) and a real converse is
-# far under WATCHDOG_HARD. Set either to 0 to disable that arm.
-# Tuning constraints (avoid false-firing a HEALTHY call):
-#  - WATCHDOG_STALL must exceed HEARTBEAT_INTERVAL (10s) by a wide margin AND any
-#    legit continuous loop-block. A long TTS turn can block the loop and starve
-#    the heartbeat; the existing reclaim logic tolerates that up to IN_EXCHANGE_MAX
-#    (180s). 90s = 9 missed beats: a strong wedge signal, still self-healing well
-#    before the user would hand-fix it, with margin under that 180s tolerance.
-#  - WATCHDOG_HARD must exceed the longest legit single converse (TTS +
-#    VOICEMODE_DEFAULT_LISTEN_DURATION[120s] + STT). 200s covers the default; raise
-#    it if you raise listen_duration_max. Stays under EXCHANGE_WEDGE_MAX (240s) so
-#    the holder self-heals about when others would otherwise reclaim.
-# Set either to 0 to disable that arm.
-WATCHDOG_STALL = float(os.getenv("VOICEMODE_WATCHDOG_STALL", "90"))   # s heartbeat-starved -> loop blocked
-WATCHDOG_HARD = float(os.getenv("VOICEMODE_WATCHDOG_HARD", "200"))    # s wall-clock cap on one exchange
-WATCHDOG_CHECK = float(os.getenv("VOICEMODE_WATCHDOG_CHECK", "5"))    # s poll cadence
 
 # One lock per process: Claude Code can issue parallel tool calls and converse
 # is async — all ticket/floor mutations must be serialized within the process
@@ -682,7 +548,6 @@ class QueueSession:
         self.voice = voice or "default"
         self._hb_task: Optional[asyncio.Task] = None
         self._acquired = False
-        self._wd_stop = None   # threading.Event, set in start_heartbeat()
 
     @property
     def intro(self) -> str:
@@ -730,7 +595,6 @@ class QueueSession:
                     self._acquired = True
                     _log("acquired_burst", self.base, project=self.project,
                          voice=self.voice, held=held, waiting=nwait)
-                    await self._ensure_audio()
                     return AcquireResult(status="acquired", waited=False)
                 # Hand off the floor and fall through to re-queue at the back.
                 _log("burst_yield", self.base, project=self.project,
@@ -756,7 +620,6 @@ class QueueSession:
                     self._acquired = True
                     _log("acquired_floor", self.base, project=self.project,
                          voice=self.voice, ticket=ticket, waited=waited)
-                    await self._ensure_audio()
                     return AcquireResult(status="acquired", waited=waited)
             if time.monotonic() >= deadline:
                 msg = self._queued_message(ticket, requeued)
@@ -767,26 +630,6 @@ class QueueSession:
                 return AcquireResult(status="queued", ticket=ticket,
                                      queued_message=msg)
             waited = True
-            await asyncio.sleep(CHECK_INTERVAL)
-
-    async def _ensure_audio(self) -> None:
-        """Take the cross-process audio token now that we hold the floor, so no
-        other voice-mode opens an output stream while we speak/listen. Waits up
-        to AUDIO_TOKEN_WAIT for a previous holder's token (and its RDP-buffer
-        drain) to clear, then proceeds regardless — we own the floor, so we are
-        the rightful speaker and must not hang. Idempotent across burst calls;
-        finish() releases it. Best-effort: never raises."""
-        deadline = time.monotonic() + AUDIO_TOKEN_WAIT
-        while True:
-            try:
-                if try_acquire_audio(self.base, self.project, self.voice):
-                    return
-            except OSError:
-                return  # token machinery unavailable -> don't block audio
-            if time.monotonic() >= deadline:
-                _log("audio_token_timeout", self.base, project=self.project,
-                     voice=self.voice)
-                return  # proceed without exclusive device (anomalous; logged)
             await asyncio.sleep(CHECK_INTERVAL)
 
     def _queued_message(self, ticket: str, requeued: bool) -> str:
@@ -821,66 +664,10 @@ class QueueSession:
                    if t[1].get("pid") != os.getpid()]
         return LISTEN_CAP if waiters else None
 
-    def _start_watchdog(self) -> None:
-        """Daemon-thread watchdog: self-heal a wedged in-exchange call.
-
-        Runs in a THREAD, not the event loop, so it still fires when the loop is
-        fully blocked (issue-#5 audio hang). Each tick it re-reads OUR floor; if
-        we still hold it, are in_exchange, and have either gone heartbeat-stale
-        (loop blocked) or run past the wall-clock ceiling (coroutine wedged), it
-        releases the floor+token so other sessions proceed immediately, then
-        hard-exits so the wrapper restarts a clean server. Disarmed by finish()."""
-        if WATCHDOG_STALL <= 0 and WATCHDOG_HARD <= 0:
-            return
-        if self._wd_stop is not None:
-            return  # already armed for this call
-        import threading
-        self._wd_stop = threading.Event()
-        mypid = os.getpid()
-        stop = self._wd_stop
-
-        def watch():
-            while not stop.wait(WATCHDOG_CHECK):
-                floor = _read_json(_floor_path(self.base))
-                if not floor or floor.get("pid") != mypid \
-                        or floor.get("start_time") != process_start_time(mypid):
-                    return  # we no longer hold the floor — stop guarding
-                if not floor.get("in_exchange"):
-                    continue  # between turns; not actively on the channel
-                now = time.time()
-                stale = now - floor.get("last_activity", now)
-                held = now - floor.get("exchange_started", now)
-                trip = ((WATCHDOG_STALL > 0 and stale > WATCHDOG_STALL)
-                        or (WATCHDOG_HARD > 0 and held > WATCHDOG_HARD))
-                if not trip:
-                    continue
-                reason = (f"heartbeat stale {stale:.0f}s (loop blocked)"
-                          if WATCHDOG_STALL > 0 and stale > WATCHDOG_STALL
-                          else f"exchange ran {held:.0f}s (coroutine wedged)")
-                _log("watchdog_fired", self.base, project=self.project,
-                     voice=self.voice, reason=reason)
-                # Free the channel for everyone else FIRST, then die clean so the
-                # voicemode-mcp wrapper reaps + restarts us (closes the stuck
-                # audio stream as a side effect of process death).
-                try:
-                    release_audio(self.base)
-                    release_floor(self.base)
-                except Exception:
-                    pass
-                os._exit(75)
-        threading.Thread(target=watch, name="vm-converse-watchdog",
-                         daemon=True).start()
-
-    def _stop_watchdog(self) -> None:
-        if self._wd_stop is not None:
-            self._wd_stop.set()
-            self._wd_stop = None
-
     def start_heartbeat(self) -> None:
         """Call-scoped background heartbeat: keeps the floor live during TTS
         and long recordings. Cancelled by finish(). Self-terminates on
-        demotion (floor stolen via grace expiry). Also arms the wedge watchdog."""
-        self._start_watchdog()
+        demotion (floor stolen via grace expiry)."""
         if self._hb_task is not None and not self._hb_task.done():
             return  # already beating — don't spawn a second heartbeat task
         async def beat():
@@ -906,11 +693,6 @@ class QueueSession:
             except asyncio.CancelledError:
                 pass
             self._hb_task = None
-        self._stop_watchdog()
-        # Always free the audio device when a call ends — between calls we are
-        # off-channel, so another session may use it. Re-acquired next call.
-        # Safe no-op if we never held it (release_audio verifies ownership).
-        release_audio(self.base)
         if not self._acquired:
             return
         async with _process_lock:
@@ -975,23 +757,10 @@ def force_reset(base: Optional[Path] = None) -> str:
                 n_tickets += 1
             except OSError:
                 pass
-    # Also clear the audio-device token — a wedged holder owns BOTH, and leaving
-    # the token would make the next speaker wait out AUDIO_TOKEN_WAIT for nothing.
-    apath = _audio_path(base)
-    audio = _read_json(apath)
-    audio_who = ""
-    if apath.exists():
-        try:
-            apath.unlink()
-            audio_who = (f"; cleared audio device (was: "
-                         f"{audio.get('project', '?')}/{audio.get('voice', '?')} "
-                         f"pid {audio.get('pid')})") if audio else "; cleared audio device"
-        except OSError:
-            pass
     who = (f"{floor.get('project', '?')}/{floor.get('voice', '?')} "
            f"(pid {floor.get('pid')})") if floor else "none"
     return (f"floor reset: cleared floor (was: {who}) and {n_tickets} "
-            f"queued ticket(s){audio_who}. Channel is now free.")
+            f"queued ticket(s). Channel is now free.")
 
 
 def print_status(base: Optional[Path] = None) -> None:
@@ -1015,16 +784,6 @@ def print_status(base: Optional[Path] = None) -> None:
         else:  # idle_stale
             print(f"Floor: RECLAIMABLE — idle holder {who}: {detail}; "
                   f"next waiter will claim it")
-    # Audio device token (physical RDPSink/output exclusivity, layered under floor)
-    audio = _read_json(_audio_path(base))
-    if audio is None:
-        print("Audio device: free")
-    else:
-        held = time.time() - audio.get("acquired_epoch", 0)
-        live = audio_token_is_live(audio)
-        print(f"Audio device: {audio.get('project', '?')}/{audio.get('voice', '?')} "
-              f"(pid {audio.get('pid')}, held {held:.0f}s)"
-              + ("" if live else " — STALE/reclaimable"))
     tickets = list_tickets(base)  # GCs dead/stale tickets as a side effect
     if not tickets:
         print("Queue: empty")
