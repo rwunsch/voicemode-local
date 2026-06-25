@@ -1,0 +1,23 @@
+# Hybrid override: Kokoro on GPU, Whisper on CPU. (Recommended when a GPU exists.)
+#
+# Rationale: Kokoro (TTS) is the CPU bottleneck — under concurrent sessions it
+# saturates the cores the real-time audio pipeline needs, causing mid-sentence
+# stalls. Whisper (STT) was never the bottleneck (idle on CPU, base model is fast
+# enough) and its CUDA image is enormous (~25 GB). So put only Kokoro on the GPU
+# and keep Whisper on the lean CPU image — solves the problem with far less disk.
+#
+# Usage (handled by `voicemode-switch compute hybrid`):
+#   docker compose -f docker-compose.yml -f docker-compose.hybrid.yml up -d
+#
+# Whisper is intentionally NOT listed here, so it inherits the base (CPU) service.
+# Same NVIDIA prerequisites as the full-GPU override (toolkit + nvidia runtime).
+services:
+  kokoro:
+    image: ${KOKORO_GPU_IMAGE:-ghcr.io/remsky/kokoro-fastapi-gpu:v0.2.0}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

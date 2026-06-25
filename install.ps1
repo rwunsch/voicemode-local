@@ -33,6 +33,12 @@
 .PARAMETER WslPath
     WSL filesystem path to a working voicemode-local checkout. Used only for
     wsl-shared mode detection. Default: /home/<wsl-user>/git/voicemode-local
+
+.PARAMETER ComputeMode
+    auto | cpu | gpu | hybrid. Which Docker compute mode for the STT/TTS backends.
+    auto (default) picks hybrid (Kokoro GPU + Whisper CPU) when an NVIDIA GPU is
+    usable by Docker, otherwise cpu. gpu = both on CUDA. Uses the shared
+    docker-compose.{gpu,hybrid}.yml overrides — identical to Linux/WSL.
 #>
 [CmdletBinding()]
 param(
@@ -41,7 +47,11 @@ param(
     [string]$OpenAIKey = "",
     [switch]$NoPiper,
     [switch]$NoStart,
-    [string]$WslPath = ""
+    [string]$WslPath = "",
+    # Compute mode for the Docker STT/TTS backends. "auto" -> hybrid if an NVIDIA
+    # GPU is usable by Docker, else cpu. hybrid = Kokoro GPU + Whisper CPU (recommended).
+    [ValidateSet("auto","cpu","gpu","hybrid")]
+    [string]$ComputeMode = "auto"
 )
 
 $ErrorActionPreference = "Stop"
@@ -52,6 +62,18 @@ function ok    { param([string]$m) Write-Host "  [+] $m" -ForegroundColor Green 
 function fail  { param([string]$m) Write-Host "  [X] $m" -ForegroundColor Red }
 function warn  { param([string]$m) Write-Host "  [!] $m" -ForegroundColor Yellow }
 function header { param([string]$m) Write-Host ""; Write-Host "=== $m ===" -ForegroundColor Cyan }
+
+function Test-GpuAvailable {
+    # True only if an NVIDIA GPU is usable BY DOCKER: the driver is visible
+    # (nvidia-smi) AND Docker has the nvidia runtime registered. Mirrors the
+    # Linux lib/compute.sh vm_detect_gpu check so all OSes agree.
+    try { & nvidia-smi -L 2>$null | Out-Null; if ($LASTEXITCODE -ne 0) { return $false } }
+    catch { return $false }
+    try {
+        $runtimes = docker info --format '{{json .Runtimes}}' 2>$null
+        return ($runtimes -match '"nvidia"')
+    } catch { return $false }
+}
 
 # Run a Python script via py -3.12 with embedded source. Avoids quoting hell.
 function Invoke-Py {
@@ -312,10 +334,24 @@ if ($NoStart) {
 } else {
     Push-Location $ScriptDir
     try {
-        $composeArgs = @()
+        # Resolve compute mode (auto -> hybrid if a GPU is usable by Docker, else cpu)
+        # and stack the matching override. Same compose files as Linux/WSL.
+        $resolvedCompute = $ComputeMode
+        if ($resolvedCompute -eq "auto") {
+            if (Test-GpuAvailable) { $resolvedCompute = "hybrid" } else { $resolvedCompute = "cpu" }
+        }
+        $composeArgs = @("-f","docker-compose.yml")
+        switch ($resolvedCompute) {
+            "gpu"    { $composeArgs += @("-f","docker-compose.gpu.yml");    $env:WHISPER_MODEL = "small" }
+            "hybrid" { $composeArgs += @("-f","docker-compose.hybrid.yml"); $env:WHISPER_MODEL = "base"  }
+            default  { $env:WHISPER_MODEL = "base" }
+        }
         if ($EnablePiper) { $composeArgs += @("--profile","piper") }
         $composeArgs += @("up","-d")
-        Write-Host "  Starting Docker containers..."
+        if ($resolvedCompute -ne "cpu") {
+            Write-Host "  (CUDA image(s) for '$resolvedCompute' download on first start — can take several minutes)"
+        }
+        Write-Host "  Starting Docker containers (compute mode: $resolvedCompute)..."
         docker compose @composeArgs 2>&1 | ForEach-Object { Write-Host "    $_" }
     } finally {
         Pop-Location

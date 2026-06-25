@@ -120,6 +120,27 @@ Switch backends with the `voicemode-switch <mode>` CLI (writes `~/.voicemode/voi
 
 Available modes: `local` (Kokoro+Piper equal, OpenAI last — recommended), `localonly` (no cloud), `piper` (Piper-primary), `openai` (cloud), `hybrid` (cloud STT + local TTS).
 
+## Compute Mode (GPU vs CPU)
+
+Orthogonal to the routing modes above: the **Docker** STT/TTS backends (Whisper +
+Kokoro) run on CPU or the NVIDIA GPU. This is the lever for the "voice stalls / drops
+mid-sentence under several sessions" failure — CPU-only Kokoro saturates the cores the
+real-time audio pipeline needs. Three modes via `voicemode-switch compute [gpu|hybrid|cpu]`
+(no arg = show current mode + GPU capability + image set):
+- **`hybrid` (recommended w/ a GPU)** — Kokoro on GPU, Whisper on CPU. Moves the actual
+  bottleneck (TTS) off-core; Whisper was never the bottleneck and its CUDA image is ~25GB,
+  so it stays on the lean CPU image. Stacks `docker-compose.hybrid.yml`.
+- **`gpu`** — both on GPU (best STT accuracy, big disk). Stacks `docker-compose.gpu.yml`.
+- **`cpu`** — both on CPU; Kokoro capped at `KOKORO_CPUS` cores (default 6) so it can't
+  starve playback.
+
+Install auto-detects the GPU and defaults to hybrid. State in `~/.voicemode-local/config`
+(`COMPUTE_MODE`, `WHISPER_MODEL`). The Whisper model is cached in the `whisper-cache`
+volume so it isn't re-downloaded on every recreate. Switching recreates containers
+(interrupts the active exchange) but does **not** change routing — no Claude Code restart.
+GPU needs `nvidia-container-toolkit` + the `nvidia` docker runtime; the Docker compose
+files are the same on Linux / WSL / Windows. See `docs/compute-modes/README.md`.
+
 **Routing config lives in `~/.voicemode/voicemode.env`** (plural `VOICEMODE_TTS_BASE_URLS`/`VOICEMODE_STT_BASE_URLS`/`VOICEMODE_VOICES`), NOT `~/.claude.json` (which holds only `OPENAI_API_KEY`). voice-mode reads ONLY the plural list vars; the singular `TTS_BASE_URL`/etc. are ignored. Each requested voice routes to the first engine that owns it (Kokoro and Piper reject foreign voices fast); OpenAI is strictly last-resort and is **never** silently substituted for a local voice. The MCP command is the `voicemode-mcp` wrapper, which auto-starts (detached) the needed proxies on session load. Test routing with `voicemode-switch test-tts`.
 
 ## Whisper Proxy Auto-Start

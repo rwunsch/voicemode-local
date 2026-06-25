@@ -29,8 +29,15 @@ SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 VENV_PY="$SCRIPT_DIR/.venv/bin/python"
 [ -x "$VENV_PY" ] || VENV_PY="python3"
 COMPOSE_FILE="$SCRIPT_DIR/docker-compose.yml"
+GPU_COMPOSE_FILE="$SCRIPT_DIR/docker-compose.gpu.yml"
+HYBRID_COMPOSE_FILE="$SCRIPT_DIR/docker-compose.hybrid.yml"
 PROXY_PID_FILE="/tmp/whisper-proxy.pid"
 CONFIG_FILE="$HOME/.voicemode-local/config"
+
+# Shared compute-mode helpers (vm_detect_gpu, vm_read_config, ...).
+VM_CONFIG_FILE="$CONFIG_FILE"
+# shellcheck source=lib/compute.sh
+[ -f "$SCRIPT_DIR/lib/compute.sh" ] && . "$SCRIPT_DIR/lib/compute.sh"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -42,15 +49,26 @@ fail() { echo -e "  ${RED}✗${NC} $1"; }
 warn() { echo -e "  ${YELLOW}!${NC} $1"; }
 
 docker_compose_cmd() {
-    # Build docker compose command with piper profile if enabled in config
-    local piper_enabled="false"
-    if [ -f "$CONFIG_FILE" ]; then
-        piper_enabled="$(grep -oP 'PIPER_ENABLED=\K.*' "$CONFIG_FILE" 2>/dev/null || echo "false")"
-    fi
+    # Build the docker compose command honoring two config axes:
+    #   PIPER_ENABLED  -> include the piper profile
+    #   COMPUTE_MODE   -> stack the GPU override (cpu | gpu)
+    # WHISPER_MODEL is exported so the compose ${WHISPER_MODEL} interpolation resolves.
+    local piper_enabled compute_mode
+    piper_enabled="$(vm_read_config PIPER_ENABLED false)"
+    compute_mode="$(vm_read_config COMPUTE_MODE cpu)"
+
+    export WHISPER_MODEL="$(vm_read_config WHISPER_MODEL "$(vm_recommended_whisper_model "$compute_mode")")"
+
+    local files=(-f "$COMPOSE_FILE")
+    case "$compute_mode" in
+        gpu)    [ -f "$GPU_COMPOSE_FILE" ]    && files+=(-f "$GPU_COMPOSE_FILE") ;;
+        hybrid) [ -f "$HYBRID_COMPOSE_FILE" ] && files+=(-f "$HYBRID_COMPOSE_FILE") ;;
+    esac
+
     if [ "$piper_enabled" = "true" ]; then
-        docker compose -f "$COMPOSE_FILE" --profile piper "$@"
+        docker compose "${files[@]}" --profile piper "$@"
     else
-        docker compose -f "$COMPOSE_FILE" "$@"
+        docker compose "${files[@]}" "$@"
     fi
 }
 
@@ -474,6 +492,119 @@ cmd_piper() {
     echo "  Make sure local services are running: voicemode-switch start"
 }
 
+# Wait until the Docker STT/TTS backends answer, or time out. Returns 0/1.
+# Probe Kokoro at /health (universal across versions) NOT /v1/models — the GPU
+# build (kokoro-fastapi v0.2.x) has no /v1/models endpoint though TTS works fine.
+wait_for_backends() {
+    local timeout="${1:-180}" i
+    for i in $(seq 1 "$timeout"); do
+        if curl -sf --max-time 2 "http://127.0.0.1:8880/health" >/dev/null 2>&1 \
+           && curl -sf --max-time 2 "http://127.0.0.1:9000/docs" >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 1
+    done
+    return 1
+}
+
+# compute [gpu|hybrid|cpu] [whisper-model]
+#   no arg  -> show current compute mode, whisper model, GPU capability, images
+#   gpu     -> Whisper + Kokoro both on CUDA          (verifies GPU first)
+#   hybrid  -> Kokoro on GPU, Whisper on CPU          (recommended w/ a GPU)
+#   cpu     -> both on CPU (Kokoro core-capped)
+# NOTE: switching recreates the Docker containers, which interrupts any in-flight
+# voice exchange. It does NOT change routing, so no Claude Code restart is needed.
+cmd_compute() {
+    local action="${1:-show}" model="${2:-}"
+    local cur_mode cur_model
+    cur_mode="$(vm_read_config COMPUTE_MODE cpu)"
+    cur_model="$(vm_read_config WHISPER_MODEL "$(vm_recommended_whisper_model "$cur_mode")")"
+
+    case "$action" in
+        show|"")
+            echo "=== VoiceMode compute mode ==="
+            echo "  Current mode:   $cur_mode"
+            echo "  Whisper model:  $cur_model"
+            if vm_detect_gpu; then
+                ok "GPU available — $VM_GPU_REASON"
+                [ "$cur_mode" = cpu ] && echo "    Recommended:  voicemode-switch compute hybrid  (Kokoro GPU + Whisper CPU)"
+            else
+                warn "GPU not available — $VM_GPU_REASON"
+                echo "    Staying on CPU is the right call here."
+            fi
+            echo ""
+            echo "  Images in use for '$cur_mode' mode:"
+            case "$cur_mode" in
+                gpu)
+                    echo "    Kokoro:  ${KOKORO_GPU_IMAGE:-ghcr.io/remsky/kokoro-fastapi-gpu:v0.2.0} (GPU)"
+                    echo "    Whisper: onerahmet/openai-whisper-asr-webservice:latest-gpu (GPU, model: $cur_model)" ;;
+                hybrid)
+                    echo "    Kokoro:  ${KOKORO_GPU_IMAGE:-ghcr.io/remsky/kokoro-fastapi-gpu:v0.2.0} (GPU)"
+                    echo "    Whisper: onerahmet/openai-whisper-asr-webservice:latest (CPU, model: $cur_model)" ;;
+                *)
+                    echo "    Kokoro:  ${KOKORO_IMAGE:-ghcr.io/remsky/kokoro-fastapi-cpu:latest} (CPU-capped at ${KOKORO_CPUS:-6} cores)"
+                    echo "    Whisper: onerahmet/openai-whisper-asr-webservice:latest (CPU, model: $cur_model)" ;;
+            esac
+            echo ""
+            echo "  Modes: cpu | gpu | hybrid   (hybrid = Kokoro GPU + Whisper CPU, recommended with a GPU)"
+            return 0 ;;
+        gpu|hybrid)
+            local target="$action" desc
+            [ "$target" = hybrid ] && desc="Kokoro on GPU, Whisper on CPU" || desc="Whisper + Kokoro on GPU"
+            echo "=== Switching compute mode -> ${target} ($desc) ==="
+            if ! vm_detect_gpu; then
+                fail "Cannot enable ${target}: $VM_GPU_REASON"
+                echo "  Fix the above (driver / nvidia-container-toolkit) then retry."
+                return 1
+            fi
+            ok "$VM_GPU_REASON"
+            warn "This recreates containers and pulls any missing image (CUDA images are large"
+            warn "on first use). Any active voice exchange will be interrupted."
+            vm_write_config COMPUTE_MODE "$target"
+            vm_write_config WHISPER_MODEL "${model:-$(vm_recommended_whisper_model "$target")}"
+            echo "  Recreating containers (${target})..."
+            # First GPU start is slow: CUDA init + kokoro build + (for full GPU) the
+            # Whisper model download can take several minutes, so allow a generous
+            # window before concluding failure (avoids a false rollback).
+            if docker_compose_cmd up -d 2>&1 | sed 's/^/    /' && wait_for_backends 600; then
+                ok "${target} mode active. Verifying the GPU is actually in use..."
+                sleep 2
+                if nvidia-smi --query-compute-apps=process_name --format=csv,noheader 2>/dev/null | grep -qiE 'python|kokoro|whisper'; then
+                    ok "Confirmed: a voice service is running on the GPU."
+                else
+                    warn "Containers are up but no GPU compute process is visible yet"
+                    warn "(it may appear on first request). Check: nvidia-smi"
+                fi
+                cmd_health || true
+            else
+                fail "${target} containers did not become healthy — rolling back to CPU."
+                vm_write_config COMPUTE_MODE cpu
+                vm_write_config WHISPER_MODEL "$(vm_recommended_whisper_model cpu)"
+                docker_compose_cmd up -d 2>&1 | sed 's/^/    /'
+                wait_for_backends 120 && ok "Rolled back to CPU." || fail "CPU rollback also unhealthy — check 'voicemode-switch status'."
+                return 1
+            fi
+            return 0 ;;
+        cpu)
+            echo "=== Switching compute mode -> CPU ==="
+            warn "This recreates the Whisper+Kokoro containers; active exchanges will be interrupted."
+            vm_write_config COMPUTE_MODE cpu
+            vm_write_config WHISPER_MODEL "${model:-$(vm_recommended_whisper_model cpu)}"
+            echo "  Recreating containers with CPU images..."
+            if docker_compose_cmd up -d 2>&1 | sed 's/^/    /' && wait_for_backends 180; then
+                ok "CPU mode active (Kokoro capped at ${KOKORO_CPUS:-6} cores)."
+                cmd_health || true
+            else
+                fail "Containers did not become healthy — check 'voicemode-switch status'."
+                return 1
+            fi
+            return 0 ;;
+        *)
+            fail "Unknown compute action: $action (use: gpu | hybrid | cpu | show)"
+            return 1 ;;
+    esac
+}
+
 case "${1:-}" in
     local)     cmd_local ;;
     localonly) cmd_localonly ;;
@@ -485,6 +616,7 @@ case "${1:-}" in
     stop)   cmd_stop ;;
     ensure) cmd_ensure "${2:-}" ;;
     health) cmd_health ;;
+    compute) cmd_compute "${2:-}" "${3:-}" ;;
     queue)
         PYBIN="$SCRIPT_DIR/.venv/bin/python"
         [ -x "$PYBIN" ] || PYBIN="python3"
@@ -523,6 +655,8 @@ case "${1:-}" in
         echo "  stop     Stop local services"
         echo "  ensure   Start (detached) only the proxies the current config needs"
         echo "  health   Probe configured local proxies (exit 0 iff all up)"
+        echo "  compute  Show or switch run-mode: compute [gpu|hybrid|cpu] [whisper-model]"
+        echo "           (hybrid = Kokoro GPU + Whisper CPU — recommended when a GPU exists)"
         echo "  test-tts Show which engine serves each voice (fallback demo)"
         echo "  queue    Show voice session queue (floor holder + waiters)"
         echo "  queue-log Tail the per-session queue event log (debug)"

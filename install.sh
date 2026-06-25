@@ -50,6 +50,11 @@ CONFIG_DIR="$HOME/.voicemode-local"
 CONFIG_FILE="$CONFIG_DIR/config"
 mkdir -p "$CONFIG_DIR"
 
+# Shared compute-mode helpers (GPU detection, config read/write).
+VM_CONFIG_FILE="$CONFIG_FILE"
+# shellcheck source=lib/compute.sh
+[ -f "$SCRIPT_DIR/lib/compute.sh" ] && . "$SCRIPT_DIR/lib/compute.sh"
+
 INSTALL_MODE=""
 if command -v docker >/dev/null 2>&1; then
     echo "  Docker detected. How would you like to install voice services?"
@@ -103,11 +108,47 @@ else
     ok "Piper TTS: disabled"
 fi
 
+# ─── Compute mode: GPU vs CPU (docker mode only) ───────────────────────────
+# GPU runs Whisper + Kokoro on CUDA, which is far faster AND frees the CPU cores
+# that CPU-only TTS otherwise saturates (the classic "audio stalls mid-sentence"
+# failure under concurrent sessions). We auto-detect and recommend the best option.
+COMPUTE_MODE="cpu"
+if [ "$INSTALL_MODE" = "docker" ]; then
+    header "Compute mode (GPU / hybrid / CPU)"
+    if vm_detect_gpu; then
+        ok "$VM_GPU_REASON"
+        echo ""
+        echo "    1) Hybrid (recommended) — Kokoro on GPU, Whisper on CPU."
+        echo "         Moves the actual CPU bottleneck (TTS) to the GPU; keeps Whisper"
+        echo "         on the lean CPU image (it was never the bottleneck). Least disk."
+        echo "    2) Full GPU — Whisper + Kokoro both on GPU."
+        echo "         Best STT accuracy/speed, but the Whisper CUDA image is ~25GB."
+        echo "    3) CPU — no GPU; Kokoro is core-capped so it can't starve playback."
+        echo ""
+        read -r -p "  Choice [1]: " compute_choice
+        compute_choice="${compute_choice:-1}"
+        case "$compute_choice" in
+            2) COMPUTE_MODE="gpu" ;;
+            3) COMPUTE_MODE="cpu" ;;
+            *) COMPUTE_MODE="hybrid" ;;
+        esac
+    else
+        warn "No usable GPU detected ($VM_GPU_REASON)"
+        echo "    Falling back to CPU mode. You can switch later with:"
+        echo "      voicemode-switch compute hybrid   # Kokoro GPU + Whisper CPU"
+        COMPUTE_MODE="cpu"
+    fi
+fi
+WHISPER_MODEL="$(vm_recommended_whisper_model "$COMPUTE_MODE")"
+ok "Compute mode: $COMPUTE_MODE (Whisper model: $WHISPER_MODEL)"
+
 # Save config
 cat > "$CONFIG_FILE" << EOF
 INSTALL_MODE=$INSTALL_MODE
 PIPER_ENABLED=$PIPER_ENABLED
 KOKORO_ONNX=$KOKORO_ONNX
+COMPUTE_MODE=$COMPUTE_MODE
+WHISPER_MODEL=$WHISPER_MODEL
 EOF
 ok "Config saved to $CONFIG_FILE"
 
@@ -277,11 +318,22 @@ header "Step 7: Start local services"
 cd "$SCRIPT_DIR"
 
 if [ "$INSTALL_MODE" = "docker" ]; then
-    echo "  Starting Docker containers..."
+    echo "  Starting Docker containers (compute mode: $COMPUTE_MODE)..."
+    # Stack the GPU override when requested; export the model for ${WHISPER_MODEL}.
+    export WHISPER_MODEL
+    COMPOSE_FILES=(-f "$SCRIPT_DIR/docker-compose.yml")
+    case "$COMPUTE_MODE" in
+        gpu)
+            [ -f "$SCRIPT_DIR/docker-compose.gpu.yml" ] && COMPOSE_FILES+=(-f "$SCRIPT_DIR/docker-compose.gpu.yml")
+            echo "  (GPU CUDA images will download on first start — this can take several minutes)" ;;
+        hybrid)
+            [ -f "$SCRIPT_DIR/docker-compose.hybrid.yml" ] && COMPOSE_FILES+=(-f "$SCRIPT_DIR/docker-compose.hybrid.yml")
+            echo "  (Kokoro GPU image will download on first start — this can take a few minutes)" ;;
+    esac
     if [ "$PIPER_ENABLED" = "true" ]; then
-        docker compose --profile piper up -d 2>&1 | sed 's/^/  /'
+        docker compose "${COMPOSE_FILES[@]}" --profile piper up -d 2>&1 | sed 's/^/  /'
     else
-        docker compose up -d 2>&1 | sed 's/^/  /'
+        docker compose "${COMPOSE_FILES[@]}" up -d 2>&1 | sed 's/^/  /'
     fi
 
     echo "  Waiting for Whisper to be ready..."

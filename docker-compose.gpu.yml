@@ -1,0 +1,41 @@
+# GPU override for VoiceMode local services.
+#
+# Usage (handled automatically by `voicemode-switch compute gpu`):
+#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
+#
+# Requires:
+#   - An NVIDIA GPU + driver visible to the host (`nvidia-smi` works)
+#   - nvidia-container-toolkit installed and the `nvidia` runtime registered with Docker
+#     (on WSL2 + Docker Desktop this is provided once GPU support is enabled)
+#
+# This swaps Whisper and Kokoro to their CUDA builds and reserves the GPU for each.
+# Piper stays on CPU (it is tiny and already fast). The CPU cap inherited from the
+# base file is harmless here — GPU builds barely touch the CPU.
+services:
+  whisper:
+    image: onerahmet/openai-whisper-asr-webservice:latest-gpu
+    environment:
+      # On GPU we can afford a larger, more accurate model at similar latency.
+      - ASR_MODEL=${WHISPER_MODEL:-small}
+      - ASR_ENGINE=faster_whisper
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  kokoro:
+    # GPU build. The gpu repo has no v0.1.5 (the CPU pin); v0.2.0 is the nearest
+    # stable multi-arch tag and exposes the same OpenAI-compatible API + voicepack.
+    # Override with KOKORO_GPU_IMAGE (e.g. v0.1.4 for closest-to-CPU parity, or
+    # v0.4.0 for the newest CUDA build).
+    image: ${KOKORO_GPU_IMAGE:-ghcr.io/remsky/kokoro-fastapi-gpu:v0.2.0}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

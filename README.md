@@ -173,7 +173,24 @@ voicemode-switch health    # Probe configured local proxies (exit 0 iff all up)
 voicemode-switch stop      # Stop everything
 voicemode-switch status    # Full status + current routing config
 voicemode-switch test-tts  # Show which engine serves each voice (fallback demo)
+voicemode-switch compute   # Show/switch GPU vs CPU run-mode: compute [gpu|cpu] [model]
 ```
+
+### GPU vs CPU compute mode
+
+The Docker Whisper + Kokoro backends run on CPU by default, or on an NVIDIA GPU if one is
+available. CPU-only TTS can saturate the machine under concurrent sessions and stall audio
+mid-sentence; GPU mode offloads that and frees the cores. Install auto-detects and
+recommends; switch anytime:
+
+```bash
+voicemode-switch compute        # show current mode + whether the GPU is usable
+voicemode-switch compute gpu    # CUDA Whisper + Kokoro (pulls ~8GB first time)
+voicemode-switch compute cpu    # back to CPU (Kokoro capped so it can't hog cores)
+```
+
+Requires `nvidia-container-toolkit` + the `nvidia` docker runtime. Details:
+`docs/compute-modes/README.md`.
 
 You usually don't need to start proxies by hand: the MCP launcher wrapper
 (`voicemode-mcp`, the command Claude Code runs) calls `ensure` on every session

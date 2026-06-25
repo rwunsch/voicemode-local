@@ -5,15 +5,33 @@ services:
     ports:
       - "9000:9000"
     environment:
-      - ASR_MODEL=base
+      # Model is configurable so GPU mode can pick a larger, more accurate model.
+      # CPU default stays "base" (fast enough on CPU); the GPU override raises it.
+      - ASR_MODEL=${WHISPER_MODEL:-base}
       - ASR_ENGINE=faster_whisper
+    volumes:
+      # Persist the downloaded model across container recreates. Whisper caches
+      # faster-whisper models under /root/.cache; without this, every `compute`
+      # switch / restart re-downloads the model (~0.5GB). Shared by the CPU and
+      # GPU whisper images (same cache path), so it survives mode switches.
+      - whisper-cache:/root/.cache
     restart: unless-stopped
 
   kokoro:
-    image: ghcr.io/remsky/kokoro-fastapi-cpu:v0.1.5
+    # Image is overridable so `compute gpu`/`compute cpu` can swap CPU<->GPU builds
+    # without editing this file. Default matches the CPU image already running here.
+    image: ${KOKORO_IMAGE:-ghcr.io/remsky/kokoro-fastapi-cpu:latest}
     container_name: voicemode-kokoro
     ports:
       - "8880:8880"
+    # Kokoro TTS is CPU-bound and, uncapped, will grab every core during synthesis,
+    # starving the real-time audio pipeline (sentences drop mid-word) and every other
+    # session's STT/LLM round-trip. Cap it so playback always has headroom. Honored by
+    # `docker compose up` in Compose v2. Tune via KOKORO_CPUS; in GPU mode this is moot.
+    deploy:
+      resources:
+        limits:
+          cpus: "${KOKORO_CPUS:-6}"
     restart: unless-stopped
 
   piper:
@@ -27,3 +45,7 @@ services:
     restart: unless-stopped
     profiles:
       - piper
+
+volumes:
+  # Named volume for the Whisper model cache (see whisper.volumes above).
+  whisper-cache:
