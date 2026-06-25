@@ -1,0 +1,106 @@
+#!/usr/bin/env bash
+#
+# voicemode-perf — protect the realtime voice pipeline from CPU contention
+# created by N concurrent Claude Code sessions, WITHOUT slowing those sessions'
+# actual work.
+#
+# Strategy (all unprivileged — own processes only):
+#   1. Reserve 2 logical cores (RESERVED) for the voice pipeline and pin the
+#      voice-mode servers + whisper/piper proxies onto them.
+#   2. Pin the contention sources — every `claude` process and the MCP/node/uv
+#      fleet — onto the REMAINING cores (GENERAL), keeping them OFF the reserved
+#      cores. Future MCP children inherit the claude affinity at fork.
+#   3. renice the contention sources to +NICE so they yield to the voice pipeline
+#      the instant it needs a slot (it uses ~2.5% CPU; it just needs to be
+#      scheduled on time).
+#
+# Negative nice / RT scheduling for the voice pipeline needs root; this script
+# stays sudo-free. Run `voicemode-perf boost` to print the optional sudo
+# one-liners. Re-runnable; safe to call repeatedly. `voicemode-perf reset`
+# restores all-core affinity and nice 0.
+
+set -uo pipefail
+
+NCPU="$(nproc)"
+RESERVED="$((NCPU-2)),$((NCPU-1))"     # e.g. 12,13 on a 14-core box
+GENERAL="0-$((NCPU-3))"                 # e.g. 0-11
+NICE="${VOICEMODE_PERF_NICE:-10}"
+
+is_voice_pid() {  # voice-mode server or our proxies
+    local cl; cl="$(tr '\0' ' ' < "/proc/$1/cmdline" 2>/dev/null)" || return 1
+    case "$cl" in
+        *bin/voice-mode*|*whisper-proxy.py*|*piper-proxy.py*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+collect_voice() { pgrep -f 'bin/voice-mode|whisper-proxy.py|piper-proxy.py' 2>/dev/null; }
+
+collect_storm() {
+    # claude clients + the MCP/node/uv fleet (the CPU burners), minus voice pids
+    { pgrep -x claude 2>/dev/null
+      pgrep -f 'mcp|uvx|uv tool|@modelcontextprotocol|/\.npm/|npm exec' 2>/dev/null
+    } | sort -u
+}
+
+cmd_apply() {
+    local applied_v=0 applied_s=0 p
+    # Build the voice pid set for exclusion
+    local voice_set=" "; for p in $(collect_voice); do voice_set+="$p "; done
+
+    echo "cores: $NCPU   reserved-for-voice: [$RESERVED]   general: [$GENERAL]   nice:+$NICE"
+
+    echo "-- voice pipeline -> cores $RESERVED --"
+    for p in $(collect_voice); do
+        taskset -pc "$RESERVED" "$p" >/dev/null 2>&1 && { echo "  pin $p ($(ps -o comm= -p $p 2>/dev/null))"; applied_v=$((applied_v+1)); }
+    done
+
+    echo "-- contention sources -> cores $GENERAL, renice +$NICE --"
+    for p in $(collect_storm); do
+        case "$voice_set" in *" $p "*) continue ;; esac      # never touch voice pids
+        is_voice_pid "$p" && continue
+        taskset -pc "$GENERAL" "$p" >/dev/null 2>&1
+        renice -n "$NICE" -p "$p" >/dev/null 2>&1 && applied_s=$((applied_s+1))
+    done
+    echo "pinned $applied_v voice procs; reniced+pinned $applied_s contention procs"
+}
+
+cmd_reset() {
+    local all="0-$((NCPU-1))" p
+    for p in $(collect_voice; collect_storm); do
+        taskset -pc "$all" "$p" >/dev/null 2>&1
+        renice -n 0 -p "$p" >/dev/null 2>&1 || true
+    done
+    echo "reset: all processes -> all cores [$all], nice 0 (negative nice needs sudo to restore)"
+}
+
+cmd_boost() {
+    cat <<EOF
+Optional one-time sudo boost for the voice pipeline (run yourself):
+  for p in \$(pgrep -f 'bin/voice-mode|whisper-proxy.py|piper-proxy.py'); do
+    sudo renice -n -10 -p \$p
+  done
+  # near-realtime priority for the voice-mode audio thread:
+  for p in \$(pgrep -f 'bin/voice-mode'); do sudo chrt -r -p 20 \$p; done
+EOF
+}
+
+cmd_status() {
+    echo "cores=$NCPU reserved=[$RESERVED]"
+    printf "%-8s %-14s %-5s %-7s %s\n" PID COMM NICE AFFINITY ROLE
+    local p
+    for p in $(collect_voice); do
+        printf "%-8s %-14s %-5s %-7s %s\n" "$p" "$(ps -o comm= -p $p)" "$(ps -o ni= -p $p|tr -d ' ')" "$(taskset -pc $p 2>/dev/null|grep -o '[0-9,-]*$')" voice
+    done
+    for p in $(pgrep -x claude); do
+        printf "%-8s %-14s %-5s %-7s %s\n" "$p" claude "$(ps -o ni= -p $p|tr -d ' ')" "$(taskset -pc $p 2>/dev/null|grep -o '[0-9,-]*$')" session
+    done
+}
+
+case "${1:-apply}" in
+    apply)  cmd_apply ;;
+    reset)  cmd_reset ;;
+    boost)  cmd_boost ;;
+    status) cmd_status ;;
+    *) echo "usage: voicemode-perf [apply|reset|boost|status]"; exit 1 ;;
+esac
