@@ -13,7 +13,65 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 LOG_DIR="$HOME/.voicemode/logs"
-mkdir -p "$LOG_DIR" 2>/dev/null || true
+RUN_DIR="$HOME/.voicemode/run"
+mkdir -p "$LOG_DIR" "$RUN_DIR" 2>/dev/null || true
+
+# --- Reap a stale same-session voice-mode before starting a new one ----------
+# Claude Code re-runs this wrapper whenever it (re)starts the voice-mode MCP for
+# a session — on reconnect, config reload, or after a cancelled converse (ESC).
+# If the PREVIOUS voice-mode instance for THIS session is still alive — typically
+# because it was blocked mid-playback writing into WSLg's deep RDPSink buffer and
+# couldn't exit on shutdown — it keeps its audio sink-input open. The new
+# instance then opens a SECOND stream, the two mix in the ~1s+ RDP buffer, and
+# you hear stutter + "stale" trailing audio that survives stopping voicemode.
+#
+# So: before exec'ing the fresh server, kill the previous incarnation that
+# belongs to THIS session only (never the other sessions' voice-mode processes).
+# Scope key: CLAUDE_CODE_SESSION_ID if present, else our parent (the Claude
+# session) PID. exec keeps our PID, so $$ recorded now == the new voice-mode PID.
+reap_stale_voicemode() {
+    local key="${CLAUDE_CODE_SESSION_ID:-ppid-$PPID}"
+    # sanitize key for use in a filename
+    key="${key//[^A-Za-z0-9_-]/_}"
+    local pidfile="$RUN_DIR/voicemode-$key.pid"
+
+    local old
+    if [ -f "$pidfile" ] && old="$(cat "$pidfile" 2>/dev/null)" && [ -n "$old" ]; then
+        if [ "$old" != "$$" ] && kill -0 "$old" 2>/dev/null; then
+            # Confirm it really is a voice-mode process before signalling it.
+            if tr '\0' ' ' < "/proc/$old/cmdline" 2>/dev/null | grep -q 'voice-mode'; then
+                echo "$(date -Is) reaping stale voice-mode pid=$old (session=$key)" \
+                    >> "$LOG_DIR/reap.log" 2>&1
+                kill -TERM "$old" 2>/dev/null || true
+                # Give it a moment to release its audio stream, then ensure death.
+                for _ in 1 2 3 4 5 6 7 8 9 10; do
+                    kill -0 "$old" 2>/dev/null || break
+                    sleep 0.1
+                done
+                kill -KILL "$old" 2>/dev/null || true
+            fi
+        fi
+    fi
+
+    # Backstop: any OTHER voice-mode that shares our parent Claude session but
+    # isn't us (covers a missing/stale pidfile after an unclean restart).
+    local p
+    for p in $(pgrep -P "$PPID" -f 'voice-mode' 2>/dev/null); do
+        [ "$p" = "$$" ] && continue
+        echo "$(date -Is) reaping sibling voice-mode pid=$p (ppid=$PPID)" \
+            >> "$LOG_DIR/reap.log" 2>&1
+        kill -TERM "$p" 2>/dev/null || true
+    done
+
+    # NOTE: we intentionally do NOT flush the RDPSink here. Killing the orphan
+    # process above already makes PulseAudio drop its sink-input; any audio left
+    # buffered in the RDP tunnel is bounded by the output-latency cap (see
+    # patch_output_latency.py). A global `suspend-sink` would also interrupt the
+    # OTHER sessions' live playback, so it's deliberately avoided.
+
+    printf '%s' "$$" > "$pidfile" 2>/dev/null || true
+}
+reap_stale_voicemode
 
 # Best-effort: never let proxy startup block or fail the MCP launch.
 "$SCRIPT_DIR/voicemode-switch" ensure --quiet >> "$LOG_DIR/ensure.log" 2>&1 || true

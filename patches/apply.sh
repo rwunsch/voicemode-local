@@ -74,6 +74,17 @@ if [ -f "$SCRIPT_DIR/patch_listen_overrun.py" ]; then
     "$PYBIN" "$SCRIPT_DIR/patch_listen_overrun.py" "$VM_DIR/tools/converse.py"
 fi
 
+# Force-exit voice-mode on shutdown so a mid-playback audio stream can't keep
+# the process alive as an orphan holding its WSLg RDPSink sink-input — the cause
+# of the "two streams mixing -> stutter + stale trailing audio" failure on WSL.
+# See patch_shutdown_abort.py (paired with the reap logic in voicemode-mcp).
+if [ -f "$SCRIPT_DIR/patch_shutdown_abort.py" ]; then
+    PYBIN="$VENV_DIR/bin/python"
+    [ -x "$PYBIN" ] || PYBIN="$VENV_DIR/Scripts/python.exe"
+    [ -x "$PYBIN" ] || PYBIN="python3"
+    "$PYBIN" "$SCRIPT_DIR/patch_shutdown_abort.py" "$VM_DIR/server.py"
+fi
+
 # Apply the "no silent OpenAI voice swap" patch to simple_failover.py.
 if [ -f "$SCRIPT_DIR/patch_simple_failover.py" ]; then
     PYBIN="$VENV_DIR/bin/python"
