@@ -580,6 +580,34 @@ def release_audio(base: Path) -> None:
 
 HEARTBEAT_INTERVAL = 10.0  # seconds: call-scoped floor heartbeat cadence
 
+# ---- converse watchdog: self-heal a wedged in-exchange call ----------------
+# A converse can wedge two ways, and a wedged holder blocks every other session
+# until the slow IN_EXCHANGE_MAX/EXCHANGE_WEDGE_MAX reclaim bounds (3-4 min):
+#   (1) event loop BLOCKED (e.g. issue-#5 sounddevice hang) -> the heartbeat task
+#       can't run, so floor.last_activity ages. Detected by WATCHDOG_STALL.
+#   (2) coroutine wedged but loop ALIVE (e.g. a hung API/STT await) -> heartbeat
+#       keeps last_activity fresh, so staleness never trips. Caught by the
+#       wall-clock WATCHDOG_HARD ceiling on a single exchange.
+# The watchdog runs in a daemon THREAD (so it fires even when the asyncio loop is
+# fully blocked); on trip it releases the floor+token (unblock others NOW) and
+# hard-exits so the voicemode-mcp wrapper restarts a clean server. A HEALTHY long
+# call never trips: its heartbeat stays fresh (no STALL) and a real converse is
+# far under WATCHDOG_HARD. Set either to 0 to disable that arm.
+# Tuning constraints (avoid false-firing a HEALTHY call):
+#  - WATCHDOG_STALL must exceed HEARTBEAT_INTERVAL (10s) by a wide margin AND any
+#    legit continuous loop-block. A long TTS turn can block the loop and starve
+#    the heartbeat; the existing reclaim logic tolerates that up to IN_EXCHANGE_MAX
+#    (180s). 90s = 9 missed beats: a strong wedge signal, still self-healing well
+#    before the user would hand-fix it, with margin under that 180s tolerance.
+#  - WATCHDOG_HARD must exceed the longest legit single converse (TTS +
+#    VOICEMODE_DEFAULT_LISTEN_DURATION[120s] + STT). 200s covers the default; raise
+#    it if you raise listen_duration_max. Stays under EXCHANGE_WEDGE_MAX (240s) so
+#    the holder self-heals about when others would otherwise reclaim.
+# Set either to 0 to disable that arm.
+WATCHDOG_STALL = float(os.getenv("VOICEMODE_WATCHDOG_STALL", "90"))   # s heartbeat-starved -> loop blocked
+WATCHDOG_HARD = float(os.getenv("VOICEMODE_WATCHDOG_HARD", "200"))    # s wall-clock cap on one exchange
+WATCHDOG_CHECK = float(os.getenv("VOICEMODE_WATCHDOG_CHECK", "5"))    # s poll cadence
+
 # One lock per process: Claude Code can issue parallel tool calls and converse
 # is async — all ticket/floor mutations must be serialized within the process
 # in addition to the cross-process file protocol.
@@ -654,6 +682,7 @@ class QueueSession:
         self.voice = voice or "default"
         self._hb_task: Optional[asyncio.Task] = None
         self._acquired = False
+        self._wd_stop = None   # threading.Event, set in start_heartbeat()
 
     @property
     def intro(self) -> str:
@@ -792,10 +821,66 @@ class QueueSession:
                    if t[1].get("pid") != os.getpid()]
         return LISTEN_CAP if waiters else None
 
+    def _start_watchdog(self) -> None:
+        """Daemon-thread watchdog: self-heal a wedged in-exchange call.
+
+        Runs in a THREAD, not the event loop, so it still fires when the loop is
+        fully blocked (issue-#5 audio hang). Each tick it re-reads OUR floor; if
+        we still hold it, are in_exchange, and have either gone heartbeat-stale
+        (loop blocked) or run past the wall-clock ceiling (coroutine wedged), it
+        releases the floor+token so other sessions proceed immediately, then
+        hard-exits so the wrapper restarts a clean server. Disarmed by finish()."""
+        if WATCHDOG_STALL <= 0 and WATCHDOG_HARD <= 0:
+            return
+        if self._wd_stop is not None:
+            return  # already armed for this call
+        import threading
+        self._wd_stop = threading.Event()
+        mypid = os.getpid()
+        stop = self._wd_stop
+
+        def watch():
+            while not stop.wait(WATCHDOG_CHECK):
+                floor = _read_json(_floor_path(self.base))
+                if not floor or floor.get("pid") != mypid \
+                        or floor.get("start_time") != process_start_time(mypid):
+                    return  # we no longer hold the floor — stop guarding
+                if not floor.get("in_exchange"):
+                    continue  # between turns; not actively on the channel
+                now = time.time()
+                stale = now - floor.get("last_activity", now)
+                held = now - floor.get("exchange_started", now)
+                trip = ((WATCHDOG_STALL > 0 and stale > WATCHDOG_STALL)
+                        or (WATCHDOG_HARD > 0 and held > WATCHDOG_HARD))
+                if not trip:
+                    continue
+                reason = (f"heartbeat stale {stale:.0f}s (loop blocked)"
+                          if WATCHDOG_STALL > 0 and stale > WATCHDOG_STALL
+                          else f"exchange ran {held:.0f}s (coroutine wedged)")
+                _log("watchdog_fired", self.base, project=self.project,
+                     voice=self.voice, reason=reason)
+                # Free the channel for everyone else FIRST, then die clean so the
+                # voicemode-mcp wrapper reaps + restarts us (closes the stuck
+                # audio stream as a side effect of process death).
+                try:
+                    release_audio(self.base)
+                    release_floor(self.base)
+                except Exception:
+                    pass
+                os._exit(75)
+        threading.Thread(target=watch, name="vm-converse-watchdog",
+                         daemon=True).start()
+
+    def _stop_watchdog(self) -> None:
+        if self._wd_stop is not None:
+            self._wd_stop.set()
+            self._wd_stop = None
+
     def start_heartbeat(self) -> None:
         """Call-scoped background heartbeat: keeps the floor live during TTS
         and long recordings. Cancelled by finish(). Self-terminates on
-        demotion (floor stolen via grace expiry)."""
+        demotion (floor stolen via grace expiry). Also arms the wedge watchdog."""
+        self._start_watchdog()
         if self._hb_task is not None and not self._hb_task.done():
             return  # already beating — don't spawn a second heartbeat task
         async def beat():
@@ -821,6 +906,7 @@ class QueueSession:
             except asyncio.CancelledError:
                 pass
             self._hb_task = None
+        self._stop_watchdog()
         # Always free the audio device when a call ends — between calls we are
         # off-channel, so another session may use it. Re-acquired next call.
         # Safe no-op if we never held it (release_audio verifies ownership).
