@@ -622,6 +622,19 @@ case "${1:-}" in
         [ -x "$PYBIN" ] || PYBIN="python3"
         "$PYBIN" -c "import sys; sys.path.insert(0, '$SCRIPT_DIR/patches'); import voice_queue; voice_queue.print_status()"
         ;;
+    floor)
+        PYBIN="$SCRIPT_DIR/.venv/bin/python"
+        [ -x "$PYBIN" ] || PYBIN="python3"
+        case "${2:-status}" in
+            reset)
+                "$PYBIN" -c "import sys; sys.path.insert(0, '$SCRIPT_DIR/patches'); import voice_queue; print(voice_queue.force_reset())"
+                ;;
+            status|"")
+                "$PYBIN" -c "import sys; sys.path.insert(0, '$SCRIPT_DIR/patches'); import voice_queue; voice_queue.print_status()"
+                ;;
+            *) echo "usage: voicemode-switch floor [status|reset]"; exit 1 ;;
+        esac
+        ;;
     queue-log)
         LOG="$HOME/.voicemode/logs/queue.log"
         if [ ! -f "$LOG" ]; then
@@ -659,6 +672,7 @@ case "${1:-}" in
         echo "           (hybrid = Kokoro GPU + Whisper CPU — recommended when a GPU exists)"
         echo "  test-tts Show which engine serves each voice (fallback demo)"
         echo "  queue    Show voice session queue (floor holder + waiters)"
+        echo "  floor    Show floor state (status) or clear a wedged floor: floor [status|reset]"
         echo "  queue-log Tail the per-session queue event log (debug)"
         echo "  sysaudio  Fold system output into voice input: on|off|status|setup|teardown"
         echo ""

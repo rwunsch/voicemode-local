@@ -291,9 +291,20 @@ def _floor_path(base: Path) -> Path:
     return base / FLOOR_NAME
 
 
-def floor_is_live(data: dict) -> bool:
-    """A floor is live if its holder process exists (same incarnation) AND is
-    either mid-exchange or has shown activity within QUEUE_GRACE seconds.
+def floor_state(data: dict) -> tuple:
+    """Classify a floor holder. Returns (state, detail) where state is one of:
+
+      "live"       — holder owns the channel and is healthy; not reclaimable.
+      "dead"       — holder process is gone (or PID recycled to another
+                     incarnation); reclaimable.
+      "wedged"     — holder is ALIVE but stuck mid-exchange past a wedge bound
+                     (loop blocked or a single exchange running too long);
+                     reclaimable. This is the case earlier reported as "dead"
+                     even though the pid was alive — hence its own state.
+      "idle_stale" — holder is alive and between turns, but quiet past
+                     QUEUE_GRACE; a waiter should take over. Reclaimable.
+
+    Single source of truth: floor_is_live() == (state == "live").
 
     `in_exchange` marks a holder actively inside a converse call (speaking or
     recording). Such a holder stays live even when last_activity is stale up to
@@ -305,7 +316,7 @@ def floor_is_live(data: dict) -> bool:
     and a waiter should take over once it goes quiet.
     """
     if not pid_alive(data.get("pid"), data.get("start_time")):
-        return False
+        return ("dead", "holder process gone (or PID recycled)")
     age = time.time() - data.get("last_activity", 0)
     if data.get("in_exchange"):
         # Live through a long (loop-blocking) TTS turn, but not forever. Two
@@ -316,12 +327,24 @@ def floor_is_live(data: dict) -> bool:
         #      the loop is alive (heartbeat keeps last_activity fresh) but the
         #      converse coroutine is wedged, so staleness never accumulates.
         if age > IN_EXCHANGE_MAX:
-            return False
+            return ("wedged", f"alive but no heartbeat for {age:.0f}s "
+                    f"(event loop blocked, > IN_EXCHANGE_MAX={IN_EXCHANGE_MAX:.0f}s)")
         started = data.get("exchange_started")
         if started is not None and time.time() - started > EXCHANGE_WEDGE_MAX:
-            return False
-        return True
-    return age <= QUEUE_GRACE
+            return ("wedged", f"alive but one exchange has run "
+                    f"{time.time() - started:.0f}s (> EXCHANGE_WEDGE_MAX="
+                    f"{EXCHANGE_WEDGE_MAX:.0f}s — converse coroutine stuck)")
+        return ("live", f"in exchange, {age:.0f}s since last activity")
+    if age <= QUEUE_GRACE:
+        return ("live", f"between turns, {age:.0f}s into the {QUEUE_GRACE:.0f}s grace")
+    return ("idle_stale", f"between turns, idle {age:.0f}s (past "
+            f"QUEUE_GRACE={QUEUE_GRACE:.0f}s)")
+
+
+def floor_is_live(data: dict) -> bool:
+    """True iff the floor holder owns the channel and is healthy. Thin wrapper
+    over floor_state() so claim/release and status all agree on liveness."""
+    return floor_state(data)[0] == "live"
 
 
 def try_claim_floor(base: Path, project: str, voice: str) -> bool:
@@ -705,19 +728,62 @@ class QueueSession:
 
 # ---------- CLI status (voicemode-switch queue) ----------
 
+def force_reset(base: Optional[Path] = None) -> str:
+    """Operator escape hatch: clear the floor and all waiting tickets.
+
+    For when a holder is WEDGED (alive but stuck mid-exchange) and you want the
+    channel back immediately instead of waiting out the wedge bound. Safe to call
+    anytime — the next converse just re-claims a free floor. Returns a summary.
+    """
+    base = Path(base) if base else DEFAULT_BASE
+    fpath = _floor_path(base)
+    floor = _read_json(fpath)
+    removed_floor = False
+    # Rename-aside then unlink (same atomic discipline as release_floor).
+    if fpath.exists():
+        snap = base / f"floor.reset.{uuid.uuid4().hex}"
+        try:
+            os.rename(fpath, snap)
+            snap.unlink(missing_ok=True)
+            removed_floor = True
+        except FileNotFoundError:
+            pass
+    n_tickets = 0
+    qdir = _queue_dir(base)
+    if qdir.is_dir():
+        for t in qdir.glob("*.json"):
+            try:
+                t.unlink()
+                n_tickets += 1
+            except OSError:
+                pass
+    who = (f"{floor.get('project', '?')}/{floor.get('voice', '?')} "
+           f"(pid {floor.get('pid')})") if floor else "none"
+    return (f"floor reset: cleared floor (was: {who}) and {n_tickets} "
+            f"queued ticket(s). Channel is now free.")
+
+
 def print_status(base: Optional[Path] = None) -> None:
     base = Path(base) if base else DEFAULT_BASE
     floor = _read_json(_floor_path(base))
     if floor is None:
         print("Floor: free")
-    elif floor_is_live(floor):
-        age = time.time() - floor.get("last_activity", 0)
-        print(f"Floor: {floor.get('project', 'unknown')}/{floor.get('voice', '?')} "
-              f"(pid {floor.get('pid')}, last activity {age:.0f}s ago)")
     else:
-        print(f"Floor: STALE — dead holder {floor.get('project', 'unknown')}/"
-              f"{floor.get('voice', '?')} (pid {floor.get('pid')}); "
-              f"next waiter will claim it")
+        state, detail = floor_state(floor)
+        who = (f"{floor.get('project', 'unknown')}/{floor.get('voice', '?')} "
+               f"(pid {floor.get('pid')})")
+        if state == "live":
+            print(f"Floor: {who} — {detail}")
+        elif state == "dead":
+            print(f"Floor: RECLAIMABLE — dead holder {who}: {detail}; "
+                  f"next waiter will claim it")
+        elif state == "wedged":
+            print(f"Floor: RECLAIMABLE — WEDGED holder {who} is ALIVE but stuck: "
+                  f"{detail}; next waiter will claim it. "
+                  f"(`voicemode-switch floor reset` to clear now)")
+        else:  # idle_stale
+            print(f"Floor: RECLAIMABLE — idle holder {who}: {detail}; "
+                  f"next waiter will claim it")
     tickets = list_tickets(base)  # GCs dead/stale tickets as a side effect
     if not tickets:
         print("Queue: empty")
