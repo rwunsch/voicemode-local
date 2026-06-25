@@ -635,6 +635,39 @@ case "${1:-}" in
             *) echo "usage: voicemode-switch floor [status|reset]"; exit 1 ;;
         esac
         ;;
+    audio-token)
+        # Toggle the cross-process audio token (VOICEMODE_AUDIO_TOKEN_ENABLED) in
+        # voicemode.env, which voice-mode folds into its env at startup. Takes
+        # effect when each session's voice-mode restarts (/mcp reconnect).
+        ENVF="$HOME/.voicemode/voicemode.env"
+        PYBIN="$SCRIPT_DIR/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="python3"
+        case "${2:-status}" in
+            on|off)
+                val=$([ "${2}" = "on" ] && echo true || echo false)
+                "$PYBIN" - "$ENVF" "$val" <<'PY'
+import sys, re, pathlib
+f=pathlib.Path(sys.argv[1]); val=sys.argv[2]
+txt=f.read_text() if f.exists() else ""
+line=f"VOICEMODE_AUDIO_TOKEN_ENABLED={val}"
+if re.search(r'^VOICEMODE_AUDIO_TOKEN_ENABLED=', txt, re.M):
+    txt=re.sub(r'^VOICEMODE_AUDIO_TOKEN_ENABLED=.*$', line, txt, flags=re.M)
+else:
+    txt=txt.rstrip('\n')+'\n'+line+'\n'
+f.write_text(txt)
+print(f"set {line} in {f}")
+PY
+                echo "Reconnect voice-mode in each session (/mcp) for it to take effect."
+                echo "Rollback anytime: voicemode-switch audio-token off  (then reconnect)."
+                ;;
+            status|"")
+                cur=$(grep -E '^VOICEMODE_AUDIO_TOKEN_ENABLED=' "$ENVF" 2>/dev/null | tail -1 | cut -d= -f2)
+                echo "audio token (voicemode.env): ${cur:-false (default)}"
+                echo "live device holder:"
+                "$PYBIN" -c "import sys; sys.path.insert(0, '$SCRIPT_DIR/patches'); import voice_queue, json, pathlib; a=voice_queue._read_json(voice_queue.DEFAULT_BASE/'audio.token'); print('  ', (a.get('project','?')+'/'+a.get('voice','?')+' pid '+str(a.get('pid'))) if a else 'free')" 2>/dev/null
+                ;;
+            *) echo "usage: voicemode-switch audio-token [on|off|status]"; exit 1 ;;
+        esac
+        ;;
     queue-log)
         LOG="$HOME/.voicemode/logs/queue.log"
         if [ ! -f "$LOG" ]; then
@@ -673,6 +706,7 @@ case "${1:-}" in
         echo "  test-tts Show which engine serves each voice (fallback demo)"
         echo "  queue    Show voice session queue (floor holder + waiters)"
         echo "  floor    Show floor state (status) or clear a wedged floor: floor [status|reset]"
+        echo "  audio-token  Toggle cross-process audio device exclusivity: audio-token [on|off|status]"
         echo "  queue-log Tail the per-session queue event log (debug)"
         echo "  sysaudio  Fold system output into voice input: on|off|status|setup|teardown"
         echo ""
