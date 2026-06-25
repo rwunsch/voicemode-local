@@ -470,6 +470,112 @@ def release_floor(base: Path) -> None:
     snap.unlink(missing_ok=True)
 
 
+# ---------- cross-process AUDIO TOKEN (physical-device exclusivity) ----------
+# The floor serializes who may SPEAK, but on WSL all sessions share one PulseAudio
+# RDPSink with a ~1s+ tunnel buffer, so two processes opening output streams close
+# together overlap acoustically -> stutter (observed 2026-06-25: a wedged holder
+# plus sessions taking turns on a reclaimable floor produced 3 concurrent streams).
+# The audio token is a second, NARROWER guard layered under the floor: a process
+# acquires it right after taking the floor and releases it at finish(), so only one
+# voice-mode at a time holds the audio device — independent of any floor race. It is
+# self-limiting: a holder that wedges past AUDIO_TOKEN_MAX is reclaimable (can't
+# deadlock the device), and a waiter only blocks up to AUDIO_TOKEN_WAIT before it
+# proceeds anyway (it already owns the floor, so it is the rightful speaker).
+AUDIO_TOKEN_NAME = "audio.token"
+# Max a token stays valid without release — must exceed the longest legit single
+# converse (TTS + listen_duration_max + STT); past it the holder is wedged and the
+# device is reclaimable. Mirrors IN_EXCHANGE_MAX.
+AUDIO_TOKEN_MAX = float(os.getenv("VOICEMODE_AUDIO_TOKEN_MAX", "180"))  # seconds
+# How long a floor-owner waits for the previous holder's token (and its RDP-buffer
+# drain) to clear before proceeding regardless. Covers the ~1.3s tunnel drain.
+AUDIO_TOKEN_WAIT = float(os.getenv("VOICEMODE_AUDIO_TOKEN_WAIT", "3"))  # seconds
+
+
+def _audio_path(base: Path) -> Path:
+    return base / AUDIO_TOKEN_NAME
+
+
+def audio_token_is_live(data: dict) -> bool:
+    """A token is live iff its holder exists (same incarnation) AND has held it
+    less than AUDIO_TOKEN_MAX — so a wedged holder can never own the device
+    forever."""
+    if not pid_alive(data.get("pid"), data.get("start_time")):
+        return False
+    return time.time() - data.get("acquired_epoch", 0) <= AUDIO_TOKEN_MAX
+
+
+def try_acquire_audio(base: Path, project: str, voice: str) -> bool:
+    """One atomic attempt to take the audio token. True iff we now hold it.
+
+    Idempotent: if we already hold it, refresh acquired_epoch and return True.
+    Same claim protocol as try_claim_floor (rename-aside-verify + os.link)."""
+    base.mkdir(parents=True, exist_ok=True)
+    apath = _audio_path(base)
+
+    for orphan in base.glob("audio.token.*"):
+        try:
+            if time.time() - orphan.stat().st_mtime > 60:
+                orphan.unlink()
+        except OSError:
+            pass
+
+    data = _read_json(apath)
+    if (data is not None and data.get("pid") == os.getpid()
+            and data.get("start_time") == process_start_time(os.getpid())):
+        data["acquired_epoch"] = time.time()  # refresh our own hold
+        _write_json_atomic(apath, data)
+        return True
+    if data is not None and audio_token_is_live(data):
+        return False  # someone else holds a live token
+
+    if apath.exists():
+        stale = base / f"audio.token.stale.{uuid.uuid4().hex}"
+        try:
+            os.rename(apath, stale)
+        except FileNotFoundError:
+            pass
+        else:
+            snap = _read_json(stale)
+            if snap is not None and audio_token_is_live(snap):
+                os.replace(stale, apath)  # raced a live refresh — put it back
+                return False
+            stale.unlink(missing_ok=True)
+
+    me = {
+        "pid": os.getpid(),
+        "start_time": process_start_time(os.getpid()),
+        "project": project,
+        "voice": voice,
+        "acquired_epoch": time.time(),
+    }
+    tmp = base / f"audio.token.tmp.{os.getpid()}.{uuid.uuid4().hex}"
+    tmp.write_text(json.dumps(me, indent=2))
+    try:
+        os.link(tmp, apath)
+        return True
+    except FileExistsError:
+        return False
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def release_audio(base: Path) -> None:
+    """Release the audio token iff we hold it (rename-aside-verify, like
+    release_floor). Safe to call when we never held it."""
+    apath = _audio_path(base)
+    snap = base / f"audio.token.release.{uuid.uuid4().hex}"
+    try:
+        os.rename(apath, snap)
+    except FileNotFoundError:
+        return
+    data = _read_json(snap)
+    if data is not None and (data.get("pid") != os.getpid()
+            or data.get("start_time") != process_start_time(os.getpid())):
+        os.replace(snap, apath)  # not ours — put it back
+        return
+    snap.unlink(missing_ok=True)
+
+
 # ---------- session API (used by the patched converse tool) ----------
 
 HEARTBEAT_INTERVAL = 10.0  # seconds: call-scoped floor heartbeat cadence
@@ -595,6 +701,7 @@ class QueueSession:
                     self._acquired = True
                     _log("acquired_burst", self.base, project=self.project,
                          voice=self.voice, held=held, waiting=nwait)
+                    await self._ensure_audio()
                     return AcquireResult(status="acquired", waited=False)
                 # Hand off the floor and fall through to re-queue at the back.
                 _log("burst_yield", self.base, project=self.project,
@@ -620,6 +727,7 @@ class QueueSession:
                     self._acquired = True
                     _log("acquired_floor", self.base, project=self.project,
                          voice=self.voice, ticket=ticket, waited=waited)
+                    await self._ensure_audio()
                     return AcquireResult(status="acquired", waited=waited)
             if time.monotonic() >= deadline:
                 msg = self._queued_message(ticket, requeued)
@@ -630,6 +738,26 @@ class QueueSession:
                 return AcquireResult(status="queued", ticket=ticket,
                                      queued_message=msg)
             waited = True
+            await asyncio.sleep(CHECK_INTERVAL)
+
+    async def _ensure_audio(self) -> None:
+        """Take the cross-process audio token now that we hold the floor, so no
+        other voice-mode opens an output stream while we speak/listen. Waits up
+        to AUDIO_TOKEN_WAIT for a previous holder's token (and its RDP-buffer
+        drain) to clear, then proceeds regardless — we own the floor, so we are
+        the rightful speaker and must not hang. Idempotent across burst calls;
+        finish() releases it. Best-effort: never raises."""
+        deadline = time.monotonic() + AUDIO_TOKEN_WAIT
+        while True:
+            try:
+                if try_acquire_audio(self.base, self.project, self.voice):
+                    return
+            except OSError:
+                return  # token machinery unavailable -> don't block audio
+            if time.monotonic() >= deadline:
+                _log("audio_token_timeout", self.base, project=self.project,
+                     voice=self.voice)
+                return  # proceed without exclusive device (anomalous; logged)
             await asyncio.sleep(CHECK_INTERVAL)
 
     def _queued_message(self, ticket: str, requeued: bool) -> str:
@@ -693,6 +821,10 @@ class QueueSession:
             except asyncio.CancelledError:
                 pass
             self._hb_task = None
+        # Always free the audio device when a call ends — between calls we are
+        # off-channel, so another session may use it. Re-acquired next call.
+        # Safe no-op if we never held it (release_audio verifies ownership).
+        release_audio(self.base)
         if not self._acquired:
             return
         async with _process_lock:
@@ -784,6 +916,16 @@ def print_status(base: Optional[Path] = None) -> None:
         else:  # idle_stale
             print(f"Floor: RECLAIMABLE — idle holder {who}: {detail}; "
                   f"next waiter will claim it")
+    # Audio device token (physical RDPSink/output exclusivity, layered under floor)
+    audio = _read_json(_audio_path(base))
+    if audio is None:
+        print("Audio device: free")
+    else:
+        held = time.time() - audio.get("acquired_epoch", 0)
+        live = audio_token_is_live(audio)
+        print(f"Audio device: {audio.get('project', '?')}/{audio.get('voice', '?')} "
+              f"(pid {audio.get('pid')}, held {held:.0f}s)"
+              + ("" if live else " — STALE/reclaimable"))
     tickets = list_tickets(base)  # GCs dead/stale tickets as a side effect
     if not tickets:
         print("Queue: empty")
