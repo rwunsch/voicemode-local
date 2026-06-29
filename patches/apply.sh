@@ -96,6 +96,17 @@ if [ -f "$SCRIPT_DIR/patch_shutdown_abort.py" ]; then
     "$PYBIN" "$SCRIPT_DIR/patch_shutdown_abort.py" "$VM_DIR/server.py"
 fi
 
+# Keep the queue floor alive while audio plays on the PortAudio callback thread,
+# so a D-state block on the WSLg RDPSink can't starve the asyncio heartbeat and
+# cause a premature floor reclaim / simultaneous-speech overlap.
+# See patch_audio_keepalive.py for the full explanation.
+if [ -f "$SCRIPT_DIR/patch_audio_keepalive.py" ]; then
+    PYBIN="$VENV_DIR/bin/python"
+    [ -x "$PYBIN" ] || PYBIN="$VENV_DIR/Scripts/python.exe"
+    [ -x "$PYBIN" ] || PYBIN="python3"
+    "$PYBIN" "$SCRIPT_DIR/patch_audio_keepalive.py" "$VM_DIR/core.py"
+fi
+
 # Apply the "no silent OpenAI voice swap" patch to simple_failover.py.
 if [ -f "$SCRIPT_DIR/patch_simple_failover.py" ]; then
     PYBIN="$VENV_DIR/bin/python"
