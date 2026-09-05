@@ -51,3 +51,41 @@ a long reply could lapse the floor mid-speech and let a waiting session cut in �
 same class of failure our `patch_audio_keepalive.py` was written for, relocated into
 upstream's model. **Must be tested during Task 4 before we trust conch for the user's
 multi-session workflow.** If it reproduces, it is a third PR candidate.
+
+## Addendum — verdicts re-verified against pristine source (2026-09-05)
+
+A fresh venv unexpectedly reported "already patched", which exposed a hazard (below) and
+put the audit's own baseline in doubt. Both live-defect verdicts were therefore re-checked
+against source fetched **directly from `mbailey/voicemode` master via the GitHub API** — no
+venv, no `uv`, no cache. Our marker count in the fetched files: **0**.
+
+| Verdict | Pristine-source evidence |
+|---|---|
+| `patch_listen_overrun` STILL NEEDED | `converse.py:1467` — `while (recording_duration < max_duration and not stop_recording` |
+| `patch_simple_failover` STILL NEEDED | `simple_failover.py:89` — `"af_sky": "nova",` and `:97` — `selected_voice = voice_mapping.get(voice, "alloy")` |
+
+Both hold. (master HEAD is the 8.12.0 version bump, so master == 8.12.0 for these files.)
+
+## Hazard found: `uv` hardlinks make in-place patching write through to the cache
+
+**Validated, end to end.** `uv pip install` populates a venv by **hardlinking** from
+`~/.cache/uv`, so patching a file under `site-packages` mutates the shared inode — the cache
+entry and every other venv built from it.
+
+Measured: four test venvs sharing **inode 14004386, links=5**; the fifth link is
+`~/.cache/uv/archive-v0/fFRJWaesm5jyhXzG/voice_mode/tools/converse.py`. After patching one
+venv, that cache entry carried our patch marker, and the decisive test — building a brand-new
+venv — produced `marker=1` on a supposedly clean install.
+
+**Consequences.** A "clean rebuild" is not clean; a future rebase could start from
+half-patched bytes; and `apply.sh`'s idempotence guard would silently skip work it should do.
+
+**Fix (committed).** `apply.sh` now replaces each patch target with a private copy before
+writing (`unshare_file`), so patching is local to the venv. Verified in isolation: the
+cache-side file stays unmodified while the venv copy is patched, and the helper no-ops when
+link count is already 1. It is also a no-op under `pip`, which copies rather than links.
+
+**Outstanding.** The already-poisoned entry `fFRJWaesm5jyhXzG` is still present —
+`uv cache clean voice-mode` failed with a 300s lock timeout (a concurrent `uv` process held
+`~/.cache/uv/.lock`). **Must be cleaned before the Task 8 cutover**, or the live install will
+be built from contaminated bytes.
