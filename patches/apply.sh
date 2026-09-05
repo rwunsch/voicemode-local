@@ -4,6 +4,20 @@
 #
 # Usage: ./patches/apply.sh [venv-path]
 #   venv-path defaults to the .venv in this repo directory.
+#
+# Anchors verified against voice-mode 8.12.0 (2026-09-05).
+#
+# HISTORY — what used to live here and why it is gone (see
+# docs/superpowers/plans/artifacts/2026-09-05-patch-audit.md for the evidence):
+#   patch_converse_cancel  -> fixed upstream in 8.12.0 (VM-2015)
+#   patch_listen_stall     -> fixed upstream in 8.11.0 (AUDIO_STALL_TIMEOUT)
+#   fcntl_shim/resource_shim -> superseded by upstream voice_mode/file_lock.py
+#   voice_queue + patch_converse_queue -> superseded by upstream's conch queue
+#                             (8.8.0 epic VM-1610). Upstream's is better: order
+#                             is allocated under an flock'd counter rather than
+#                             epoch-us, so it is correct across machines, and it
+#                             ships callback mode, notify-on-give, fair
+#                             promotion, an MCP tool and a CLI we never built.
 
 set -euo pipefail
 
@@ -30,104 +44,55 @@ if [ -z "$VM_DIR" ]; then
     exit 1
 fi
 
-# NOTE: as of voice-mode 8.7.x we no longer patch the converse PROMPT or ship a
-# switch_mode tool/slash-command. Upstream now provides native config tools
-# (configuration_management: update_config/config_reload) that write
-# voicemode.env, and the session-queue LLM contract lives in the QUEUED status
-# message + the converse tool docstring (added by patch_converse_queue.py) +
-# the project CLAUDE.md. Mode switching is the `voicemode-switch` CLI.
-
-# Install the session queue module and patch converse.py to use it.
-# If the patcher aborts on upstream drift (set -e), voice_queue.py is left
-# copied but converse.py unpatched — converse then falls back to its own
-# conch arbitration and the install stays functional. Fix the anchors in
-# patch_converse_queue.py and re-run.
-if [ -f "$SCRIPT_DIR/voice_queue.py" ]; then
-    cp "$SCRIPT_DIR/voice_queue.py" "$VM_DIR/voice_queue.py"
-    echo "[patches] Applied voice_queue.py → $VM_DIR/voice_queue.py"
-fi
-if [ -f "$SCRIPT_DIR/patch_converse_queue.py" ]; then
-    PYBIN="$VENV_DIR/bin/python"
-    [ -x "$PYBIN" ] || PYBIN="$VENV_DIR/Scripts/python.exe"
-    [ -x "$PYBIN" ] || PYBIN="python3"
-    "$PYBIN" "$SCRIPT_DIR/patch_converse_queue.py" "$VM_DIR/tools/converse.py"
-fi
-
-# Re-raise client cancellations in converse.py. Upstream 8.7.1 swallows
-# CancelledError and returns a result; under fastmcp 3.x/mcp>=1.26 that
-# double-responds and kills the MCP server (next call: -32000 Connection
-# closed). See patch_converse_cancel.py for details.
-if [ -f "$SCRIPT_DIR/patch_converse_cancel.py" ]; then
-    PYBIN="$VENV_DIR/bin/python"
-    [ -x "$PYBIN" ] || PYBIN="$VENV_DIR/Scripts/python.exe"
-    [ -x "$PYBIN" ] || PYBIN="python3"
-    "$PYBIN" "$SCRIPT_DIR/patch_converse_cancel.py" "$VM_DIR/tools/converse.py"
-fi
+PYBIN="$VENV_DIR/bin/python"
+[ -x "$PYBIN" ] || PYBIN="$VENV_DIR/Scripts/python.exe"
+[ -x "$PYBIN" ] || PYBIN="python3"
 
 # Never truncate active speech at listen_duration_max: once the user has
 # started speaking, the listen window extends until the normal silence exit
-# (bounded by VOICEMODE_LISTEN_OVERRUN). See patch_listen_overrun.py.
+# (bounded by VOICEMODE_LISTEN_OVERRUN).
+#
+# STILL NEEDED as of 8.12.0. Upstream's stall backstop (8.11.0) is explicitly
+# NOT a length cap — converse.py:1462 says so — so the loop is still bounded by
+# `recording_duration < max_duration` and a user still talking at 60s/120s is
+# cut off mid-word. Upstreamed as docs/upstream/pr-listen-overrun.md.
 if [ -f "$SCRIPT_DIR/patch_listen_overrun.py" ]; then
-    PYBIN="$VENV_DIR/bin/python"
-    [ -x "$PYBIN" ] || PYBIN="$VENV_DIR/Scripts/python.exe"
-    [ -x "$PYBIN" ] || PYBIN="python3"
     "$PYBIN" "$SCRIPT_DIR/patch_listen_overrun.py" "$VM_DIR/tools/converse.py"
-fi
-
-# Root fix for the issue-#5 recording hang: bound the VAD capture loop by a
-# wall-clock frame-arrival gap so a starved audio callback (WSLg capture hang)
-# ends the recording instead of looping forever and wedging the converse.
-# Builds on the overrun patch's loop structure, so it runs after it.
-if [ -f "$SCRIPT_DIR/patch_listen_stall.py" ]; then
-    PYBIN="$VENV_DIR/bin/python"
-    [ -x "$PYBIN" ] || PYBIN="$VENV_DIR/Scripts/python.exe"
-    [ -x "$PYBIN" ] || PYBIN="python3"
-    "$PYBIN" "$SCRIPT_DIR/patch_listen_stall.py" "$VM_DIR/tools/converse.py"
 fi
 
 # Force-exit voice-mode on shutdown so a mid-playback audio stream can't keep
 # the process alive as an orphan holding its WSLg RDPSink sink-input — the cause
 # of the "two streams mixing -> stutter + stale trailing audio" failure on WSL.
-# See patch_shutdown_abort.py (paired with the reap logic in voicemode-mcp).
+# (Paired with the reap logic in voicemode-mcp.)
+#
+# STILL NEEDED as of 8.12.0. Upstream's mcp_shutdown_patch.py (VM-2015) restores
+# transport-close cancellation of in-flight handlers — a different problem.
+# Nothing upstream force-exits when a lingering PortAudio thread holds the
+# interpreter open.
 if [ -f "$SCRIPT_DIR/patch_shutdown_abort.py" ]; then
-    PYBIN="$VENV_DIR/bin/python"
-    [ -x "$PYBIN" ] || PYBIN="$VENV_DIR/Scripts/python.exe"
-    [ -x "$PYBIN" ] || PYBIN="python3"
     "$PYBIN" "$SCRIPT_DIR/patch_shutdown_abort.py" "$VM_DIR/server.py"
 fi
 
-# Keep the queue floor alive while audio plays on the PortAudio callback thread,
-# so a D-state block on the WSLg RDPSink can't starve the asyncio heartbeat and
-# cause a premature floor reclaim / simultaneous-speech overlap.
-# See patch_audio_keepalive.py for the full explanation.
+# Keep the queue floor alive while audio plays on the PortAudio callback thread.
+#
+# UNDER REVIEW as of 8.12.0: upstream's _wait_for_player_with_control is now an
+# async poll loop rather than a blocking executor wait, so the event-loop
+# starvation this patched around is largely gone — and the heartbeat it served
+# belonged to our now-deleted queue. Kept guarded until the conch hold-TTL
+# question in the audit doc is settled.
 if [ -f "$SCRIPT_DIR/patch_audio_keepalive.py" ]; then
-    PYBIN="$VENV_DIR/bin/python"
-    [ -x "$PYBIN" ] || PYBIN="$VENV_DIR/Scripts/python.exe"
-    [ -x "$PYBIN" ] || PYBIN="python3"
     "$PYBIN" "$SCRIPT_DIR/patch_audio_keepalive.py" "$VM_DIR/core.py"
 fi
 
-# Apply the "no silent OpenAI voice swap" patch to simple_failover.py.
+# Remove the silent OpenAI voice swap: upstream maps a local voice (af_sky) to
+# an OpenAI voice (nova) when it falls through to the OpenAI endpoint, so a
+# Kokoro/Piper outage silently switches the user to a cloud voice mid-
+# conversation. Policy here is "OpenAI last-resort, no silent swaps".
+#
+# STILL NEEDED as of 8.12.0 — simple_failover.py:84-97 still carries the
+# voice_mapping table. Upstreamed as docs/upstream/pr-no-silent-voice-swap.md.
 if [ -f "$SCRIPT_DIR/patch_simple_failover.py" ]; then
-    PYBIN="$VENV_DIR/bin/python"
-    [ -x "$PYBIN" ] || PYBIN="$VENV_DIR/Scripts/python.exe"
-    [ -x "$PYBIN" ] || PYBIN="python3"
     "$PYBIN" "$SCRIPT_DIR/patch_simple_failover.py" "$VM_DIR/simple_failover.py"
-fi
-
-# Windows-only shims for POSIX-only stdlib modules voice-mode imports (fcntl,
-# resource). Dormant on Linux/macOS (the real stdlib wins import resolution); on
-# Windows, stdlib lookup fails and Python falls through to these in site-packages.
-if [ -d "$VENV_DIR/Lib/site-packages" ]; then
-    SITE_PKGS="$VENV_DIR/Lib/site-packages"
-    if [ -f "$SCRIPT_DIR/fcntl_shim.py" ]; then
-        cp "$SCRIPT_DIR/fcntl_shim.py" "$SITE_PKGS/fcntl.py"
-        echo "[patches] Installed Windows fcntl shim → $SITE_PKGS/fcntl.py"
-    fi
-    if [ -f "$SCRIPT_DIR/resource_shim.py" ]; then
-        cp "$SCRIPT_DIR/resource_shim.py" "$SITE_PKGS/resource.py"
-        echo "[patches] Installed Windows resource shim → $SITE_PKGS/resource.py"
-    fi
 fi
 
 echo "[patches] Done. Restart Claude Code for changes to take effect."
