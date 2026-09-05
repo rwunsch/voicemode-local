@@ -48,6 +48,27 @@ PYBIN="$VENV_DIR/bin/python"
 [ -x "$PYBIN" ] || PYBIN="$VENV_DIR/Scripts/python.exe"
 [ -x "$PYBIN" ] || PYBIN="python3"
 
+# Break hardlinks before patching (validated 2026-09-05).
+#
+# `uv pip install` populates a venv by HARDLINKING from ~/.cache/uv, so a file
+# in site-packages typically has link count > 1 and is shared with the cache
+# entry AND with every other venv built from it. Patching in place therefore
+# writes through to all of them: measured 4 test venvs sharing inode 14004386
+# with links=5, where patching one made a supposedly pristine venv report
+# "already patched" and poisoned the cache for every future install.
+#
+# Replacing each target with a private copy first makes patching local to this
+# venv. Cheap, idempotent, and a no-op when pip (which copies) was used instead.
+unshare_file() {
+    if [ -f "$1" ] && [ "$(stat -c %h "$1" 2>/dev/null || echo 1)" -gt 1 ]; then
+        cp -p "$1" "$1.vmltmp" && mv -f "$1.vmltmp" "$1"
+        echo "[patches] unshared hardlink: $1"
+    fi
+}
+for _f in "$VM_DIR/tools/converse.py" "$VM_DIR/server.py" "$VM_DIR/simple_failover.py"; do
+    unshare_file "$_f"
+done
+
 # Never truncate active speech at listen_duration_max: once the user has
 # started speaking, the listen window extends until the normal silence exit
 # (bounded by VOICEMODE_LISTEN_OVERRUN).
@@ -71,17 +92,6 @@ fi
 # interpreter open.
 if [ -f "$SCRIPT_DIR/patch_shutdown_abort.py" ]; then
     "$PYBIN" "$SCRIPT_DIR/patch_shutdown_abort.py" "$VM_DIR/server.py"
-fi
-
-# Keep the queue floor alive while audio plays on the PortAudio callback thread.
-#
-# UNDER REVIEW as of 8.12.0: upstream's _wait_for_player_with_control is now an
-# async poll loop rather than a blocking executor wait, so the event-loop
-# starvation this patched around is largely gone — and the heartbeat it served
-# belonged to our now-deleted queue. Kept guarded until the conch hold-TTL
-# question in the audit doc is settled.
-if [ -f "$SCRIPT_DIR/patch_audio_keepalive.py" ]; then
-    "$PYBIN" "$SCRIPT_DIR/patch_audio_keepalive.py" "$VM_DIR/core.py"
 fi
 
 # Remove the silent OpenAI voice swap: upstream maps a local voice (af_sky) to
