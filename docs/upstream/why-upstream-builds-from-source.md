@@ -56,6 +56,56 @@ Different constraints, and they're good ones:
 Both choices are right for their platform. That's why this stays a fork-level difference
 rather than a PR.
 
+## Revised 2026-09-05: there IS a case for Docker as an *optional* path
+
+The position above ("don't upstream the stack") was right about not proposing Docker as a
+**replacement**. It was too absolute about proposing it as an **alternative**. The evidence
+that changed this is in upstream's own tracker: building whisper.cpp from source is a
+recurring, cross-distro support burden.
+
+**Validated — build/install pain in upstream's own issues and PRs:**
+
+| Item | What it is |
+|---|---|
+| #250 (merged 8.8.0) | "Clearer guidance when the CUDA toolkit is missing during a GPU whisper install" — a *build* failure needing distro detection (apt vs dnf) |
+| #319 (merged 8.8.0) | NixOS flake, because the install tool gave "a cryptic FHS build failure" |
+| #517 (open since 2026-08-13) | Fedora Atomic (Silverblue / Bazzite / Bluefin) support — immutable distros where compiling is actively hostile |
+| #524 (open since 2026-08-18) | "native Windows support for whisper/kokoro install and start" |
+
+Four separate items, all downstream of "you must compile whisper.cpp on the user's machine".
+A prebuilt container eliminates that entire class on Linux, WSL and Windows.
+
+**Real advantages of the Docker path, honestly stated:**
+
+1. **No build toolchain.** No cmake, no compiler, no CUDA toolkit. This is the big one, and
+   the four items above are the receipts.
+2. **Immutable and atomic distros work unchanged** — no FHS assumptions, no `dnf` at all.
+3. **Resource capping is free.** `KOKORO_CPUS` stops TTS starving the real-time audio
+   pipeline; a container limit is one line, a native cgroup is not.
+4. **Compute-mode switching is declarative** — GPU / hybrid / CPU as stacked compose files.
+5. **Clean uninstall** — remove containers and volumes; nothing left in `~/.voicemode`.
+6. **Pinned, reproducible runtime** across machines and CI.
+
+**And the disadvantages remain real, so this must stay opt-in:**
+
+1. **macOS loses Metal.** Docker Desktop is a Linux VM with no GPU passthrough, so a
+   containerised whisper/Kokoro on a Mac is materially slower than a native Metal build.
+   Since macOS is upstream's primary platform, Docker must never become the default.
+2. **Docker Desktop is a heavy dependency** and is licensed for commercial use at some org
+   sizes.
+3. **The Whisper CUDA image is ~25GB** (measured here — which is why our own default is
+   hybrid: Kokoro on GPU, Whisper on the lean CPU image).
+4. **Lifecycle moves to another daemon** — `service logs`, `Restart=always` and
+   start-on-login all assume voice-mode owns the process.
+
+**So the proposal shape is:** not "switch to Docker", but *"an optional, documented
+container path for Linux / WSL / Windows, for users who would rather not build whisper.cpp"* —
+alongside the native path, never replacing it, and explicitly not recommended on macOS.
+That is a far more defensible PR than the one ruled out above, and it answers four existing
+issues rather than changing anyone's mind.
+
+It also depends on the service-awareness fix below, since the two paths collide on `:8880`.
+
 ## What *is* worth upstreaming
 
 Not the stack — the collision it causes. A Docker backend on `:8880` and an enabled
