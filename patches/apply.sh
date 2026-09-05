@@ -65,7 +65,8 @@ unshare_file() {
         echo "[patches] unshared hardlink: $1"
     fi
 }
-for _f in "$VM_DIR/tools/converse.py" "$VM_DIR/server.py" "$VM_DIR/simple_failover.py"; do
+for _f in "$VM_DIR/tools/converse.py" "$VM_DIR/server.py" "$VM_DIR/simple_failover.py" \
+          "$VM_DIR/control_channel.py"; do
     unshare_file "$_f"
 done
 
@@ -103,6 +104,25 @@ fi
 # voice_mapping table. Upstreamed as docs/upstream/pr-no-silent-voice-swap.md.
 if [ -f "$SCRIPT_DIR/patch_simple_failover.py" ]; then
     "$PYBIN" "$SCRIPT_DIR/patch_simple_failover.py" "$VM_DIR/simple_failover.py"
+fi
+
+# Push-to-talk: a level-triggered *hold* on upstream's control channel.
+#
+# 8.11's control channel already covers two thirds of PTT -- skip_forward is
+# press-to-barge-in AND short-press-to-end-turn. The missing third is the hold:
+# mic open exactly while the key is down, with silence detection suppressed so
+# a pause mid-thought doesn't end the turn. These two patches add a hold_start/
+# hold_end intent pair mirroring the existing skip_forward pair (~100 lines),
+# replacing the old 1,984-line patch_converse_ptt/patch_core_ptt approach.
+#
+# Order-independent of patch_listen_overrun (verified byte-identical either way):
+# that one rewrites the `while (...)` header, these touch the init line above it
+# and two sites in the body.
+if [ -f "$SCRIPT_DIR/patch_control_hold.py" ]; then
+    "$PYBIN" "$SCRIPT_DIR/patch_control_hold.py" "$VM_DIR/control_channel.py"
+fi
+if [ -f "$SCRIPT_DIR/patch_converse_hold.py" ]; then
+    "$PYBIN" "$SCRIPT_DIR/patch_converse_hold.py" "$VM_DIR/tools/converse.py"
 fi
 
 echo "[patches] Done. Restart Claude Code for changes to take effect."
