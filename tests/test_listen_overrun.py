@@ -104,7 +104,6 @@ def _record(max_duration):
         disable_silence_detection=False,
         min_duration=0.0,
         vad_aggressiveness=3,
-        no_speech_timeout=None,
     )
     return len(audio) / converse.SAMPLE_RATE, speech_detected
 

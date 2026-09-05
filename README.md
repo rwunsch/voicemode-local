@@ -29,19 +29,31 @@ The conversation flows naturally. Claude's responses are typically 1-3 seconds t
 
 ## What VoiceMode Local Adds
 
-The upstream [VoiceMode MCP](https://github.com/mbailey/voicemode) provides the core voice conversation framework for Claude Code. VoiceMode Local builds on it with local infrastructure:
+The upstream [VoiceMode MCP](https://github.com/mbailey/voicemode) provides the core voice
+conversation framework for Claude Code — **including local STT and TTS**. Upstream defaults to
+local (`VOICEMODE_TTS_BASE_URLS` starts at `http://127.0.0.1:8880/v1`, OpenAI is only the
+fallback), builds whisper.cpp from source via `voicemode service install whisper`, installs
+kokoro-fastapi via `uv`, and manages both through systemd units or launchd plists.
 
-| Feature | VoiceMode (upstream) | VoiceMode Local |
-|---------|---------------------|-----------------|
-| STT | OpenAI Whisper API (cloud) | Local Whisper via Docker (free) |
-| TTS | OpenAI TTS (cloud) | Kokoro + Piper locally, OpenAI as fallback |
-| Cost | ~$0.01/min | Free (local modes) |
-| Privacy | Audio sent to OpenAI | Audio stays on your machine |
-| Voice engines | OpenAI only | Kokoro, Piper, OpenAI — switchable |
-| Voice selection | Fixed | Random or named voice per session |
-| Language switching | Via OpenAI | Automatic (Whisper detects language) |
-| Multi-session | Same voice everywhere | Different voice per session |
-| Mode switching | N/A | `voicemode-switch` CLI / upstream `update_config` |
+> **Correction (2026-09-05):** earlier versions of this table claimed upstream was cloud-only.
+> That was true when this project started and has been false since at least 8.8. Local voice is
+> not what VoiceMode Local adds — the differences are narrower and more specific, below.
+
+| Feature | VoiceMode (upstream 8.12) | VoiceMode Local |
+|---------|---------------------------|-----------------|
+| Local STT / TTS | Yes — whisper.cpp + Kokoro, built from source, systemd/launchd | Yes — same engines as **prebuilt Docker containers** |
+| Install path | Compile whisper.cpp (cmake, CUDA toolkit for GPU) | `docker compose up` — no build toolchain |
+| Piper (multilingual) | Not supported | German, Dutch, Polish, Russian, Korean native voices |
+| Compute switching | Manual rebuild | `voicemode-switch compute gpu\|hybrid\|cpu`, stacked compose files |
+| CPU capping | — | `KOKORO_CPUS` keeps TTS from starving the audio pipeline |
+| Session names in the queue | Every holder reports as `converse` | Real per-session labels in `conch status` |
+| Speech at `listen_duration_max` | Truncated mid-word ([bug](docs/upstream/pr-listen-overrun.md)) | Extends until the natural silence exit |
+| TTS failover | Silently swaps to an OpenAI voice ([bug](docs/upstream/pr-no-silent-voice-swap.md)) | Fails loudly; never a surprise cloud voice |
+| Push-to-talk | `skip_forward` only (edge-triggered) | Level-triggered hold — think, then push and talk |
+| WSLg audio | Orphaned-stream stutter on shutdown | Force-exit + wrapper reap |
+
+Several of these are staged as upstream contributions — see [docs/upstream/](docs/upstream/).
+The goal is for this list to get **shorter** over time.
 
 ## Supported Environments
 

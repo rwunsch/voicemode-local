@@ -618,22 +618,28 @@ case "${1:-}" in
     health) cmd_health ;;
     compute) cmd_compute "${2:-}" "${3:-}" ;;
     queue)
-        PYBIN="$SCRIPT_DIR/.venv/bin/python"
-        [ -x "$PYBIN" ] || PYBIN="python3"
-        "$PYBIN" -c "import sys; sys.path.insert(0, '$SCRIPT_DIR/patches'); import voice_queue; voice_queue.print_status()"
+        # Upstream's conch queue (8.8.0 epic VM-1610) replaced our voice_queue.py.
+        # `voicemode conch status` shows the floor holder + the FIFO waiter list.
+        VM="$SCRIPT_DIR/.venv/bin/voicemode"
+        [ -x "$VM" ] || VM="voicemode"
+        "$VM" conch status "${@:2}"
         ;;
     floor)
-        PYBIN="$SCRIPT_DIR/.venv/bin/python"
-        [ -x "$PYBIN" ] || PYBIN="python3"
+        VM="$SCRIPT_DIR/.venv/bin/voicemode"
+        [ -x "$VM" ] || VM="voicemode"
         case "${2:-status}" in
-            reset)
-                "$PYBIN" -c "import sys; sys.path.insert(0, '$SCRIPT_DIR/patches'); import voice_queue; print(voice_queue.force_reset())"
-                ;;
-            status|"")
-                "$PYBIN" -c "import sys; sys.path.insert(0, '$SCRIPT_DIR/patches'); import voice_queue; voice_queue.print_status()"
-                ;;
-            *) echo "usage: voicemode-switch floor [status|reset]"; exit 1 ;;
+            reset)   "$VM" conch release ;;
+            status|"") "$VM" conch status ;;
+            give)    shift 2; "$VM" conch give "$@" ;;
+            *) echo "usage: voicemode-switch floor [status|reset|give <session>]"; exit 1 ;;
         esac
+        ;;
+    conch)
+        # Passthrough to upstream's conch CLI for anything we don't wrap
+        # (bump, wait, and any future subcommand).
+        VM="$SCRIPT_DIR/.venv/bin/voicemode"
+        [ -x "$VM" ] || VM="voicemode"
+        shift; "$VM" conch "$@"
         ;;
     audio-token)
         # Toggle the cross-process audio token (VOICEMODE_AUDIO_TOKEN_ENABLED) in
@@ -662,20 +668,24 @@ PY
             status|"")
                 cur=$(grep -E '^VOICEMODE_AUDIO_TOKEN_ENABLED=' "$ENVF" 2>/dev/null | tail -1 | cut -d= -f2)
                 echo "audio token (voicemode.env): ${cur:-false (default)}"
-                echo "live device holder:"
-                "$PYBIN" -c "import sys; sys.path.insert(0, '$SCRIPT_DIR/patches'); import voice_queue, json, pathlib; a=voice_queue._read_json(voice_queue.DEFAULT_BASE/'audio.token'); print('  ', (a.get('project','?')+'/'+a.get('voice','?')+' pid '+str(a.get('pid'))) if a else 'free')" 2>/dev/null
+                echo "live floor holder (upstream conch):"
+                VM="$SCRIPT_DIR/.venv/bin/voicemode"; [ -x "$VM" ] || VM="voicemode"
+                "$VM" conch status 2>/dev/null | sed 's/^/  /'
                 ;;
             *) echo "usage: voicemode-switch audio-token [on|off|status]"; exit 1 ;;
         esac
         ;;
     queue-log)
-        LOG="$HOME/.voicemode/logs/queue.log"
+        # Our voice_queue.py wrote ~/.voicemode/logs/queue.log; upstream's conch
+        # logs through voice-mode itself. Tail whichever exists.
+        LOG="$HOME/.voicemode/logs/voicemode.log"
+        [ -f "$LOG" ] || LOG="$HOME/.voicemode/logs/queue.log"
         if [ ! -f "$LOG" ]; then
-            warn "No queue log yet at $LOG (no session has run the queue since logging was added)"
+            warn "No voicemode log found under $HOME/.voicemode/logs/"
             exit 0
         fi
-        echo "Tailing $LOG (Ctrl-C to stop)..."
-        tail -n 40 -f "$LOG"
+        echo "Tailing $LOG for conch activity (Ctrl-C to stop)..."
+        tail -n 40 -f "$LOG" | grep --line-buffered -iE "conch|queue|floor|grant" || true
         ;;
     sysaudio)
         PYBIN="$SCRIPT_DIR/.venv/bin/python"
@@ -704,7 +714,8 @@ PY
         echo "  compute  Show or switch run-mode: compute [gpu|hybrid|cpu] [whisper-model]"
         echo "           (hybrid = Kokoro GPU + Whisper CPU — recommended when a GPU exists)"
         echo "  test-tts Show which engine serves each voice (fallback demo)"
-        echo "  queue    Show voice session queue (floor holder + waiters)"
+        echo "  queue    Show voice session queue (upstream conch: holder + waiters)"
+        echo "  conch    Passthrough to the upstream conch CLI (bump, wait, ...)"
         echo "  floor    Show floor state (status) or clear a wedged floor: floor [status|reset]"
         echo "  audio-token  Toggle cross-process audio device exclusivity: audio-token [on|off|status]"
         echo "  queue-log Tail the per-session queue event log (debug)"

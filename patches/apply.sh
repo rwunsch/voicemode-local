@@ -106,6 +106,16 @@ if [ -f "$SCRIPT_DIR/patch_simple_failover.py" ]; then
     "$PYBIN" "$SCRIPT_DIR/patch_simple_failover.py" "$VM_DIR/simple_failover.py"
 fi
 
+# Give each session a distinguishable name in the conch. Upstream hardcodes
+# agent_name="converse" (converse.py:3360), so concurrent sessions are
+# indistinguishable in `voicemode conch status` -- the one thing that makes a
+# multi-session queue readable. The payload field already exists; only the
+# population is missing. Restores what voice_queue.session_project() did.
+# Upstreamed as docs/upstream/pr-session-names.md.
+if [ -f "$SCRIPT_DIR/patch_session_name.py" ]; then
+    "$PYBIN" "$SCRIPT_DIR/patch_session_name.py" "$VM_DIR/tools/converse.py"
+fi
+
 # Push-to-talk: a level-triggered *hold* on upstream's control channel.
 #
 # 8.11's control channel already covers two thirds of PTT -- skip_forward is

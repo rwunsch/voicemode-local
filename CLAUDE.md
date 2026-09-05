@@ -47,18 +47,44 @@ If the user asks to change voice during a conversation, switch the `voice` param
 ## Session Queue (multiple concurrent voice sessions)
 
 Concurrent Claude Code sessions take strict FIFO turns on the voice channel.
-Two non-negotiable rules when using `mcp__voicemode__converse`:
+Since 2026-09-05 this is **upstream voice-mode's conch queue** (8.8.0, epic
+VM-1610), not our own `voice_queue.py` — that was deleted because upstream built
+the same design, and better: order is allocated under an flock'd counter rather
+than a microsecond clock, so it stays correct across machines.
 
-1. **QUEUED status**: if converse returns "QUEUED — position N of M ...",
-   immediately call converse again with the same message and the given
-   `ticket` value. Repeat as long as needed. Never degrade the question to
-   text; never give up.
-2. **`end_burst=true`** hands the mic to the next waiting session — it does NOT
-   end the conversation. Use it when pausing so a queued session gets the floor,
-   or before stepping away for longer work; then continue the same conversation
-   by calling converse again. Forgetting costs ~90s (auto-release).
+Three things to know when using `mcp__voicemode__converse`:
 
-Inspect the queue anytime with `./voicemode-switch queue`.
+1. **`wait_for_conch`** is the gate. Left false (the default), a busy channel
+   does not queue you at all. Pass `wait_for_conch=true` to join the FIFO
+   waiter queue — you then appear in `voicemode conch status`. It fast-fails if
+   the holder dies, so you cannot be stuck behind a corpse.
+2. **`conch_mode`** decides how you are served once queued. `"wait"` (the
+   default) blocks until the floor is granted to you. `"callback"` returns
+   immediately and pings you when your turn comes — your message is **not**
+   spoken at call time; you take the floor by calling converse again when
+   notified. Never downgrade a queued question to text, and never give up.
+3. **`hold_conch=true`** keeps the floor *across turns* — use it when your next
+   converse call continues the same thread (asking a question you will answer,
+   or speaking across several turns) so another agent cannot cut in mid-thought.
+   It is a short, refreshed TTL (10s idle, re-stamped each turn); override per
+   call with `conch_hold_timeout`. Release by simply not passing it next turn.
+
+There is no `end_burst` and no `ticket` any more — those were our queue's API.
+Handing the mic on is now the *default*: the floor releases at the end of your
+turn unless you asked to hold it.
+
+Inspect and drive the queue:
+
+```bash
+./voicemode-switch queue          # -> voicemode conch status (holder + waiters)
+./voicemode-switch floor reset    # -> voicemode conch release
+./voicemode-switch conch give <session>   # hand the floor to a named session
+```
+
+Sessions are named by `patches/patch_session_name.py` — upstream hardcodes every
+holder as "converse", so without it `conch status` cannot tell your sessions
+apart. The label comes from `VOICEMODE_SESSION_NAME`, else
+`~/.voicemode/session_names/$CLAUDE_CODE_SESSION_ID.txt`, else the repo name.
 
 ## Never End a Voice Conversation on Your Own Initiative
 

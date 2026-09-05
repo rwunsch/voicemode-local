@@ -33,6 +33,14 @@ def test_recording_loop_has_a_wallclock_backstop(loop_src):
     )
 
 
+@pytest.mark.xfail(
+    strict=True,
+    reason="LIVE UPSTREAM BUG as of 8.12.0 -- converse.py:1467 still caps an "
+           "active recording at max_duration. We patch it (patch_listen_overrun) "
+           "and have drafted the fix as docs/upstream/pr-listen-overrun.md. "
+           "strict=True so this turns RED the day upstream fixes it, which is "
+           "when we should retire our patch.",
+)
 def test_speech_not_truncated_by_bare_max_duration_cap(loop_src):
     r"""The overrun fix: a bare `recording_duration < max_duration` bound is the bug.
 
