@@ -43,14 +43,43 @@ corroboration, never as the sole basis for a verdict.
 - **Re-verify 1 after migration:** `patch_audio_keepalive.py`.
 - **Net:** the patch set shrinks from ~1,400 lines to roughly 250, and two of the three survivors are genuine upstream defects with clean, isolated fixes — i.e. good PR material.
 
-## Open question raised during the audit (not yet measured)
+## Open question raised during the audit — MEASURED AND CLOSED, no bug
 
-Upstream's conch hold TTL is **10s, refreshed** (`conch.py:62`, VM-1649). A single TTS
-utterance frequently plays longer than 10s. If nothing bumps the hold during playback,
-a long reply could lapse the floor mid-speech and let a waiting session cut in — the
-same class of failure our `patch_audio_keepalive.py` was written for, relocated into
-upstream's model. **Must be tested during Task 4 before we trust conch for the user's
-multi-session workflow.** If it reproduces, it is a third PR candidate.
+**The concern:** upstream's conch hold TTL is 10s (`conch.py:62`, VM-1649). TTS utterances
+routinely run longer. Would a long reply lapse the floor mid-speech and let a waiting
+session cut in?
+
+**Answer: no. The concern conflated two different windows.** Measured from
+`mbailey/voicemode` master source:
+
+| Window | Default | Governs |
+|---|---|---|
+| `CONCH_LOCK_EXPIRY` | **300s** (`config.py:622`) | an **active** lock — a turn in progress, including TTS playback |
+| `CONCH_HOLD_EXPIRY` | 10s (`config.py:634`) | a **between-turns hold** only |
+| `CONCH_GRANT_TTL` | 30s (`config.py:666`) | an unclaimed grant self-healing |
+
+`Conch.try_acquire`'s docstring states the split explicitly: a stale lock is cleared using
+"CONCH_LOCK_EXPIRY for active locks, CONCH_HOLD_EXPIRY for between-turns holds". Playback
+happens inside a turn, so the applicable window is **300 seconds**, not 10 — comfortably
+beyond any single utterance.
+
+The 10s figure is the idle gap *between* turns, and `_get_hold_expiry`'s own docstring says
+it "is re-stamped every turn, so it only ever needs to cover the gap between two turns
+(agent thinking / light tool use)". Per-hold overrides exist via `conch_hold_timeout`
+(VM-1649). The primary staleness guard is in any case a **PID liveness check**, not a
+timer — a live holder is not evicted by duration alone.
+
+**Residual, minor:** an agent that thinks for >10s between turns while holding
+(`hold_conch=true`) could lapse the hold. That is what `conch_hold_timeout` is for, and it
+is not a regression from our queue — ours auto-released after 90s of a *wedged* floor,
+which is the same class of tradeoff.
+
+**Consequence:** `patch_audio_keepalive` has no successor obligation. Deleting it was
+correct, and no third PR candidate arises here.
+
+*(Noted for discipline: this was flagged as an unmeasured worry and, once measured, it
+shrank to nothing — the expected shape. Flagging it as unmeasured rather than as a finding
+was the right call; escalating it as a probable bug would not have been.)*
 
 ## Addendum — verdicts re-verified against pristine source (2026-09-05)
 
