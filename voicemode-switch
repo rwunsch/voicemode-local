@@ -605,6 +605,23 @@ cmd_compute() {
     esac
 }
 
+# Resolve the upstream `voicemode` CLI and verify it has the conch subcommand
+# (added in 8.8.0, epic VM-1610). Before the 8.12 cutover the installed
+# voice-mode is 8.7.1, whose CLI has no `conch` -- so say that plainly instead
+# of letting click print "No such command 'conch'. (Did you mean 'clone'?)".
+_vm_cli() {
+    VM="$SCRIPT_DIR/.venv/bin/voicemode"
+    [ -x "$VM" ] || VM="voicemode"
+    if ! "$VM" conch --help >/dev/null 2>&1; then
+        ver=$("$SCRIPT_DIR/.venv/bin/python" -c "import voice_mode,importlib.metadata as m; print(m.version('voice-mode'))" 2>/dev/null || echo unknown)
+        echo "This needs upstream's conch queue CLI (voice-mode >= 8.8.0); installed: $ver." >&2
+        echo "Our own voice_queue.py was retired in favour of it on 2026-09-05." >&2
+        echo "Run the 8.12.0 cutover first:  ./patches/apply.sh  (see docs/superpowers/plans/2026-09-05-upstream-realignment.md)" >&2
+        return 127
+    fi
+    printf '%s' "$VM"
+}
+
 case "${1:-}" in
     local)     cmd_local ;;
     localonly) cmd_localonly ;;
@@ -620,13 +637,11 @@ case "${1:-}" in
     queue)
         # Upstream's conch queue (8.8.0 epic VM-1610) replaced our voice_queue.py.
         # `voicemode conch status` shows the floor holder + the FIFO waiter list.
-        VM="$SCRIPT_DIR/.venv/bin/voicemode"
-        [ -x "$VM" ] || VM="voicemode"
+        VM=$(_vm_cli) || exit $?
         "$VM" conch status "${@:2}"
         ;;
     floor)
-        VM="$SCRIPT_DIR/.venv/bin/voicemode"
-        [ -x "$VM" ] || VM="voicemode"
+        VM=$(_vm_cli) || exit $?
         case "${2:-status}" in
             reset)   "$VM" conch release ;;
             status|"") "$VM" conch status ;;
@@ -637,8 +652,7 @@ case "${1:-}" in
     conch)
         # Passthrough to upstream's conch CLI for anything we don't wrap
         # (bump, wait, and any future subcommand).
-        VM="$SCRIPT_DIR/.venv/bin/voicemode"
-        [ -x "$VM" ] || VM="voicemode"
+        VM=$(_vm_cli) || exit $?
         shift; "$VM" conch "$@"
         ;;
     audio-token)
@@ -669,8 +683,7 @@ PY
                 cur=$(grep -E '^VOICEMODE_AUDIO_TOKEN_ENABLED=' "$ENVF" 2>/dev/null | tail -1 | cut -d= -f2)
                 echo "audio token (voicemode.env): ${cur:-false (default)}"
                 echo "live floor holder (upstream conch):"
-                VM="$SCRIPT_DIR/.venv/bin/voicemode"; [ -x "$VM" ] || VM="voicemode"
-                "$VM" conch status 2>/dev/null | sed 's/^/  /'
+                VM=$(_vm_cli 2>/dev/null) && "$VM" conch status 2>/dev/null | sed 's/^/  /' || echo "  (needs voice-mode >= 8.8.0)"
                 ;;
             *) echo "usage: voicemode-switch audio-token [on|off|status]"; exit 1 ;;
         esac
