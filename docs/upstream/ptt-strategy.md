@@ -1,62 +1,101 @@
-# Push-to-talk: strategy before code
+# Push-to-talk: investigated 2026-09-05 — verdict and plan
 
-**Status:** decision pending. **Do not open a PR yet.**
+**Status:** investigation complete. Recommendation below. Nothing submitted.
 
-## The landscape
+## Verdict
 
-- **#312** "Support for push-to-talk and/or interruptible converse mode" — open since 2026-03-11.
-- **#93** "Feature Request: Push to Talk" — closed.
-- **#328** "hold-mode PTT with TTS interrupt, tag-based polyglot TTS, and lo..." — **an open PR
-  since 2026-03-27**, unmerged for 5+ months.
-- **8.11.0 shipped a control channel** we did not have when we designed ours.
+**Rebuild our PTT as a control-channel client.** Upstream's 8.11 control channel already
+provides everything except one thing, and that thing is ~100–150 lines rather than our 1,984.
 
-## The thing that changes our plan
+## What upstream already gives us (validated in 8.12.0)
 
-8.11.0's control channel already provides most of PTT's plumbing: a local-only socket into the
-running server, `pause` / `resume` / `stop`, and crucially **`skip-forward`**, documented as:
+`voice_mode/control_channel.py` (503 lines) — pure logic, transport-agnostic, with
+`control_socket.py` on top and a `voicemode control {pause,resume,stop,skip_back,skip_forward}`
+CLI (`cli.py:1443-1510`).
 
-> pressed while the assistant speaks, it cuts the utterance and hands you the mic; pressed while
-> *you* speak, it ends the recording immediately and transcribes what was captured — a manual
-> end-of-turn and a reliable VAD fallback. Lands in ~200 ms.
+The decisive finding: **the control channel already reaches the recording loop, not just
+playback.** `converse.py:1483-1506` polls `get_control_state().snapshot()` inside the capture
+loop and honours `is_skip_forward` there:
 
-That is barge-in plus manual end-of-turn — two of the three things our PTT patch implements. It
-is already hardened (VM-1688: peer-credential auth, `0700` socket dir, bounded input) and already
-driven by media keys and Stream Deck.
+```python
+if snap.is_skip_forward:
+    logger.info("⏭  Recording ended early by skip_forward -- transcribing what we have")
+    break
+```
 
-**Implication:** our PTT should probably be re-expressed as a **control-channel client** rather
-than a `converse.py` monkey-patch. Concretely, the key listener sends named intents over the
-existing socket instead of us patching the recording loop. That would:
+Mapping that against our own design doc (`../superpowers/specs/2026-07-07-push-to-talk-design.md`):
 
-- survive every future upgrade (no anchors to drift — and note `converse.py` went 2261 → 4620
-  lines in five releases, breaking both our PTT patchers);
-- reuse upstream's hardening rather than duplicating it;
-- reduce the PR from ~2,000 lines to a listener plus a `hold` / `release` intent pair, which is
-  a size a maintainer at 5% merge rate might actually review.
+| Our PTT behaviour | Upstream 8.12.0 | Gap |
+|---|---|---|
+| Press while assistant speaks → cut TTS, hand over mic | `skip_forward` — documented as exactly this, lands in ~200ms | **none** |
+| Short press while listening → stop recording early, transcribe | `skip_forward` in the recording loop (`converse.py:1506`) | **none** |
+| Hold → record while key is down, ignore silence detection, end on release | — | **this is the whole gap** |
 
-**What is genuinely still missing upstream:** a *hold* semantic. `skip-forward` is an edge
-trigger; PTT needs level-triggered "recording is open exactly while the key is down", plus the
-press-to-barge-in-and-start-talking combination. That is the real contribution.
+Also already solved upstream and worth not rebuilding: peer-credential auth on a `0700`
+socket dir, bounded input, stale-socket cleanup (VM-1688 adversarial review), plus a
+server-owned intent allowlist so a control client can never inject free text into the
+agent's context.
 
-## What we have
+## The one real gap
 
-`feature/push-to-talk`: 17 commits, 1,984 lines, 9 test files — press/hold/release state machine,
-TCP relay bus, X11 listener, Windows listener, WSL2 companion, barge-in on press, terminal focus
-scoping. Built against 8.7.1; both patchers (`patch_converse_ptt.py`, `patch_core_ptt.py`) will
-drift on 8.12.0.
+A **level-triggered hold**. `skip_forward` is edge-triggered; PTT needs "the mic is open
+exactly while the key is down", and critically needs silence detection suppressed for the
+duration — otherwise pausing mid-thought ends your turn, which defeats the point.
 
-## Recommended sequence
+`disable_silence_detection` already exists (`converse.py:1335`) but only as a **call-time
+argument** threaded down from the CLI/config. It cannot be toggled at runtime.
 
-1. **Read #328 properly** before writing anything:
-   ```bash
-   gh pr view 328 -R mbailey/voicemode --json title,body,comments
-   gh pr diff 328 -R mbailey/voicemode
-   ```
-   If it substantially overlaps ours, **review and support it** rather than opening a rival. A
-   second unmerged PTT PR helps nobody, and a substantive review from a user with a working
-   implementation is worth more to that PR than a competing diff.
-2. **Read upstream `docs/reference/control-channel.md`** and settle whether `hold` can be a new
-   named intent.
-3. **Comment on #312** with the design and the finding that `skip-forward` gets most of the way
-   — then *ask* before building.
-4. **Locally**: rebase our PTT onto 8.12.0 as a control-channel client if step 2 says that works,
-   otherwise re-anchor the existing patchers. Either way the user gets PTT regardless of upstream.
+**Proposed upstream shape** (small, additive, no behaviour change when unused):
+
+1. `COMMAND_HOLD_START` / `COMMAND_HOLD_END` added to `VALID_COMMANDS`.
+2. `request_hold_start()` / `request_hold_end()` + an `is_holding` field on `ControlState` —
+   mirroring the existing `request_skip_forward` / `is_skip_forward` pair exactly.
+3. In the recording loop: while `snap.is_holding`, skip the silence-detection exit; on
+   hold-end, `break` — the same path `skip_forward` already takes.
+4. `voicemode control hold-start` / `hold-end` CLI verbs for parity.
+
+Everything else stays ours and out-of-tree: X11/Windows/WSL2 key capture, focus scoping, the
+press/hold classification, the relay bus. That is the right split — upstream already delegates
+key capture to Hammerspoon and Stream Deck rather than owning it.
+
+**Honest caveat:** item 3 touches the recording loop, not only `ControlState`. And a press
+while converse is *not* in its listen phase still cannot originate a turn — the agent decides
+when to listen. So this delivers hold-to-talk *within* a listen window, which is what the
+design doc's hold mode actually needs, but it is not "press anytime to summon the mic".
+
+## On PR #328
+
+`feat: hold-mode PTT with TTS interrupt, tag-based polyglot TTS, and local TTS retry` —
+opened 2026-03-27, **`updatedAt` still 2026-03-27**, **0 comments**, +1442/−60 across 12 files.
+
+Two reasons it has sat for five months, and both are instructive for us:
+
+1. **It bundles three unrelated features** — PTT, tag-based polyglot TTS, and local TTS
+   retry. A reviewer has to make three decisions to merge one thing. This is precisely the
+   "one fix per PR" rule in our own [README](README.md), demonstrated in the negative.
+2. **It has been overtaken.** It predates the control channel by four months, so its barge-in
+   machinery — an eager global `pynput` listener, a `_current_playback` global,
+   `interrupt_streaming` polled inside the PCM chunk loop, `stream.abort()` — solves a problem
+   upstream independently solved in 8.11 with `skip_forward`. Its TTS-interrupt half is now
+   redundant; only the hold semantics remain novel, and those are the ~100 lines above.
+
+**Recommendation:** do **not** open a rival PR. Comment on #328 noting the control-channel
+overlap and offering the narrower hold-intent path, and comment on #312 with the same. If the
+author would rather split #328, say so supportively — a review from someone running a working
+PTT is worth more to that PR than a competing diff. Only open our own PR if #328 stays dormant
+after that.
+
+## Local plan (independent of upstream — you get PTT either way)
+
+1. Add the `hold` intent to our patched `control_channel.py` + recording loop as a small
+   local patch (`patch_control_hold.py`), replacing `patch_converse_ptt.py` and
+   `patch_core_ptt.py`. Both of those target code that went 2261 → 4620 lines and will not
+   re-anchor cheaply.
+2. Repoint our existing listeners (`ptt_listener_linux.py`, `ptt_listener_windows.py`,
+   `ptt_bridge.py`) at upstream's control socket instead of our own TCP relay bus — deleting
+   `ptt_ipc.py` and `ptt_playback_bridge.py`, since upstream now owns barge-in.
+3. Keep `ptt_core.py` (press/hold classification) and the focus scoping — still ours.
+
+**Estimated:** ~1,984 lines → roughly 400, most of it the platform key listeners, and only
+one small patch against upstream code instead of two against the most volatile file in the
+package.
