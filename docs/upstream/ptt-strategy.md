@@ -99,3 +99,71 @@ after that.
 **Estimated:** ~1,984 lines → roughly 400, most of it the platform key listeners, and only
 one small patch against upstream code instead of two against the most volatile file in the
 package.
+
+---
+
+## Live-test findings, 2026-09-06
+
+Three live attempts through the real MCP server all failed before the mechanism was
+proven working in isolation. Recording what each step established, because the sequence
+matters more than the conclusion.
+
+### 1. The patch was inert (fixed)
+
+`ControlCommand.apply_to()` had no arm for `hold_start`/`hold_end`. `parse_command`
+accepted them and nothing happened. All 15 unit tests passed because every one drove
+`ControlState` directly and never touched the dispatch path the socket listener actually
+uses. Fixed, plus three tests including one that walks every `VALID_COMMANDS` entry
+through `apply_to`.
+
+### 2. The chain does work (proven)
+
+`socket_path_test.py` runs the real `start_control_listener()` and the real
+`record_audio_with_silence_detection()`, and sends `hold_start` over the real AF_UNIX
+socket from a **separate process**:
+
+```
+  sent hold_start: True
+  audio=308.01s  wall=42.94s
+  final is_holding: True
+  VERDICT: SOCKET->HOLD WORKS
+```
+
+Instrumented per-iteration, the loop sees `is_holding=True` from t=0.51s onward. Baseline
+without a hold ends at 1.53s on the silence exit. So client -> socket -> listener ->
+apply_to -> ControlState -> recording loop is sound.
+
+### 3. What still fails: a hold started during TTS playback
+
+In every live attempt the probe's `hold_start` landed during playback rather than during
+the listen phase (playback ran 11.0s, then 20.5s; the probe's fixed delays under-shot
+both). Those recordings ended on the normal silence exit.
+
+**Likely cause, not yet confirmed by measurement:** `ptt_control_client.on_action("hold_start")`
+sends `skip_forward` first when audio is playing (to barge in), and converse consumes that
+edge at `converse.py:3826` with `control_state.reset()` -- which our patch made clear
+`_holding` too. So the barge-in wipes the hold it was supposed to precede.
+
+This matters for real use: pressing the key *while the assistant is speaking* is the
+normal way to interrupt and answer.
+
+**Candidate fixes, in preference order:**
+
+1. Have `reset()` preserve `_holding` while keeping it clearing the play/hold/cut state.
+   Turn-boundary leakage is still prevented by the scope-entry reset, which happens before
+   any key press for that turn.
+2. Re-send `hold_start` after the skip_forward edge is consumed (client-side retry) --
+   works, but races the consume and is fragile.
+3. Give the hold its own consume path so the skip_forward edge never touches it.
+
+(1) is cleanest and is a two-line change to `patch_control_hold.py`. Verify with the same
+`socket_path_test.py` harness, extended to send `skip_forward` immediately before
+`hold_start`.
+
+### Method note
+
+Two wrong conclusions were drawn and retracted along the way: a first in-process test
+reported "HOLD DID NOT SUPPRESS" because the fake stream runs ~30x real time and the
+wall-clock driver fired after the recording had already finished; and the multi-session
+socket was suspected before `lsof` showed the right process (46597) owned it. Both were
+harness faults, not code faults. Drive these tests in **audio time**, never wall time.
