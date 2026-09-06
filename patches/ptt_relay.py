@@ -69,15 +69,26 @@ class _Handler(socketserver.StreamRequestHandler):
     def handle(self) -> None:
         try:
             for raw in self.rfile:
-                action = parse_action(raw.decode("utf-8", "replace"))
+                text = raw.decode("utf-8", "replace")
+                action = parse_action(text)
                 if action is None:
+                    if text.strip():
+                        logger.info("relay <- rejected %r", text.strip()[:80])
                     continue
-                logger.debug("relay -> control: %s", action)
+                logger.info("relay <- %s", action)
                 try:
                     from voice_mode import ptt_control_client
+                    reachable = ptt_control_client.available()
                     ptt_control_client.on_action(action)
+                    if not reachable:
+                        logger.info(
+                            "   ...but voice-mode's control socket is not bound: "
+                            "it exists only DURING a converse call, so this press "
+                            "did nothing. Press while the assistant is speaking or "
+                            "listening."
+                        )
                 except Exception as e:  # noqa: BLE001 - never kill the relay
-                    logger.debug("forward failed: %s", e)
+                    logger.warning("forward failed: %s", e)
         except (OSError, socket.timeout):
             pass
 
