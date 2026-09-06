@@ -92,9 +92,24 @@ PTT press already works, today, with no new code.
   parked sessions contend for the conch; and it does not help a session that has already
   gone idle.
 
+## DECIDED 2026-09-06: tmux is out
+
+Robert rejected option A, and the reasoning is right: most users on Windows, macOS *and*
+Linux do not run tmux, and **the voicemode MCP server is started by Claude Code itself** --
+so requiring a terminal multiplexer wrapped around the agent is the wrong shape for a
+feature meant to work out of the box. Option A is closed.
+
+That also sharpens the upstream angle: `notify_granted`'s single tmux delivery path is not
+merely inconvenient for us, it is unavailable to the majority of upstream's own users. The
+gap is upstream's, not ours.
+
+So the live options are C (keep sessions parked in `converse` -- no new code) and B
+(Windows keystroke synthesis -- powerful but a footgun). Recommendation below stands with A
+struck out.
+
 ## Recommendation
 
-**C first, then A, and B only if we decide the risk is worth it.**
+**C first, and B only if we decide the risk is worth it.** (A is ruled out, above.)
 
 C is not a workaround — it is the design working as intended, and it costs nothing. Before
 building anything, the honest first question is *why* sessions are idling at a prompt when
