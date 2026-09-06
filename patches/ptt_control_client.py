@@ -15,11 +15,12 @@ Mapping from ``ptt_core.PTTAction`` to control commands
     both halves of a short press, so we send one command and let the server
     decide which it meant.
 
-``hold_start``   -> (``skip_forward`` if audio is playing) then ``hold_start``
-    The hold flag only suppresses silence detection in the recording loop; it
-    does not cut playback. So if the assistant is mid-utterance we barge in
-    first. We *query* rather than fire blindly, because a latched
-    skip_forward with nothing playing would cut the NEXT utterance instead.
+``hold_start``   -> ``hold_start``
+    One command. patch_hold_barges_in makes the playback loops abort on
+    ``is_holding``, so a press during speech cuts the utterance AND holds the
+    mic. No status query: upstream's status cannot report live playback (its
+    own docstring says now_playing is the previous COMPLETED utterance), so a
+    client-side barge-in decision would be a guess.
 
 ``hold_release`` -> ``hold_end``
     Ends the recording via the same path skip_forward uses.
@@ -95,40 +96,37 @@ def send(command: str) -> bool:
     return True
 
 
-def is_playing() -> bool:
-    """Best-effort: is an utterance being spoken right now?
-
-    Uses upstream's read-only ``status`` query. On any doubt returns False, so
-    we skip a barge-in rather than risk latching a skip_forward that would cut
-    the next utterance instead of this one.
-    """
-    line = _send_line({"command": "status"}, read_reply=True)
-    if not line:
-        return False
-    try:
-        data = json.loads(line)
-    except (ValueError, TypeError):
-        return False
-    if not isinstance(data, dict):
-        return False
-    # Upstream's status payload reports the now-playing entry when speaking.
-    now = data.get("now_playing") or data.get("nowPlaying")
-    if now:
-        return True
-    return str(data.get("state", "")).lower() in ("playing", "running_playback")
-
-
 def on_action(action: str) -> None:
-    """Translate one ptt_core action name into control-channel traffic."""
+    """Translate one ptt_core action name into control-channel traffic.
+
+    ``short_press``  -> ``skip_forward``
+        Upstream's skip_forward is already context-sensitive: pressed while the
+        assistant speaks it cuts the utterance and hands over the mic; pressed
+        while *you* speak it ends the recording and transcribes. One command
+        covers both halves of a short press.
+
+    ``hold_start``   -> ``hold_start``
+        Just the one command. The hold is self-sufficient: patch_hold_barges_in
+        makes the playback loops abort on ``is_holding``, so a press during
+        speech cuts the utterance AND holds the mic.
+
+        This deliberately does NOT query status first and send skip_forward.
+        Upstream's status query cannot report live playback -- its own docstring
+        says now_playing is "the previous completed utterance, not the live
+        in-flight stream", and state is "running" whether speaking or listening
+        -- so any client-side barge-in decision would be a guess. Sending
+        skip_forward unconditionally is worse: with nothing playing it latches
+        STATE_SKIP_FORWARD, which the recording loop reads as "end this turn".
+
+    ``hold_release`` -> ``hold_end``
+    ``press``        -> nothing (fires before short-vs-hold is known)
+    """
     if action == "short_press":
         send("skip_forward")
     elif action == "hold_start":
-        if is_playing():
-            send("skip_forward")   # barge in, then keep the mic open
         send("hold_start")
     elif action == "hold_release":
         send("hold_end")
-    # "press" is deliberately ignored -- see the module docstring.
 
 
 def available() -> bool:

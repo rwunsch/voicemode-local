@@ -66,7 +66,7 @@ unshare_file() {
     fi
 }
 for _f in "$VM_DIR/tools/converse.py" "$VM_DIR/server.py" "$VM_DIR/simple_failover.py" \
-          "$VM_DIR/control_channel.py"; do
+          "$VM_DIR/control_channel.py" "$VM_DIR/core.py"; do
     unshare_file "$_f"
 done
 
@@ -133,6 +133,15 @@ if [ -f "$SCRIPT_DIR/patch_control_hold.py" ]; then
 fi
 if [ -f "$SCRIPT_DIR/patch_converse_hold.py" ]; then
     "$PYBIN" "$SCRIPT_DIR/patch_converse_hold.py" "$VM_DIR/tools/converse.py"
+fi
+
+# A hold also cuts TTS, so PTT is a single command. A client cannot tell whether
+# playback is live (status' now_playing is the previous COMPLETED utterance), so
+# pairing hold_start with a guessed skip_forward was unreliable -- the hold does
+# the barge-in itself instead. Touches both playback poll sites.
+if [ -f "$SCRIPT_DIR/patch_hold_barges_in.py" ]; then
+    "$PYBIN" "$SCRIPT_DIR/patch_hold_barges_in.py" "$VM_DIR/core.py"
+    "$PYBIN" "$SCRIPT_DIR/patch_hold_barges_in.py" "$VM_DIR/tools/converse.py"
 fi
 
 # PTT support modules, copied in (not patches). The listener talks to upstream's

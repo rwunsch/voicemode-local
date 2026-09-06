@@ -143,27 +143,40 @@ def test_hold_release_maps_to_hold_end(client_mod, server):
     assert srv.commands() == ["hold_end"]
 
 
-def test_hold_start_barges_in_when_audio_is_playing(client_mod, server):
+def test_hold_start_sends_exactly_one_command(client_mod, server):
+    """No status query, no skip_forward -- the hold does the barge-in itself.
+
+    A client cannot tell whether playback is live: upstream's status reports
+    now_playing as the previous COMPLETED utterance, and state is "running"
+    whether speaking or listening. So the old query-then-maybe-skip_forward
+    sequence was a guess, and every live test mis-timed because of it.
+    patch_hold_barges_in makes the playback loops abort on is_holding instead.
+    """
+    srv = server()
+    client_mod.on_action("hold_start")
+    _wait(lambda: srv.received)
+    assert srv.commands() == ["hold_start"]
+
+
+def test_hold_start_never_sends_skip_forward(client_mod, server):
+    """Unconditional skip_forward is actively harmful with nothing playing:
+    it latches STATE_SKIP_FORWARD, which the recording loop reads as
+    'end this turn now'."""
     srv = server(status_payload={"state": "running", "now_playing": {"id": 3}})
     client_mod.on_action("hold_start")
-    _wait(lambda: len(srv.received) >= 3)
-    assert srv.commands() == ["status", "skip_forward", "hold_start"]
+    _wait(lambda: srv.received)
+    assert "skip_forward" not in srv.commands()
 
 
-def test_hold_start_does_not_barge_in_when_idle(client_mod, server):
-    """A latched skip_forward with nothing playing would cut the NEXT utterance."""
+def test_client_no_longer_queries_status(client_mod, server):
+    """The status query was load-bearing for a decision it could not inform."""
     srv = server(status_payload={"state": "running"})
     client_mod.on_action("hold_start")
+    client_mod.on_action("hold_release")
     _wait(lambda: len(srv.received) >= 2)
-    assert srv.commands() == ["status", "hold_start"]
-
-
-def test_unparseable_status_is_treated_as_not_playing(client_mod, server):
-    srv = server(status_payload=None)  # server answers nothing
-    client_mod.on_action("hold_start")
-    _wait(lambda: len(srv.received) >= 2)
-    assert "skip_forward" not in srv.commands()
-    assert srv.commands()[-1] == "hold_start"
+    assert "status" not in srv.commands()
+    assert not hasattr(client_mod, "is_playing"), \
+        "is_playing() cannot work against upstream's status payload; it should be gone"
 
 
 def _wait(pred, timeout=2.0):
