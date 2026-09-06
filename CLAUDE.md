@@ -167,6 +167,32 @@ volume so it isn't re-downloaded on every recreate. Switching recreates containe
 GPU needs `nvidia-container-toolkit` + the `nvidia` docker runtime; the Docker compose
 files are the same on Linux / WSL / Windows. See `docs/compute-modes/README.md`.
 
+## STT Timeout (and the ~61s stall)
+
+Upstream hardcodes a 60s read timeout on the STT client. When a local
+transcription hangs, that 60s **is** the whole cost: the retry then succeeds in
+about a second, so nothing errors — the turn just goes silent for ~61.5s.
+Measured 2026-09-06: 22% of calls that day, and zero in the 5,651 before it.
+
+`patches/patch_simple_failover.py` makes the timeout configurable. Defaults are
+unchanged, so it is a no-op until you opt in:
+
+| var | scope | default |
+|---|---|---|
+| `VOICEMODE_STT_TIMEOUT` | all STT endpoints | 60 |
+| `VOICEMODE_STT_TIMEOUT_LOCAL` | local endpoints only | as above |
+
+This machine sets `VOICEMODE_STT_TIMEOUT_LOCAL=15`, turning a 61s stall into
+~16s. **Size it by measurement, not feel — local STT time scales with audio
+length**, and `voicemode-switch compute cpu` changes the answer: GPU whisper
+`small` here is median 1.1s / p95 3.6s / max 6.6s (n=67), while the same box on
+CPU took 24–29s for a 10MB recording. **Put it back to 60 before switching to
+CPU compute.** Takes effect on a fresh voice-mode process (`/mcp` → reconnect;
+no full Claude Code restart needed).
+
+Root cause is still open — see `docs/stt-61s-stall/README.md` for what has
+already been ruled out by measurement, so it doesn't get re-proposed.
+
 **Routing config lives in `~/.voicemode/voicemode.env`** (plural `VOICEMODE_TTS_BASE_URLS`/`VOICEMODE_STT_BASE_URLS`/`VOICEMODE_VOICES`), NOT `~/.claude.json` (which holds only `OPENAI_API_KEY`). voice-mode reads ONLY the plural list vars; the singular `TTS_BASE_URL`/etc. are ignored. Each requested voice routes to the first engine that owns it (Kokoro and Piper reject foreign voices fast); OpenAI is strictly last-resort and is **never** silently substituted for a local voice. The MCP command is the `voicemode-mcp` wrapper, which auto-starts (detached) the needed proxies on session load. Test routing with `voicemode-switch test-tts`.
 
 ## Whisper Proxy Auto-Start
