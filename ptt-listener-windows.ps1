@@ -39,8 +39,7 @@
 param(
     [int]$Port = 8765,
     [string]$RelayHost = "127.0.0.1",
-    [int]$HoldThresholdMs = 400,
-    [switch]$Verbose
+    [int]$HoldThresholdMs = 400
 )
 
 $ErrorActionPreference = "Stop"
@@ -54,6 +53,8 @@ public static class VmlKey {
     [DllImport("user32.dll")] public static extern int GetWindowTextLength(IntPtr hWnd);
     [DllImport("user32.dll", CharSet=CharSet.Unicode)]
     public static extern int GetWindowText(IntPtr hWnd, System.Text.StringBuilder s, int n);
+    [DllImport("user32.dll")] public static extern int GetWindowThreadProcessId(IntPtr hWnd, out uint pid);
+    public static uint ForegroundPid() { uint pid; GetWindowThreadProcessId(GetForegroundWindow(), out pid); return pid; }
     public static bool Down(int vKey) { return (GetAsyncKeyState(vKey) & 0x8000) != 0; }
     public static string ForegroundTitle() {
         IntPtr h = GetForegroundWindow();
@@ -69,9 +70,21 @@ public static class VmlKey {
 $VK_CONTROL = 0x11
 $VK_SPACE   = 0x20
 
-# Only fire while a terminal-looking window has focus, so Ctrl+Space in another
-# app (where it is often "next input method") cannot grab the microphone.
-$TerminalTitlePattern = 'Windows Terminal|WSL|Ubuntu|Debian|claude|cmd\.exe|PowerShell|Terminal'
+# Only fire while a terminal has focus, so Ctrl+Space in another app (where it
+# is often "next input method") cannot grab the microphone.
+#
+# Match the foreground PROCESS, not the window title. Titles are whatever the
+# app sets -- Claude Code puts the session name there, so this box shows
+# "Voicemode", which no sane title pattern would have matched. Process names are
+# stable.
+$TerminalProcessPattern = 'WindowsTerminal|powershell|pwsh|wsl|conhost|cmd|alacritty|wezterm|Code'
+
+function Test-TerminalFocused {
+    try {
+        $p = Get-Process -Id ([VmlKey]::ForegroundPid()) -ErrorAction Stop
+        return $p.ProcessName -match $TerminalProcessPattern
+    } catch { return $false }
+}
 
 function Send-Action {
     param([string]$Action)
@@ -97,7 +110,7 @@ Write-Host "  VoiceMode push-to-talk listener" -ForegroundColor Cyan
 Write-Host "  relay        : $RelayHost`:$Port"
 Write-Host "  hotkey       : Ctrl+Space"
 Write-Host "  hold after   : ${HoldThresholdMs}ms"
-Write-Host "  active while : a terminal window has focus"
+Write-Host "  active while : a terminal process has focus"
 Write-Host "  Ctrl+C to stop." -ForegroundColor DarkGray
 Write-Host ""
 
@@ -118,8 +131,7 @@ try {
         $isDown = ([VmlKey]::Down($VK_CONTROL)) -and ([VmlKey]::Down($VK_SPACE))
 
         if ($isDown -and -not $down) {
-            $title = [VmlKey]::ForegroundTitle()
-            if ($title -notmatch $TerminalTitlePattern) { continue }   # not our window
+            if (-not (Test-TerminalFocused)) { continue }   # not a terminal
             $down      = $true
             $pressedAt = Get-Date
             $holdFired = $false
