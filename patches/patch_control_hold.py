@@ -152,7 +152,26 @@ R_RESET_BODY = (
     "            self._cond.notify_all()\n"
 )
 
-# --- 6. snapshot() carries it ----------------------------------------------
+# --- 6. ControlCommand.apply_to dispatch ------------------------------------
+# WITHOUT THIS THE WHOLE PATCH IS INERT. The socket listener does
+# `parse_command(line).apply_to(state)`, so adding the commands to
+# VALID_COMMANDS and the methods to ControlState is not enough -- apply_to is
+# the only thing that connects them. Found by live end-to-end testing after the
+# unit tests (which drove ControlState directly) all passed.
+A_APPLY = (
+    "        elif self.command == COMMAND_SKIP_FORWARD:\n"
+    "            state.request_skip_forward()\n"
+)
+R_APPLY = (
+    "        elif self.command == COMMAND_SKIP_FORWARD:\n"
+    "            state.request_skip_forward()\n"
+    "        elif self.command == COMMAND_HOLD_START:\n"
+    "            state.request_hold_start()  # voicemode-local ptt hold\n"
+    "        elif self.command == COMMAND_HOLD_END:\n"
+    "            state.request_hold_end()  # voicemode-local ptt hold\n"
+)
+
+# --- 7. snapshot() carries it ----------------------------------------------
 A_SNAP = (
     "            return ControlSnapshot(\n"
     "                self._state, self._message, self._hint, self._pending_transport\n"
@@ -175,6 +194,7 @@ EDITS = [
     ("ControlState.__init__", A_INIT, R_INIT, 1),
     ("hold request methods", A_RESET, R_RESET, 1),
     ("reset body", A_RESET_BODY, R_RESET_BODY, 1),
+    ("apply_to dispatch", A_APPLY, R_APPLY, 1),
     ("snapshot construction", A_SNAP, R_SNAP, 2),
 ]
 

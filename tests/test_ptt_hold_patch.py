@@ -173,3 +173,36 @@ def test_stall_backstop_and_max_duration_survive(patched_converse):
     """Holding suppresses silence detection ONLY -- the other bounds remain."""
     assert "AUDIO_STALL_TIMEOUT" in patched_converse
     assert "max_duration" in patched_converse
+
+
+# --- the wiring, not just the primitive ------------------------------------
+#
+# These exist because the first version of this patch passed every test above
+# and was still completely inert in production: the socket listener dispatches
+# via ControlCommand.apply_to(), which knew nothing about the hold commands.
+# Testing ControlState directly never touched that path.
+
+def test_apply_to_drives_hold_start(control):
+    st = control.ControlState()
+    control.parse_command('{"command": "hold_start"}').apply_to(st)
+    assert st.snapshot().is_holding is True
+
+
+def test_apply_to_drives_hold_end(control):
+    st = control.ControlState()
+    st.request_hold_start()
+    control.parse_command('{"command": "hold_end"}').apply_to(st)
+    assert st.snapshot().is_holding is False
+
+
+def test_apply_to_handles_every_valid_command(control):
+    """No command may parse successfully and then do nothing on apply.
+
+    apply_to raises ControlCommandError on an unhandled command, so this fails
+    loudly for any future command added to VALID_COMMANDS without a dispatch arm.
+    """
+    st = control.ControlState()
+    for cmd in control.VALID_COMMANDS:
+        parsed = control.parse_command('{"command": "%s"}' % cmd)
+        parsed.apply_to(st)   # must not raise
+        st.reset()
