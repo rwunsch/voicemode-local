@@ -278,7 +278,7 @@ class PiperProxyHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def log_message(self, format, *args):
-        print(f"[piper-proxy] {args[0]}")
+        print(f"[piper-proxy] {args[0]}", flush=True)
 
 
 def main():

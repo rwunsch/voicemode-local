@@ -14,7 +14,11 @@ Usage:
 
 import argparse
 import io
+import itertools
 import json
+import sys
+import threading
+import time
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 import urllib.request
 import urllib.error
@@ -24,6 +28,22 @@ import re
 class WhisperProxyHandler(BaseHTTPRequestHandler):
 
     whisper_url = "http://127.0.0.1:9000"
+
+    # Per-request tracing. The ~61s STT stalls (60s client timeout + a retry
+    # that succeeds in ~1s) leave no trace anywhere else: the proxy's own
+    # upstream timeout is 30s, so a stalled attempt that actually reached
+    # _proxy_transcription could not have taken 60s. Tracing each phase tells
+    # us whether the hung attempt ever arrived at all, and if it did, which
+    # phase swallowed it.
+    _seq = itertools.count(1)
+
+    def _trace(self, phase, rid, **kw):
+        extra = " ".join(f"{k}={v}" for k, v in kw.items())
+        print(
+            f"[whisper-proxy] {time.strftime('%H:%M:%S')}."
+            f"{int(time.time() * 1000) % 1000:03d} #{rid} {phase} {extra}",
+            flush=True,
+        )
 
     def do_POST(self):
         if self.path == "/v1/audio/transcriptions":
@@ -58,9 +78,14 @@ class WhisperProxyHandler(BaseHTTPRequestHandler):
             self.send_error(404, "Not Found")
 
     def _proxy_transcription(self):
+        rid = next(self._seq)
+        t0 = time.perf_counter()
         content_type = self.headers.get("Content-Type", "")
         content_length = int(self.headers.get("Content-Length", 0))
+        self._trace("ACCEPT", rid, bytes=content_length,
+                    peer=self.client_address[1], threads=threading.active_count())
         body = self.rfile.read(content_length)
+        self._trace("BODY", rid, ms=f"{(time.perf_counter() - t0) * 1000:.0f}")
 
         # Parse multipart form data to extract the file
         boundary = self._extract_boundary(content_type)
@@ -95,12 +120,18 @@ class WhisperProxyHandler(BaseHTTPRequestHandler):
             method="POST",
         )
 
+        t_up = time.perf_counter()
         try:
             with urllib.request.urlopen(req, timeout=30) as resp:
                 result_text = resp.read().decode().strip()
         except urllib.error.URLError as e:
+            self._trace("UPSTREAM_ERR", rid,
+                        ms=f"{(time.perf_counter() - t_up) * 1000:.0f}", err=e)
             self.send_error(502, f"Whisper service error: {e}")
             return
+        self._trace("UPSTREAM_OK", rid,
+                    ms=f"{(time.perf_counter() - t_up) * 1000:.0f}",
+                    chars=len(result_text))
 
         # Return response in the requested format
         response_format = fields.get("response_format", "json")
@@ -115,6 +146,7 @@ class WhisperProxyHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(response)))
         self.end_headers()
         self.wfile.write(response.encode())
+        self._trace("DONE", rid, ms=f"{(time.perf_counter() - t0) * 1000:.0f}")
 
     def _extract_boundary(self, content_type):
         match = re.search(r"boundary=(.+)", content_type)
@@ -170,7 +202,7 @@ class WhisperProxyHandler(BaseHTTPRequestHandler):
         return body.getvalue()
 
     def log_message(self, format, *args):
-        print(f"[whisper-proxy] {args[0]}")
+        print(f"[whisper-proxy] {args[0]}", flush=True)
 
 
 def main():
