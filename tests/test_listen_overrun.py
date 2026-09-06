@@ -25,6 +25,25 @@ import types
 import numpy as np
 import pytest
 
+
+# These tests drive the REAL recording loop out of the INSTALLED voice_mode, so
+# they only mean anything against a venv that patches/apply.sh has processed.
+# Run against an unpatched install they fail confusingly (the loop still hard-
+# caps at max_duration, which is the upstream bug) -- so say so instead.
+def _installed_converse_is_patched() -> bool:
+    try:
+        import voice_mode.tools.converse as c
+        from pathlib import Path as _P
+        return "voicemode-local listen overrun" in _P(c.__file__).read_text()
+    except Exception:  # noqa: BLE001
+        return False
+
+
+pytestmark = pytest.mark.skipif(
+    not _installed_converse_is_patched(),
+    reason="installed voice_mode is not patched -- run patches/apply.sh on this venv first",
+)
+
 converse = pytest.importorskip("voice_mode.tools.converse")
 
 CHUNK_MS = 30  # converse.VAD_CHUNK_DURATION_MS

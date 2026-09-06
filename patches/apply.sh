@@ -135,4 +135,17 @@ if [ -f "$SCRIPT_DIR/patch_converse_hold.py" ]; then
     "$PYBIN" "$SCRIPT_DIR/patch_converse_hold.py" "$VM_DIR/tools/converse.py"
 fi
 
+# PTT support modules, copied in (not patches). The listener talks to upstream's
+# control socket directly; ptt_relay is only the WSL2 Windows->guest hop, since
+# a Windows-side key press cannot reach the guest's AF_UNIX socket.
+# Retired with the control-channel rewrite: ptt_ipc.py (event bus),
+# ptt_bridge.py (converse glue), ptt_playback_bridge.py (barge-in registry) --
+# upstream's control channel owns all three concerns now.
+for _m in ptt_core.py ptt_control_client.py ptt_relay.py ptt_listener_linux.py; do
+    if [ -f "$SCRIPT_DIR/$_m" ]; then
+        cp "$SCRIPT_DIR/$_m" "$VM_DIR/$_m"
+        echo "[patches] installed $_m"
+    fi
+done
+
 echo "[patches] Done. Restart Claude Code for changes to take effect."
