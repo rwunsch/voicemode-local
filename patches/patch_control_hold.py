@@ -148,9 +148,22 @@ R_RESET_BODY = (
     "            self._message = None\n"
     "            self._hint = None\n"
     "            self._pending_transport = None\n"
-    "            self._holding = False  # voicemode-local ptt hold\n"
+    "            # voicemode-local ptt hold: a PTT press during playback sends\n"
+    "            # skip_forward (barge-in) and then hold_start. converse consumes\n"
+    "            # the skip_forward edge with reset(), which would otherwise wipe\n"
+    "            # the hold that press was for -- the mic would open and then close\n"
+    "            # on the first second of silence. preserve_hold lets that\n"
+    "            # edge-consume keep the hold; the turn-boundary reset (scope\n"
+    "            # entry, before any press for this turn) still clears it, so a\n"
+    "            # hold can never leak across turns.\n"
+    "            if not preserve_hold:\n"
+    "                self._holding = False\n"
     "            self._cond.notify_all()\n"
 )
+
+# reset() signature
+A_RESET_SIG = "    def reset(self) -> None:\n"
+R_RESET_SIG = "    def reset(self, preserve_hold: bool = False) -> None:\n"
 
 # --- 6. ControlCommand.apply_to dispatch ------------------------------------
 # WITHOUT THIS THE WHOLE PATCH IS INERT. The socket listener does
@@ -193,6 +206,7 @@ EDITS = [
     ("snapshot fields", A_SNAP_FIELDS, R_SNAP_FIELDS, 1),
     ("ControlState.__init__", A_INIT, R_INIT, 1),
     ("hold request methods", A_RESET, R_RESET, 1),
+    ("reset signature", A_RESET_SIG, R_RESET_SIG, 1),
     ("reset body", A_RESET_BODY, R_RESET_BODY, 1),
     ("apply_to dispatch", A_APPLY, R_APPLY, 1),
     ("snapshot construction", A_SNAP, R_SNAP, 2),

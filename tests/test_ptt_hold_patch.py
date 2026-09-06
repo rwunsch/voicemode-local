@@ -206,3 +206,36 @@ def test_apply_to_handles_every_valid_command(control):
         parsed = control.parse_command('{"command": "%s"}' % cmd)
         parsed.apply_to(st)   # must not raise
         st.reset()
+
+
+def test_reset_preserves_hold_when_asked(control):
+    """The skip_forward edge-consume must not wipe the hold that press was for.
+
+    A PTT press during playback sends skip_forward (barge-in) then hold_start;
+    converse then consumes the skip_forward edge with reset(). Without
+    preserve_hold that reset wiped the hold, so the mic opened and closed again
+    on the first second of silence -- the exact live failure.
+    """
+    st = control.ControlState()
+    st.request_hold_start()
+    st.reset(preserve_hold=True)
+    assert st.snapshot().is_holding is True
+
+
+def test_reset_clears_hold_by_default(control):
+    """Turn-boundary reset must still clear it, so a hold can't leak across turns."""
+    st = control.ControlState()
+    st.request_hold_start()
+    st.reset()
+    assert st.snapshot().is_holding is False
+
+
+def test_reset_still_clears_everything_else_when_preserving(control):
+    st = control.ControlState()
+    st.request_skip_forward()
+    st.request_hold_start()
+    st.reset(preserve_hold=True)
+    snap = st.snapshot()
+    assert snap.is_skip_forward is False, "skip_forward edge must still be consumed"
+    assert snap.is_running is True
+    assert snap.is_holding is True

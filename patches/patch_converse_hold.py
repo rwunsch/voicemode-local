@@ -97,10 +97,29 @@ R_SILENCE = (
     "                                        and silence_duration_ms >= SILENCE_THRESHOLD_MS):\n"
 )
 
+# --- 4. keep the hold across the skip_forward edge-consume -------------------
+# A PTT press during playback sends skip_forward (barge-in) then hold_start.
+# converse consumes the skip_forward edge with control_state.reset(), which
+# would wipe the hold that press was for. Preserve it here; the turn-boundary
+# reset still clears it.
+A_TTS_CONSUME = (
+    "                if control_snapshot.is_skip_forward:\n"
+    "                    logger.info(\"Converse skip-forward via control channel during TTS\")\n"
+    "                    control_state.reset()\n"
+)
+R_TTS_CONSUME = (
+    "                if control_snapshot.is_skip_forward:\n"
+    "                    logger.info(\"Converse skip-forward via control channel during TTS\")\n"
+    "                    # voicemode-local ptt hold: preserve a hold set by the\n"
+    "                    # same key press that caused this barge-in.\n"
+    "                    control_state.reset(preserve_hold=True)\n"
+)
+
 EDITS = [
     ("hold transition tracker", A_INIT, R_INIT, 1),
     ("hold release break", A_BREAK, R_BREAK, 1),
     ("silence-exit suppression", A_SILENCE, R_SILENCE, 1),
+    ("tts skip_forward consume", A_TTS_CONSUME, R_TTS_CONSUME, 1),
 ]
 
 
