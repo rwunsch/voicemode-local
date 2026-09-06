@@ -50,8 +50,9 @@ def test_allowlist_matches_ptt_core(relay):
     assert relay.VALID_ACTIONS == {a.value for a in core.PTTAction}
 
 
-def test_binds_loopback_only(relay):
-    """Nothing off-box should be able to drive the microphone."""
+def test_binds_loopback_by_default(relay):
+    """Nothing off-box drives the microphone unless explicitly opted in."""
     import inspect
     src = inspect.getsource(relay.serve)
-    assert '"127.0.0.1"' in src
+    assert '"VOICEMODE_PTT_HOST", "127.0.0.1"' in src, \
+        "the default bind must stay loopback"

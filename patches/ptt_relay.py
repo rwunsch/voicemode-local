@@ -90,10 +90,19 @@ class _Server(socketserver.ThreadingTCPServer):
     address_family = socket.AF_INET
 
 
-def serve(port: Optional[int] = None) -> None:
+def serve(port: Optional[int] = None, host: Optional[str] = None) -> None:
+    """Serve the relay.
+
+    Binds loopback by default. On WSL2 the producer is a Windows-side listener,
+    and Windows reaches a WSL server through localhostForwarding only if it is
+    bound to 0.0.0.0 -- set VOICEMODE_PTT_HOST=0.0.0.0 there. Inside WSL's NAT
+    namespace that is the virtual adapter, not your LAN, but it is still wider
+    than loopback, so it stays opt-in.
+    """
     port = port if port is not None else int(os.getenv("VOICEMODE_PTT_PORT", DEFAULT_PORT))
-    with _Server(("127.0.0.1", port), _Handler) as srv:
-        logger.info("PTT relay listening on 127.0.0.1:%d -> control socket", port)
+    host = host if host is not None else os.getenv("VOICEMODE_PTT_HOST", "127.0.0.1")
+    with _Server((host, port), _Handler) as srv:
+        logger.info("PTT relay listening on %s:%d -> control socket", host, port)
         try:
             srv.serve_forever()
         except KeyboardInterrupt:
