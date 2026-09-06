@@ -21,7 +21,7 @@ import sys
 import tempfile
 import urllib.request
 import urllib.error
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 
 
 def resolve_piper_bin():
@@ -317,7 +317,11 @@ def main():
     PiperProxyHandler.models_dir = models_dir
     PiperProxyHandler.piper_bin = resolve_piper_bin()
 
-    server = HTTPServer((args.host, args.port), PiperProxyHandler)
+    # ThreadingHTTPServer, not HTTPServer: the proxies are shared by every
+    # concurrent voice-mode process on this machine. A single-threaded
+    # server serialises them, so one session's STT/TTS stalls everyone
+    # else's — observed as multi-second freezes with several sessions open.
+    server = ThreadingHTTPServer((args.host, args.port), PiperProxyHandler)
     print(f"[piper-proxy] Listening on http://{args.host}:{args.port}")
     print(f"[piper-proxy] Voices file: {voices_path}")
     print(f"[piper-proxy] Models dir:  {models_dir}")

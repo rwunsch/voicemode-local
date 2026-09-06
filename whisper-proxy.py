@@ -15,7 +15,7 @@ Usage:
 import argparse
 import io
 import json
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 import urllib.request
 import urllib.error
 import re
@@ -187,7 +187,11 @@ def main():
     args = parser.parse_args()
 
     WhisperProxyHandler.whisper_url = args.whisper_url
-    server = HTTPServer((args.host, args.port), WhisperProxyHandler)
+    # ThreadingHTTPServer, not HTTPServer: the proxies are shared by every
+    # concurrent voice-mode process on this machine. A single-threaded
+    # server serialises them, so one session's STT/TTS stalls everyone
+    # else's — observed as multi-second freezes with several sessions open.
+    server = ThreadingHTTPServer((args.host, args.port), WhisperProxyHandler)
     print(f"[whisper-proxy] Listening on http://{args.host}:{args.port}")
     print(f"[whisper-proxy] Forwarding to {args.whisper_url}/asr")
     print(f"[whisper-proxy] OpenAI endpoint: POST /v1/audio/transcriptions")
