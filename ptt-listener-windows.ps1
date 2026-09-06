@@ -44,6 +44,18 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+# Always log to a fixed file as well as the console. However this script gets
+# launched -- Startup folder, Start-Process, a job, a plain window -- the log is
+# readable from WSL, so a silent failure can never look identical to "no keys
+# pressed" again.
+$LogFile = "\\wsl.localhost\Ubuntu\home\wunsch\.voicemode\logs\ptt-listener.log"
+function Log {
+    param([string]$Text, [string]$Colour = "Gray")
+    $line = "{0}  {1}" -f (Get-Date -Format "HH:mm:ss.fff"), $Text
+    Write-Host "  $line" -ForegroundColor $Colour
+    try { $line | Out-File -Append -FilePath $LogFile -Encoding utf8 } catch { }
+}
+
 Add-Type @"
 using System;
 using System.Runtime.InteropServices;
@@ -69,6 +81,14 @@ public static class VmlKey {
 
 $VK_CONTROL = 0x11
 $VK_SPACE   = 0x20
+
+try {
+    [void][VmlKey]::Down($VK_CONTROL)
+    [void][VmlKey]::ForegroundPid()
+} catch {
+    Log ("FATAL: key interop unavailable -- " + $_.Exception.Message) "Red"
+    exit 1
+}
 
 # Only fire while a terminal has focus, so Ctrl+Space in another app (where it
 # is often "next input method") cannot grab the microphone.
@@ -115,7 +135,7 @@ Write-Host "  Ctrl+C to stop." -ForegroundColor DarkGray
 Write-Host ""
 
 if (Send-Action "press") {
-    Write-Host "  relay reachable." -ForegroundColor Green
+    Log "relay reachable; watching for Ctrl+Space" "Green"
 } else {
     Write-Host "  relay NOT reachable at $RelayHost`:$Port" -ForegroundColor Yellow
     Write-Host "  In WSL run:  VOICEMODE_PTT_HOST=0.0.0.0 ~/git/voicemode-local/.venv/bin/python -m voice_mode.ptt_relay" -ForegroundColor Yellow
@@ -124,14 +144,19 @@ if (Send-Action "press") {
 $down        = $false
 $pressedAt   = $null
 $holdFired   = $false
+$lastSeen    = $false
 
 try {
     while ($true) {
         Start-Sleep -Milliseconds 50
         $isDown = ([VmlKey]::Down($VK_CONTROL)) -and ([VmlKey]::Down($VK_SPACE))
+        if ($isDown -ne $lastSeen) { Log ("keys ctrl+space = " + $isDown) "DarkGray"; $lastSeen = $isDown }
 
         if ($isDown -and -not $down) {
-            if (-not (Test-TerminalFocused)) { continue }   # not a terminal
+            if (-not (Test-TerminalFocused)) {
+                Log "ignored: foreground is not a terminal" "Yellow"
+                continue
+            }
             $down      = $true
             $pressedAt = Get-Date
             $holdFired = $false
@@ -139,18 +164,18 @@ try {
         elseif ($isDown -and $down -and -not $holdFired) {
             if (((Get-Date) - $pressedAt).TotalMilliseconds -ge $HoldThresholdMs) {
                 $holdFired = $true
-                [void](Send-Action "hold_start")
-                Write-Host ("  {0:HH:mm:ss}  hold_start  (mic open)" -f (Get-Date)) -ForegroundColor Green
+                $ok = Send-Action "hold_start"
+                Log ("hold_start  (mic open)  sent=" + $ok) "Green"
             }
         }
         elseif (-not $isDown -and $down) {
             $down = $false
             if ($holdFired) {
-                [void](Send-Action "hold_release")
-                Write-Host ("  {0:HH:mm:ss}  hold_end    (sending)" -f (Get-Date)) -ForegroundColor Green
+                $ok = Send-Action "hold_release"
+                Log ("hold_end    (sending)  sent=" + $ok) "Green"
             } else {
-                [void](Send-Action "short_press")
-                Write-Host ("  {0:HH:mm:ss}  short_press" -f (Get-Date)) -ForegroundColor DarkCyan
+                $ok = Send-Action "short_press"
+                Log ("short_press  sent=" + $ok) "DarkCyan"
             }
         }
     }
