@@ -74,10 +74,17 @@ than ask twice.
 
 ---
 
+## Appended to the posted comment, 2026-09-12
+
+A marked edit was added rather than a second comment, since the maintainer had not yet replied and a
+follow-up an hour later reads as bumping. It reports the listening test: five matched A/B pairs
+across four voices, no audible difference, with the scope stated (one listener, not blind) and the
+reason it was unsurprising (kokoro-onnx converts the same Kokoro v1.0 weights).
+
 ## What we are deliberately not saying
 
-- No claim about quality. We have not run a listening comparison, and ONNX output could be worse in
-  ways a benchmark cannot see.
+- ~~No claim about quality.~~ **Answered 2026-09-12:** five pairs, four voices, no audible
+  difference. One listener, not blind.
 - No claim about concurrency. Our own reason for putting Kokoro on a GPU was that CPU synthesis
   starves the real-time audio pipeline when several sessions speak at once — a single-request
   benchmark is blind to exactly that.
