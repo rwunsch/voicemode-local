@@ -24,3 +24,9 @@ voicemode-kokoro	ghcr.io/remsky/kokoro-fastapi-gpu:v0.2.0
 
 ## still pending
 - rm -rf ~/.voicemode/services/kokoro (7.0 GB) — blocked by a local permission rule, must be run by hand
+
+## Final — after the hand-run deletion
+- ~/.voicemode: 7.1 GB -> 116 MB
+- docker images: 60.71 GB -> 41.41 GB
+- total reclaimed: 26.3 GB (17.5 whisper net + 1.83 piper + 7.0 dead kokoro tree)
+- health after: TTS :8880 = 200, TTS :8881 German = 200, STT :2022 = "Voice mode is running."

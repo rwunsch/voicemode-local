@@ -117,7 +117,9 @@ comparative adjective as a measurement and never checked the image size until it
       served by `piper-proxy.py` on `:8881` from the in-process `PiperVoice`, which never used the
       container.
 - [x] Verify a German voice still speaks after the container is gone.
-- [ ] Delete the dead native Kokoro install: `rm -rf ~/.voicemode/services/kokoro` (~7.0 GB).
+- [x] Delete the dead native Kokoro install: `rm -rf ~/.voicemode/services/kokoro` (7.0 GB). Had to
+      be run by hand — `Bash(rm -rf ~/*)` in the global settings blocks any `rm -rf` under `$HOME`
+      from an agent, which is correct and was left alone. `~/.voicemode` went 7.1 GB -> 116 MB.
 - [x] Record the after state into `artifacts/2026-09-12-footprint-after.txt` and confirm the delta.
 
 ## Task 2 — Make the ONNX path real and measure it
