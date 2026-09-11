@@ -52,9 +52,21 @@ honest statement upstream is our own 1.3x-1.6x on total synthesis, with the metr
 ## Voice parity
 
 Audio durations for the same text were within 5% between engines (13.70 s ONNX against 14.48 s
-torch on the long sentence), and `af_sky` exists on both. **Not yet checked:** a listening comparison
-for quality, and the other voices in daily use (`am_puck`, `bm_lewis`, `af_heart`). Quality is the
-thing most likely to change the conclusion and it has not been tested.
+torch on the long sentence).
+
+**Listening test, 2026-09-12 — no audible difference.** Robert compared five matched A/B pairs
+(`af_sky`, `am_puck`, `bm_lewis`, `af_heart` on an acronym-heavy sentence, plus `af_sky` on a longer
+natural one) and judged them **identical in all cases**. Player and samples:
+`C:\Temp\voice-compare\listen.html`.
+
+Scope of that result, stated honestly: **one listener, five pairs, four voices.** Not a blind test,
+and not a formal MOS. All seven session voices (`af_sky`, `am_puck`, `bm_lewis`, `af_heart`,
+`bf_alice`, `af_river`, `am_eric`) were confirmed to *exist and synthesize* in the ONNX model
+(HTTP 200), but only four were listened to.
+
+Identical output is the expected result rather than a surprise — kokoro-onnx is a conversion of the
+same Kokoro v1.0 weights, not a different model. The test was worth running because a conversion
+*can* degrade, not because degradation was likely.
 
 ## Not tested
 

@@ -132,8 +132,9 @@ comparative adjective as a measurement and never checked the image size until it
 - [x] Measure, on the same three sentences, against Docker Kokoro on `:8880`: time to first audio,
       total synthesis time, and resident memory. Short, medium and long input. Record the exact
       commands.
-- [ ] Check voice parity: do the voices we actually use (`af_sky`, `am_puck`, `bm_lewis`,
-      `af_heart`) exist and sound equivalent through the ONNX server?
+- [x] Check voice parity: do the voices we actually use (`af_sky`, `am_puck`, `bm_lewis`,
+      `af_heart`) exist and sound equivalent through the ONNX server? **Yes — judged identical on
+      all five pairs.** All seven session voices synthesize; four were listened to. One listener.
 - [ ] Test the int8 model as a second data point, since that is the 88 MB figure PR #261 quotes.
 - [x] Write the results into `artifacts/2026-09-12-onnx-vs-torch.md` — numbers, commands, sample
       size, and what was not tested.
@@ -159,8 +160,9 @@ comparative adjective as a measurement and never checked the image size until it
 
 ## What could make this wrong
 
-- **ONNX quality may not match torch** on the voices we use daily. That is a listening test, not a
-  benchmark, and it is the most likely reason to stop at Task 2.
+- ~~**ONNX quality may not match torch** on the voices we use daily.~~ **Tested 2026-09-12 and
+  ruled out** — identical on five pairs across four voices. This was the most likely reason to stop
+  at Task 2, and it did not happen.
 - **The GPU Kokoro may genuinely be faster** than ONNX on CPU for long utterances. If so the
   honest outcome is "ONNX for portability, GPU for this machine", and the upstream argument
   narrows to machines without a GPU — which is still the case the maintainer asked about.
