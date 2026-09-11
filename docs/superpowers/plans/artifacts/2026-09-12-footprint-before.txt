@@ -1,0 +1,28 @@
+# Footprint before reclaim — 2026-09-12
+
+## ~/.voicemode-local/config
+INSTALL_MODE=docker
+PIPER_ENABLED=true
+COMPUTE_MODE=gpu
+WHISPER_MODEL=small
+
+## docker images (voice-related)
+ghcr.io/remsky/kokoro-fastapi-cpu:latest	4.85GB
+rhasspy/wyoming-piper:latest	1.83GB
+onerahmet/openai-whisper-asr-webservice:latest-gpu	25.7GB
+ghcr.io/remsky/kokoro-fastapi-gpu:v0.2.0	18GB
+
+## docker ps
+voicemode-whisper	onerahmet/openai-whisper-asr-webservice:latest-gpu	Up 16 hours
+voicemode-piper	rhasspy/wyoming-piper:latest	Up 16 hours
+voicemode-kokoro	ghcr.io/remsky/kokoro-fastapi-gpu:v0.2.0	Up 16 hours
+
+## du
+7.1G	/home/wunsch/.voicemode
+
+## docker system df
+TYPE            TOTAL     ACTIVE    SIZE      RECLAIMABLE
+Images          22        18        60.71GB   5.869GB (9%)
+Containers      19        3         281.3MB   1.417MB (0%)
+Local Volumes   312       9         26.65GB   18.6GB (69%)
+Build Cache     0         0         0B        0B
