@@ -1,0 +1,26 @@
+# Footprint after reclaim — 2026-09-12
+
+## config
+INSTALL_MODE=docker
+PIPER_ENABLED=false
+COMPUTE_MODE=hybrid
+WHISPER_MODEL=base
+
+## docker images (voice-related)
+ghcr.io/remsky/kokoro-fastapi-cpu:latest	4.85GB
+onerahmet/openai-whisper-asr-webservice:latest	8.19GB
+ghcr.io/remsky/kokoro-fastapi-gpu:v0.2.0	18GB
+
+## containers
+voicemode-whisper	onerahmet/openai-whisper-asr-webservice:latest
+voicemode-kokoro	ghcr.io/remsky/kokoro-fastapi-gpu:v0.2.0
+
+## ~/.voicemode
+7.1G	/home/wunsch/.voicemode
+
+## verification after each removal
+- German TTS via piper-proxy :8881 after wyoming-piper removal: HTTP 200, 150572 bytes
+- STT via whisper-proxy :2022 on the CPU image: 0.78s, transcript verbatim correct
+
+## still pending
+- rm -rf ~/.voicemode/services/kokoro (7.0 GB) — blocked by a local permission rule, must be run by hand

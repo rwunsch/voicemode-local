@@ -1,7 +1,7 @@
 # Reclaim the dead install footprint, and test whether ONNX can replace the torch TTS
 
 **In one paragraph, for someone who wasn't there.** Running voice locally on this machine costs
-about 58 GB of disk. When we actually measured what each part was doing, roughly 34.5 GB of that
+about 58 GB of disk. When we actually measured what each part was doing, roughly 26 GB of that
 was serving nothing at all — a GPU Whisper image kept by a compute-mode setting nobody revisited, a
 Piper container superseded months ago by an in-process proxy, and a 7 GB Kokoro install abandoned
 when the setup moved to Docker. None of it is a bug; each piece was correct when it was made and
@@ -13,7 +13,8 @@ maintainer has already asked for exactly this, for exactly our platform.
 
 ## Goal
 
-1. Reclaim ~34.5 GB with no functional change.
+1. Reclaim ~26.3 GB with no functional change. *(Originally written as 34.5 GB — see the correction
+   under Task 1.)*
 2. Establish, by measurement on this machine, whether ONNX Kokoro is a viable replacement for the
    Docker/torch Kokoro for day-to-day use.
 3. If it is, offer it upstream in the place a maintainer invited it, and make it the local default.
@@ -89,47 +90,55 @@ reduction, not 75x.
 
 ---
 
-## Task 1 — Reclaim the dead 34.5 GB
+## Task 1 — Reclaim the dead weight
 
-- [ ] Record the current state first: `docker images`, `docker ps`, `du -sh ~/.voicemode`,
+**Corrected 2026-09-12, during execution: the reclaim is ~26.3 GB, not 34.5 GB.** The replacement
+CPU Whisper image is **8.19 GB**, not the small thing "lean CPU image" implied everywhere in these
+notes — including in `docker-compose.hybrid.yml`'s own header, where "lean" was meant relative to
+25.7 GB rather than as an absolute. So the Whisper swap nets 25.7 − 8.19 = **17.5 GB**, and the
+total is 17.5 + 1.83 (Piper) + 7.0 (dead Kokoro tree) = **26.3 GB**. The error was mine: I treated a
+comparative adjective as a measurement and never checked the image size until it had downloaded.
+
+- [x] Record the current state first: `docker images`, `docker ps`, `du -sh ~/.voicemode`,
       and a copy of `~/.voicemode-local/config`, into `artifacts/2026-09-12-footprint-before.txt`.
-- [ ] Switch compute mode to hybrid: `voicemode-switch compute hybrid`. This moves Whisper back to
+- [x] Switch compute mode to hybrid: `voicemode-switch compute hybrid`. This moves Whisper back to
       the lean CPU image and leaves Kokoro on the GPU, which is what
       `docker-compose.hybrid.yml` was written for.
-- [ ] Confirm STT still works before deleting anything — one `converse` round trip, and check the
+- [x] Confirm STT still works before deleting anything — one `converse` round trip, and check the
       whisper container is the CPU image.
-- [ ] Measure STT latency with `WHISPER_MODEL=small` on CPU. The hybrid compose defaults to `base`,
-      but the config explicitly sets `small`, which will be slower on CPU. If a round trip is
-      noticeably worse, drop to `base` and record the difference.
-- [ ] Remove the GPU Whisper image: `docker image rm onerahmet/openai-whisper-asr-webservice:latest-gpu`
+- [~] Measure STT latency with `WHISPER_MODEL=small` on CPU. **Not done, and no longer needed:**
+      `voicemode-switch compute hybrid` reset `WHISPER_MODEL` from `small` to `base` itself, so
+      there was never a `small`-on-CPU state to measure. `base` on CPU transcribes 4.9 s of audio in
+      **0.78 s**, verbatim correct, which settles the concern that prompted the step.
+- [x] Remove the GPU Whisper image: `docker image rm onerahmet/openai-whisper-asr-webservice:latest-gpu`
       (~25.7 GB).
-- [ ] Stop and remove the Piper container, and set `PIPER_ENABLED=false`; remove
+- [x] Stop and remove the Piper container, and set `PIPER_ENABLED=false`; remove
       `rhasspy/wyoming-piper` (~1.83 GB). German and other Piper voices are unaffected — they are
       served by `piper-proxy.py` on `:8881` from the in-process `PiperVoice`, which never used the
       container.
-- [ ] Verify a German voice still speaks after the container is gone.
+- [x] Verify a German voice still speaks after the container is gone.
 - [ ] Delete the dead native Kokoro install: `rm -rf ~/.voicemode/services/kokoro` (~7.0 GB).
-- [ ] Record the after state into `artifacts/2026-09-12-footprint-after.txt` and confirm the delta.
+- [x] Record the after state into `artifacts/2026-09-12-footprint-after.txt` and confirm the delta.
 
 ## Task 2 — Make the ONNX path real and measure it
 
-- [ ] Install `kokoro-onnx` into the working venv and start `kokoro-onnx-server.py` on a free port
+- [x] Install `kokoro-onnx` into the working venv and start `kokoro-onnx-server.py` on a free port
       (not `:8880`, which Docker Kokoro holds, and not `:8881`, which Piper holds — see
       [`../../kokoro-port-collision/README.md`](../../kokoro-port-collision/README.md)).
-- [ ] Record what it actually downloads and what the install weighs: model, voices, onnxruntime,
+- [x] Record what it actually downloads and what the install weighs: model, voices, onnxruntime,
       total on disk.
-- [ ] Measure, on the same three sentences, against Docker Kokoro on `:8880`: time to first audio,
+- [x] Measure, on the same three sentences, against Docker Kokoro on `:8880`: time to first audio,
       total synthesis time, and resident memory. Short, medium and long input. Record the exact
       commands.
 - [ ] Check voice parity: do the voices we actually use (`af_sky`, `am_puck`, `bm_lewis`,
       `af_heart`) exist and sound equivalent through the ONNX server?
 - [ ] Test the int8 model as a second data point, since that is the 88 MB figure PR #261 quotes.
-- [ ] Write the results into `artifacts/2026-09-12-onnx-vs-torch.md` — numbers, commands, sample
+- [x] Write the results into `artifacts/2026-09-12-onnx-vs-torch.md` — numbers, commands, sample
       size, and what was not tested.
 
 ## Task 3 — Comment on upstream #262
 
-- [ ] Draft `docs/upstream/comment-kokoro-onnx-cpu.md` following the house format: lead with the
+- [x] Draft `docs/upstream/comment-kokoro-onnx-cpu.md` following the house format: lead with the
       mechanism, quote the maintainer's own invitation back, credit PR #261, give our measured
       Linux/WSL numbers, and ask whether an in-tree ONNX provider would be welcome before offering
       one. Cross-link #535, which asks the same underlying question about Piper.
