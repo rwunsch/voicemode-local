@@ -33,7 +33,7 @@ Read: the bottleneck is attention, not hostility. So —
 | 4 | [`comment-wslg-audio.md`](comment-wslg-audio.md) | #341, #342 | Diagnosis comment | **Medium** — comment first, PR only if a maintainer engages |
 | 5 | [`ptt-strategy.md`](ptt-strategy.md) | #312, #328 | Strategy | **Medium** — support the existing PR before opening a rival |
 | 6 | [`issue-piper.md`](issue-piper.md) | new issue | Feature request | **Low** — zero demand signal upstream; ask, don't build |
-| 7 | [`comment-kokoro-onnx-cpu.md`](comment-kokoro-onnx-cpu.md) | #262 (closed) | Diagnosis comment | **High** — the maintainer's own closing note asks for exactly this case, by name, and we have measured it |
+| 7 | [`comment-kokoro-onnx-cpu.md`](comment-kokoro-onnx-cpu.md) | **POSTED** #262 2026-09-11 | Diagnosis comment | **High** — the maintainer's own closing note asks for exactly this case, by name, and we have measured it |
 
 Deliberately **not** upstreamed: the Docker compose stack itself. See
 [`why-upstream-builds-from-source.md`](why-upstream-builds-from-source.md).

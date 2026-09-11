@@ -142,9 +142,9 @@ comparative adjective as a measurement and never checked the image size until it
       mechanism, quote the maintainer's own invitation back, credit PR #261, give our measured
       Linux/WSL numbers, and ask whether an in-tree ONNX provider would be welcome before offering
       one. Cross-link #535, which asks the same underlying question about Piper.
-- [ ] Add it to the queue table in `docs/upstream/README.md`.
-- [ ] `gh auth switch --user rwunsch`, post the comment on #262, then switch back.
-- [ ] Record the issue URL and the date in the queue table.
+- [x] Add it to the queue table in `docs/upstream/README.md`.
+- [x] `gh auth switch --user rwunsch`, post the comment on #262, then switch back.
+- [x] Record the issue URL and the date in the queue table.
 
 ## Task 4 — Only if the measurements hold, and only after a reply
 

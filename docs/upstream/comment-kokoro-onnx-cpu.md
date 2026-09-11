@@ -3,7 +3,7 @@
 **Target:** [`mbailey/voicemode#262`](https://github.com/mbailey/voicemode/issues/262) (closed).
 **Type:** comment on a closed issue, answering the maintainer's own invitation. Not a new issue.
 **Submit as:** `gh auth switch --user rwunsch` first.
-**Status:** draft, not submitted.
+**Status:** POSTED 2026-09-11 as rwunsch — https://github.com/mbailey/voicemode/issues/262#issuecomment-5641877185
 
 ## Why this thread and not a new one
 
