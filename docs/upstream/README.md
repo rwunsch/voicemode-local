@@ -34,7 +34,7 @@ Read: the bottleneck is attention, not hostility. So —
 | 5 | [`ptt-strategy.md`](ptt-strategy.md) | #312, #328 | Strategy | **Medium** — support the existing PR before opening a rival |
 | 6 | [`issue-piper.md`](issue-piper.md) | new issue | Feature request | **Low** — zero demand signal upstream; ask, don't build |
 | 7 | [`comment-kokoro-onnx-cpu.md`](comment-kokoro-onnx-cpu.md) | **POSTED** #262 2026-09-11 | Diagnosis comment | **High** — the maintainer's own closing note asks for exactly this case, by name, and we have measured it |
-| 8 | [`issue-simpleaudio-blocks-windows.md`](issue-simpleaudio-blocks-windows.md) | new issue | Bug report | **High** — proven by a resolver run, one-line fix, and the dep has broken installs in #117/#13/#319 already |
+| 8 | [`issue-simpleaudio-blocks-windows.md`](issue-simpleaudio-blocks-windows.md) | **POSTED** #541 2026-09-12 | Bug report | **High** — proven by a resolver run, one-line fix, and the dep has broken installs in #117/#13/#319 already |
 
 Deliberately **not** upstreamed: the Docker compose stack itself. See
 [`why-upstream-builds-from-source.md`](why-upstream-builds-from-source.md).

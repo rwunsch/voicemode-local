@@ -4,7 +4,9 @@
 #239 (open, Windows STT analysis), #117 (closed, Ubuntu 24.04 — same dependency, different platform).
 **Type:** bug report with a one-line fix.
 **Submit as:** `gh auth switch --user rwunsch` first.
-**Status:** draft, NOT submitted — awaiting Robert's go-ahead.
+**Status:** POSTED 2026-09-12 as rwunsch — https://github.com/mbailey/voicemode/issues/541
+(Posted in a shortened form, with the internal references stripped. The draft below is the long
+version; the issue as filed is tighter.)
 
 **Confidence: high.** The mechanism is proven by a resolver run rather than inferred, the dependency
 has broken installs on at least three platforms already, and the fix is deleting one line.
@@ -93,8 +95,10 @@ installs from wheels alone.
 
 ## Notes for us, not for upstream
 
-If upstream declines or goes quiet, FELIX can carry a `uv` override that drops `simpleaudio` at
-install time, which keeps us on stock upstream otherwise. Building and shipping our own
-`simpleaudio` wheel is possible and is the wrong answer — it would make us the maintainer of a
-binary wheel for an unmaintained 2020 package. See
-`felix-framework` PR #621 for where this sits in the FELIX decision.
+**None of this section goes upstream, and none of it did** — the filed issue names no internal
+project, and that was checked before posting rather than trusted.
+
+If upstream declines or goes quiet, we can carry a `uv` override that drops `simpleaudio` at install
+time, which keeps us on stock upstream otherwise. Building and shipping our own `simpleaudio` wheel
+is possible and is the wrong answer — it would make us the maintainer of a binary wheel for an
+unmaintained 2020 package.
