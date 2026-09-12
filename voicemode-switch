@@ -168,18 +168,30 @@ PYEOF
 cmd_status() {
     echo "=== VoiceMode Service Status ==="
     echo ""
+    local onnx_port; onnx_port="$(kokoro_onnx_port)"
+    # Docker Kokoro still owns 8880 unless ONNX was configured to take it over.
+    if ! is_kokoro_onnx || [ "$onnx_port" != "8880" ]; then
+        echo "Docker containers:"
+        # Probe with the SAME predicate `health` uses (/health, then /v1/models).
+        # These used to be two different notions of "up", and they disagreed:
+        # kokoro-fastapi-gpu:v0.2.0 answers /health but returns 404 for
+        # /v1/models, so `status` called a perfectly healthy container
+        # unreachable while `health` called it up. Fixed 2026-09-12.
+        if healthy 8880; then
+            ok "Kokoro TTS is running (http://127.0.0.1:8880)"
+        else
+            fail "Kokoro TTS is not reachable (http://127.0.0.1:8880)"
+        fi
+    fi
     if is_kokoro_onnx; then
-        echo "Kokoro ONNX (native):"
+        echo "Kokoro ONNX (native, port $onnx_port):"
         KOKORO_ONNX_PID_FILE="/tmp/kokoro-onnx-server.pid"
         if [ -f "$KOKORO_ONNX_PID_FILE" ] && kill -0 "$(cat "$KOKORO_ONNX_PID_FILE")" 2>/dev/null; then
             ok "Kokoro ONNX server running (PID $(cat "$KOKORO_ONNX_PID_FILE"))"
         else
             fail "Kokoro ONNX server not running"
         fi
-        check_service "Kokoro ONNX TTS" "http://127.0.0.1:8880/health" || true
-    else
-        echo "Docker containers:"
-        check_service "Kokoro TTS" "http://127.0.0.1:8880/v1/models" || true
+        check_service "Kokoro ONNX TTS" "http://127.0.0.1:$onnx_port/health" || true
     fi
     check_service "Whisper ASR" "http://127.0.0.1:9000/docs" || true
     echo ""
@@ -225,20 +237,42 @@ is_kokoro_onnx() {
     [ "$onnx" = "true" ]
 }
 
+# Which port the ONNX Kokoro server listens on. Defaults to 8880, where it
+# REPLACES the Docker Kokoro — that was the original design, and the port
+# collision it causes is written up in docs/kokoro-port-collision/README.md.
+#
+# Set KOKORO_ONNX_PORT to something else (we use 8882) to run it ALONGSIDE the
+# Docker one instead, as a local last resort in VOICEMODE_TTS_BASE_URLS. That
+# is what replaced OpenAI at the end of our chain: measured 2026-09-12, ONNX is
+# indistinguishable from Docker Kokoro by ear, so the only thing the cloud entry
+# was still providing was a way for our words to leave the machine unnoticed.
+kokoro_onnx_port() {
+    local p=""
+    if [ -f "$CONFIG_FILE" ]; then
+        p="$(grep -oP 'KOKORO_ONNX_PORT=\K.*' "$CONFIG_FILE" 2>/dev/null || true)"
+    fi
+    echo "${p:-8880}"
+}
+
 # Which local proxy ports the *current* config (voicemode.env) actually uses.
 configured_local_ports() {
-    python3 - << 'PYEOF'
+    KOKORO_ONNX_PORT="$(kokoro_onnx_port)" python3 - << 'PYEOF'
 import os, re
 envfile = os.path.expanduser("~/.voicemode/voicemode.env")
 text = open(envfile).read() if os.path.exists(envfile) else ""
 def val(key):
-    m = re.search(rf"^{re.escape(key)}=(.*)$", text, re.M)
-    return m.group(1) if m else ""
+    # The env file can carry a key more than once (later wins, as with a shell
+    # source), so collect every occurrence rather than only the first.
+    return ",".join(m.group(1) for m in re.finditer(rf"^{re.escape(key)}=(.*)$", text, re.M))
 urls = val("VOICEMODE_TTS_BASE_URLS") + "," + val("VOICEMODE_STT_BASE_URLS")
+known = ["8880", "8881", "2022"]
+onnx = os.environ.get("KOKORO_ONNX_PORT", "8880")
+if onnx not in known:
+    known.append(onnx)
 # Fall back to the local default if nothing is configured yet.
 if not urls.strip(","):
-    urls = "8880,8881,2022"
-print(" ".join(p for p in ("8880", "8881", "2022") if p in urls))
+    urls = ",".join(known)
+print(" ".join(p for p in known if p in urls))
 PYEOF
 }
 
@@ -263,6 +297,7 @@ start_detached() {
 # and serialized across concurrent session starts via a lock.
 cmd_ensure() {
     local quiet="${1:-}"
+    local onnx_port; onnx_port="$(kokoro_onnx_port)"
     exec 9>"/tmp/voicemode-ensure.lock"
     flock 9 2>/dev/null || true
     for port in $(configured_local_ports); do
@@ -288,6 +323,13 @@ cmd_ensure() {
                     python3 "$SCRIPT_DIR/whisper-proxy.py" --port 2022 \
                     --whisper-url http://127.0.0.1:9000
                 [ -n "$quiet" ] || echo "  ensured Whisper proxy (2022)" ;;
+            "$onnx_port")
+                # Only reached when KOKORO_ONNX_PORT is NOT 8880 — i.e. ONNX is
+                # running alongside the Docker Kokoro rather than instead of it.
+                start_detached kokoro-onnx-server /tmp/kokoro-onnx-server.pid \
+                    "$VENV_PY" "$SCRIPT_DIR/kokoro-onnx-server.py" --port "$onnx_port" \
+                    --model-dir "$SCRIPT_DIR/models/kokoro"
+                [ -n "$quiet" ] || echo "  ensured Kokoro ONNX ($onnx_port)" ;;
         esac
     done
     flock -u 9 2>/dev/null || true
@@ -300,7 +342,13 @@ cmd_health() {
     local ports; ports="$(configured_local_ports)"
     [ -n "$ports" ] || { echo "  (no local proxies configured)"; return 0; }
     for port in $ports; do
-        case "$port" in 8880) n="Kokoro TTS";; 8881) n="Piper TTS";; 2022) n="Whisper STT";; *) n="port $port";; esac
+        case "$port" in
+            8880) n="Kokoro TTS";;
+            8881) n="Piper TTS";;
+            2022) n="Whisper STT";;
+            "$(kokoro_onnx_port)") n="Kokoro ONNX TTS";;
+            *) n="port $port";;
+        esac
         if healthy "$port"; then ok "$n ($port) up"; else fail "$n ($port) DOWN"; all_up=1; fi
     done
     return $all_up
@@ -310,17 +358,21 @@ cmd_start() {
     echo "=== Starting Local VoiceMode Services ==="
 
     if is_kokoro_onnx; then
+        ONNX_PORT="$(kokoro_onnx_port)"
         echo ""
-        echo "Starting Kokoro ONNX server (native)..."
+        echo "Starting Kokoro ONNX server (native, port $ONNX_PORT)..."
         KOKORO_ONNX_PID_FILE="/tmp/kokoro-onnx-server.pid"
         if [ -f "$KOKORO_ONNX_PID_FILE" ] && kill -0 "$(cat "$KOKORO_ONNX_PID_FILE")" 2>/dev/null; then
             warn "Kokoro ONNX server already running (PID $(cat "$KOKORO_ONNX_PID_FILE"))"
         else
-            if lsof -ti:8880 > /dev/null 2>&1; then
+            # Only clear the port when ONNX is taking 8880 FROM the Docker
+            # Kokoro. On a separate port (8882) there is nothing to displace,
+            # and killing whatever answers there would be gratuitous.
+            if [ "$ONNX_PORT" = "8880" ] && lsof -ti:8880 > /dev/null 2>&1; then
                 kill "$(lsof -ti:8880)" 2>/dev/null
                 sleep 1
             fi
-            nohup "$VENV_PY" "$SCRIPT_DIR/kokoro-onnx-server.py" --port 8880 \
+            nohup "$VENV_PY" "$SCRIPT_DIR/kokoro-onnx-server.py" --port "$ONNX_PORT" \
                 --model-dir "$SCRIPT_DIR/models/kokoro" \
                 > /tmp/kokoro-onnx-server.log 2>&1 &
             echo $! > "$KOKORO_ONNX_PID_FILE"

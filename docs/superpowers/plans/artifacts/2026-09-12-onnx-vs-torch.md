@@ -91,3 +91,41 @@ curl -s -o out.wav -X POST http://127.0.0.1:8882/v1/audio/speech \
   -H 'Content-Type: application/json' \
   -d '{"model":"kokoro","input":"<text>","voice":"af_sky","response_format":"wav"}'
 ```
+
+## Concurrency — the test that decides where ONNX can be primary
+
+Measured 2026-09-12 on 14 cores. N simultaneous requests of the 4.9 s sentence; the figure that
+matters is the **slowest** request, because that is the one a listener notices as a stall.
+
+| N | ONNX slowest | GPU slowest |
+| --- | --- | --- |
+| 1 | 1.18–1.66 s | 0.44 s |
+| 2 | 2.51–2.55 s | 0.39 s |
+| 3 | 3.85 s | — |
+| 4 | 4.97–5.06 s | 0.60 s |
+| 8 | 9.90 s | 1.01 s |
+
+No failures at any level on either engine — it degrades by getting slow, not by breaking.
+
+**ONNX serialises: latency is roughly 1.2 s x N.** Each request already uses several threads, so
+concurrent requests contend rather than parallelise. The GPU path is nearly flat to N=8.
+
+**First run discarded, and why.** The first pass reported N=2 at 5.23 s, out of line with N=4 at
+5.06 s. A re-run gave a clean monotonic 1.66 / 2.55 / 3.85 / 4.97. The first N=2 was warm-up
+contamination, not a measurement. Recorded because the original number would have made ONNX look
+unusable at two sessions, which is exactly the laptop case.
+
+**What this settles:**
+
+- **This workstation runs ~10 Claude sessions.** At that load ONNX would stall for ~10 s. The GPU
+  path stays primary here — confirmed by measurement rather than assumed.
+- **One or two sessions — the FE laptop case — is comfortable** at 1.2–2.5 s.
+- ONNX is a sound *local last resort* in the chain at any load, because a slow local answer beats
+  sending audio off the machine.
+
+## What changed here as a result
+
+`VOICEMODE_TTS_BASE_URLS` is now `8880 (Kokoro GPU) -> 8881 (Piper) -> 8882 (Kokoro ONNX)` and
+`VOICEMODE_STT_BASE_URLS` is `2022` alone. **No cloud endpoint remains in either chain.** The ONNX
+server is started unattended by `voicemode-switch ensure`, which the MCP wrapper runs on every
+session start — verified by killing it and watching `ensure` bring it back.

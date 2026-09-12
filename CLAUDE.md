@@ -136,7 +136,7 @@ No need to switch to Piper for German.
 | whisper-proxy | 2022 | Translates OpenAI-compatible STT to Whisper `/asr` |
 | voicemode-whisper | 9000 | Whisper ASR (Docker) |
 | voicemode-kokoro | 8880 | Kokoro TTS (Docker mode, Kokoro-FastAPI) |
-| kokoro-onnx-server | 8880 | Kokoro TTS (native mode, lightweight ONNX ~92MB) |
+| kokoro-onnx-server | 8882 | Kokoro TTS (native ONNX). **482 MB measured** — 144 MB venv + 338 MB models. The old "~92MB" here was never measured and was wrong. Set `KOKORO_ONNX=true` + `KOKORO_ONNX_PORT=8882` in `~/.voicemode-local/config`; `ensure` starts it. Runs ALONGSIDE the Docker Kokoro as the local last resort in the TTS chain — on 8880 it would replace it instead. |
 | piper-proxy | 8881 | OpenAI-compatible TTS via Piper |
 | voicemode-piper | 10200 | Piper TTS (Docker, optional profile) |
 
