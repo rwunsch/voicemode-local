@@ -113,3 +113,28 @@ Not the stack — the collision it causes. A Docker backend on `:8880` and an en
 unit starts in 14 days. See [`issue-service-foreign-backend.md`](issue-service-foreign-backend.md).
 The fix is for `service status` to notice a healthy backend it didn't start — which needs
 no knowledge of Docker at all, and so doesn't ask upstream to change its mind about anything.
+
+## Can a container path drop `whisper-proxy`? (tested 2026-10-01)
+
+**Validated — what the proxy is.** `whisper-proxy.py` only translates voicemode's
+`POST /v1/audio/transcriptions` (field `file`) to `onerahmet/openai-whisper-asr-webservice`'s
+`POST /asr` (field `audio_file`). It exists solely because of that image choice.
+Upstream's native path needs no proxy: `templates/scripts/start-whisper-server.sh` runs
+whisper.cpp's `whisper-server --inference-path /v1/audio/transcriptions`.
+
+**Validated — two candidate images, neither a drop-in with voicemode's defaults** (n=1 machine:
+i7-13800H, AVX2 yes / AVX-512 no; one Kokoro-generated test WAV; requests sent with the
+`openai` client exactly as `simple_failover.py` builds them):
+
+| Image | Result |
+|---|---|
+| `ghcr.io/ggml-org/whisper.cpp:main` (512 MB) | **Crashes, exit 132 (SIGILL)** right after model load. *Inference:* built for a CPU with instructions this one lacks (likely AVX-512). A prebuilt whisper.cpp image is CPU-sensitive; a portable build (`GGML_NATIVE=OFF`) would have to be ours. |
+| `ghcr.io/speaches-ai/speaches:latest-cpu` (852 MB, faster-whisper) | Speaks the OpenAI API natively, **but** (1) `model=whisper-1` (voicemode's default `VOICEMODE_STT_MODEL`) maps to `faster-whisper-large-v3`, 404 unless downloaded — config-fixable; (2) **`language=auto` returns HTTP 500**, and voicemode sends exactly that to every *local* endpoint by default (`simple_failover.py` ~451-456, `WHISPER_LANGUAGE` default `auto`). With an explicit model and `language=en` it transcribed correctly. |
+
+Current setup (proxy -> onerahmet, `base` model) passed all 6 request shapes. Timings are not
+comparable (base vs small, n=1 each) and are deliberately not reported.
+
+**So:** dropping the proxy needs either a fixed `VOICEMODE_WHISPER_LANGUAGE` (loses
+auto-detect, which matters for German) or a small upstream change — send `language=auto`
+only to backends that need it (whisper.cpp), omit it otherwise, as is already done for
+OpenAI. That change is a better upstream candidate than the proxy itself.
