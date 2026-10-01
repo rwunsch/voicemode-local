@@ -197,9 +197,9 @@ if [ ! -d "$VENV_DIR" ]; then
     echo "  Creating local venv..."
     uv venv "$VENV_DIR" 2>&1 | sed 's/^/  /'
 fi
-# Pinned: our patch anchors (patches/patch_converse_queue.py, patch_simple_failover.py)
+# Pinned: our patch anchors (patches/*.py, see patches/apply.sh)
 # target this exact upstream version. Bump deliberately and re-verify the anchors.
-VOICE_MODE_VERSION="8.7.1"
+VOICE_MODE_VERSION="8.12.0"
 echo "  Installing voice-mode==$VOICE_MODE_VERSION into local venv..."
 uv pip install --python "$VENV_DIR/bin/python3" "voice-mode==$VOICE_MODE_VERSION" 2>&1 | tail -1 | sed 's/^/  /'
 ok "voice-mode $VOICE_MODE_VERSION installed in $VENV_DIR"

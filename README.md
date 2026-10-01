@@ -429,7 +429,7 @@ Patches are applied by `./patches/apply.sh` (run automatically during install) a
 | `patches/apply.sh` | Applies the patches into the installed voice_mode package |
 | `tests/` | Test suite (118 tests: queue, routing patchers, sysaudio) |
 
-Pinned to upstream `voice-mode==8.7.1`; mode switching, voicemode.env config, and voice discovery are now native upstream, so those patches were retired.
+Pinned to upstream `voice-mode==8.12.0`; mode switching, voicemode.env config, and voice discovery are now native upstream, so those patches were retired.
 
 ## System Files Modified
 
