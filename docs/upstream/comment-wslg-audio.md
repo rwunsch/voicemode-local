@@ -1,6 +1,6 @@
 # Draft comments: WSLg audio issues #341 / #342
 
-**Target:** existing open issues. **Status:** not submitted. **Comment first, PR only if a maintainer engages.**
+**Target:** existing open issues. **Status:** superseded — a verified, trimmed version was posted to #342 on 2026-10-01 (see `comment-342-posted.md`); #341 deliberately skipped (different bug). **Comment first, PR only if a maintainer engages.**
 
 - **#341** "Audio cuts off at ~19 seconds on WSLg / Docker Desktop" (open since 2026-04-16)
 - **#342** "Mild crackling on WSLg after extended use" (open since 2026-04-16)
