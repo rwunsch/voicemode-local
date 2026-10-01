@@ -12,6 +12,9 @@
 #   patch_converse_cancel  -> fixed upstream in 8.12.0 (VM-2015)
 #   patch_listen_stall     -> fixed upstream in 8.11.0 (AUDIO_STALL_TIMEOUT)
 #   fcntl_shim/resource_shim -> superseded by upstream voice_mode/file_lock.py
+#   patch_shutdown_abort   -> replaced 2026-10-01 by patch_turns_playback_stop
+#                             (force-exit after mcp.run() could not reach a
+#                             wait that happens inside mcp.run(); see #554)
 #   voice_queue + patch_converse_queue -> superseded by upstream's conch queue
 #                             (8.8.0 epic VM-1610). Upstream's is better: order
 #                             is allocated under an flock'd counter rather than
@@ -65,7 +68,7 @@ unshare_file() {
         echo "[patches] unshared hardlink: $1"
     fi
 }
-for _f in "$VM_DIR/tools/converse.py" "$VM_DIR/server.py" "$VM_DIR/simple_failover.py" \
+for _f in "$VM_DIR/tools/converse.py" "$VM_DIR/simple_failover.py" \
           "$VM_DIR/control_channel.py" "$VM_DIR/core.py"; do
     unshare_file "$_f"
 done
@@ -82,17 +85,18 @@ if [ -f "$SCRIPT_DIR/patch_listen_overrun.py" ]; then
     "$PYBIN" "$SCRIPT_DIR/patch_listen_overrun.py" "$VM_DIR/tools/converse.py"
 fi
 
-# Force-exit voice-mode on shutdown so a mid-playback audio stream can't keep
-# the process alive as an orphan holding its WSLg RDPSink sink-input — the cause
-# of the "two streams mixing -> stutter + stale trailing audio" failure on WSL.
-# (Paired with the reap logic in voicemode-mcp.)
+# Stop the turns[] playback thread when converse is cancelled. Without it a
+# cancelled multi-turn converse plays its turn to the end, and on shutdown
+# mcp.run() cannot return (asyncio.Runner.close() joins the default executor),
+# so the old process lingers and its WSLg sink-input mixes with the next
+# instance's -> stutter + stale trailing audio. (Paired with the reap logic in
+# voicemode-mcp.) Downstream carry of upstream PR #555 / issue #554.
 #
-# STILL NEEDED as of 8.12.0. Upstream's mcp_shutdown_patch.py (VM-2015) restores
-# transport-close cancellation of in-flight handlers — a different problem.
-# Nothing upstream force-exits when a lingering PortAudio thread holds the
-# interpreter open.
-if [ -f "$SCRIPT_DIR/patch_shutdown_abort.py" ]; then
-    "$PYBIN" "$SCRIPT_DIR/patch_shutdown_abort.py" "$VM_DIR/server.py"
+# Replaced patch_shutdown_abort.py on 2026-10-01: that force-exited AFTER
+# mcp.run() returned, but the wait is inside mcp.run(), so it could not reach
+# this (12.6s vs 13.0s linger, n=1 each; this fix: 0.37-0.46s, n=3).
+if [ -f "$SCRIPT_DIR/patch_turns_playback_stop.py" ]; then
+    "$PYBIN" "$SCRIPT_DIR/patch_turns_playback_stop.py" "$VM_DIR/tools/converse.py"
 fi
 
 # Remove the silent OpenAI voice swap: upstream maps a local voice (af_sky) to

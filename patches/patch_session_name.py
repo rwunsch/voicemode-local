@@ -37,7 +37,10 @@ This restores a capability voicemode-local had in its own queue
 Because the payload field already exists, the upstream change is genuinely this
 small -- drafted as docs/upstream/pr-session-names.md.
 
-Anchors verified against voice-mode 8.12.0 (2026-09-05).
+Both sites (holder + queued waiter) are upstream PR #556; retire the env/cwd
+steps once it merges and keep only the session_names/ file lookup.
+
+Anchors verified against voice-mode 8.12.0 (2026-09-05; queue site 2026-10-01).
 Idempotent; fails loudly on drift.
 
 Usage: patch_session_name.py [<path-to-converse.py>]
@@ -46,6 +49,19 @@ import sys
 from pathlib import Path
 
 MARKER = "voicemode-local session name"
+
+# Second site: queued waiters are registered under the same hardcoded name, so
+# `conch status` showed every *waiter* as "converse" even with the holder fixed.
+# Own marker, so venvs patched before this site existed still pick it up.
+QUEUE_MARKER = "voicemode-local queue name"
+A_QUEUE = (
+    "                        queue_session_id,\n"
+    "                        agent=\"converse\",\n"
+)
+R_QUEUE = (
+    "                        queue_session_id,\n"
+    "                        agent=_vml_session_name(),  # voicemode-local queue name\n"
+)
 
 A_CONCH = (
     "    conch = Conch(  # Named for event logging\n"
@@ -110,35 +126,49 @@ def _vml_session_name() -> str:
 
 def apply(target: Path) -> int:
     src = target.read_text()
-    if MARKER in src:
+    if MARKER in src and QUEUE_MARKER in src:
         print(f"  already patched: {target}")
         return 0
 
-    for name, anchor in (("conch construction", A_CONCH), ("helper anchor", A_HELPER)):
-        count = src.count(anchor)
-        if count != 1:
+    out = src
+    if MARKER not in out:
+        for name, anchor in (("conch construction", A_CONCH), ("helper anchor", A_HELPER)):
+            count = out.count(anchor)
+            if count != 1:
+                print(
+                    f"ANCHOR DRIFT: '{name}' matched {count} times (expected 1) in "
+                    f"{target}. Upstream converse.py changed — update "
+                    f"patches/patch_session_name.py.",
+                    file=sys.stderr,
+                )
+                return 1
+
+        out = out.replace(A_CONCH, R_CONCH, 1)
+        # Insert the helper at module level, immediately before the function that
+        # contains the Conch construction. Find the enclosing `async def`/`def` line.
+        idx = out.index(R_CONCH)
+        head = out[:idx]
+        fn_start = max(head.rfind("\nasync def "), head.rfind("\ndef "))
+        if fn_start == -1:
             print(
-                f"ANCHOR DRIFT: '{name}' matched {count} times (expected 1) in "
-                f"{target}. Upstream converse.py changed — update "
-                f"patches/patch_session_name.py.",
+                f"ANCHOR DRIFT: could not locate the enclosing function for the "
+                f"Conch construction in {target}.",
                 file=sys.stderr,
             )
             return 1
+        out = out[:fn_start] + "\n" + HELPER_SRC.rstrip("\n") + "\n" + out[fn_start:]
 
-    out = src.replace(A_CONCH, R_CONCH, 1)
-    # Insert the helper at module level, immediately before the function that
-    # contains the Conch construction. Find the enclosing `async def`/`def` line.
-    idx = out.index(R_CONCH)
-    head = out[:idx]
-    fn_start = max(head.rfind("\nasync def "), head.rfind("\ndef "))
-    if fn_start == -1:
-        print(
-            f"ANCHOR DRIFT: could not locate the enclosing function for the "
-            f"Conch construction in {target}.",
-            file=sys.stderr,
-        )
-        return 1
-    out = out[:fn_start] + "\n" + HELPER_SRC.rstrip("\n") + "\n" + out[fn_start:]
+    if QUEUE_MARKER not in out:
+        count = out.count(A_QUEUE)
+        if count != 1:
+            print(
+                f"ANCHOR DRIFT: 'queue register' matched {count} times (expected 1) in "
+                f"{target}. Upstream converse.py changed (has PR #556 merged?) — "
+                f"update patches/patch_session_name.py.",
+                file=sys.stderr,
+            )
+            return 1
+        out = out.replace(A_QUEUE, R_QUEUE, 1)
 
     compile(out, str(target), "exec")  # syntax safety net before writing
     target.write_text(out)

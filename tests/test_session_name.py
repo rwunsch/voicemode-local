@@ -143,3 +143,30 @@ def test_never_raises_when_cwd_is_gone(resolver, monkeypatch, clean_env, tmp_pat
     monkeypatch.chdir(gone)
     gone.rmdir()
     assert resolver() == "converse"  # final fallback, no exception
+
+
+# --- queued-waiter site (added 2026-10-01; upstream PR #556) -----------------
+
+def test_queue_waiter_site_uses_the_resolved_name(patched):
+    assert 'agent="converse"' not in patched
+    assert "agent=_vml_session_name(),  # voicemode-local queue name" in patched
+
+
+def test_venv_patched_before_the_queue_site_existed_gets_it(tmp_path, src_dir):
+    """A venv patched by the old single-site version must pick up the queue site."""
+    target = tmp_path / "converse.py"
+    old = (src_dir / "converse.py").read_text()
+    # Simulate the old patch: only the holder site carries the marker.
+    old = old.replace(
+        '        agent_name="converse",\n',
+        "        agent_name=_vml_session_name(),  # voicemode-local session name\n", 1)
+    target.write_text(old)
+    r = subprocess.run(
+        [sys.executable, str(PATCHES / "patch_session_name.py"), str(target)],
+        capture_output=True, text=True,
+    )
+    assert r.returncode == 0, r.stderr
+    out = target.read_text()
+    assert "# voicemode-local queue name" in out
+    assert 'agent="converse"' not in out
+    assert out.count("\ndef _vml_session_name() -> str:") == 0  # helper not re-added

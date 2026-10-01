@@ -64,13 +64,17 @@ silently runs the wrong pytest). Full suite on each branch and on clean master: 
 `test_concurrent_stdio.py::test_sounddevice_stderr_redirect_disabled`, which also fails on
 unmodified master under `-n 4` (2/2 runs) and passes alone — pre-existing upstream test isolation.
 
-**Downstream findings from this round (act on these):**
+**Downstream findings from this round — both acted on 2026-10-01:**
 - `patch_shutdown_abort.py` (force `os._exit` after `mcp.run()`) is ineffective for the turns[]
   path: the wait is *inside* `mcp.run()` (`asyncio.Runner.close()` joins the default executor).
   Measured by the PR #555 work: 12.6s vs 13.0s linger with/without it (n=1 each); the fix
   takes it to 0.37–0.46s (n=3). Also corrects item 3 of our #342 comment — #554 says so.
+  **Done:** `patch_shutdown_abort.py` deleted; `patch_turns_playback_stop.py` carries #555's
+  change until it merges (#555's own 5 tests pass against the patched 8.12.0 install).
 - `patch_session_name.py` patches only `Conch(agent_name=...)`; `ConchQueue.register(agent=...)`
   is still "converse", so *queued* sessions are unnamed in `conch status` locally.
+  **Done:** the patch now covers both sites, with a separate marker so already-patched venvs
+  pick up the queue site on re-apply.
 
 Deliberately **not** upstreamed: the Docker compose stack itself. See
 [`why-upstream-builds-from-source.md`](why-upstream-builds-from-source.md).
