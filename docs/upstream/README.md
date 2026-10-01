@@ -49,5 +49,28 @@ Read: the bottleneck is attention, not hostility. So —
 Also filed without a draft here: **#536** (2026-09-06) — `conch status` names every session
 "converse"; the gap our `patch_session_name.py` closes.
 
+## Filed 2026-10-01 (patches turned into real upstream PRs)
+
+| Upstream | What | Replaces downstream |
+|---|---|---|
+| PR #552 | configurable STT request timeout (`VOICEMODE_STT_TIMEOUT[_LOCAL]`) | timeout half of `patch_simple_failover.py` |
+| PR #553 | local STT servers that reject `language=auto` (speaches) get a one-time retry without it | nothing yet — new; lets a container path drop `whisper-proxy` |
+| PR #556 (fixes #536) | session name in conch holder **and** queue waiter | `patch_session_name.py` env/cwd steps; the `session_names/` file lookup stays downstream |
+| issue #554 → PR #555 | cancelling a `turns[]` converse doesn't stop the playback thread; `mcp.run()` can't return | see below — `patch_shutdown_abort.py` does NOT fix this |
+
+All four: one fix each, branched from upstream master `126d15e`, tests re-run by us in a clean
+venv (`env -u VIRTUAL_ENV uv run --directory <wt> ...` — our shell's `VIRTUAL_ENV` otherwise
+silently runs the wrong pytest). Full suite on each branch and on clean master: 1 failure,
+`test_concurrent_stdio.py::test_sounddevice_stderr_redirect_disabled`, which also fails on
+unmodified master under `-n 4` (2/2 runs) and passes alone — pre-existing upstream test isolation.
+
+**Downstream findings from this round (act on these):**
+- `patch_shutdown_abort.py` (force `os._exit` after `mcp.run()`) is ineffective for the turns[]
+  path: the wait is *inside* `mcp.run()` (`asyncio.Runner.close()` joins the default executor).
+  Measured by the PR #555 work: 12.6s vs 13.0s linger with/without it (n=1 each); the fix
+  takes it to 0.37–0.46s (n=3). Also corrects item 3 of our #342 comment — #554 says so.
+- `patch_session_name.py` patches only `Conch(agent_name=...)`; `ConchQueue.register(agent=...)`
+  is still "converse", so *queued* sessions are unnamed in `conch status` locally.
+
 Deliberately **not** upstreamed: the Docker compose stack itself. See
 [`why-upstream-builds-from-source.md`](why-upstream-builds-from-source.md).
