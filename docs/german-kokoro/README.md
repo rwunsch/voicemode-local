@@ -80,6 +80,16 @@ transcribe German, which it auto-detects.
 - Martin's voicepack holds a single key, `martin` (shape 510×1×256). The server maps
   `dm_martin` to it.
 
+## Keeping German voices German
+
+`dm_martin` phonemizes everything as German, so English text comes out garbled. This happened
+on 2026-10-19 when the agent kept Martin while answering in English. Two guards:
+
+- `patches/patch_voice_language.py` adds a LANGUAGE-LOCKED VOICES note to the `converse` tool
+  description, so every MCP client sees it. Applied by `patches/apply.sh`, and needs a Claude Code
+  restart to take effect.
+- CLAUDE.md rule for sessions inside this repo.
+
 ## Open ideas
 
 - Port `german_text_rules.py` / `tts_normalizer.py` from the Martin repo (numbers, dates, units,

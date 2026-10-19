@@ -148,6 +148,12 @@ if [ -f "$SCRIPT_DIR/patch_hold_barges_in.py" ]; then
     "$PYBIN" "$SCRIPT_DIR/patch_hold_barges_in.py" "$VM_DIR/tools/converse.py"
 fi
 
+# Tool-description note: German voices (dm_martin, p_de_*) get German text only.
+# Reaches every MCP client, unlike the CLAUDE.md rule. See docs/german-kokoro/.
+if [ -f "$SCRIPT_DIR/patch_voice_language.py" ]; then
+    "$PYBIN" "$SCRIPT_DIR/patch_voice_language.py" "$VM_DIR/tools/converse.py"
+fi
+
 # PTT support modules, copied in (not patches). The listener talks to upstream's
 # control socket directly; ptt_relay is only the WSL2 Windows->guest hop, since
 # a Windows-side key press cannot reach the guest's AF_UNIX socket.
