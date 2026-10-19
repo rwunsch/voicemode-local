@@ -62,7 +62,7 @@ The goal is for this list to get **shorter** over time.
 | **WSL2 on Windows 11** | Tested | Primary target. Requires WSLg for audio passthrough |
 | **Ubuntu 22.04+** | Should work | PulseAudio or PipeWire required for audio. Skip `~/.asoundrc` step |
 | **Fedora / RHEL** | Should work | Same as Ubuntu; use `dnf` instead of `apt` for system packages |
-| **macOS** | Untested | Docker services should work. Audio uses CoreAudio, not ALSA — skip `~/.asoundrc`. Microphone access may need System Settings approval |
+| **macOS (Apple Silicon)** | Partially tested | Native mode, no Docker: whisper.cpp (Metal) + Kokoro ONNX + Piper. Manual setup — see [macOS (native, no Docker)](#macos-native-no-docker); `install.sh` is apt-based. Verified on macOS 26 / M2 Pro: services, TTS→STT round trip, MCP handshake. Live mic/speaker conversation not yet verified; push-to-talk listener is Linux/Windows only |
 | **NixOS** | Untested | Docker works. System packages need a Nix derivation instead of `apt install` |
 | **Windows + WSL2 (Windows Claude Code)** | Tested | Windows Claude Code's MCP entry invokes `voice-mode` inside WSL via `wsl.exe`; audio routes through WSLg. Set up via `install.ps1`. Same containers + proxies are shared with WSL Claude Code. |
 | **Windows (native)** | In progress | Install scripts (`install.ps1`, `voicemode-services.ps1`) exist but voice-mode 8.6.1 has open Windows-side bugs (recording loop hangs, etc.). See [docs/windows-issues.md](docs/windows-issues.md). The wsl.exe bridge above is the recommended path until those land upstream. |
@@ -192,6 +192,43 @@ The installer offers three modes:
 - **windows-native** — everything on Windows, no WSL dependency.
 
 `wsl-shared` and `windows-native` currently hit voice-mode 8.6.1's Windows-side bugs (recording loop hang, etc.). Use `wsl-mcp` until those are fixed upstream — see [docs/windows-issues.md](docs/windows-issues.md) for the full list and patches.
+
+### macOS (native, no Docker)
+
+`install.sh` is apt-based, so on macOS set up by hand. STT uses Homebrew's
+whisper.cpp `whisper-server`, which serves `/v1/audio/transcriptions` itself (Metal
+accelerated) — no whisper-proxy or Docker backend needed. `voicemode-switch ensure`
+starts it on :2022 when `WHISPER_CPP_MODEL` is set in `~/.voicemode-local/config`.
+
+```bash
+brew install whisper-cpp ffmpeg portaudio
+cd ~/git/voicemode-local
+uv venv --python 3.12 .venv
+uv pip install --python .venv/bin/python "voice-mode==8.12.0" kokoro-onnx soundfile numpy piper-tts
+./patches/apply.sh
+
+mkdir -p ~/.voicemode/models/whisper ~/.voicemode-local models/kokoro models/piper ~/.local/bin
+curl -L -o ~/.voicemode/models/whisper/ggml-large-v3-turbo-q5_0.bin \
+  https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-q5_0.bin
+cat > ~/.voicemode-local/config <<EOF
+INSTALL_MODE=native
+PIPER_ENABLED=true
+KOKORO_ONNX=true
+KOKORO_ONNX_PORT=8880
+COMPUTE_MODE=cpu
+WHISPER_CPP_MODEL=$HOME/.voicemode/models/whisper/ggml-large-v3-turbo-q5_0.bin
+EOF
+ln -sf "$PWD/voicemode-switch" ~/.local/bin/voicemode-switch
+voicemode-switch localonly && voicemode-switch ensure && voicemode-switch health
+
+claude mcp add --scope user voicemode -- "$PWD/voicemode-mcp"   # Claude Code
+copilot mcp add voicemode -- "$PWD/voicemode-mcp"               # GitHub Copilot CLI
+```
+
+For Copilot in VS Code, add to `~/Library/Application Support/Code/User/mcp.json`:
+`{"servers": {"voicemode": {"type": "stdio", "command": "/path/to/voicemode-local/voicemode-mcp"}}}`
+and use Copilot Chat in Agent mode. Grant the terminal / VS Code microphone access
+when macOS prompts.
 
 ### Switching modes mid-session
 

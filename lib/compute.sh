@@ -19,7 +19,7 @@ vm_read_config() {
     local key="$1" default="${2:-}"
     if [ -f "$VM_CONFIG_FILE" ]; then
         local val
-        val="$(grep -oP "^${key}=\K.*" "$VM_CONFIG_FILE" 2>/dev/null | tail -1)"
+        val="$(sed -n "s/^${key}=//p" "$VM_CONFIG_FILE" 2>/dev/null | tail -1)"
         if [ -n "${val:-}" ]; then echo "$val"; return 0; fi
     fi
     echo "$default"

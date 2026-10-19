@@ -63,7 +63,7 @@ PYBIN="$VENV_DIR/bin/python"
 # Replacing each target with a private copy first makes patching local to this
 # venv. Cheap, idempotent, and a no-op when pip (which copies) was used instead.
 unshare_file() {
-    if [ -f "$1" ] && [ "$(stat -c %h "$1" 2>/dev/null || echo 1)" -gt 1 ]; then
+    if [ -f "$1" ] && [ "$(stat -c %h "$1" 2>/dev/null || stat -f %l "$1" 2>/dev/null || echo 1)" -gt 1 ]; then
         cp -p "$1" "$1.vmltmp" && mv -f "$1.vmltmp" "$1"
         echo "[patches] unshared hardlink: $1"
     fi
