@@ -62,7 +62,7 @@ The goal is for this list to get **shorter** over time.
 | **WSL2 on Windows 11** | Tested | Primary target. Requires WSLg for audio passthrough |
 | **Ubuntu 22.04+** | Should work | PulseAudio or PipeWire required for audio. Skip `~/.asoundrc` step |
 | **Fedora / RHEL** | Should work | Same as Ubuntu; use `dnf` instead of `apt` for system packages |
-| **macOS (Apple Silicon)** | Partially tested | Native mode, no Docker: whisper.cpp (Metal) + Kokoro ONNX + Piper. Manual setup — see [macOS (native, no Docker)](#macos-native-no-docker); `install.sh` is apt-based. Verified on macOS 26 / M2 Pro: services, TTS→STT round trip, MCP handshake. Live mic/speaker conversation not yet verified; push-to-talk listener is Linux/Windows only |
+| **macOS (Apple Silicon)** | Partially tested | Native mode, no Docker: whisper.cpp (Metal) + Kokoro ONNX + Piper. Manual setup — see [macOS (native, no Docker)](#macos-native-no-docker); `install.sh` is apt-based. Verified on macOS 26 / M2 Pro: services, TTS→STT round trip, MCP handshake. Live mic/speaker conversation verified 2026-10-19. Push-to-talk on Control-Option-Space verified 2026-10-20 (see below) |
 | **NixOS** | Untested | Docker works. System packages need a Nix derivation instead of `apt install` |
 | **Windows + WSL2 (Windows Claude Code)** | Tested | Windows Claude Code's MCP entry invokes `voice-mode` inside WSL via `wsl.exe`; audio routes through WSLg. Set up via `install.ps1`. Same containers + proxies are shared with WSL Claude Code. |
 | **Windows (native)** | In progress | Install scripts (`install.ps1`, `voicemode-services.ps1`) exist but voice-mode 8.6.1 has open Windows-side bugs (recording loop hangs, etc.). See [docs/windows-issues.md](docs/windows-issues.md). The wsl.exe bridge above is the recommended path until those land upstream. |
@@ -204,7 +204,7 @@ starts it on :2022 when `WHISPER_CPP_MODEL` is set in `~/.voicemode-local/config
 brew install whisper-cpp ffmpeg portaudio
 cd ~/git/voicemode-local
 uv venv --python 3.12 .venv
-uv pip install --python .venv/bin/python "voice-mode==8.12.0" kokoro-onnx soundfile numpy piper-tts
+uv pip install --python .venv/bin/python "voice-mode==8.12.0" kokoro-onnx soundfile numpy piper-tts pynput
 ./patches/apply.sh
 
 mkdir -p ~/.voicemode/models/whisper ~/.voicemode-local models/kokoro models/piper ~/.local/bin
@@ -237,6 +237,21 @@ the same session. Without an explicit session ID (including Copilot sessions),
 it leaves other servers alone and relies on the MCP client to stop them.
 Multiple sessions can share one host process; parent PIDs and sibling processes
 are not safe cleanup boundaries.
+
+**Push-to-talk on macOS.** `voicemode-mcp` starts one key listener
+(`voice_mode.ptt_listener_macos`) for all sessions. It is pidfile-guarded, so a second session
+reuses the running one; log in `~/.voicemode/logs/ptt-listener.log`. It needs
+`VOICEMODE_CONTROL_CHANNEL_ENABLED=true` in `~/.voicemode/voicemode.env`, and **Accessibility**
+plus **Input Monitoring** for your terminal app (System Settings → Privacy & Security; quit and
+reopen the terminal after granting Input Monitoring).
+
+- **Tap** Control-Option-Space: skip, which cuts the reply or ends your turn.
+- **Hold** (more than 1s): cuts the reply and keeps the mic open, with no silence cut-off, until
+  you let go.
+
+Control-Space is avoided because macOS uses it to switch input sources. Change the modifiers with
+`VOICEMODE_PTT_MACOS_MODIFIERS` (e.g. `ctrl,cmd`), the hold time with `VOICEMODE_PTT_HOLD_THRESHOLD`,
+and disable the listener with `VOICEMODE_PTT_ENABLED=false`.
 
 ### Switching modes mid-session
 

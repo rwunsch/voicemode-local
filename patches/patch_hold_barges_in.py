@@ -31,13 +31,16 @@ handled at each:
 * ``core.py::_wait_for_player_with_control`` -- the buffered player path.
 * ``converse.py::_play_samples_controllable`` -- the streaming path.
 
-Both already abort on ``is_stopped``; a hold now aborts the same way. Playback
+* ``streaming.py`` -- the two chunked-streaming loops (added 2026-10-20; this
+  is the path Kokoro takes in macOS native mode).
+
+All already abort on ``is_stopped``; a hold now aborts the same way. Playback
 teardown is upstream's, untouched -- this only adds a condition.
 
 Anchors verified against voice-mode 8.12.0 (2026-09-06).
 Idempotent; fails loudly on drift.
 
-Usage: patch_hold_barges_in.py <core.py|converse.py>
+Usage: patch_hold_barges_in.py <core.py|converse.py|streaming.py>
 """
 import sys
 from pathlib import Path
@@ -80,9 +83,34 @@ R_CONVERSE = (
     "            if snap.is_stopped:\n"
 )
 
+# --- streaming.py: chunked TTS streaming (stream_pcm_audio + its twin) --------
+# The path Kokoro takes on macOS native mode. Neither loop checked is_holding,
+# so a PTT hold during playback was ignored and only a tap (skip_forward) cut
+# the utterance. Found 2026-10-20. A hold now cuts exactly like skip_forward.
+A_STREAM_PCM = (
+    "\n                    if snap.is_skip_forward:\n"
+    "                        transport_interrupted = True\n"
+)
+R_STREAM_PCM = (
+    "\n                    # voicemode-local hold barge-in: a PTT hold cuts like skip_forward.\n"
+    "                    if snap.is_skip_forward or getattr(snap, \"is_holding\", False):\n"
+    "                        transport_interrupted = True\n"
+)
+A_STREAM_2 = (
+    "\n                if snap.is_skip_forward:\n"
+    "                    transport_interrupted = True\n"
+)
+R_STREAM_2 = (
+    "\n                # voicemode-local hold barge-in: a PTT hold cuts like skip_forward.\n"
+    "                if snap.is_skip_forward or getattr(snap, \"is_holding\", False):\n"
+    "                    transport_interrupted = True\n"
+)
+
 TARGETS = {
     "core.py": [("buffered playback abort", A_CORE, R_CORE, 1)],
     "converse.py": [("streaming playback abort", A_CONVERSE, R_CONVERSE, 1)],
+    "streaming.py": [("stream_pcm_audio abort", A_STREAM_PCM, R_STREAM_PCM, 1),
+                     ("second streaming loop abort", A_STREAM_2, R_STREAM_2, 1)],
 }
 
 
@@ -116,7 +144,7 @@ def apply(target: Path) -> int:
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("usage: patch_hold_barges_in.py <path to core.py or converse.py>",
+        print("usage: patch_hold_barges_in.py <path to core.py, converse.py or streaming.py>",
               file=sys.stderr)
         sys.exit(2)
     sys.exit(apply(Path(sys.argv[1])))

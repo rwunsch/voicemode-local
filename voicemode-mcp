@@ -69,6 +69,33 @@ reap_stale_voicemode() {
 }
 reap_stale_voicemode
 
+# --- One push-to-talk key listener for all sessions (macOS) ------------------
+# The control socket path is shared, so a single listener serves every voice
+# session. The first session to launch starts it detached; later sessions find
+# the live pid and do nothing. mkdir is the atomic lock, so two sessions
+# starting at once cannot both spawn one. Opt out: VOICEMODE_PTT_ENABLED=false.
+# Linux is not auto-started: its listener gates on the focused terminal, which
+# it finds by walking up from its own pid, so it must run inside the session.
+ensure_ptt_listener() {
+    [ "${VOICEMODE_PTT_ENABLED:-true}" = "false" ] && return 0
+    [ "$(uname -s)" = "Darwin" ] || return 0
+    local pidfile="$RUN_DIR/ptt-listener.pid" lock="$RUN_DIR/ptt-listener.lock" old
+    # A lock left behind by a killed launcher is stale after a minute.
+    find "$lock" -maxdepth 0 -mmin +1 -exec rmdir {} \; 2>/dev/null
+    mkdir "$lock" 2>/dev/null || return 0
+    if old="$(cat "$pidfile" 2>/dev/null)" && [ -n "$old" ] && kill -0 "$old" 2>/dev/null \
+        && ps -o command= -p "$old" 2>/dev/null | grep -q 'ptt_listener_macos'; then
+        rmdir "$lock"
+        return 0
+    fi
+    nohup "$SCRIPT_DIR/.venv/bin/python" -m voice_mode.ptt_listener_macos \
+        >> "$LOG_DIR/ptt-listener.log" 2>&1 < /dev/null &
+    printf '%s' "$!" > "$pidfile"
+    disown 2>/dev/null || true
+    rmdir "$lock"
+}
+ensure_ptt_listener
+
 # Best-effort: never let proxy startup block or fail the MCP launch.
 "$SCRIPT_DIR/voicemode-switch" ensure --quiet >> "$LOG_DIR/ensure.log" 2>&1 || true
 

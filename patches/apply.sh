@@ -146,6 +146,7 @@ fi
 if [ -f "$SCRIPT_DIR/patch_hold_barges_in.py" ]; then
     "$PYBIN" "$SCRIPT_DIR/patch_hold_barges_in.py" "$VM_DIR/core.py"
     "$PYBIN" "$SCRIPT_DIR/patch_hold_barges_in.py" "$VM_DIR/tools/converse.py"
+    "$PYBIN" "$SCRIPT_DIR/patch_hold_barges_in.py" "$VM_DIR/streaming.py"
 fi
 
 # Tool-description note: German voices (dm_martin, p_de_*) get German text only.
@@ -160,7 +161,7 @@ fi
 # Retired with the control-channel rewrite: ptt_ipc.py (event bus),
 # ptt_bridge.py (converse glue), ptt_playback_bridge.py (barge-in registry) --
 # upstream's control channel owns all three concerns now.
-for _m in ptt_core.py ptt_control_client.py ptt_relay.py ptt_listener_linux.py; do
+for _m in ptt_core.py ptt_control_client.py ptt_relay.py ptt_listener_linux.py ptt_listener_macos.py; do
     if [ -f "$SCRIPT_DIR/$_m" ]; then
         cp "$SCRIPT_DIR/$_m" "$VM_DIR/$_m"
         echo "[patches] installed $_m"
