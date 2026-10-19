@@ -1,6 +1,6 @@
 # Push-to-talk to the last session you spoke with — design
 
-**Status:** design, not built. Written 2026-09-06 at Robert's request, to be discussed before any code.
+**Status:** built for macOS / Terminal.app on 2026-10-20 as a tty-targeted variant of option B (see `patches/ptt_listener_macos.py`). Windows/Linux still design only. Original status: design, not built. Written 2026-09-06 at Robert's request, to be discussed before any code.
 
 ## The ask
 

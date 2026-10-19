@@ -252,8 +252,12 @@ reopen the terminal after granting Input Monitoring).
   in text. Both hotkeys are swallowed, so they never reach the terminal. A bare Escape would
   interrupt Claude Code's tool call instead of stopping cleanly.
 
-The keys only act during a live voice call. They cannot wake a session that is idle at its text
-prompt (see `docs/superpowers/specs/2026-09-06-ptt-wake-last-session-design.md`).
+**Wake from idle:** with no voice call running, Control-Option-Space wakes the session you last
+spoke with. The listener maps that session's voice-mode pid (from the conch events log) to its
+tty, selects the Terminal.app tab with that exact tty, types `[push-to-talk] resume the voice
+conversation` and presses Return. That briefly brings the tab to the front. Terminal.app only;
+disable with `VOICEMODE_PTT_WAKE=false`. A hold keeps recording 0.35s after release
+(`VOICEMODE_PTT_RELEASE_TAIL`) so the last word is not clipped.
 
 Control-Space is avoided because macOS uses it to switch input sources. Change the modifiers with
 `VOICEMODE_PTT_MACOS_MODIFIERS` (e.g. `ctrl,cmd`), the hold time with `VOICEMODE_PTT_HOLD_THRESHOLD`,
