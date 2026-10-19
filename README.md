@@ -238,7 +238,7 @@ it leaves other servers alone and relies on the MCP client to stop them.
 Multiple sessions can share one host process; parent PIDs and sibling processes
 are not safe cleanup boundaries.
 
-**Push-to-talk on macOS.** `voicemode-mcp` starts one key listener
+**Push-to-talk on macOS** (full write-up: [docs/macos-push-to-talk](docs/macos-push-to-talk/README.md)). `voicemode-mcp` starts one key listener
 (`voice_mode.ptt_listener_macos`) for all sessions. It is pidfile-guarded, so a second session
 reuses the running one; log in `~/.voicemode/logs/ptt-listener.log`. It needs
 `VOICEMODE_CONTROL_CHANNEL_ENABLED=true` in `~/.voicemode/voicemode.env`, and **Accessibility**
