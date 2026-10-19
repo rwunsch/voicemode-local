@@ -22,6 +22,7 @@ When starting a voice conversation via `/voicemode:converse`, offer voice select
 - **Random voice**: Pick from this pool of distinct-sounding voices (excludes current default):
   `af_bella`, `af_heart`, `af_nova`, `am_adam`, `am_eric`, `am_puck`, `bf_emma`, `bm_daniel`, `bm_george`, `ff_siwis`, `if_sara`, `im_nicola`
 - **Named voice**: Use it directly as the `voice` parameter
+- **German**: `dm_martin` (Kokoro, native ONNX mode) or Piper's `p_de_thorsten`. Stock English Kokoro voices mispronounce German
 - **Default / "just start"**: Proceed without specifying a voice
 
 Pass the selected voice as the `voice` parameter on every `mcp__voicemode__converse` call for that session.

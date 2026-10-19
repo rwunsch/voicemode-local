@@ -357,6 +357,15 @@ if [ "$KOKORO_ONNX" = "true" ]; then
 
     mkdir -p "$SCRIPT_DIR/models/kokoro"
 
+    # German voice dm_martin: separate fine-tuned model (~325 MB), see docs/german-kokoro/
+    echo "  Downloading German Kokoro model (dm_martin)..."
+    if python3 "$SCRIPT_DIR/kokoro-onnx-server.py" --model-dir "$SCRIPT_DIR/models/kokoro" \
+        --download-german; then
+        ok "German Kokoro model ready (voice dm_martin)"
+    else
+        warn "German Kokoro model download failed - dm_martin unavailable, English voices unaffected"
+    fi
+
     echo "  Starting Kokoro ONNX server..."
     KOKORO_ONNX_PID_FILE="/tmp/kokoro-onnx-server.pid"
     if [ -f "$KOKORO_ONNX_PID_FILE" ] && kill -0 "$(cat "$KOKORO_ONNX_PID_FILE")" 2>/dev/null; then

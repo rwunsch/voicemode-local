@@ -210,6 +210,8 @@ uv pip install --python .venv/bin/python "voice-mode==8.12.0" kokoro-onnx soundf
 mkdir -p ~/.voicemode/models/whisper ~/.voicemode-local models/kokoro models/piper ~/.local/bin
 curl -L -o ~/.voicemode/models/whisper/ggml-large-v3-turbo-q5_0.bin \
   https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-q5_0.bin
+# optional: German Kokoro voice dm_martin (~325 MB, see docs/german-kokoro/)
+.venv/bin/python kokoro-onnx-server.py --model-dir models/kokoro --download-german
 cat > ~/.voicemode-local/config <<EOF
 INSTALL_MODE=native
 PIPER_ENABLED=true
@@ -407,6 +409,10 @@ config, no `WSLENV` routing plumbing.
 | Japanese | jf_alpha | jm_kumo |
 | Portuguese | pf_dora | pm_alex |
 | Chinese | zf_xiaobei | zm_yunxi |
+| German¹ | | dm_martin |
+
+¹ Native (ONNX) mode only. `dm_martin` is a separate German fine-tune loaded alongside the stock
+model, see [docs/german-kokoro](docs/german-kokoro/README.md).
 
 ### Piper TTS (local, port 8881)
 

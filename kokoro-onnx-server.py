@@ -31,6 +31,18 @@ VOICES_URL = "https://github.com/thewh1teagle/kokoro-onnx/releases/download/mode
 _kokoro = None
 _model_dir = None
 
+# Optional German model: Kokoro-82M fine-tuned on one German speaker ("Martin").
+# Upstream Kokoro v1.0 has no German voices, and a voicepack only works with the
+# weights it was trained with, so German needs its own model file. Same ONNX
+# graph as v1.0, so kokoro-onnx loads it unchanged. See docs/german-kokoro/.
+DE_MODEL_URL = ("https://huggingface.co/Godelaune/Kokoro-82M-ONNX-German-Martin"
+                "/resolve/main/kokoro-martin.onnx")
+DE_VOICES_URL = ("https://huggingface.co/Godelaune/Kokoro-82M-ONNX-German-Martin"
+                 "/resolve/main/voices-martin.npz")
+DE_VOICE = "dm_martin"
+_kokoro_de = None
+_de_model_dir = None
+
 
 def get_model_dir():
     return _model_dir or Path("./models/kokoro")
@@ -72,6 +84,36 @@ def get_kokoro():
         _kokoro = kokoro_onnx.Kokoro(str(model_path), str(voices_path))
         print("Model loaded.")
     return _kokoro
+
+
+def get_kokoro_de():
+    """Lazy-load the German model, or None if its files are not downloaded.
+
+    Fetch them with: python3 kokoro-onnx-server.py --download-german
+    """
+    global _kokoro_de
+    if _kokoro_de is None:
+        model_dir = _de_model_dir or Path("./models/kokoro-de-martin")
+        model_path = model_dir / "kokoro-martin.onnx"
+        voices_path = model_dir / "voices-martin.npz"
+        if not (model_path.exists() and voices_path.exists()):
+            return None
+        import kokoro_onnx
+        print(f"Loading German Kokoro ONNX model from {model_path}...")
+        _kokoro_de = kokoro_onnx.Kokoro(str(model_path), str(voices_path))
+        print(f"German model loaded (voices: {_kokoro_de.get_voices()}).")
+    return _kokoro_de
+
+
+def download_german():
+    model_dir = _de_model_dir or Path("./models/kokoro-de-martin")
+    model_dir.mkdir(parents=True, exist_ok=True)
+    for url, name in ((DE_MODEL_URL, "kokoro-martin.onnx"),
+                      (DE_VOICES_URL, "voices-martin.npz")):
+        path = model_dir / name
+        if not path.exists():
+            print(f"Downloading {name} to {path}...")
+            urlretrieve(url, str(path))
 
 
 def pcm_to_wav(pcm_data, sample_rate=24000, channels=1, sample_width=2):
@@ -175,9 +217,19 @@ class TTSHandler(BaseHTTPRequestHandler):
 
         try:
             import numpy as np
-            kokoro = get_kokoro()
+            if voice_id == DE_VOICE:
+                kokoro = get_kokoro_de()
+                if kokoro is None:
+                    self._send_json(400, {"error": f"{DE_VOICE} needs the German model; "
+                                          "run kokoro-onnx-server.py --download-german"})
+                    return
+                voice_id = kokoro.get_voices()[0]
+                lang = "de"
+            else:
+                kokoro = get_kokoro()
+                lang = "en-us"
             start = time.time()
-            samples, sample_rate = kokoro.create(text, voice=voice_id, speed=speed)
+            samples, sample_rate = kokoro.create(text, voice=voice_id, speed=speed, lang=lang)
             elapsed = time.time() - start
             print(f"[kokoro-onnx] Generated {len(samples)/sample_rate:.1f}s audio "
                   f"in {elapsed:.1f}s (voice={voice_id})")
@@ -200,13 +252,23 @@ def main():
     parser.add_argument("--port", type=int, default=8880, help="Port to listen on")
     parser.add_argument("--model-dir", type=str, default="./models/kokoro",
                         help="Directory for model files")
+    parser.add_argument("--de-model-dir", type=str, default=None,
+                        help="Directory for the German model (default: <model-dir>-de-martin)")
+    parser.add_argument("--download-german", action="store_true",
+                        help="Download the German model (voice dm_martin) and exit")
     args = parser.parse_args()
 
-    global _model_dir
+    global _model_dir, _de_model_dir
     _model_dir = Path(args.model_dir)
+    _de_model_dir = Path(args.de_model_dir or f"{args.model_dir.rstrip('/')}-de-martin")
 
-    # Pre-load model
+    if args.download_german:
+        download_german()
+        return
+
+    # Pre-load models
     get_kokoro()
+    get_kokoro_de()
 
     server = HTTPServer(("0.0.0.0", args.port), TTSHandler)
     print(f"Kokoro ONNX TTS server listening on port {args.port}")
