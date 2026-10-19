@@ -248,6 +248,12 @@ reopen the terminal after granting Input Monitoring).
 - **Tap** Control-Option-Space: skip, which cuts the reply or ends your turn.
 - **Hold** (more than 1s): cuts the reply and keeps the mic open, with no silence cut-off, until
   you let go.
+- **Control-Option-Escape**: full stop. Cuts the reply without listening; the agent continues
+  in text. Both hotkeys are swallowed, so they never reach the terminal. A bare Escape would
+  interrupt Claude Code's tool call instead of stopping cleanly.
+
+The keys only act during a live voice call. They cannot wake a session that is idle at its text
+prompt (see `docs/superpowers/specs/2026-09-06-ptt-wake-last-session-design.md`).
 
 Control-Space is avoided because macOS uses it to switch input sources. Change the modifiers with
 `VOICEMODE_PTT_MACOS_MODIFIERS` (e.g. `ctrl,cmd`), the hold time with `VOICEMODE_PTT_HOLD_THRESHOLD`,

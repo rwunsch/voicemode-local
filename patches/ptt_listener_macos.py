@@ -13,7 +13,11 @@ Differences from the Linux listener:
   (comma list of ``ctrl``, ``alt``, ``cmd``, ``shift``; default ``ctrl,alt``).
 - **No focus check.** There is no xdotool equivalent without extra deps, and the
   control socket only exists while a voice-mode server is up, so a stray press
-  elsewhere is inert. The key event is not suppressed and still reaches the app.
+  elsewhere is inert. Both hotkeys are swallowed (``darwin_intercept``) so they
+  never reach the focused app; Escape would otherwise interrupt Claude Code.
+- **Control-Option-Escape is a full stop**: cuts the reply and does not listen
+  (control command ``stop``). The converse call returns cleanly with a control
+  marker, so the agent carries on in text. Same modifiers as the PTT key.
 - **One listener for all sessions.** The control socket path is shared, so
   ``voicemode-mcp`` starts this once (pidfile-guarded) and every session uses it.
 
@@ -35,6 +39,9 @@ logger = logging.getLogger("voicemode.ptt_listener_macos")
 POLL_INTERVAL = 0.05  # seconds; how often to check the hold threshold while held
 
 DEFAULT_MODIFIERS = "ctrl,alt"
+
+KEYCODE_SPACE = 49
+KEYCODE_ESC = 53
 
 
 def modifier_groups(spec: str, keyboard) -> list:
@@ -107,9 +114,39 @@ def run_listener() -> None:
             held = False
             _emit(state.on_release(time.monotonic()))
 
-    listener = keyboard.Listener(on_press=on_press, on_release=on_release)
+    import Quartz
+
+    want_flags = 0
+    for part in (p.strip().lower() for p in spec.split(",")):
+        want_flags |= {"ctrl": Quartz.kCGEventFlagMaskControl,
+                       "alt": Quartz.kCGEventFlagMaskAlternate,
+                       "cmd": Quartz.kCGEventFlagMaskCommand,
+                       "shift": Quartz.kCGEventFlagMaskShift}.get(part, 0)
+
+    def intercept(event_type, event):
+        """Swallow our hotkeys so they never reach the focused app.
+
+        Escape in particular must not reach Claude Code: there it interrupts
+        the running tool call, tearing down converse instead of the clean
+        control-channel stop. The stop key is detected here on the raw keycode,
+        which does not depend on pynput's modifier tracking.
+        """
+        if event_type not in (Quartz.kCGEventKeyDown, Quartz.kCGEventKeyUp):
+            return event
+        code = Quartz.CGEventGetIntegerValueField(event, Quartz.kCGKeyboardEventKeycode)
+        if code not in (KEYCODE_SPACE, KEYCODE_ESC):
+            return event
+        if (Quartz.CGEventGetFlags(event) & want_flags) != want_flags:
+            return event
+        if code == KEYCODE_ESC and event_type == Quartz.kCGEventKeyDown:
+            logger.info("PTT stop")
+            ptt_control_client.send("stop")
+        return None
+
+    listener = keyboard.Listener(on_press=on_press, on_release=on_release,
+                                 darwin_intercept=intercept)
     listener.start()
-    logger.info("PTT listener active (%s+space) -> %s", spec, ptt_control_client.socket_path())
+    logger.info("PTT listener active (%s+space, %s+esc = stop) -> %s", spec, spec, ptt_control_client.socket_path())
 
     try:
         while True:
