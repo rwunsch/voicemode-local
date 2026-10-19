@@ -23,8 +23,13 @@ Differences from the Linux listener:
   with: it finds that session's voice-mode pid in the conch events log, maps it
   to its tty, selects the Terminal.app tab with that exact tty, types
   ``WAKE_TEXT`` and presses Return. ``do script`` alone cannot submit to
-  Claude Code (its newline lands in the input box), so Return is a real key
-  press via System Events, which briefly brings that tab to the front.
+  Claude Code (its newline lands in the input box), so Return is a System
+  Events key press, sent only once Control-Option are released (a held
+  modifier turns it into Control-Option-Return, which does not submit).
+  ``WAKE_TEXT`` must stay short: a long line is taken for a paste and the
+  Return after it does not submit. Only a fresh press
+  wakes; key auto-repeat is ignored. Selecting the tab briefly brings it to
+  the front.
   Terminal.app only; does nothing if the tab cannot be found. Disable with
   ``VOICEMODE_PTT_WAKE=false``.
 - **One listener for all sessions.** The control socket path is shared, so
@@ -59,7 +64,9 @@ KEYCODE_SPACE = 49
 KEYCODE_ESC = 53
 
 
-WAKE_TEXT = "[push-to-talk] resume the voice conversation"
+# Keep this short. A 127-char line never submitted: Claude Code took the burst
+# for a paste and the Return after it did not send. ~50 chars works (2026-10-20).
+WAKE_TEXT = "[push-to-talk] listen now (converse, skip_tts=true)"
 WAKE_COOLDOWN = 5.0  # seconds
 
 
@@ -104,7 +111,7 @@ on run argv
           set index of w to 1
           activate
           do script wakeText in t
-          delay 0.2
+          delay 0.4
           tell application "System Events" to key code 36
           return "woke " & targetTty
         end if
@@ -116,14 +123,34 @@ end run
 """
 
 
-def wake_last_session() -> None:
+def wait_modifiers_released(flags: int, timeout: float = 5.0) -> None:
+    """Block until the hotkey's modifiers are physically up (or timeout).
+
+    Return posted while Control-Option is still held arrives as
+    Control-Option-Return, which Claude Code does not treat as submit, and
+    clearing the event's flags does not help: macOS merges the live modifier
+    state in (both tried 2026-10-20).
+    """
+    import Quartz
+
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        state = Quartz.CGEventSourceFlagsState(Quartz.kCGEventSourceStateHIDSystemState)
+        if not state & flags:
+            return
+        time.sleep(0.03)
+
+
+def wake_last_session(flags: int = 0) -> None:
+    wait_modifiers_released(flags)
     tty = last_voice_tty()
     if tty is None:
         logger.info("PTT wake: no live voice session with a terminal found")
         return
     out = subprocess.run(["osascript", "-e", WAKE_SCRIPT, tty, WAKE_TEXT],
                          capture_output=True, text=True, timeout=10)
-    logger.info("PTT wake: %s", (out.stdout or out.stderr).strip())
+    result = (out.stdout or out.stderr).strip()
+    logger.info("PTT wake: %s", result)
 
 
 def modifier_groups(spec: str, keyboard) -> list:
@@ -167,6 +194,8 @@ def run_listener() -> None:
         )
     )
     last_wake = [0.0]
+    # Key auto-repeat re-fires on_press while held; only a fresh press wakes.
+    space_down = [False]
     wake_enabled = os.getenv("VOICEMODE_PTT_WAKE", "true").lower() != "false"
     release_tail = float(os.getenv("VOICEMODE_PTT_RELEASE_TAIL", str(DEFAULT_RELEASE_TAIL)))
     down = set()
@@ -188,12 +217,13 @@ def run_listener() -> None:
             return
         if key == keyboard.Key.space and not held and _mods_down():
             if wake_enabled and not ptt_control_client.available():
-                # Idle: no call to hold. Wake the last session instead. Key
-                # auto-repeat re-fires on_press while held, hence the cooldown.
+                # Idle: no call to hold. Wake the last session instead.
                 now = time.monotonic()
-                if now - last_wake[0] > WAKE_COOLDOWN:
+                if not space_down[0] and now - last_wake[0] > WAKE_COOLDOWN:
                     last_wake[0] = now
-                    threading.Thread(target=wake_last_session, daemon=True).start()
+                    threading.Thread(target=wake_last_session, args=(want_flags,),
+                                     daemon=True).start()
+                space_down[0] = True
                 return
             held = True
             _emit(state.on_press(time.monotonic()))
@@ -203,6 +233,8 @@ def run_listener() -> None:
         if key in all_mods:
             down.discard(key)
             return
+        if key == keyboard.Key.space:
+            space_down[0] = False
         if held and key == keyboard.Key.space:
             held = False
             action = state.on_release(time.monotonic())

@@ -254,8 +254,9 @@ reopen the terminal after granting Input Monitoring).
 
 **Wake from idle:** with no voice call running, Control-Option-Space wakes the session you last
 spoke with. The listener maps that session's voice-mode pid (from the conch events log) to its
-tty, selects the Terminal.app tab with that exact tty, types `[push-to-talk] resume the voice
-conversation` and presses Return. That briefly brings the tab to the front. Terminal.app only;
+tty, selects the Terminal.app tab with that exact tty, types `[push-to-talk] listen now (converse,
+skip_tts=true)` and presses Return once you release the keys; the agent then records you
+right away. That briefly brings the tab to the front. Terminal.app only;
 disable with `VOICEMODE_PTT_WAKE=false`. A hold keeps recording 0.35s after release
 (`VOICEMODE_PTT_RELEASE_TAIL`) so the last word is not clipped.
 
