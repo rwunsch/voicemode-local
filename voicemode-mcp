@@ -30,10 +30,13 @@ mkdir -p "$LOG_DIR" "$RUN_DIR" 2>/dev/null || true
 #
 # So: before exec'ing the fresh server, kill the previous incarnation that
 # belongs to THIS session only (never the other sessions' voice-mode processes).
-# Scope key: CLAUDE_CODE_SESSION_ID if present, else our parent (the Claude
-# session) PID. exec keeps our PID, so $$ recorded now == the new voice-mode PID.
+# Only an explicit session ID establishes ownership. MCP hosts such as Copilot
+# can run multiple sessions under one parent PID, so neither PPID nor sibling
+# status is safe evidence that a server is stale.
+# exec keeps our PID, so $$ recorded now == the new voice-mode PID.
 reap_stale_voicemode() {
-    local key="${CLAUDE_CODE_SESSION_ID:-ppid-$PPID}"
+    local key="${CLAUDE_CODE_SESSION_ID:-}"
+    [ -n "$key" ] || return 0
     # sanitize key for use in a filename
     key="${key//[^A-Za-z0-9_-]/_}"
     local pidfile="$RUN_DIR/voicemode-$key.pid"
@@ -55,16 +58,6 @@ reap_stale_voicemode() {
             fi
         fi
     fi
-
-    # Backstop: any OTHER voice-mode that shares our parent Claude session but
-    # isn't us (covers a missing/stale pidfile after an unclean restart).
-    local p
-    for p in $(pgrep -P "$PPID" -f 'voice-mode' 2>/dev/null); do
-        [ "$p" = "$$" ] && continue
-        echo "$(date +%Y-%m-%dT%H:%M:%S%z) reaping sibling voice-mode pid=$p (ppid=$PPID)" \
-            >> "$LOG_DIR/reap.log" 2>&1
-        kill -TERM "$p" 2>/dev/null || true
-    done
 
     # NOTE: we intentionally do NOT flush the RDPSink here. Killing the orphan
     # process above already makes PulseAudio drop its sink-input; any audio left

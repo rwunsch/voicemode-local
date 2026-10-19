@@ -232,6 +232,12 @@ For Copilot in VS Code, add to `~/Library/Application Support/Code/User/mcp.json
 and use Copilot Chat in Agent mode. Grant the terminal / VS Code microphone access
 when macOS prompts.
 
+The launcher only reaps an earlier server when `CLAUDE_CODE_SESSION_ID` identifies
+the same session. Without an explicit session ID (including Copilot sessions),
+it leaves other servers alone and relies on the MCP client to stop them.
+Multiple sessions can share one host process; parent PIDs and sibling processes
+are not safe cleanup boundaries.
+
 ### Switching modes mid-session
 
 Switch engines with `voicemode-switch <mode>` (writes `~/.voicemode/voicemode.env`); restart Claude Code afterward. (voice-mode 8.7+ also exposes `update_config`/`config_reload` MCP tools.)
