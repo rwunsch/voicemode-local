@@ -23,6 +23,7 @@ When starting a voice conversation via `/voicemode:converse`, offer voice select
   `af_bella`, `af_heart`, `af_nova`, `am_adam`, `am_eric`, `am_puck`, `bf_emma`, `bm_daniel`, `bm_george`, `ff_siwis`, `if_sara`, `im_nicola`
 - **Named voice**: Use it directly as the `voice` parameter
 - **German**: `dm_martin` (Kokoro, native ONNX mode) or Piper's `p_de_thorsten`. Stock English Kokoro voices mispronounce German
+- **German voices speak German only.** With `dm_martin` (or any `p_de_*` voice) write every `message` in German, even if the user speaks English. The model phonemizes everything as German, so English text comes out garbled. If the user wants English, switch to an English voice instead
 - **Default / "just start"**: Proceed without specifying a voice
 
 Pass the selected voice as the `voice` parameter on every `mcp__voicemode__converse` call for that session.
