@@ -15,6 +15,9 @@ SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 LOG_DIR="$HOME/.voicemode/logs"
 RUN_DIR="$HOME/.voicemode/run"
 mkdir -p "$LOG_DIR" "$RUN_DIR" 2>/dev/null || true
+# GUI-launched clients (VS Code from the Dock) don't inherit the shell PATH;
+# make Homebrew tools (whisper-server, ffmpeg) resolvable on macOS.
+[ -d /opt/homebrew/bin ] && export PATH="/opt/homebrew/bin:$PATH"
 
 # --- Reap a stale same-session voice-mode before starting a new one ----------
 # Claude Code re-runs this wrapper whenever it (re)starts the voice-mode MCP for
@@ -39,8 +42,8 @@ reap_stale_voicemode() {
     if [ -f "$pidfile" ] && old="$(cat "$pidfile" 2>/dev/null)" && [ -n "$old" ]; then
         if [ "$old" != "$$" ] && kill -0 "$old" 2>/dev/null; then
             # Confirm it really is a voice-mode process before signalling it.
-            if tr '\0' ' ' < "/proc/$old/cmdline" 2>/dev/null | grep -q 'voice-mode'; then
-                echo "$(date -Is) reaping stale voice-mode pid=$old (session=$key)" \
+            if { tr '\0' ' ' < "/proc/$old/cmdline" 2>/dev/null || ps -o command= -p "$old" 2>/dev/null; } | grep -q 'voice-mode'; then
+                echo "$(date +%Y-%m-%dT%H:%M:%S%z) reaping stale voice-mode pid=$old (session=$key)" \
                     >> "$LOG_DIR/reap.log" 2>&1
                 kill -TERM "$old" 2>/dev/null || true
                 # Give it a moment to release its audio stream, then ensure death.
@@ -58,7 +61,7 @@ reap_stale_voicemode() {
     local p
     for p in $(pgrep -P "$PPID" -f 'voice-mode' 2>/dev/null); do
         [ "$p" = "$$" ] && continue
-        echo "$(date -Is) reaping sibling voice-mode pid=$p (ppid=$PPID)" \
+        echo "$(date +%Y-%m-%dT%H:%M:%S%z) reaping sibling voice-mode pid=$p (ppid=$PPID)" \
             >> "$LOG_DIR/reap.log" 2>&1
         kill -TERM "$p" 2>/dev/null || true
     done

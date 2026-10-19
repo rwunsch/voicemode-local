@@ -6,7 +6,7 @@ Local voice services for Claude Code, with Whisper STT, Kokoro TTS, and Piper TT
 
 - **WSL2 on Windows 11** (primary, tested on Ubuntu 22.04 LTS)
 - **Ubuntu 22.04+** (native Linux, should work with PulseAudio/PipeWire)
-- **macOS** (untested — Docker services should work, audio routing may differ)
+- **macOS** (partially tested — native mode: whisper.cpp via `WHISPER_CPP_MODEL`, Kokoro ONNX, Piper; see README "macOS (native, no Docker)")
 - **Windows (native)** — work in progress, see below
 
 ## Windows Working Copy

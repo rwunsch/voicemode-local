@@ -232,7 +232,7 @@ print(f'  OpenAI key (in .claude.json): {\"set\" if ce.get(\"OPENAI_API_KEY\") e
 is_kokoro_onnx() {
     local onnx="false"
     if [ -f "$CONFIG_FILE" ]; then
-        onnx="$(grep -oP 'KOKORO_ONNX=\K.*' "$CONFIG_FILE" 2>/dev/null || echo "false")"
+        onnx="$(sed -n 's/^KOKORO_ONNX=//p' "$CONFIG_FILE" 2>/dev/null | tail -1)"
     fi
     [ "$onnx" = "true" ]
 }
@@ -249,7 +249,7 @@ is_kokoro_onnx() {
 kokoro_onnx_port() {
     local p=""
     if [ -f "$CONFIG_FILE" ]; then
-        p="$(grep -oP 'KOKORO_ONNX_PORT=\K.*' "$CONFIG_FILE" 2>/dev/null || true)"
+        p="$(sed -n 's/^KOKORO_ONNX_PORT=//p' "$CONFIG_FILE" 2>/dev/null | tail -1)"
     fi
     echo "${p:-8880}"
 }
@@ -288,7 +288,13 @@ healthy() {
 start_detached() {
     local label="$1" pidfile="$2"; shift 2
     if [ -f "$pidfile" ] && kill -0 "$(cat "$pidfile")" 2>/dev/null; then return 0; fi
-    setsid nohup "$@" >> "/tmp/${label}.log" 2>&1 < /dev/null &
+    if command -v setsid > /dev/null 2>&1; then
+        setsid nohup "$@" >> "/tmp/${label}.log" 2>&1 < /dev/null &
+    else
+        # macOS has no setsid(1); do the same via os.setsid() + exec (keeps the PID).
+        nohup python3 -c 'import os, sys; os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])' \
+            "$@" >> "/tmp/${label}.log" 2>&1 < /dev/null &
+    fi
     echo $! > "$pidfile"
 }
 
@@ -319,10 +325,20 @@ cmd_ensure() {
                     --models-dir "$SCRIPT_DIR/models/piper"
                 [ -n "$quiet" ] || echo "  ensured Piper (8881)" ;;
             2022)
-                start_detached whisper-proxy /tmp/whisper-proxy.pid \
-                    python3 "$SCRIPT_DIR/whisper-proxy.py" --port 2022 \
-                    --whisper-url http://127.0.0.1:9000
-                [ -n "$quiet" ] || echo "  ensured Whisper proxy (2022)" ;;
+                local wcpp_model; wcpp_model="$(vm_read_config WHISPER_CPP_MODEL)"
+                if [ -n "$wcpp_model" ] && command -v whisper-server > /dev/null 2>&1; then
+                    # Native whisper.cpp (e.g. macOS + Metal): serves the
+                    # OpenAI-compatible path itself, so no proxy / Docker backend.
+                    start_detached whisper-server /tmp/whisper-server.pid \
+                        whisper-server --host 127.0.0.1 --port 2022 -m "$wcpp_model" \
+                        -l auto --convert --inference-path /v1/audio/transcriptions
+                    [ -n "$quiet" ] || echo "  ensured whisper.cpp server (2022)"
+                else
+                    start_detached whisper-proxy /tmp/whisper-proxy.pid \
+                        python3 "$SCRIPT_DIR/whisper-proxy.py" --port 2022 \
+                        --whisper-url http://127.0.0.1:9000
+                    [ -n "$quiet" ] || echo "  ensured Whisper proxy (2022)"
+                fi ;;
             "$onnx_port")
                 # Only reached when KOKORO_ONNX_PORT is NOT 8880 — i.e. ONNX is
                 # running alongside the Docker Kokoro rather than instead of it.
@@ -457,6 +473,13 @@ cmd_stop() {
         rm -f "$PIPER_PID_FILE"
     else
         warn "No Piper proxy PID file found"
+    fi
+
+    if [ -f /tmp/whisper-server.pid ]; then
+        echo ""
+        echo "Stopping whisper.cpp server..."
+        kill "$(cat /tmp/whisper-server.pid)" 2>/dev/null && ok "whisper.cpp server stopped" || warn "whisper.cpp server was not running"
+        rm -f /tmp/whisper-server.pid
     fi
 
     echo ""
