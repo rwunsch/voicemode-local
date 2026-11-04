@@ -13,6 +13,8 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
+import socket
 import subprocess
 import sys
 import tempfile
@@ -308,3 +310,70 @@ def load_ui(base=None) -> dict:
 
 def save_ui(ui: dict, base=None) -> None:
     _write_json(_base(base) / "ui.json", ui)
+
+
+# -- control socket (shared by the barge trigger and the pill backend) -------
+
+def control_socket_path() -> Path:
+    # Upstream's variable is VOICEMODE_CONTROL_SOCKET (config.py).
+    return Path(os.path.expanduser(os.getenv("VOICEMODE_CONTROL_SOCKET") or "~/.voicemode/control.sock"))
+
+
+def _exchange(path: Path, payload: dict, want_reply: bool):
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+        s.settimeout(0.3)
+        s.connect(str(path))
+        s.sendall((json.dumps(payload) + "\n").encode("utf-8"))
+        if not want_reply:
+            return None
+        buf = b""
+        while b"\n" not in buf and len(buf) < 65536:
+            chunk = s.recv(4096)
+            if not chunk:
+                break
+            buf += chunk
+        return json.loads(buf.split(b"\n", 1)[0])
+
+
+def _status(path: Path) -> dict:
+    """The server's status, or {}. The socket exists only during an active
+    converse, so an absent one is the normal idle state."""
+    if not path.exists():
+        return {}
+    try:
+        reply = _exchange(path, {"command": "status"}, want_reply=True)
+    except (OSError, ValueError):
+        return {}
+    return reply if isinstance(reply, dict) else {}
+
+
+def send_control(path: Path, command: str) -> bool:
+    """Fire-and-forget control command. True if it was delivered to a live socket."""
+    if not path.exists():
+        return False
+    try:
+        _exchange(path, {"command": command}, want_reply=False)
+    except OSError:
+        return False
+    return True
+
+
+def barge_control(action: str, switch=None) -> str:
+    """Run ``voicemode-switch barge <action>``. The action is checked against a
+    fixed list, so model output never reaches the command line."""
+    action = (action or "").strip().lower()
+    if action not in ("on", "off", "status"):
+        return "action must be on, off or status"
+    # The venv lives in the repo, next to the script.
+    switch = Path(switch) if switch is not None else Path(sys.prefix).parent / "voicemode-switch"
+    if not switch.exists():
+        return f"voicemode-switch not found at {switch}"
+    try:
+        # `on` may download the Silero model.
+        done = subprocess.run([str(switch), "barge", action], capture_output=True, text=True, timeout=180)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return f"voice barge {action} failed: {e}"
+    output = re.sub(r"\x1b\[[0-9;]*m", "", (done.stdout + done.stderr)).strip()
+    if done.returncode != 0:
+        return f"voice barge {action} failed: {output}"
+    return output
