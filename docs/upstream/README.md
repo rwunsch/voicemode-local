@@ -3,6 +3,8 @@
 Contributions to `mbailey/voicemode`, filed as `rwunsch`. Submit with
 `gh auth switch --user rwunsch` first; upstream's default branch is `master`.
 
+**Filed 2026-11-04:** voice barge-in report and PR question, https://github.com/mbailey/voicemode/issues/585 (draft: `issue-voice-barge.md`).
+
 **Note 2026-11-04:** upstream has since shipped 9.0.0 to 9.0.2 (2026-10-25 to 10-29); we still pin 8.12.0, and the status below predates them.
 
 **Status 2026-10-01:** all nine queue items plus #536 are filed. Nothing merged, no

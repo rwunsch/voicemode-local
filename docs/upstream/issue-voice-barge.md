@@ -1,6 +1,6 @@
 # Draft: voice barge-in for `converse`, and whether a PR is wanted
 
-**Type:** report + question → possible PR. **Target:** `mbailey/voicemode`. **Status:** not submitted.
+**Type:** report + question → possible PR. **Target:** `mbailey/voicemode`. **Status:** filed as https://github.com/mbailey/voicemode/issues/585 (2026-11-04).
 **Where:** a comment on #211 or a new issue linking it. Copy only the text under "Body". No @mentions.
 Fact-checked against the code and session logs by an independent reviewer, 2026-11-04.
 
