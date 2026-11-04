@@ -7,7 +7,7 @@ a no-op unless TTS is live (patch_voice_barge.py), so a late detection cannot
 end the turn that follows.
 
 The words said before the server's own recording starts would otherwise be lost
-(measured: 2 of 4 counted words, with a 1.05 s gap). So the trigger keeps the
+(measured: only 1 of 4 counted words kept, with a 1.05 s gap). So the trigger keeps the
 last 3 seconds of mic audio, keeps capturing until the server reports it is
 listening, and hands that audio over in a private file for the server to prepend.
 

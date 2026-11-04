@@ -40,12 +40,12 @@ Silero alone is not enough on speakers: it correctly calls the assistant's echo 
 | Setup | Test | Result |
 |---|---|---|
 | Laptop speakers + mic | Normal count, before the handoff | 1 of 4 words |
-| Laptop speakers + mic | Normal count | 10 of 10 words; mic open 28 ms after the cut |
+| Laptop speakers + mic | Normal count, at -35 dBFS and 1 s lookback | 10 of 10 words; listen began 28 ms after the cut (log lines, not stream open) |
 | Laptop speakers + mic | Soft count, -40 dBFS | 8 of 8 words, cut in about 1 s; voice peaked -15 to -31 dBFS |
-| Laptop speakers + mic | Silent during TTS | No cut in 19 s and in 13.4 s (2 runs) |
+| Laptop speakers + mic | Silent during TTS | No cut in 19 s and in 13.4 s (2 runs); echo stayed below the gate, so this does not test echo rejection |
 | Headset | Talk over TTS | Fired about 0.9 s into playback; "8, 1, 2" kept. Most of the count predated TTS |
 
-`barge_in` to playback stopped: about 35 ms.
+`barge_in` to the player's stop log line: 7 to 35 ms (n=3). Time to actual silence not measured.
 
 ## Known limits
 
@@ -54,8 +54,8 @@ Silero alone is not enough on speakers: it correctly calls the assistant's echo 
   -40 gate was only replayed against the loud recordings: 0 false triggers in 3.
 - **A real whisper on speakers probably won't interrupt.** A stretch at -41 to -50 dBFS
   was missed under load, and sits at or below the gate.
-- **Heavy load** was present in the headset and soft runs, and delays transcription rather
-  than the cut (see `VOICEMODE_STT_TIMEOUT_LOCAL`).
+- **Heavy load** was present in the headset and soft runs. Transcription slowed (see
+  `VOICEMODE_STT_TIMEOUT_LOCAL`). Its effect on cut timing has not been measured.
 - **Buffered and `turns[]` players only.** With `VOICEMODE_STREAMING_ENABLED=true` the
   trigger stays inert. Linux/WSL only: it needs `parec`.
 - A 1 s pause ends the turn, as in any listen.
