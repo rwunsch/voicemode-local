@@ -310,7 +310,11 @@ cmd_ensure() {
         if healthy "$port"; then continue; fi
         case "$port" in
             8880)
-                if is_kokoro_onnx; then
+                # ONNX takes 8880 only when configured to replace Docker Kokoro.
+                # Otherwise a session starting before Docker is up would claim
+                # the port, keep it after Docker arrives, and (via the shared
+                # PID file) stop the real ONNX fallback port from starting.
+                if is_kokoro_onnx && [ "$onnx_port" = "8880" ]; then
                     start_detached kokoro-onnx-server /tmp/kokoro-onnx-server.pid \
                         "$VENV_PY" "$SCRIPT_DIR/kokoro-onnx-server.py" --port 8880 \
                         --model-dir "$SCRIPT_DIR/models/kokoro"

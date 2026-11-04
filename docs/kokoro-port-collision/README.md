@@ -131,3 +131,13 @@ docker logs voicemode-kokoro --since 1m | grep 'audio/speech'   # request appear
 
 If the native unit is ever wanted as the owner, stop and disable the Docker container instead — but
 fix its CUDA first, or you are choosing the CPU-only path.
+
+## Second route to the same symptom: `ensure` during boot (2026-11-04)
+
+**Symptom:** TTS silently on CPU. Port 8880 answers `{"engine": "kokoro-onnx"}`, Docker Kokoro logs no requests, and 8882 is not listening.
+
+**Cause:** `cmd_ensure` started ONNX on a hardcoded `--port 8880` whenever 8880 was unhealthy and `KOKORO_ONNX=true`, ignoring `KOKORO_ONNX_PORT=8882`. On 2026-11-04 ONNX started at 15:22:14 and the Docker container at 15:27:11. ONNX then held the port, and the shared PID file stopped the 8882 fallback from starting.
+
+**Fix:** ONNX takes 8880 only when `KOKORO_ONNX_PORT` is 8880. Regression test: `tests/test_switch_ensure_kokoro_port.py`.
+
+**Gotcha when recovering by hand:** after stopping the stray server, 8880 stayed down until `docker restart voicemode-kokoro`; `compose up -d` did not restore it.
