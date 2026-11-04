@@ -1,0 +1,30 @@
+:root{--bg:#fff;--line:#d0d5dd;--t:#101828;--m:#667085;--a:#8b5cf6;--g:#0d9488;--r:#be123c;--hover:#f2f4f7}
+@media (prefers-color-scheme:dark){:root{--bg:#172033;--line:#334155;--t:#f1f5f9;--m:#94a3b8;--a:#c4a7ff;--g:#5eead4;--r:#fda4af;--hover:#243049}}
+*{box-sizing:border-box}
+html,body{margin:0;background:transparent;color:var(--t);font:13px system-ui,sans-serif;overflow:hidden;user-select:none}
+.card{background:var(--bg);border:1px solid var(--line);border-radius:16px;padding:8px 10px;max-width:100vw}
+.row{display:flex;align-items:center;gap:6px}.between{justify-content:space-between}
+.drag{display:flex;align-items:center;gap:8px;flex:1;min-width:0;-webkit-app-region:drag;cursor:grab}
+.txt{min-width:0}.txt b{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:12.5px}
+.m{color:var(--m);font-size:12px}
+.orb{width:26px;height:26px;border-radius:50%;flex:none;background:var(--m);transition:background .2s}
+[data-phase=speaking] .orb{background:var(--a);animation:pulse 1.4s ease-in-out infinite}
+[data-phase=listening] .orb{background:var(--g);animation:pulse 2.2s ease-in-out infinite}
+[data-phase=paused] .orb{background:transparent;border:3px solid var(--m)}
+[data-phase=disconnected] .orb{opacity:.35}
+@keyframes pulse{50%{transform:scale(.82);opacity:.75}}
+@media (prefers-reduced-motion:reduce){.orb{animation:none!important}}
+.btn,select{-webkit-app-region:no-drag;border:1px solid var(--line);background:transparent;color:var(--t);border-radius:8px;padding:4px 7px;font:inherit;font-size:12px;cursor:pointer}
+.btn:hover:not(:disabled){background:var(--hover)}
+.btn:disabled,select:disabled{opacity:.4;cursor:default}
+.btn.icon{padding:4px 6px}
+.stop{color:var(--r);border-color:var(--r)}
+select{flex:1;min-width:0}
+.more{display:none;margin-top:10px;flex-direction:column;gap:8px}
+[data-mode=expanded] .more,[data-mode=docked] .more{display:flex}
+.q{display:flex;justify-content:space-between;padding:3px 0;border-top:1px solid var(--line)}
+kbd{border:1px solid var(--line);border-radius:4px;padding:0 4px;font:11px ui-monospace,monospace}
+.dot{display:none;width:16px;height:16px;border-radius:50%;border:2px solid var(--bg);padding:0;background:var(--m);cursor:pointer;box-shadow:0 0 0 1px var(--line)}
+[data-phase=speaking] .dot{background:var(--a)}[data-phase=listening] .dot{background:var(--g)}
+[data-mode=dot] .dot{display:block}[data-mode=dot] .card{display:none}
+:focus-visible{outline:2px solid var(--a);outline-offset:1px}
