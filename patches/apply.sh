@@ -172,7 +172,7 @@ fi
 # Retired with the control-channel rewrite: ptt_ipc.py (event bus),
 # ptt_bridge.py (converse glue), ptt_playback_bridge.py (barge-in registry) --
 # upstream's control channel owns all three concerns now.
-for _m in ptt_core.py ptt_control_client.py ptt_relay.py ptt_listener_linux.py ptt_listener_macos.py voice_barge.py; do
+for _m in ptt_core.py ptt_control_client.py ptt_relay.py ptt_listener_linux.py ptt_listener_macos.py voice_barge.py voice_pill_state.py; do
     if [ -f "$SCRIPT_DIR/$_m" ]; then
         cp "$SCRIPT_DIR/$_m" "$VM_DIR/$_m"
         echo "[patches] installed $_m"
