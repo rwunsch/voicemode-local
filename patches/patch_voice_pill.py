@@ -18,8 +18,8 @@
 4. Pause during recording: the loop ends, the audio is discarded, and the listen
    restarts after resume. A flag rather than a second is_paused() read, so a
    pause released at once cannot let the partial audio through. The fixed-duration
-   fallback (``record_audio``) has no loop to check, so its audio is discarded only
-   if Pause is still on when it returns.
+   recorder (``record_audio``) blocked in ``sd.wait()``, so it polls instead and
+   does the same.
 
 5. The pill's voice override replaces the caller's voice. Its language override is
    added to the result for the agent, not spoken.
@@ -77,6 +77,18 @@ CONVERSE = [
      "from voice_mode.control_socket import start_control_listener, stop_control_listener\n",
      "from voice_mode.control_socket import start_control_listener, stop_control_listener\n"
      f"from voice_mode import voice_pill_state  # {MARKER}\n"),
+    ("fixed-duration recording",
+     "            dtype=np.int16\n        )\n        sd.wait()\n",
+     "            dtype=np.int16\n        )\n"
+     f"        # {MARKER}: poll rather than block, so Pause closes this mic too.\n"
+     "        while sd.get_stream().active:\n"
+     "            if voice_pill_state.is_paused():\n"
+     '                logger.info("Recording ended by Pause -- discarding it")\n'
+     "                sd.stop()\n"
+     "                _voice_pill_discard.set()\n"
+     "                return np.array([])\n"
+     "            time.sleep(0.05)\n"
+     "        sd.wait()  # closes the finished stream\n"),
     ("helpers and recording wrapper",
      "def record_audio_with_silence_detection" + RECORD_SIG,
      f"# {MARKER}: set when Pause ended the recording, so its audio is discarded.\n"

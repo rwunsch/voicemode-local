@@ -5,6 +5,7 @@ import stat
 import subprocess
 import sys
 import time
+import types
 from pathlib import Path
 
 import pytest
@@ -143,3 +144,41 @@ def test_state_dir_is_0700(base):
 def test_default_base_is_under_home(monkeypatch, tmp_path):
     monkeypatch.setenv("HOME", str(tmp_path))
     assert st.default_base() == tmp_path / ".voicemode" / "pill"
+
+
+def _fake_mac_ps(monkeypatch, stdout):
+    """Make process_start take its non-Linux path; returns the list of spawns."""
+    spawns = []
+
+    def run(cmd, **_):
+        spawns.append(cmd)
+        return types.SimpleNamespace(stdout=stdout)
+
+    monkeypatch.setattr(st.sys, "platform", "darwin")
+    monkeypatch.setattr(st.subprocess, "run", run)
+    return spawns
+
+
+def test_dead_pause_owner_costs_one_ps_spawn_only(base, monkeypatch):
+    st.set_paused(True, dead_pid(), base=base)
+    spawns = _fake_mac_ps(monkeypatch, "")
+    assert st.is_paused(base=base) is False
+    assert len(spawns) == 1
+    assert st.is_paused(base=base) is False
+    assert len(spawns) == 1
+    assert not (base / "paused.json").exists()
+
+
+def test_reused_pause_owner_costs_one_ps_spawn_only(base, monkeypatch):
+    st.set_paused(True, os.getpid(), base=base)
+    spawns = _fake_mac_ps(monkeypatch, "a different start time")
+    assert st.is_paused(base=base) is False
+    assert st.is_paused(base=base) is False
+    assert len(spawns) == 1
+    assert not (base / "paused.json").exists()
+
+
+def test_live_pause_owner_keeps_the_pause_file(base):
+    st.set_paused(True, os.getpid(), base=base)
+    assert st.is_paused(base=base) is True
+    assert (base / "paused.json").exists()

@@ -179,9 +179,17 @@ def set_paused(on: bool, owner_pid: int, base=None) -> None:
 
 
 def is_paused(base=None) -> bool:
-    p = _read_json(_base(base) / "paused.json")
+    path = _base(base) / "paused.json"
+    p = _read_json(path)
+    if not p:
+        return False
     owner = p.get("owner")
-    return isinstance(owner, int) and _alive_same(owner, p.get("start"))
+    if isinstance(owner, int) and _alive_same(owner, p.get("start")):
+        return True
+    # Remove it: on non-Linux every owner check spawns ps, and the recording loop
+    # calls this each chunk, so a crashed pill must cost one spawn, not one per chunk.
+    _unlink(path)
+    return False
 
 
 async def wait_while_paused(until=None, poll: float = 0.25, base=None) -> None:

@@ -490,6 +490,83 @@ def test_pause_does_not_disturb_a_voice_cut(work, st, control, monkeypatch):
     assert rec.stt == [[9]]
 
 
+class _FakeRec:
+    """sd.rec/get_stream/stop/wait. The first take is paused on its first poll and
+    resumed moments later; without polling, Pause and resume both land inside wait()."""
+
+    def __init__(self, st):
+        self.st, self.takes, self.stopped, self.waits = st, 0, 0, 0
+
+    def _pause_then_resume(self):
+        self.st.set_paused(True, os.getpid())
+        threading.Timer(0.2, self.st.set_paused, (False, os.getpid())).start()
+
+    def rec(self, frames, **_):
+        self.takes += 1
+        return np.full((2, 1), self.takes, dtype=np.int16)
+
+    def get_stream(self):
+        return self
+
+    @property
+    def active(self):
+        if self.takes == 1 and not self.stopped:
+            self._pause_then_resume()
+            return True
+        return False
+
+    def stop(self):
+        self.stopped += 1
+
+    def wait(self):
+        self.waits += 1
+        if self.takes == 1:  # the old sd.wait(): blocks through the whole Pause
+            self.st.set_paused(True, os.getpid())
+            self.st.set_paused(False, os.getpid())
+
+
+def _fixed_ns(work, st, control, monkeypatch, sd, state):
+    ns, rec = _listen_ns(work, st, control, monkeypatch, None)
+    ns.update(sd=sd, DEBUG=False, CHANNELS=1, VAD_AVAILABLE=False, DISABLE_SILENCE_DETECTION=False,
+              get_control_state=lambda: state)
+    _lift(work, "converse.py", ["record_audio", "record_audio_with_silence_detection",
+                                "record_audio_with_silence_detection_inner"], ns)
+    return ns, rec
+
+
+def test_fixed_duration_recording_under_pause_never_reaches_stt(work, st, control, monkeypatch):
+    state = control.ControlState()
+    sd = _FakeRec(st)
+    ns, rec = _fixed_ns(work, st, control, monkeypatch, sd, state)
+    result = _listen(ns, state)
+    assert rec.stt == [[2, 2]]  # only the take after resume
+    assert result.outcome == "answered"
+    assert sd.stopped == 1  # the mic was closed at once
+
+
+def test_pause_closes_the_fixed_duration_mic(work, st, control, monkeypatch):
+    state = control.ControlState()
+    sd = _FakeRec(st)
+    ns, _ = _fixed_ns(work, st, control, monkeypatch, sd, state)
+    out, _speech = ns["record_audio_with_silence_detection"](5.0)
+    assert len(out) == 0
+    assert sd.stopped == 1
+    assert sd.waits == 0
+    assert ns["_voice_pill_discard"].is_set()
+    assert state.is_listening is False
+
+
+def test_fixed_duration_without_pause_is_unchanged(work, st, control, monkeypatch):
+    state = control.ControlState()
+    sd = _FakeRec(st)
+    sd.takes = 1  # rec() makes this take 2, which never pauses
+    ns, _ = _fixed_ns(work, st, control, monkeypatch, sd, state)
+    out, speech = ns["record_audio_with_silence_detection"](5.0)
+    assert out.tolist() == [2, 2] and speech is True
+    assert (sd.stopped, sd.waits) == (0, 1)  # wait() still runs, it closes the stream
+    assert not ns["_voice_pill_discard"].is_set()
+
+
 def test_queued_session_does_not_start_during_pause(work, st, control):
     """A session past enter, queued for the conch, gets the floor mid-pause."""
     state = control.ControlState()
