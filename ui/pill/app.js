@@ -1,5 +1,7 @@
 // Renders the pill from model.js. Talks to the native wrapper only through
 // window.pillTransport.send(json) and window.pillReceive(json).
+// Window messages: {"window":{"mode":"pill"|"expanded"|"dot"|"docked"|"hidden","side":...}} and
+// {"window":{"drag":true}}. "hidden" is sent once on Dismiss; the wrapper then hides the window.
 (function () {
   var M = window.PillModel, $ = function (id) { return document.getElementById(id); };
   var hidden = false, snapshot = null, lastSeen = null, ui = null, lastMode = null, filled = false;
@@ -64,8 +66,12 @@
   window.pillReceive = function (json) {
     var s; try { s = JSON.parse(json); } catch (e) { return; }
     if (!s || typeof s !== "object") return;
+    var wasStale = lastSeen === null || Date.now() - lastSeen > M.STALE_MS;
+    var prevVisible = snapshot ? snapshot.visible : null;
     snapshot = s; lastSeen = Date.now();
-    if (hidden && s.visible === false) { hidden = false; lastMode = null; } // a later new session shows it again
+    var h = M.nextHidden(hidden, prevVisible, s.visible, wasStale);
+    if (hidden && !h) lastMode = null; // resend the mode so the wrapper shows the window again
+    hidden = h;
     if (ui === null) ui = Object.assign({}, s.ui); // restore once; afterwards the page owns it
     render();
   };

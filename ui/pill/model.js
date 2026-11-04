@@ -57,7 +57,14 @@
     };
   }
 
-  var api = { viewModel: viewModel, VOICES: VOICES, LANGUAGES: LANGUAGES, STALE_MS: STALE_MS };
+  // Whether a dismissed page stays hidden after a snapshot. The wrapper hides from `visible`;
+  // the page only decides when its own hidden flag clears.
+  function nextHidden(hidden, prevVisible, snapshotVisible, wasStale) {
+    if (!hidden) return false;
+    return !(snapshotVisible === true && (wasStale || prevVisible === false));
+  }
+
+  var api = { nextHidden: nextHidden, viewModel: viewModel, VOICES: VOICES, LANGUAGES: LANGUAGES, STALE_MS: STALE_MS };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   if (typeof window !== "undefined") window.PillModel = api;
 })();

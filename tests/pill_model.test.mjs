@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import model from "../ui/pill/model.js";
-const { viewModel, VOICES, LANGUAGES } = model;
+const { viewModel, VOICES, LANGUAGES, nextHidden } = model;
 
 const snap = (o = {}) => ({
   visible: true, phase: "speaking", floor: { pid: 1, label: "a" },
@@ -119,4 +119,24 @@ test("unknown voice and language stay null", () => {
 test("minimize and dismiss stay enabled when connected too", () => {
   const vm = viewModel(snap(), 0, 0);
   assert.deepEqual([vm.minimizeEnabled, vm.dismissEnabled], [true, true]);
+});
+
+test("nextHidden: un-hides on false to true", () => {
+  assert.equal(nextHidden(true, false, true, false), false);
+});
+test("nextHidden: un-hides on first visible snapshot after disconnect", () => {
+  assert.equal(nextHidden(true, true, true, true), false);
+  assert.equal(nextHidden(true, null, true, true), false);
+});
+test("nextHidden: visible:false alone does not un-hide", () => {
+  assert.equal(nextHidden(true, true, false, false), true);
+  assert.equal(nextHidden(true, false, false, false), true);
+  assert.equal(nextHidden(true, true, false, true), true);
+});
+test("nextHidden: visible:true right after a connected dismiss stays hidden", () => {
+  assert.equal(nextHidden(true, true, true, false), true);
+});
+test("nextHidden: not hidden stays not hidden", () => {
+  assert.equal(nextHidden(false, true, true, false), false);
+  assert.equal(nextHidden(false, true, false, false), false);
 });
