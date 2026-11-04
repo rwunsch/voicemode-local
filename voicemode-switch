@@ -33,6 +33,9 @@ GPU_COMPOSE_FILE="$SCRIPT_DIR/docker-compose.gpu.yml"
 HYBRID_COMPOSE_FILE="$SCRIPT_DIR/docker-compose.hybrid.yml"
 PROXY_PID_FILE="/tmp/whisper-proxy.pid"
 CONFIG_FILE="$HOME/.voicemode-local/config"
+SILERO_MODEL="$SCRIPT_DIR/models/silero/silero_vad.onnx"
+SILERO_URL="https://raw.githubusercontent.com/snakers4/silero-vad/bfdc0193023f121ea5b3cc7b176dbed570a68a59/src/silero_vad/data/silero_vad.onnx"
+SILERO_SHA256="1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d8788e3"
 
 # Shared compute-mode helpers (vm_detect_gpu, vm_read_config, ...).
 VM_CONFIG_FILE="$CONFIG_FILE"
@@ -352,7 +355,72 @@ cmd_ensure() {
                 [ -n "$quiet" ] || echo "  ensured Kokoro ONNX ($onnx_port)" ;;
         esac
     done
+    # Voice barge-in trigger (opt-in; one per machine, shared by all sessions).
+    if voice_barge_enabled && [ -f "$SILERO_MODEL" ]; then
+        start_detached voice-barge /tmp/voice-barge.pid \
+            "$VENV_PY" -m voice_mode.voice_barge "$SILERO_MODEL"
+        [ -n "$quiet" ] || echo "  ensured voice barge-in trigger"
+    fi
     flock -u 9 2>/dev/null || true
+}
+
+# --- Voice barge-in: stop TTS when the user talks over it --------------------
+voice_barge_enabled() {
+    local env_file="$HOME/.voicemode/voicemode.env" value=""
+    [ -f "$env_file" ] && value="$(sed -n 's/^VOICEMODE_VOICE_BARGE=//p' "$env_file" | tail -1)"
+    [ "$value" = "true" ]
+}
+
+set_voice_barge() {
+    local env_file="$HOME/.voicemode/voicemode.env"
+    mkdir -p "$(dirname "$env_file")"; touch "$env_file"
+    sed -i.bak '/^VOICEMODE_VOICE_BARGE=/d' "$env_file" && rm -f "$env_file.bak"
+    echo "VOICEMODE_VOICE_BARGE=$1" >> "$env_file"
+}
+
+stop_voice_barge() {
+    local pidfile=/tmp/voice-barge.pid
+    if [ -f "$pidfile" ] && kill -0 "$(cat "$pidfile")" 2>/dev/null; then
+        kill "$(cat "$pidfile")" 2>/dev/null || true
+    fi
+    rm -f "$pidfile"
+}
+
+fetch_silero_model() {
+    [ -f "$SILERO_MODEL" ] && [ "$(sha256sum "$SILERO_MODEL" | cut -d' ' -f1)" = "$SILERO_SHA256" ] && return 0
+    mkdir -p "$(dirname "$SILERO_MODEL")"
+    local tmp="$SILERO_MODEL.download"
+    curl -fsSL --max-time 120 -o "$tmp" "$SILERO_URL" || { rm -f "$tmp"; fail "Could not download the Silero model"; return 1; }
+    if [ "$(sha256sum "$tmp" | cut -d' ' -f1)" != "$SILERO_SHA256" ]; then
+        rm -f "$tmp"; fail "Silero model failed its checksum; not installed"; return 1
+    fi
+    mv -f "$tmp" "$SILERO_MODEL"
+}
+
+cmd_barge() {
+    case "${1:-status}" in
+        on)
+            fetch_silero_model || return 1
+            set_voice_barge true
+            stop_voice_barge
+            cmd_ensure --quiet
+            ok "Voice barge-in on. New voice sessions need /mcp reconnect to pick up the patch."
+            ;;
+        off)
+            set_voice_barge false
+            stop_voice_barge
+            ok "Voice barge-in off"
+            ;;
+        status)
+            if voice_barge_enabled; then echo "Voice barge-in: enabled"; else echo "Voice barge-in: disabled"; fi
+            if [ -f /tmp/voice-barge.pid ] && kill -0 "$(cat /tmp/voice-barge.pid)" 2>/dev/null; then
+                echo "Trigger: running (PID $(cat /tmp/voice-barge.pid), log /tmp/voice-barge.log)"
+            else
+                echo "Trigger: not running"
+            fi
+            ;;
+        *) echo "usage: voicemode-switch barge [on|off|status]"; return 2 ;;
+    esac
 }
 
 # Structured health probe of the configured endpoints (exit 0 iff all up).
@@ -713,6 +781,7 @@ case "${1:-}" in
     ensure) cmd_ensure "${2:-}" ;;
     health) cmd_health ;;
     compute) cmd_compute "${2:-}" "${3:-}" ;;
+    barge) cmd_barge "${2:-}" ;;
     queue)
         # Upstream's conch queue (8.8.0 epic VM-1610) replaced our voice_queue.py.
         # `voicemode conch status` shows the floor holder + the FIFO waiter list.

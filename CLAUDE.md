@@ -88,6 +88,13 @@ holder as "converse", so without it `conch status` cannot tell your sessions
 apart. The label comes from `VOICEMODE_SESSION_NAME`, else
 `~/.voicemode/session_names/$CLAUDE_CODE_SESSION_ID.txt`, else the repo name.
 
+## Voice Barge-In (stop talking when interrupted)
+
+Opt-in: `voicemode-switch barge on|off|status`. It stops TTS when the user talks over it
+and keeps the words they said. Off takes effect at once, so run it whenever the user asks
+to turn interruption on or off. See `docs/voice-barge-in/README.md`, including what has not
+been tested.
+
 ## Never End a Voice Conversation on Your Own Initiative
 
 Only the **user** ends a voice conversation (e.g. "goodbye", "that's all",
@@ -184,12 +191,11 @@ unchanged, so it is a no-op until you opt in:
 | `VOICEMODE_STT_TIMEOUT` | all STT endpoints | 60 |
 | `VOICEMODE_STT_TIMEOUT_LOCAL` | local endpoints only | as above |
 
-This machine sets `VOICEMODE_STT_TIMEOUT_LOCAL=15`, turning a 61s stall into
-~16s. **Size it by measurement, not feel — local STT time scales with audio
-length**, and `voicemode-switch compute cpu` changes the answer: GPU whisper
-`small` here is median 1.1s / p95 3.6s / max 6.6s (n=67), while the same box on
-CPU took 24–29s for a 10MB recording. **Put it back to 60 before switching to
-CPU compute.** Takes effect on a fresh voice-mode process (`/mcp` → reconnect;
+This machine sets `VOICEMODE_STT_TIMEOUT_LOCAL=60`, because `hybrid` runs Whisper
+on the CPU: a 5.5s clip took about 29s under load (2026-11-04), so the earlier 15
+failed and retried. **Size it by measurement, not feel — local STT time scales with
+audio length**, and compute mode changes the answer: GPU whisper `small` here is
+median 1.1s / p95 3.6s / max 6.6s (n=67), which is what 15 was sized on. Takes effect on a fresh voice-mode process (`/mcp` → reconnect;
 no full Claude Code restart needed).
 
 Root cause is still open — see `docs/stt-61s-stall/README.md` for what has

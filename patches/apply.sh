@@ -69,7 +69,8 @@ unshare_file() {
     fi
 }
 for _f in "$VM_DIR/tools/converse.py" "$VM_DIR/simple_failover.py" \
-          "$VM_DIR/control_channel.py" "$VM_DIR/core.py"; do
+          "$VM_DIR/control_channel.py" "$VM_DIR/core.py" \
+          "$VM_DIR/control_socket.py" "$VM_DIR/streaming.py"; do
     unshare_file "$_f"
 done
 
@@ -155,13 +156,23 @@ if [ -f "$SCRIPT_DIR/patch_voice_language.py" ]; then
     "$PYBIN" "$SCRIPT_DIR/patch_voice_language.py" "$VM_DIR/tools/converse.py"
 fi
 
+# Voice barge-in: report live playback, and a barge_in command that only acts
+# while TTS is playing. Anchors on the hold patches above, so it must follow them.
+# See docs/voice-barge-in/README.md.
+if [ -f "$SCRIPT_DIR/patch_voice_barge.py" ]; then
+    "$PYBIN" "$SCRIPT_DIR/patch_voice_barge.py" "$VM_DIR/control_channel.py"
+    "$PYBIN" "$SCRIPT_DIR/patch_voice_barge.py" "$VM_DIR/control_socket.py"
+    "$PYBIN" "$SCRIPT_DIR/patch_voice_barge.py" "$VM_DIR/core.py"
+    "$PYBIN" "$SCRIPT_DIR/patch_voice_barge.py" "$VM_DIR/tools/converse.py"
+fi
+
 # PTT support modules, copied in (not patches). The listener talks to upstream's
 # control socket directly; ptt_relay is only the WSL2 Windows->guest hop, since
 # a Windows-side key press cannot reach the guest's AF_UNIX socket.
 # Retired with the control-channel rewrite: ptt_ipc.py (event bus),
 # ptt_bridge.py (converse glue), ptt_playback_bridge.py (barge-in registry) --
 # upstream's control channel owns all three concerns now.
-for _m in ptt_core.py ptt_control_client.py ptt_relay.py ptt_listener_linux.py ptt_listener_macos.py; do
+for _m in ptt_core.py ptt_control_client.py ptt_relay.py ptt_listener_linux.py ptt_listener_macos.py voice_barge.py; do
     if [ -f "$SCRIPT_DIR/$_m" ]; then
         cp "$SCRIPT_DIR/$_m" "$VM_DIR/$_m"
         echo "[patches] installed $_m"

@@ -27,7 +27,7 @@ def _run_ensure(tmp_path: Path, config: str, urls: str) -> tuple[str, str]:
     """Run `ensure` with every local service down; return (python_args, docker_args)."""
     root, home, bin_dir, scratch = (tmp_path / n for n in ("app", "home", "bin", "scratch"))
     for d in (root, home / ".voicemode-local", home / ".voicemode", bin_dir, scratch):
-        d.mkdir(parents=True)
+        d.mkdir(parents=True, exist_ok=True)
     py_log, docker_log = scratch / "python.log", scratch / "docker.log"
 
     script = root / "voicemode-switch"
@@ -78,3 +78,35 @@ def test_docker_mode_starts_docker_and_no_onnx(tmp_path):
     )
     assert "kokoro-onnx-server" not in python_args
     assert "up -d" in docker_args
+
+
+def _prepare_model(tmp_path: Path) -> None:
+    model = tmp_path / "app/models/silero/silero_vad.onnx"
+    model.parent.mkdir(parents=True)
+    model.write_bytes(b"stub")
+
+
+def _run_ensure_with_model(tmp_path: Path, env_extra: str) -> str:
+    _prepare_model(tmp_path)
+    python_args, _ = _run_ensure(
+        tmp_path,
+        "KOKORO_ONNX=false\n",
+        f"http://127.0.0.1:8880/v1\n{env_extra}",
+    )
+    return python_args
+
+
+def test_ensure_starts_the_voice_barge_trigger_when_enabled(tmp_path):
+    args = _run_ensure_with_model(tmp_path, "VOICEMODE_VOICE_BARGE=true")
+    assert "-m voice_mode.voice_barge" in args
+    assert "models/silero/silero_vad.onnx" in args
+
+
+def test_ensure_leaves_the_trigger_off_by_default(tmp_path):
+    args = _run_ensure_with_model(tmp_path, "")
+    assert "voice_barge" not in args
+
+
+def test_ensure_leaves_the_trigger_off_when_disabled(tmp_path):
+    args = _run_ensure_with_model(tmp_path, "VOICEMODE_VOICE_BARGE=false")
+    assert "voice_barge" not in args
