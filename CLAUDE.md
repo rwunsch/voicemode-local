@@ -90,9 +90,10 @@ apart. The label comes from `VOICEMODE_SESSION_NAME`, else
 
 ## Voice Barge-In (stop talking when interrupted)
 
-Opt-in: `voicemode-switch barge on|off|status`. It stops TTS when the user talks over it
-and keeps the words they said. Off takes effect at once, so run it whenever the user asks
-to turn interruption on or off. See `docs/voice-barge-in/README.md`, including what has not
+Opt-in: the `voice_barge` MCP tool (`on`, `off`, `status`), or `voicemode-switch barge
+on|off|status` from a shell. It stops TTS when the user talks over it and keeps the words
+they said. Off takes effect at once, so use it whenever the user asks to turn interruption
+on or off. See `docs/voice-barge-in/README.md`, including what has not
 been tested.
 
 ## Never End a Voice Conversation on Your Own Initiative

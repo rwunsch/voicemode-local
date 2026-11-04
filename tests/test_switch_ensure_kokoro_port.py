@@ -110,3 +110,22 @@ def test_ensure_leaves_the_trigger_off_by_default(tmp_path):
 def test_ensure_leaves_the_trigger_off_when_disabled(tmp_path):
     args = _run_ensure_with_model(tmp_path, "VOICEMODE_VOICE_BARGE=false")
     assert "voice_barge" not in args
+
+
+def _env_after_ensure(tmp_path: Path, env_extra: str) -> str:
+    _run_ensure(tmp_path, "KOKORO_ONNX=false\n", f"http://127.0.0.1:8880/v1\n{env_extra}")
+    return (tmp_path / "home/.voicemode/voicemode.env").read_text()
+
+
+def test_ensure_adds_the_barge_tool_to_an_existing_whitelist(tmp_path):
+    env = _env_after_ensure(tmp_path, "VOICEMODE_TOOLS_ENABLED=converse,service\n")
+    assert "VOICEMODE_TOOLS_ENABLED=converse,service,voice_barge_tool\n" in env
+
+
+def test_ensure_does_not_duplicate_the_barge_tool(tmp_path):
+    env = _env_after_ensure(tmp_path, "VOICEMODE_TOOLS_ENABLED=converse,voice_barge_tool\n")
+    assert env.count("voice_barge_tool") == 1
+
+
+def test_ensure_creates_no_whitelist_when_there_is_none(tmp_path):
+    assert "VOICEMODE_TOOLS_ENABLED" not in _env_after_ensure(tmp_path, "")

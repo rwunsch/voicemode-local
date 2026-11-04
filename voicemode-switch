@@ -355,6 +355,7 @@ cmd_ensure() {
                 [ -n "$quiet" ] || echo "  ensured Kokoro ONNX ($onnx_port)" ;;
         esac
     done
+    expose_barge_tool
     # Voice barge-in trigger (opt-in; one per machine, shared by all sessions).
     if voice_barge_enabled && [ -f "$SILERO_MODEL" ]; then
         start_detached voice-barge /tmp/voice-barge.pid \
@@ -369,6 +370,16 @@ voice_barge_enabled() {
     local env_file="$HOME/.voicemode/voicemode.env" value=""
     [ -f "$env_file" ] && value="$(sed -n 's/^VOICEMODE_VOICE_BARGE=//p' "$env_file" | tail -1)"
     [ "$value" = "true" ]
+}
+
+# A tool whitelist would hide the voice_barge MCP tool. Never create a whitelist:
+# without one, every tool already loads.
+expose_barge_tool() {
+    local env_file="$HOME/.voicemode/voicemode.env"
+    [ -f "$env_file" ] || return 0
+    grep -q '^VOICEMODE_TOOLS_ENABLED=' "$env_file" || return 0
+    grep -q '^VOICEMODE_TOOLS_ENABLED=.*voice_barge_tool' "$env_file" && return 0
+    sed -i.bak 's/^\(VOICEMODE_TOOLS_ENABLED=.*\)$/\1,voice_barge_tool/' "$env_file" && rm -f "$env_file.bak"
 }
 
 set_voice_barge() {

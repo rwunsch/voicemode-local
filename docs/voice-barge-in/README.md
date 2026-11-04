@@ -9,6 +9,9 @@ voicemode-switch barge off      # takes effect immediately
 voicemode-switch barge status
 ```
 
+From inside Claude Code, Copilot or any MCP client, use the `voice_barge` tool with `on`,
+`off` or `status`. `ensure` adds it to `VOICEMODE_TOOLS_ENABLED` if you have a whitelist.
+
 Voice-mode processes started before the patch ignore it, so run `/mcp` to reconnect.
 
 ## How it works

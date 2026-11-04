@@ -280,3 +280,41 @@ class TestPrependPreroll:
 def test_lookback_covers_the_measured_soft_voice_detection_delay():
     # Soft speech took 2.5 s to detect (2026-11-04); shorter loses those words.
     assert voice_barge.PREROLL_WINDOWS * voice_barge.WINDOW_S >= 2.5
+
+
+class TestBargeControl:
+    def _switch(self, tmp_path, body='echo "$@"'):
+        path = tmp_path / "voicemode-switch"
+        path.write_text(f"#!/bin/bash\n{body}\n")
+        path.chmod(0o755)
+        return path
+
+    def test_passes_the_action_to_voicemode_switch(self, tmp_path):
+        assert voice_barge.barge_control("off", self._switch(tmp_path)) == "barge off"
+
+    @pytest.mark.parametrize("action", ["ON", " on ", "Status"])
+    def test_action_is_forgiving_about_case_and_spaces(self, tmp_path, action):
+        assert voice_barge.barge_control(action, self._switch(tmp_path)) == f"barge {action.strip().lower()}"
+
+    @pytest.mark.parametrize("action", ["", "restart", "on; rm -rf /", "--help"])
+    def test_rejects_anything_else_without_running_it(self, tmp_path, action):
+        marker = tmp_path / "ran"
+        switch = self._switch(tmp_path, f'touch "{marker}"')
+        assert "must be on, off or status" in voice_barge.barge_control(action, switch)
+        assert not marker.exists()
+
+    def test_strips_terminal_colours(self, tmp_path):
+        switch = self._switch(tmp_path, r"printf '\033[0;32mok\033[0m Voice barge-in off\n'")
+        assert voice_barge.barge_control("off", switch) == "ok Voice barge-in off"
+
+    def test_reports_a_failure_instead_of_claiming_success(self, tmp_path):
+        out = voice_barge.barge_control("on", self._switch(tmp_path, "echo no model; exit 3"))
+        assert "failed" in out and "no model" in out
+
+    def test_reports_a_missing_switch(self, tmp_path):
+        assert "not found" in voice_barge.barge_control("on", tmp_path / "absent")
+
+
+def test_tool_file_registers_a_voice_barge_mcp_tool():
+    src = (MODULE.parent / "voice_barge_tool.py").read_text()
+    assert "@mcp.tool()" in src and "async def voice_barge(" in src

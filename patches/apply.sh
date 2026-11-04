@@ -179,4 +179,10 @@ for _m in ptt_core.py ptt_control_client.py ptt_relay.py ptt_listener_linux.py p
     fi
 done
 
+# MCP tool for switching voice barge-in from inside any client.
+if [ -f "$SCRIPT_DIR/voice_barge_tool.py" ]; then
+    cp "$SCRIPT_DIR/voice_barge_tool.py" "$VM_DIR/tools/voice_barge_tool.py"
+    echo "[patches] installed tools/voice_barge_tool.py"
+fi
+
 echo "[patches] Done. Restart Claude Code for changes to take effect."

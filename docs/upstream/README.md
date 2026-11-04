@@ -3,6 +3,8 @@
 Contributions to `mbailey/voicemode`, filed as `rwunsch`. Submit with
 `gh auth switch --user rwunsch` first; upstream's default branch is `master`.
 
+**Note 2026-11-04:** upstream has since shipped 9.0.0 to 9.0.2 (2026-10-25 to 10-29); we still pin 8.12.0, and the status below predates them.
+
 **Status 2026-10-01:** all nine queue items plus #536 are filed. Nothing merged, no
 maintainer reply on any of it. That is upstream-wide, not about us: last release v8.12.0
 (2026-07-21), and the only merge since is a CI fix (#542, 2026-09-15). PRs #537/#538 are

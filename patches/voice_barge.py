@@ -25,6 +25,7 @@ Installed into voice_mode/voice_barge.py by patches/apply.sh.
 import json
 import logging
 import os
+import re
 import select
 import shutil
 import signal
@@ -235,6 +236,27 @@ def send_barge_in(path: Path) -> None:
         _exchange(path, {"command": "barge_in"}, want_reply=False)
     except OSError as e:
         logger.debug("barge_in not delivered: %s", e)
+
+
+def barge_control(action: str, switch=None) -> str:
+    """Run ``voicemode-switch barge <action>`` for the MCP tool. The action is
+    checked against a fixed list, so model output never reaches the command line."""
+    action = (action or "").strip().lower()
+    if action not in ("on", "off", "status"):
+        return "action must be on, off or status"
+    # The venv lives in the repo, next to the script.
+    switch = Path(switch) if switch is not None else Path(sys.prefix).parent / "voicemode-switch"
+    if not switch.exists():
+        return f"voicemode-switch not found at {switch}"
+    try:
+        # `on` may download the Silero model.
+        done = subprocess.run([str(switch), "barge", action], capture_output=True, text=True, timeout=180)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return f"voice barge {action} failed: {e}"
+    output = re.sub(r"\x1b\[[0-9;]*m", "", (done.stdout + done.stderr)).strip()
+    if done.returncode != 0:
+        return f"voice barge {action} failed: {output}"
+    return output
 
 
 def _hand_off(capture, held, poll_listen_started, preroll_sink, poll_every_windows, clock) -> None:
