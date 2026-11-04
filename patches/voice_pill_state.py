@@ -10,6 +10,7 @@ is ignored, so a crashed pill can never leave every voice session hanging.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import subprocess
@@ -28,8 +29,10 @@ def default_base() -> Path:
 
 def _base(base) -> Path:
     b = Path(base) if base is not None else default_base()
-    b.mkdir(mode=0o700, parents=True, exist_ok=True)
+    # Best effort: is_paused() runs in the recording loop and must not raise.
+    # A real write fails later, on its own, where the caller can handle it.
     try:
+        b.mkdir(mode=0o700, parents=True, exist_ok=True)
         os.chmod(b, 0o700)
     except OSError:
         pass
@@ -116,7 +119,8 @@ def register_session(pid: int, label: str, voice: str | None, base=None) -> None
     })
 
 
-def touch_session(pid: int, voice: str | None = None, base=None) -> None:
+def touch_session(pid: int, voice: str | None = None, base=None,
+                  label: str | None = None) -> None:
     path = _session_path(pid, base)
     s = _read_json(path)
     if not s:
@@ -124,6 +128,8 @@ def touch_session(pid: int, voice: str | None = None, base=None) -> None:
     s["last_voice_at"] = time.time()
     if voice is not None:
         s["voice"] = voice
+    if label is not None:
+        s["label"] = label
     _write_json(path, s)
 
 
@@ -138,6 +144,9 @@ def live_sessions(base=None) -> list[dict]:
         pid = s.get("pid")
         if not isinstance(pid, int) or not _alive_same(pid, s.get("start")):
             _unlink(path)
+            if isinstance(pid, int):  # a reused pid must not inherit these
+                set_override(pid, None, None, base)
+                take_stop(pid, base)
             continue
         out.append({k: s.get(k) for k in
                     ("pid", "label", "voice", "started_at", "last_voice_at")})
@@ -175,6 +184,12 @@ def is_paused(base=None) -> bool:
     return isinstance(owner, int) and _alive_same(owner, p.get("start"))
 
 
+async def wait_while_paused(until=None, poll: float = 0.25, base=None) -> None:
+    """Sleep until resume, or until the optional until() says to stop waiting."""
+    while is_paused(base) and not (until is not None and until()):
+        await asyncio.sleep(poll)
+
+
 # -- per-session voice/language override ------------------------------------
 
 def set_override(pid: int, voice: str | None, language: str | None, base=None) -> None:
@@ -188,6 +203,41 @@ def set_override(pid: int, voice: str | None, language: str | None, base=None) -
 
 def get_override(pid: int, base=None) -> dict:
     return _read_json(_base(base) / f"override-{int(pid)}.json")
+
+
+def effective_voice(pid: int, voice: str | None, base=None) -> str | None:
+    return get_override(pid, base).get("voice") or voice
+
+
+def language_note(pid: int, base=None) -> str:
+    """Text for the agent, not spoken: a voice speaks only its own language."""
+    language = get_override(pid, base).get("language")
+    if not language:
+        return ""
+    return f"\n\nThe user selected {language}. Write your next messages in {language}."
+
+
+# -- entering a voice turn --------------------------------------------------
+
+STOPPED_MESSAGE = ("Voice was stopped from the pill. "
+                   "Continue in text unless the user asks for voice again.")
+
+
+async def enter(pid: int, label: str, voice: str | None, base=None) -> str | None:
+    """Runs before the conch is taken: a waiting session must not hold the floor.
+
+    Returns a message for the agent if this session was stopped, else None.
+    """
+    voice = effective_voice(pid, voice, base)
+    current = _read_json(_session_path(pid, base))
+    if not current or current.get("start") != process_start(pid):
+        register_session(pid, label, voice, base)
+    touch_session(pid, voice, base, label=label)
+    await wait_while_paused(base=base)
+    if take_stop(pid, base):
+        unregister_session(pid, base)
+        return STOPPED_MESSAGE
+    return None
 
 
 # -- interruptions (append-only log of timestamps) --------------------------
