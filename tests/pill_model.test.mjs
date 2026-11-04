@@ -16,7 +16,9 @@ test("disconnected after 3s with no snapshot", () => {
   assert.equal(vm.interrupt.enabled, false);
   assert.equal(vm.pause.enabled, false);
   assert.equal(vm.stop.enabled, false);
-  assert.equal(vm.expandControlsEnabled, false);
+  assert.equal(vm.pickersEnabled, false);
+  assert.equal(vm.barge.enabled, false);
+  assert.deepEqual([vm.minimizeEnabled, vm.dismissEnabled], [true, true]);
   assert.equal(viewModel(snap(), 1000, 3999).connected, true);
   assert.equal(viewModel(null, null, 5).label, "Disconnected");
 });
@@ -96,4 +98,25 @@ test("disconnected does not show last state", () => {
   assert.equal(vm.phase, "disconnected");
   assert.deepEqual(vm.queue, []);
   assert.equal(vm.barge.visible, false);
+});
+
+test("pause and resume carry icons with the text variation selector", () => {
+  assert.equal(viewModel(snap(), 0, 0).pause.icon, "\u23F8\uFE0E");
+  assert.equal(viewModel(snap({ phase: "paused" }), 0, 0).pause.icon, "\u25B6\uFE0E");
+});
+
+test("pickers enabled only with a floor", () => {
+  assert.equal(viewModel(snap(), 0, 0).pickersEnabled, true);
+  assert.equal(viewModel(snap({ floor: null, voice: null }), 0, 0).pickersEnabled, false);
+});
+
+test("unknown voice and language stay null", () => {
+  const vm = viewModel(snap({ voice: null, language: null }), 0, 0);
+  assert.equal(vm.voice, null);
+  assert.equal(vm.language, null);
+});
+
+test("minimize and dismiss stay enabled when connected too", () => {
+  const vm = viewModel(snap(), 0, 0);
+  assert.deepEqual([vm.minimizeEnabled, vm.dismissEnabled], [true, true]);
 });

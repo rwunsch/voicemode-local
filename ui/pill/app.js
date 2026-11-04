@@ -2,7 +2,7 @@
 // window.pillTransport.send(json) and window.pillReceive(json).
 (function () {
   var M = window.PillModel, $ = function (id) { return document.getElementById(id); };
-  var snapshot = null, lastSeen = null, ui = null, lastMode = null, filled = false;
+  var hidden = false, snapshot = null, lastSeen = null, ui = null, lastMode = null, filled = false;
 
   function send(obj) {
     try { if (window.pillTransport) window.pillTransport.send(JSON.stringify(obj)); } catch (e) { /* no transport */ }
@@ -14,7 +14,8 @@
   }
   function fill(select, items, current) {
     if (!filled) items.forEach(function (v) { var o = document.createElement("option"); o.value = o.textContent = v; select.appendChild(o); });
-    if (current && select !== document.activeElement) select.value = current;
+    if (select === document.activeElement) return;
+    if (current) select.value = current; else select.selectedIndex = -1; // unknown is not shown as a value
   }
   function keysNode(k) {
     var d = document.createElement("div");
@@ -36,10 +37,13 @@
     document.body.dataset.phase = vm.phase;
     $("label").textContent = vm.label;
     $("sub").textContent = vm.connected && snapshot.floor ? (snapshot.floor.label || "") : "";
-    var on = vm.connected;
-    [["interrupt", vm.interrupt.enabled], ["stop", vm.stop.enabled], ["pause", vm.pause.enabled]].forEach(function (p) { $(p[0]).disabled = !p[1]; });
-    $("pause").textContent = vm.pause.label;
-    ["expand", "minimize", "dock", "dismiss", "voice", "language", "barge"].forEach(function (id) { $(id).disabled = !on; });
+    document.body.hidden = hidden;
+    [["interrupt", vm.interrupt.enabled], ["stop", vm.stop.enabled], ["pause", vm.pause.enabled],
+      ["voice", vm.pickersEnabled], ["language", vm.pickersEnabled], ["barge", vm.barge.enabled],
+      ["minimize", vm.minimizeEnabled], ["dismiss", vm.dismissEnabled], ["expand", true], ["dock", true]]
+      .forEach(function (p) { $(p[0]).disabled = !p[1]; });
+    $("pause").textContent = vm.pause.icon;
+    $("pause").title = vm.pause.label; $("pause").setAttribute("aria-label", vm.pause.label);
     $("expand").setAttribute("aria-expanded", String(vm.mode === "expanded" || vm.mode === "docked"));
     $("dock").textContent = vm.mode === "docked" ? "Undock" : "Dock";
     fill($("voice"), vm.voices, vm.voice); fill($("language"), vm.languages, vm.language); filled = true;
@@ -61,6 +65,7 @@
     var s; try { s = JSON.parse(json); } catch (e) { return; }
     if (!s || typeof s !== "object") return;
     snapshot = s; lastSeen = Date.now();
+    if (hidden && s.visible === false) { hidden = false; lastMode = null; } // a later new session shows it again
     if (ui === null) ui = Object.assign({}, s.ui); // restore once; afterwards the page owns it
     render();
   };
@@ -69,7 +74,7 @@
   $("interrupt").onclick = cmd("interrupt");
   $("stop").onclick = cmd("stop");
   $("pause").onclick = function () { send({ cmd: M.viewModel(snapshot, lastSeen, Date.now()).pause.cmd }); };
-  $("dismiss").onclick = cmd("dismiss");
+  $("dismiss").onclick = function () { send({ cmd: "dismiss" }); hidden = true; send({ window: { mode: "hidden" } }); render(); };
   $("voice").onchange = function () { send({ cmd: "set_voice", voice: this.value }); };
   $("language").onchange = function () { send({ cmd: "set_language", language: this.value }); };
   $("barge").onclick = function () { send({ cmd: "set_barge", on: !(snapshot && snapshot.barge && snapshot.barge.enabled) }); };

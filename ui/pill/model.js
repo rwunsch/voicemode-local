@@ -7,6 +7,7 @@
     "bf_alice", "bf_emma", "bf_lily", "bm_daniel", "bm_george", "bm_lewis",
     "dm_martin", "p_de_thorsten"];
   var LANGUAGES = ["English", "German"];
+  var PAUSE = "\u23F8\uFE0E", RESUME = "\u25B6\uFE0E";
   var LABELS = { speaking: "Speaking", listening: "Listening", working: "Not in a voice turn",
     idle: "Not in a voice turn", paused: "Paused", disconnected: "Disconnected" };
 
@@ -29,9 +30,9 @@
     if (!connected) {
       // Never show the last known state: a stale "Listening" is worse than none.
       return { connected: false, phase: "disconnected", label: LABELS.disconnected, mode: "pill", side: null,
-        interrupt: off, pause: { enabled: false, label: "Pause", cmd: "pause" }, stop: off,
-        expandControlsEnabled: false, queue: [], voice: null, language: null, keys: [],
-        barge: { visible: false, on: false, countText: "" }, voices: VOICES, languages: LANGUAGES };
+        interrupt: off, pause: { enabled: false, label: "Pause", cmd: "pause", icon: PAUSE }, stop: off,
+        pickersEnabled: false, minimizeEnabled: true, dismissEnabled: true, queue: [], voice: null, language: null, keys: [],
+        barge: { visible: false, on: false, enabled: false, countText: "" }, voices: VOICES, languages: LANGUAGES };
     }
     var s = snapshot, phase = s.phase || "idle", ui = s.ui || {}, barge = s.barge || {};
     var count = barge.count || 0;
@@ -41,16 +42,16 @@
       side: mode === "docked" ? (ui.side === "left" ? "left" : "right") : null,
       interrupt: { enabled: phase === "speaking" || phase === "listening" },
       pause: { enabled: true, label: phase === "paused" ? "Resume" : "Pause",
-        cmd: phase === "paused" ? "resume" : "pause" },
+        cmd: phase === "paused" ? "resume" : "pause", icon: phase === "paused" ? RESUME : PAUSE },
       stop: { enabled: !!s.floor },
-      expandControlsEnabled: true,
+      pickersEnabled: !!s.floor, minimizeEnabled: true, dismissEnabled: true,
       queue: (s.sessions || []).map(function (r) {
         var text = r.state === "waiting" && r.position ? "waiting, " + ordinal(r.position) : r.state;
         return { name: r.label || "session " + r.pid, text: text, state: r.state };
       }),
       voice: s.voice || null, language: s.language || null,
       keys: keysFor(s.platform),
-      barge: { visible: !!barge.available, on: !!barge.enabled,
+      barge: { visible: !!barge.available, on: !!barge.enabled, enabled: true,
         countText: count + (count === 1 ? " interruption today" : " interruptions today") },
       voices: VOICES, languages: LANGUAGES,
     };
