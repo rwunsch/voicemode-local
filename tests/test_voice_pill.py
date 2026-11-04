@@ -443,3 +443,71 @@ def test_state_socket_helpers(sock_dir, monkeypatch):
 
 def test_barge_control_lives_in_state_and_rejects_bad_action():
     assert "must be on, off or status" in st.barge_control("on; rm -rf /")
+
+
+# -- exit while paused: the server-side pause must be released too -----------
+
+def _paused_backend(tmp_path, sock_path):
+    env = {**os.environ, "HOME": str(tmp_path), "VOICEMODE_CONTROL_SOCKET": str(sock_path)}
+    p = subprocess.Popen([sys.executable, str(PATCHES / "voice_pill.py"), "--stdio"],
+                         stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                         stderr=subprocess.PIPE, env=env, text=True)
+    json.loads(p.stdout.readline())
+    p.stdin.write(json.dumps({"cmd": "pause"}) + "\n")
+    p.stdin.flush()
+    for _ in range(3):
+        if json.loads(p.stdout.readline())["phase"] == "paused":
+            break
+    return p
+
+
+def _wait_received(control, n, timeout=3):
+    end = time.time() + timeout
+    while len(control.received) < n and time.time() < end:
+        time.sleep(0.05)
+
+
+def test_eof_while_paused_sends_resume_to_socket(tmp_path, sock_dir):
+    c = FakeControl(sock_dir / "c.sock")
+    try:
+        p = _paused_backend(tmp_path, sock_dir / "c.sock")
+        p.stdin.close()
+        assert p.wait(timeout=5) == 0
+        _wait_received(c, 2)
+        assert c.received == ["pause", "resume"]
+    finally:
+        c.close()
+        if p.poll() is None:
+            p.kill()
+    assert not (tmp_path / ".voicemode" / "pill" / "paused.json").exists()
+
+
+def test_sigterm_while_paused_releases_like_eof(tmp_path, sock_dir):
+    import signal
+    c = FakeControl(sock_dir / "c.sock")
+    try:
+        p = _paused_backend(tmp_path, sock_dir / "c.sock")
+        p.send_signal(signal.SIGTERM)
+        assert p.wait(timeout=5) == 0
+        _wait_received(c, 2)
+        assert c.received == ["pause", "resume"]
+    finally:
+        c.close()
+        if p.poll() is None:
+            p.kill()
+    assert not (tmp_path / ".voicemode" / "pill" / "paused.json").exists()
+
+
+def test_exit_when_not_paused_sends_no_resume(tmp_path, sock_dir):
+    c = FakeControl(sock_dir / "c.sock")
+    env = {**os.environ, "HOME": str(tmp_path), "VOICEMODE_CONTROL_SOCKET": str(sock_dir / "c.sock")}
+    try:
+        p = subprocess.Popen([sys.executable, str(PATCHES / "voice_pill.py"), "--stdio"],
+                             stdin=subprocess.PIPE, stdout=subprocess.PIPE, env=env, text=True)
+        p.stdout.readline()
+        p.stdin.close()
+        assert p.wait(timeout=5) == 0
+        time.sleep(0.2)
+        assert c.received == []
+    finally:
+        c.close()

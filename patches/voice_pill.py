@@ -19,6 +19,7 @@ import json
 import os
 import platform as _platform
 import select
+import signal
 import shutil
 import sys
 import threading
@@ -283,9 +284,11 @@ def acquire_lock(base):
     return f
 
 
-def _release_pause(base):
-    if st._read_json(Path(base) / "paused.json").get("owner") == os.getpid():
-        st.set_paused(False, os.getpid(), base)
+def _release_pause(ctx):
+    """If this process owns the pause, lift it, and tell the server (harmless without a socket)."""
+    if st._read_json(ctx.base / "paused.json").get("owner") == os.getpid():
+        st.set_paused(False, os.getpid(), ctx.base)
+        st.send_control(ctx.sock, "resume")
 
 
 def _emit(ctx, out) -> float:
@@ -325,12 +328,14 @@ def main(argv=None) -> int:
     if lock is None:
         print("voice_pill: another backend is running", file=sys.stderr)
         return 1
+    # The wrapper stops us with SIGTERM: treat it like Ctrl-C so the finally runs.
+    signal.signal(signal.SIGTERM, signal.default_int_handler)
     try:
         run_stdio(ctx)
     except (BrokenPipeError, KeyboardInterrupt):
         pass
     finally:
-        _release_pause(ctx.base)
+        _release_pause(ctx)
         lock.close()
     return 0
 
