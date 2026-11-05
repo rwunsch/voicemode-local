@@ -236,6 +236,27 @@ def language_note(pid: int, base=None) -> str:
     return f"\n\nThe user selected {language}. Write your next messages in {language}."
 
 
+# -- beeps switch, machine-wide ---------------------------------------------
+
+def set_beeps(on: bool, base=None) -> None:
+    _write_json(_base(base) / "beeps.json", {"on": bool(on)})
+
+
+def beeps_choice(base=None) -> bool | None:
+    """The pill's choice, or None if none was made and the env setting still decides."""
+    on = _read_json(_base(base) / "beeps.json").get("on")
+    return on if isinstance(on, bool) else None
+
+
+def effective_beeps(enabled: bool | None, base=None) -> bool | None:
+    """Off silences everything. On beats the env, not a caller's own False: a voice cut
+    skips its chime on purpose."""
+    choice = beeps_choice(base)
+    if choice is None or enabled is False:
+        return enabled
+    return choice
+
+
 def result_note(pid: int, base=None, already: str = "") -> str:
     """Everything the agent should read after a turn. The stop note covers a turn cut by the
     socket, which only says playback stopped; our rule to keep talking would otherwise win."""

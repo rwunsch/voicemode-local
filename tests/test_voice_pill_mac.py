@@ -431,7 +431,7 @@ def test_only_a_mode_change_cancels_a_slide():
 
 def test_slide_in_checks_for_a_newer_slide_before_its_jump_and_lands_exactly():
     body = _mac_method("slide")
-    jump = body.index("setFrameOrigin_")
+    jump = body.index("self.place_off")
     assert "gen != self.slide_gen" in body[:jump]
     assert "self.apply()" in body[body.index("for x in"):]
 
@@ -573,3 +573,30 @@ def test_resize_logs_what_it_did():
     src = (REPO / "patches/voice_pill_mac.py").read_text()
     body = src[src.index("def resize_loop("):src.index("def shutdown(self")]
     assert "self.log(" in body
+
+
+# Robert, 69612df: a flash of the full window before it slides in; FELIX-MAC measured about 30 ms
+def test_return_from_the_tab_never_places_the_window_on_screen_first():
+    body = _mac_method("from_page")
+    branch = body[body.index('prev == "tab"'):body.index("self.apply()")]
+    assert "self.sliding = True" in branch and "args=(False,)" in branch
+    assert "else:" in branch  # apply() is only the other branch
+    place = _mac_method("place_off")
+    assert place.index("setFrame_display_") < place.index("orderFrontRegardless")
+    assert "NSMakeRect(off, y, w, h)" in place
+    assert "time.sleep(0.03)" not in _mac_method("slide")
+
+
+# FELIX-MAC, 69612df: AppKit's own edge resize went past the limit, frame 885x100
+def test_appkit_cannot_resize_the_window_itself():
+    assert m.window_options()["resizable"] is False
+
+
+def test_resize_log_shows_whole_pixels():
+    assert "int(last)" in _mac_method("resize_loop")
+
+
+def test_a_mode_change_clears_a_stale_hover():
+    js = (REPO / "ui/pill/app.js").read_text()
+    body = js[js.index("if (vm.mode !== lastMode)"):]
+    assert "window.pillHover(-1, -1)" in body[:body.index("\n")]

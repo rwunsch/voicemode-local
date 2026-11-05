@@ -190,7 +190,7 @@ def test_snapshot_shape_and_json_serialisable():
              barge={"enabled": True, "available": False, "count": 2})
     assert json.loads(json.dumps(s)) == s
     assert set(s) == {"visible", "phase", "floor", "sessions", "voice", "language",
-                      "barge", "platform", "ui"}
+                      "barge", "beeps", "platform", "ui"}
     assert s["platform"] == "mac" and s["ui"] == {"docked": True}
     assert s["barge"] == {"enabled": True, "available": False, "count": 2}
 
@@ -531,3 +531,25 @@ def test_a_live_turn_on_another_session_is_not_shown_as_stopped():
     s = vp.build_snapshot({"speaking": True}, sessions, {"holder": {"pid": 2, "label": "b"}, "waiters": []})
     assert s["phase"] == "speaking"
     assert [r["state"] for r in s["sessions"]] == ["stopped", "talking"]
+
+
+def test_set_beeps_is_saved_and_reported(ctx):
+    vp.handle_command({"cmd": "set_beeps", "on": False}, ctx)
+    assert vp.gather(ctx)["beeps"] is False
+    vp.handle_command({"cmd": "set_beeps", "on": True}, ctx)
+    assert vp.gather(ctx)["beeps"] is True
+
+
+def test_set_beeps_ignores_a_non_boolean(ctx):
+    vp.handle_command({"cmd": "set_beeps", "on": "off"}, ctx)
+    assert not (ctx.base / "beeps.json").exists()
+
+
+@pytest.mark.parametrize("env,expected", [
+    ("", True), ("VOICEMODE_AUDIO_FEEDBACK=false\n", False), ("VOICEMODE_AUDIO_FEEDBACK=true\n", True),
+    ("# VOICEMODE_AUDIO_FEEDBACK=false\n", True), ("VOICEMODE_AUDIO_FEEDBACK=false\nVOICEMODE_AUDIO_FEEDBACK=on\n", True),
+])
+def test_beeps_follow_the_env_until_chosen(ctx, env, expected):
+    ctx.home.mkdir(parents=True, exist_ok=True)
+    (ctx.home / "voicemode.env").write_text(env)
+    assert vp.gather(ctx)["beeps"] is expected

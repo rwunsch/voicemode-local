@@ -72,6 +72,8 @@
     $("bargeRow").style.display = vm.barge.visible ? "" : "none";
     $("barge").textContent = vm.barge.on ? "On" : "Off";
     $("barge").setAttribute("aria-checked", String(vm.barge.on));
+    $("beeps").textContent = vm.beeps.on ? "On" : "Off";
+    $("beeps").setAttribute("aria-checked", String(vm.beeps.on));
     $("count").textContent = vm.barge.visible ? vm.barge.countText : "";
     var q = $("queue"); q.replaceChildren();
     vm.queue.forEach(function (r) {
@@ -84,7 +86,7 @@
     }
     $("keys").replaceChildren.apply($("keys"), vm.keys.map(keysNode));
     if (vm.phase !== lastPhase) { lastPhase = vm.phase; send({ window: { phase: vm.phase } }); } // tray colour
-    if (vm.mode !== lastMode) { lastMode = vm.mode; send({ window: { mode: vm.mode, side: vm.side } }); }
+    if (vm.mode !== lastMode) { lastMode = vm.mode; window.pillHover(-1, -1); send({ window: { mode: vm.mode, side: vm.side } }); }
   }
 
   window.pillReceive = function (json) {
@@ -109,6 +111,7 @@
   $("voice").onchange = function () { send({ cmd: "set_voice", voice: this.value }); this.blur(); };
   $("language").onchange = function () { send({ cmd: "set_language", language: this.value }); this.blur(); };
   $("barge").onclick = function () { send({ cmd: "set_barge", on: !(snapshot && snapshot.barge && snapshot.barge.enabled) }); };
+  $("beeps").onclick = function () { send({ cmd: "set_beeps", on: !(snapshot && snapshot.beeps) }); };
   $("expand").onclick = function () { if (ui && ui.docked) { saveUi({ dockOpen: true }); return; } saveUi({ expanded: !(ui && ui.expanded) && !(ui && ui.docked), docked: false }); };
   $("minimize").onclick = function () { saveUi({ minimized: true }); };
   $("dock").onclick = $("dockTop").onclick = function () { var d = !(ui && ui.docked); saveUi({ docked: d, expanded: false, tucked: false, dockOpen: false, side: (ui && ui.side) || "right" }); };

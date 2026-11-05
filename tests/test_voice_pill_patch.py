@@ -656,3 +656,27 @@ def test_apply_sh_runs_it_after_barge_on_every_target():
     barge = text.index('"$SCRIPT_DIR/patch_voice_barge.py" "$VM_DIR/tools/converse.py"')
     for target in ("control_channel.py", "control_socket.py", "tools/converse.py", "streaming.py"):
         assert text.index(f'"$SCRIPT_DIR/patch_voice_pill.py" "$VM_DIR/{target}"') > barge
+
+
+def test_beeps_switch_gates_every_chime(work):
+    src = (work / "converse.py").read_text()
+    fn = src[src.index("async def play_audio_feedback("):src.index("def record_audio(")]
+    assert fn.index("_voice_pill_beeps(enabled)") < fn.index("if enabled is False:")
+    assert 'if turn.get("ack") and _voice_pill_beeps(None) is not False:' in src
+
+
+@pytest.mark.parametrize("choice,env_on,plays", [
+    (None, True, True), (None, False, False), (False, True, False), (True, False, True),
+])
+def test_chime_obeys_the_switch(work, st, choice, env_on, plays):
+    played = []
+
+    async def chime(**_):
+        played.append(1)
+    ns = _base_ns(st)
+    ns.update(AUDIO_FEEDBACK_ENABLED=env_on, play_chime_start=chime, play_chime_end=chime)
+    _lift(work, "converse.py", ["_voice_pill_beeps", "play_audio_feedback"], ns)
+    if choice is not None:
+        st.set_beeps(choice)
+    asyncio.run(ns["play_audio_feedback"]("listening", {}))
+    assert bool(played) is plays

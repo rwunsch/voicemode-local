@@ -24,6 +24,8 @@
 5. The pill's voice override replaces the caller's voice. Its language override is
    added to the result for the agent, not spoken.
 
+6. The pill's Beeps switch decides every chime, read as each one is about to play.
+
 The logic lives in voice_pill_state.py, which needs no server imports. A failure
 there must not cost a turn, so the converse helpers catch and log.
 
@@ -73,6 +75,16 @@ RECORD_SIG = (
 )
 
 CONVERSE = [
+    ("beeps switch",
+     "    # Use parameter override if provided, otherwise use global setting\n"
+     "    if enabled is False:\n",
+     f"    enabled = _voice_pill_beeps(enabled)  # {MARKER}\n"
+     "    # Use parameter override if provided, otherwise use global setting\n"
+     "    if enabled is False:\n"),
+    ("beeps switch, capture cue",
+     '                    if turn.get("ack"):\n',
+     f'                    # {MARKER}\n'
+     '                    if turn.get("ack") and _voice_pill_beeps(None) is not False:\n'),
     ("import",
      "from voice_mode.control_socket import start_control_listener, stop_control_listener\n",
      "from voice_mode.control_socket import start_control_listener, stop_control_listener\n"
@@ -103,6 +115,14 @@ CONVERSE = [
      "    except Exception:\n"
      '        logger.warning("voice pill: could not enter the turn", exc_info=True)\n'
      "        return None\n"
+     "\n"
+     "\n"
+     "def _voice_pill_beeps(enabled: Optional[bool]) -> Optional[bool]:\n"
+     "    try:\n"
+     "        return voice_pill_state.effective_beeps(enabled)\n"
+     "    except Exception:\n"
+     '        logger.warning("voice pill: could not read the beeps switch", exc_info=True)\n'
+     "        return enabled\n"
      "\n"
      "\n"
      "def _voice_pill_voice(voice: Optional[str]) -> Optional[str]:\n"

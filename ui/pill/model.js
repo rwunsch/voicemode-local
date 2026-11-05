@@ -37,7 +37,7 @@
       return { connected: false, phase: "disconnected", label: LABELS.disconnected, mode: "pill", side: null,
         interrupt: off, pause: { enabled: false, label: "Pause", cmd: "pause", icon: PAUSE }, stop: off,
         pickersEnabled: false, minimizeEnabled: true, dismissEnabled: true, queue: [], queueMore: "", voice: null, language: null, keys: [], session: "", stateText: LABELS.disconnected, waitingText: "",
-        barge: { visible: false, on: false, enabled: false, countText: "" }, voices: VOICES, languages: LANGUAGES };
+        barge: { visible: false, on: false, enabled: false, countText: "" }, beeps: { on: false }, voices: VOICES, languages: LANGUAGES };
     }
     var s = snapshot, phase = s.phase || "idle", ui = s.ui || {}, barge = s.barge || {};
     var count = barge.count || 0;
@@ -65,6 +65,7 @@
       keys: keysFor(s.platform),
       barge: { visible: !!barge.available, on: !!barge.enabled, enabled: true,
         countText: count + (count === 1 ? " interruption today" : " interruptions today") },
+      beeps: { on: !!s.beeps },
       voices: voices, languages: LANGUAGES,
       session: name,
       stateText: LABELS[phase] || LABELS.idle,

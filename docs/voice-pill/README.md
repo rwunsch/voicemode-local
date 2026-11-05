@@ -168,6 +168,10 @@ as pywebview's own dependencies). The main venv gains nothing. The backend is st
   control run without it showed the icon), a small fading tile at 0.4 s in 3 of 3, and the 5 px hop gone in 3 of 3.
   `use_panel()` gives pywebview a non-activating `NSPanel` that never becomes key, and the web view
   accepts first clicks. It is shown with `orderFrontRegardless`, never pywebview's `show()`.
+- **Width limits.** The window is not resizable as far as AppKit knows: its own edge resize
+  once took the frame to 885x100, past the limit (FELIX-MAC, n=1). Only our edges change the width.
+- **Back from the tab.** The window is sized and shown off screen in one main-thread step, then
+  slides in. It used to sit at its final position for about 30 ms first, which Robert saw as a flash.
 - **Hover.** With the panel never key, Robert saw no hover and no resize cursor at `909a3dc` (n=1
   session). A tracking area that works while the app is inactive reports the pointer to the page's
   `pillHover`, which sets a `.hover` class, and the wrapper sets the resize cursor at the edges.
@@ -198,6 +202,7 @@ as pywebview's own dependencies). The main venv gains nothing. The backend is st
 - **Dragging** polls `NSEvent.mouseLocation` while the left button is down, as on Windows.
 - **Corners** come from the page: the window is transparent.
 - **Primary screen only.** Placement and clamping use the main display. Display changes are not watched.
+- **Beeps switch, both platforms:** on or off for the whole machine, next turn onward with no restart. Stored in `~/.voicemode/pill/beeps.json`; until first used it shows `VOICEMODE_AUDIO_FEEDBACK`. Off wins over an agent's `chime_enabled=true`; On does not override a caller's explicit false.
 - **Barge-in stays hidden:** the backend reports `available: false` without `parec`, which macOS lacks, so the page hides it. Nothing is Mac-specific. (If someone installs PulseAudio's `parec`, it will appear; untested.)
 - **Stop:** `pill off` kills the window, whose death closes the backend's stdin and ends it. A plain `kill` of the window is the same.
 - **Key press:** `ptt_listener_macos.py` calls `touch_ptt()` on every hotkey press (best effort), so the two-minute rule applies here too.

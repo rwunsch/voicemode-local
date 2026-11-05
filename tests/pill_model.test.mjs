@@ -188,3 +188,9 @@ test("panel lists at most ten sessions, talking first, then a count of the rest"
   assert.equal(vm.queueMore, "+4 more queued");
   assert.equal(viewModel(snap({ sessions: sessions.slice(0, 3) }), 0, 0).queueMore, "");
 });
+
+test("beeps switch shows the backend's value", () => {
+  assert.equal(viewModel(snap({ beeps: true }), 0, 0).beeps.on, true);
+  assert.equal(viewModel(snap({ beeps: false }), 0, 0).beeps.on, false);
+  assert.equal(viewModel(null, 0, 0).beeps.on, false);
+});

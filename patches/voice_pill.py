@@ -142,7 +142,7 @@ def _floor(sessions, conch, last_floor):
 
 
 def build_snapshot(status, sessions, conch, *, paused=False, ptt=False, dismissed=None,
-                   last_floor=None, overrides=None, barge=None, ui=None, platform=None) -> dict:
+                   last_floor=None, overrides=None, barge=None, ui=None, platform=None, beeps=False) -> dict:
     overrides = overrides or {}
     floor, is_holder = _floor(sessions, conch, last_floor)
     new = session_keys(sessions) - (dismissed or frozenset())
@@ -180,6 +180,7 @@ def build_snapshot(status, sessions, conch, *, paused=False, ptt=False, dismisse
     return {"visible": visible, "phase": phase, "floor": floor, "sessions": rows,
             "voice": voice, "language": language,
             "barge": barge or {"enabled": False, "available": False, "count": 0},
+            "beeps": beeps,
             "platform": platform or detect_platform(), "ui": ui or {}}
 
 
@@ -192,6 +193,21 @@ def _barge_enabled(home) -> bool:
     except OSError:
         pass
     return value == "true"
+
+
+def _beeps_on(ctx) -> bool:
+    """The pill's choice, else voice-mode's own setting: on unless the env says otherwise."""
+    choice = st.beeps_choice(ctx.base)
+    if choice is not None:
+        return choice
+    value = "true"
+    try:
+        for line in (Path(ctx.home) / "voicemode.env").read_text().splitlines():
+            if line.startswith("VOICEMODE_AUDIO_FEEDBACK="):
+                value = line.split("=", 1)[1].strip().lower()
+    except OSError:
+        pass
+    return value in ("true", "1", "yes", "on")
 
 
 def _midnight() -> float:
@@ -221,7 +237,7 @@ def gather(ctx) -> dict:
         ptt=st.ptt_recent(base=ctx.base), dismissed=ctx.dismissed,
         last_floor=_remember_floor(ctx, conch),
         overrides={s["pid"]: st.get_override(s["pid"], ctx.base) for s in sessions},
-        barge=barge, ui=st.load_ui(ctx.base))
+        barge=barge, ui=st.load_ui(ctx.base), beeps=_beeps_on(ctx))
 
 
 # -- commands ----------------------------------------------------------------
@@ -264,6 +280,8 @@ def handle_command(msg, ctx=None) -> None:
             ctx.barge_thread = threading.Thread(
                 target=st.barge_control, args=("on" if msg["on"] else "off", ctx.switch), daemon=True)
             ctx.barge_thread.start()
+    elif cmd == "set_beeps" and isinstance(msg.get("on"), bool):
+        st.set_beeps(msg["on"], ctx.base)
     elif cmd in ("set_voice", "set_language"):
         key = "voice" if cmd == "set_voice" else "language"
         floor, _ = _floor(st.live_sessions(ctx.base), read_conch(ctx.home),

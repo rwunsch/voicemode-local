@@ -234,7 +234,8 @@ def ui_file_url():
 def window_options():
     """create_window kwargs. No url: the wrapper loads the page itself, after the bridge is in."""
     return dict(title="Voice pill", width=WIDTH, height=DEFAULT_H, frameless=True, on_top=True,
-                transparent=True, easy_drag=False, hidden=True)
+                transparent=True, easy_drag=False, hidden=True,
+                resizable=False)  # width comes from our edges; AppKit's own resize ignores the limits
 
 
 def tray_rgb(phase):
@@ -469,9 +470,12 @@ class App:
         elif what == "slide":
             threading.Thread(target=self.slide, args=(True,), daemon=True).start()
         elif what == "changed":
-            self.apply()
             if prev == "tab" and self.state.mode in ("docked", "rail") and self.state.shown:
+                self.sliding = True  # from now: a height message must not place it on screen first
+                self.update_tray()
                 threading.Thread(target=self.slide, args=(False,), daemon=True).start()
+            else:
+                self.apply()
 
     # window. Every AppKit call below runs on the main thread (run_on_main / callAfter).
     def webview(self):
@@ -604,6 +608,18 @@ class App:
         except OSError as e:
             self.log(f"position not saved: {e}")
 
+    def place_off(self):
+        """Main thread. Size the window for its mode and show it off screen, in one step, so the
+        slide-in never starts with a flash at its final position. Returns (x, off, y)."""
+        from AppKit import NSMakeRect
+        area, full_h = self.screen()
+        x, y, w, h = to_cocoa(geometry(self.state, area, self.pos), full_h)
+        off = slide_off(self.state.side, area, w)
+        native = self.win.native
+        native.setFrame_display_(NSMakeRect(off, y, w, h), True)
+        native.orderFrontRegardless()
+        return x, off, y
+
     def slide(self, out):
         """Move the window off the screen edge, or back onto it from there."""
         from AppKit import NSMakePoint
@@ -612,19 +628,19 @@ class App:
         gen = self.slide_gen
         self.sliding = True
         try:
-            if not out:
-                time.sleep(0.03)  # let apply() land
             if gen != self.slide_gen:
                 return
-            fr = run_on_main(lambda: native.frame())
-            off = slide_off(self.state.side, self.screen()[0], int(fr.size.width))
-            here = int(fr.origin.x)
-            if not out:
-                AppHelper.callAfter(native.setFrameOrigin_, NSMakePoint(off, fr.origin.y))
-            for x in slide_steps(here, off) if out else slide_steps(off, here):
+            if out:
+                fr = run_on_main(lambda: native.frame())
+                here, y = int(fr.origin.x), fr.origin.y
+                steps = slide_steps(here, slide_off(self.state.side, self.screen()[0], int(fr.size.width)))
+            else:
+                here, off, y = run_on_main(self.place_off)
+                steps = slide_steps(off, here)
+            for x in steps:
                 if gen != self.slide_gen:
                     return
-                AppHelper.callAfter(native.setFrameOrigin_, NSMakePoint(x, fr.origin.y))
+                AppHelper.callAfter(native.setFrameOrigin_, NSMakePoint(x, y))
                 time.sleep(0.016)
         finally:
             self.sliding = False
@@ -649,7 +665,7 @@ class App:
                     last, self.pos, self.state.css_width = w, (int(x), int(y0)), int(w)
                     self.apply()
                 time.sleep(0.016)
-            self.log(f"resize {edge}: width {w0} -> {last}")
+            self.log(f"resize {edge}: width {w0} -> {int(last)}")
             if last != w0:
                 self.save_position()
         finally:

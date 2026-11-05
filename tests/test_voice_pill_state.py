@@ -196,3 +196,28 @@ def test_stopped_session_tells_the_agent_until_it_comes_back(base):
 def test_marking_an_unknown_session_creates_nothing(base):
     st.mark_stopped(424242, True, base=base)
     assert st.live_sessions(base=base) == []
+
+
+def test_beeps_have_no_choice_until_one_is_made(base):
+    assert st.beeps_choice(base) is None
+    assert st.effective_beeps(None, base) is None
+    assert st.effective_beeps(True, base) is True
+
+
+def test_beeps_off_wins_over_everything(base):
+    st.set_beeps(False, base)
+    assert st.beeps_choice(base) is False
+    assert st.effective_beeps(None, base) is False
+    assert st.effective_beeps(True, base) is False
+
+
+def test_beeps_on_wins_over_the_env_but_not_an_explicit_silence(base):
+    st.set_beeps(True, base)
+    assert st.effective_beeps(None, base) is True
+    assert st.effective_beeps(False, base) is False  # a voice cut skips its chime on purpose
+
+
+def test_a_bad_beeps_file_means_no_choice(base):
+    Path(base).mkdir(parents=True, exist_ok=True)
+    (Path(base) / "beeps.json").write_text('{"on": "yes"}')
+    assert st.beeps_choice(base) is None
