@@ -680,3 +680,9 @@ def test_chime_obeys_the_switch(work, st, choice, env_on, plays):
         st.set_beeps(choice)
     asyncio.run(ns["play_audio_feedback"]("listening", {}))
     assert bool(played) is plays
+
+
+def test_apply_sh_installs_the_modules_before_patching_code_that_imports_them():
+    # A patch failing under set -e must not leave a converse.py importing a module not yet there.
+    src = (PATCHES / "apply.sh").read_text()
+    assert src.index('cp "$SCRIPT_DIR/$_m" "$VM_DIR/$_m"') < src.index('patch_voice_pill.py" "$VM_DIR/control_channel.py"')

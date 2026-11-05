@@ -110,6 +110,10 @@ now shows by colour only. Whether the old or new cost affects stutter was not me
 - After Interrupt or Stop, the player's stop call was seen blocking for about 6 s and once 36 s, under load 12 to 20 (2026-11-05, n=2). A silent test of the same call returned in about 0.1 s, n=3. Cause unknown; whether sound continued is not recorded.
 - No Play button or Windows push-to-talk wake yet. A stopped session gets going again when you ask it in its terminal. An agent stayed quiet after Stop, n=1, headless.
 - The Interrupt by voice toggle fix has not been retested with a real click.
+- The pill's patches install even with the pill off. A turn then does a few extra file operations and leaves one small file per voice session in `~/.voicemode/pill/sessions/`, which nothing removes while the pill is off (final review, read in the code).
+- `pill off` leaves `~/.voicemode/pill/beeps.json` in place, and it still decides beeps: delete it to go back to `VOICEMODE_AUDIO_FEEDBACK`. It also leaves `VOICEMODE_CONTROL_CHANNEL_ENABLED=true`, which push-to-talk uses too.
+- If every voice turn hangs while Paused and no window is visible, run `voicemode-switch pill off`: it ends the backend, which releases the Pause.
+- To pick up a later pill build, rebuild the venv from pristine voice-mode: the patch skips files it has already marked.
 
 ## Not tested
 

@@ -166,15 +166,6 @@ if [ -f "$SCRIPT_DIR/patch_voice_barge.py" ]; then
     "$PYBIN" "$SCRIPT_DIR/patch_voice_barge.py" "$VM_DIR/tools/converse.py"
 fi
 
-# Voice pill: report listening and streaming playback, register sessions, and
-# honour Pause and Stop before the floor is taken. Anchors on voice barge above.
-if [ -f "$SCRIPT_DIR/patch_voice_pill.py" ]; then
-    "$PYBIN" "$SCRIPT_DIR/patch_voice_pill.py" "$VM_DIR/control_channel.py"
-    "$PYBIN" "$SCRIPT_DIR/patch_voice_pill.py" "$VM_DIR/control_socket.py"
-    "$PYBIN" "$SCRIPT_DIR/patch_voice_pill.py" "$VM_DIR/tools/converse.py"
-    "$PYBIN" "$SCRIPT_DIR/patch_voice_pill.py" "$VM_DIR/streaming.py"
-fi
-
 # PTT support modules, copied in (not patches). The listener talks to upstream's
 # control socket directly; ptt_relay is only the WSL2 Windows->guest hop, since
 # a Windows-side key press cannot reach the guest's AF_UNIX socket.
@@ -187,6 +178,15 @@ for _m in ptt_core.py ptt_control_client.py ptt_relay.py ptt_listener_linux.py p
         echo "[patches] installed $_m"
     fi
 done
+
+# Voice pill: report listening and streaming playback, register sessions, and
+# honour Pause and Stop before the floor is taken. Anchors on voice barge above.
+if [ -f "$SCRIPT_DIR/patch_voice_pill.py" ]; then
+    "$PYBIN" "$SCRIPT_DIR/patch_voice_pill.py" "$VM_DIR/control_channel.py"
+    "$PYBIN" "$SCRIPT_DIR/patch_voice_pill.py" "$VM_DIR/control_socket.py"
+    "$PYBIN" "$SCRIPT_DIR/patch_voice_pill.py" "$VM_DIR/tools/converse.py"
+    "$PYBIN" "$SCRIPT_DIR/patch_voice_pill.py" "$VM_DIR/streaming.py"
+fi
 
 # MCP tool for switching voice barge-in from inside any client.
 if [ -f "$SCRIPT_DIR/voice_barge_tool.py" ]; then
