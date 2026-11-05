@@ -2,12 +2,12 @@
 
 > **TL;DR:** `pill-windows.ps1` shows `ui/pill` in a small always-on-top window that never
 > takes focus, and runs `patches/voice_pill.py` inside WSL over stdin/stdout. Tested on the
-> Windows desktop with a fake backend and the real backend under a fake HOME. Not yet tested
-> in a real voice turn.
+> Windows desktop with a fake backend and in real voice turns (2026-11-05: two sessions, then one
+> real agent, n=1 each). Off by default: turn it on with `voicemode-switch pill on`.
 
 | Field | Value |
 |---|---|
-| Status | In progress: the real voice checks below are open |
+| Status | Released, off by default. WSL backend only; native Windows is next. Open checks are listed below |
 | Last updated | 2026-11-05 |
 | Measured on | Windows build 26200, PowerShell 5.1, WebView2 Runtime 156, one 1920x1080 monitor at 100% scale |
 
@@ -105,6 +105,12 @@ now shows by colour only. Whether the old or new cost affects stutter was not me
 - [ ] Closing the window while paused releases Pause in a real turn
 - [ ] No new stutter under a voice turn (`voicemode-perf`)
 
+## Known issues
+
+- After Interrupt or Stop, the player's stop call was seen blocking for about 6 s and once 36 s, under load 12 to 20 (2026-11-05, n=2). A silent test of the same call returned in about 0.1 s, n=3. Cause unknown; whether sound continued is not recorded.
+- No Play button or Windows push-to-talk wake yet. A stopped session gets going again when you ask it in its terminal. An agent stayed quiet after Stop, n=1, headless.
+- The Interrupt by voice toggle fix has not been retested with a real click.
+
 ## Not tested
 
 - `wsl --terminate` and recovery: it would have ended every WSL session on this machine.
@@ -123,12 +129,12 @@ now shows by colour only. Whether the old or new cost affects stutter was not me
 
 > **TL;DR:** `patches/voice_pill_mac.py` shows the same `ui/pill` page in a frameless,
 > always-on-top pywebview window, with the same backend (`voice_pill.py`) and the same
-> message protocol as Windows. Written on Linux; **nothing in the GUI part has run yet**. The
-> checklist below is for `FELIX-MAC`.
+> message protocol as Windows. Tested by Robert with a real mouse through `FELIX-MAC` on the fake backend (2026-11-05,
+> n=1 session per build). Real voice turns and an installed launch are untested on the Mac.
 
 | Field | Value |
 |---|---|
-| Status | Implemented; first Mac run found two launch blockers, fixed in round 3 and awaiting a re-run |
+| Status | Released, off by default. No Mac installer yet: see the README's macOS steps |
 | Measured on | Only the pure logic (`tests/test_voice_pill_mac.py`, on Linux). `FELIX-MAC` confirmed on 2026-11-04 (n=1, macOS 26.7.1, Apple silicon) that pywebview 6.2.1 with pyobjc 13.0 opens a frameless on-top window |
 
 ## Use (macOS)
