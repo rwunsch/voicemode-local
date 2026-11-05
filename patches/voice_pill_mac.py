@@ -357,7 +357,7 @@ class App:
         self.handler = make_handler(self)
         ucc.addScriptMessageHandler_name_(self.handler, HANDLER)
         ucc.addUserScript_(WKUserScript.alloc().initWithSource_injectionTime_forMainFrameOnly_(BRIDGE, 0, True))
-        wv.loadFileURL_allowingReadAccessToURL_(NSURL.fileURLWithPath_(str(ui_dir() / "index.html")),
+        wv.loadFileURL_allowingReadAccessToURL_(NSURL.URLWithString_(ui_file_url()),
                                                 NSURL.fileURLWithPath_(str(ui_dir())))
 
     def drag(self):
