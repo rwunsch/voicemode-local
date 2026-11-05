@@ -259,8 +259,8 @@ def test_stop_only_targets_floor_session(ctx, child):
     vp.handle_command({"cmd": "stop"}, ctx)
     assert st.take_stop(child.pid, ctx.base) is True      # flag set for the floor
     assert st.take_stop(os.getpid(), ctx.base) is False   # the other one untouched
-    pids = [s["pid"] for s in st.live_sessions(ctx.base)]
-    assert pids == [os.getpid()]                          # floor unregistered at once
+    stopped = {s["pid"]: s["stopped"] for s in st.live_sessions(ctx.base)}
+    assert stopped == {child.pid: True, os.getpid(): None}  # stays listed, only the floor marked
 
 
 def test_stop_with_live_socket_sets_no_stop_flag(ctx, child, control):
@@ -269,7 +269,7 @@ def test_stop_with_live_socket_sets_no_stop_flag(ctx, child, control):
     time.sleep(0.1)
     assert control.received == ["stop"]
     assert st.take_stop(child.pid, ctx.base) is False
-    assert [s["pid"] for s in st.live_sessions(ctx.base)] == [os.getpid()]
+    assert {s["pid"] for s in st.live_sessions(ctx.base)} == {child.pid, os.getpid()}
 
 
 def test_stop_with_no_floor_does_nothing(ctx):
@@ -511,3 +511,23 @@ def test_exit_when_not_paused_sends_no_resume(tmp_path, sock_dir):
         assert c.received == []
     finally:
         c.close()
+
+
+# Stopping one session keeps the pill: it closes when the last server exits, or on the close button
+def test_stopped_session_keeps_the_pill_visible_and_shows_stopped(ctx, child):
+    st.register_session(child.pid, "floor", None, ctx.base)
+    write_conch(ctx, child.pid)
+    vp.gather(ctx)  # remembers the floor
+    vp.handle_command({"cmd": "stop"}, ctx)
+    (ctx.home / ".voicemode" / "conch").unlink(missing_ok=True)
+    s = vp.build_snapshot({}, st.live_sessions(ctx.base), {}, last_floor={"pid": child.pid, "label": "floor"})
+    assert s["visible"] is True and s["phase"] == "stopped"
+    assert s["floor"]["pid"] == child.pid
+    assert [r["state"] for r in s["sessions"]] == ["stopped"]
+
+
+def test_a_live_turn_on_another_session_is_not_shown_as_stopped():
+    sessions = [{"pid": 1, "label": "a", "stopped": True}, {"pid": 2, "label": "b"}]
+    s = vp.build_snapshot({"speaking": True}, sessions, {"holder": {"pid": 2, "label": "b"}, "waiters": []})
+    assert s["phase"] == "speaking"
+    assert [r["state"] for r in s["sessions"]] == ["stopped", "talking"]

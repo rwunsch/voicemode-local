@@ -182,3 +182,17 @@ def test_live_pause_owner_keeps_the_pause_file(base):
     st.set_paused(True, os.getpid(), base=base)
     assert st.is_paused(base=base) is True
     assert (base / "paused.json").exists()
+
+
+def test_stopped_session_tells_the_agent_until_it_comes_back(base):
+    st.register_session(os.getpid(), "demo", None, base=base)
+    assert st.result_note(os.getpid(), base=base) == ""
+    st.mark_stopped(os.getpid(), True, base=base)
+    assert st.STOPPED_MESSAGE in st.result_note(os.getpid(), base=base)
+    st.mark_stopped(os.getpid(), False, base=base)
+    assert st.result_note(os.getpid(), base=base) == ""
+
+
+def test_marking_an_unknown_session_creates_nothing(base):
+    st.mark_stopped(424242, True, base=base)
+    assert st.live_sessions(base=base) == []

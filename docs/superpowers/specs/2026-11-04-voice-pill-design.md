@@ -56,6 +56,9 @@ starts as a slim rail with status and the three main controls, and the full pane
 - Not shown until voice mode starts in a session.
 - Appears when a voice conversation starts, or when push-to-talk is pressed.
 - Stays up the whole time the agent is working between turns. Idle time does not hide it.
+- **(Robert, 2026-11-05, replaces the "stop voice mode" part of the next line)** Stopping one session
+  does not remove the pill, because other sessions may use it and a stopped session can be
+  re-engaged. It closes when every voice-mode server has exited, or when the X is pressed.
 - Removed when the user says "stop voice mode", or two minutes after the last push-to-talk
   use, if push-to-talk is what started it.
 - On return it has the same state as when it left: position, docked or not, expanded or not.

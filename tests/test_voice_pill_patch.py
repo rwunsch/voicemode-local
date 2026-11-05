@@ -218,9 +218,9 @@ def test_enter_returns_stop_message_once(helpers, st):
     asyncio.run(helpers["_voice_pill_enter"]("v"))
     st.request_stop(os.getpid())
     assert asyncio.run(helpers["_voice_pill_enter"]("v")) == STOP_MESSAGE
-    assert st.live_sessions() == []
+    assert [s["stopped"] for s in st.live_sessions()] == [True]  # listed, so the pill stays
     assert asyncio.run(helpers["_voice_pill_enter"]("v")) is None
-    assert len(st.live_sessions()) == 1
+    assert [s["stopped"] for s in st.live_sessions()] == [False]  # a new turn re-engages it
 
 
 def test_enter_waits_while_paused_then_continues(helpers, st):

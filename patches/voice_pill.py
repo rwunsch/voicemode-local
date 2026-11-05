@@ -153,13 +153,17 @@ def build_snapshot(status, sessions, conch, *, paused=False, ptt=False, dismisse
         phase = "speaking"
     elif status.get("listening"):
         phase = "listening"
+    elif floor and any(s["pid"] == floor["pid"] and s.get("stopped") for s in sessions):
+        phase = "stopped"
     else:
         phase = "working" if sessions else "idle"
     positions = {w["pid"]: i + 1 for i, w in enumerate(conch.get("waiters", []))}
     rows = []
     for s in sessions:
         pid = s["pid"]
-        if is_holder and pid == floor["pid"]:
+        if s.get("stopped"):
+            state, pos = "stopped", None
+        elif is_holder and pid == floor["pid"]:
             state, pos = "talking", None
         elif pid in positions:
             state, pos = "waiting", positions[pid]
@@ -249,9 +253,9 @@ def handle_command(msg, ctx=None) -> None:
                                   st._read_json(ctx.base / "last_floor.json"))
         if floor:
             # A live socket belongs to the holder's turn; only a holder may be cut by it.
+            st.mark_stopped(floor["pid"], True, ctx.base)  # first: the cut turn's result reads it
             if not (is_holder and st.send_control(ctx.sock, "stop")):
                 st.request_stop(floor["pid"], ctx.base)
-            st.unregister_session(floor["pid"], ctx.base)
     elif cmd == "dismiss":
         ctx.dismissed = session_keys(st.live_sessions(ctx.base))
     elif cmd == "set_barge" and isinstance(msg.get("on"), bool):

@@ -135,6 +135,15 @@ def touch_session(pid: int, voice: str | None = None, base=None,
     _write_json(path, s)
 
 
+def mark_stopped(pid: int, stopped: bool, base=None) -> None:
+    """A stopped session stays listed: the pill closes only when its server exits."""
+    path = _session_path(pid, base)
+    s = _read_json(path)
+    if s:
+        s["stopped"] = stopped
+        _write_json(path, s)
+
+
 def unregister_session(pid: int, base=None) -> None:
     _unlink(_session_path(pid, base))
 
@@ -151,7 +160,7 @@ def live_sessions(base=None) -> list[dict]:
                 take_stop(pid, base)
             continue
         out.append({k: s.get(k) for k in
-                    ("pid", "label", "voice", "started_at", "last_voice_at")})
+                    ("pid", "label", "voice", "started_at", "last_voice_at", "stopped")})
     return out
 
 
@@ -227,6 +236,15 @@ def language_note(pid: int, base=None) -> str:
     return f"\n\nThe user selected {language}. Write your next messages in {language}."
 
 
+def result_note(pid: int, base=None) -> str:
+    """Everything the agent should read after a turn. The stop note covers a turn cut by the
+    socket, which only says playback stopped; our rule to keep talking would otherwise win."""
+    note = language_note(pid, base)
+    if _read_json(_session_path(pid, base)).get("stopped"):
+        note += "\n\n" + STOPPED_MESSAGE
+    return note
+
+
 # -- entering a voice turn --------------------------------------------------
 
 STOPPED_MESSAGE = ("Voice was stopped from the pill. "
@@ -245,8 +263,9 @@ async def enter(pid: int, label: str, voice: str | None, base=None) -> str | Non
     touch_session(pid, voice, base, label=label)
     await wait_while_paused(base=base)
     if take_stop(pid, base):
-        unregister_session(pid, base)
+        mark_stopped(pid, True, base)
         return STOPPED_MESSAGE
+    mark_stopped(pid, False, base)
     return None
 
 
