@@ -20,9 +20,22 @@ when the pipe is opened, by its DACL:
   -- or a squatter that got there first -- makes the bind fail instead of
   silently sharing the name;
 * ``PIPE_REJECT_REMOTE_CLIENTS``, so the pipe is local only;
+* a mandatory label ``S:(ML;;NW;;;<min(own, Medium)>)``, so a Low-integrity
+  process of the same user cannot open the server's pipe for writing;
 * the client opens with ``SECURITY_IDENTIFICATION`` (the server cannot
   impersonate it) and refuses to send anything unless the pipe's owner SID is
-  its own.
+  its own AND the process serving the pipe (``GetNamedPipeServerProcessId``)
+  runs as the same user at an integrity level at least the client's own. The
+  owner check alone is not enough: a Low-integrity process of the same user
+  (a sandboxed browser tab, say) can create the pipe while no turn holds it,
+  owned by that same SID -- shown on Windows 2026-11-05, when such a squatter
+  received a command. Anything that cannot be verified fails closed.
+
+Accepted risk: the name is predictable and free between turns. If another user
+(or a Low-integrity process) creates it first, that denies the channel to this
+one: our bind fails (``FILE_FLAG_FIRST_PIPE_INSTANCE``) and the channel stays
+off for that turn. It cannot receive our commands; it can only
+deny the channel, which is the same outcome as the channel being disabled.
 
 Naming
 ======
@@ -42,10 +55,12 @@ import re
 import socket
 import sys
 import threading
+import time
 
 PIPE_PREFIX = "\\\\.\\pipe\\voicemode-control-"
 
 _API = None  # Windows API bindings, loaded on first use
+_ORPHANED = []  # OVERLAPPEDs whose cancelled I/O was not waited for; never freed
 
 
 def use_pipe() -> bool:
@@ -64,15 +79,53 @@ def pipe_name(path, pathmod=os.path) -> str:
     return PIPE_PREFIX + hashlib.sha256(p.encode("utf-8")).hexdigest()[:16]
 
 
-def owner_only_sddl(sid: str) -> str:
-    """Owner and sole grantee is ``sid``; ``P`` blocks inherited ACEs."""
-    return f"O:{sid}D:P(A;;GA;;;{sid})"
+_LOW_RID, _MEDIUM_RID, _HIGH_RID, _SYSTEM_RID = 0x1000, 0x2000, 0x3000, 0x4000
+_LABEL_ALIASES = {"LW": _LOW_RID, "ME": _MEDIUM_RID, "MP": 0x2100, "HI": _HIGH_RID,
+                  "SI": _SYSTEM_RID}
+
+
+def owner_only_sddl(sid: str, label_rid=None) -> str:
+    """Owner and sole grantee is ``sid``; ``P`` blocks inherited ACEs. With
+    ``label_rid``, a no-write-up mandatory label at that integrity level."""
+    sddl = f"O:{sid}D:P(A;;GA;;;{sid})"
+    if label_rid is not None:
+        sddl += f"S:(ML;;NW;;;S-1-16-{label_rid})"
+    return sddl
+
+
+def server_label_rid(own_rid: int) -> int:
+    """The server's label: its own level, capped at Medium. Capped so a medium
+    client can still reach an elevated server; never above its own, which
+    Windows would refuse anyway."""
+    return min(own_rid, _MEDIUM_RID)
+
+
+def sddl_label_rid(sddl: str):
+    """Integrity RID of the mandatory label in an SDDL string, or None."""
+    m = re.search(r"\(ML;[^;]*;[^;]*;[^;]*;[^;]*;(?P<sid>[^)]+)\)", sddl)
+    if not m:
+        return None
+    sid = m.group("sid")
+    if sid in _LABEL_ALIASES:
+        return _LABEL_ALIASES[sid]
+    if sid.startswith("S-1-16-"):
+        return int(sid[len("S-1-16-"):])
+    return None
+
+
+def server_is_trusted(server_sid, server_rid, my_sid, my_rid) -> bool:
+    """Trust a pipe server only if it runs as us, at our integrity or above.
+    Unknown values fail closed."""
+    if not server_sid or server_rid is None or my_rid is None:
+        return False
+    return server_sid == my_sid and server_rid >= my_rid
 
 
 def sddl_is_owner_only(sddl: str, sid: str) -> bool:
     """True if a read-back descriptor is owned by ``sid``, protected, and has
     exactly one ACE: an allow for ``sid``."""
-    m = re.fullmatch(r"O:(?P<o>[^:]+?)(?:G:[^:]+?)?D:(?P<flags>[A-Z]*)(?P<aces>(?:\([^)]*\))*)", sddl)
+    m = re.fullmatch(r"O:(?P<o>[^:]+?)(?:G:[^:]+?)?D:(?P<flags>[A-Z]*)(?P<aces>(?:\([^)]*\))*)"
+                     r"(?:S:[A-Z]*(?:\([^)]*\))*)?", sddl)
     if not m or m.group("o") != sid or "P" not in m.group("flags"):
         return False
     aces = re.findall(r"\(([^)]*)\)", m.group("aces"))
@@ -159,6 +212,11 @@ def _api():
         LP(w.LPWSTR), LP(w.ULONG))
     api.GetSecurityInfo = sig(adv.GetSecurityInfo, w.DWORD, w.HANDLE, ctypes.c_int, w.DWORD,
                               LP(P), LP(P), LP(P), LP(P), LP(P))
+    api.GetNamedPipeServerProcessId = sig(k32.GetNamedPipeServerProcessId, w.BOOL, w.HANDLE,
+                                          LP(w.ULONG))
+    api.OpenProcess = sig(k32.OpenProcess, w.HANDLE, w.DWORD, w.BOOL, w.DWORD)
+    api.GetSidSubAuthorityCount = sig(adv.GetSidSubAuthorityCount, LP(ctypes.c_ubyte), P)
+    api.GetSidSubAuthority = sig(adv.GetSidSubAuthority, LP(w.DWORD), P, w.DWORD)
     _API = api
     return api
 
@@ -193,6 +251,10 @@ _ERROR_IO_PENDING = 997
 _ERROR_SEM_TIMEOUT = 121
 _TOKEN_QUERY = 0x0008
 _TOKEN_USER = 1
+_TOKEN_INTEGRITY_LEVEL = 25
+_PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+_LABEL_SECURITY_INFORMATION = 0x10
+_WAIT_FAILED = 0xFFFFFFFF
 _SE_KERNEL_OBJECT = 6
 _OWNER_SECURITY_INFORMATION = 0x1
 _DACL_SECURITY_INFORMATION = 0x4
@@ -233,23 +295,65 @@ def _sid_string(api, psid) -> str:
         api.LocalFree(api.ctypes.cast(out, api.ctypes.c_void_p))
 
 
+def _token_sid_buffer(api, tok, info_class):
+    """The SID inside a TOKEN_USER / TOKEN_MANDATORY_LABEL (both start with a
+    SID_AND_ATTRIBUTES), plus the buffer that owns it."""
+    ct = api.ctypes
+    size = api.w.DWORD()
+    api.GetTokenInformation(tok, info_class, None, 0, ct.byref(size))
+    if not size.value:
+        raise _winerr(api)
+    buf = ct.create_string_buffer(size.value)
+    if not api.GetTokenInformation(tok, info_class, buf, size, ct.byref(size)):
+        raise _winerr(api)
+    return ct.cast(buf, ct.POINTER(ct.c_void_p))[0], buf
+
+
+def _process_identity(api, process):
+    """(user SID string, integrity RID) of a process handle's primary token."""
+    ct = api.ctypes
+    tok = api.w.HANDLE()
+    if not api.OpenProcessToken(process, _TOKEN_QUERY, ct.byref(tok)):
+        raise _winerr(api)
+    try:
+        user, _keep = _token_sid_buffer(api, tok, _TOKEN_USER)
+        sid = _sid_string(api, user)
+        label, _keep2 = _token_sid_buffer(api, tok, _TOKEN_INTEGRITY_LEVEL)
+        count = api.GetSidSubAuthorityCount(label)[0]
+        if count < 1:
+            raise OSError("integrity label SID has no sub-authority")
+        rid = api.GetSidSubAuthority(label, count - 1)[0]
+        return sid, int(rid)
+    finally:
+        api.CloseHandle(tok)
+
+
 def current_user_sid() -> str:
     """String SID of the user this process runs as (the token's user)."""
     api = _api()
+    return _process_identity(api, api.GetCurrentProcess())[0]
+
+
+def current_integrity_rid() -> int:
+    """This process's integrity level RID (0x1000 Low, 0x2000 Medium, ...)."""
+    api = _api()
+    return _process_identity(api, api.GetCurrentProcess())[1]
+
+
+def server_identity(conn):
+    """(user SID, integrity RID) of the process serving a connected pipe."""
+    api = _api()
     ct = api.ctypes
-    tok = api.w.HANDLE()
-    if not api.OpenProcessToken(api.GetCurrentProcess(), _TOKEN_QUERY, ct.byref(tok)):
+    pid = api.w.ULONG()
+    if not api.GetNamedPipeServerProcessId(conn._handle, ct.byref(pid)):
+        raise _winerr(api)
+    proc = api.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, pid.value)
+    if not _handle_ok(proc):
         raise _winerr(api)
     try:
-        size = api.w.DWORD()
-        api.GetTokenInformation(tok, _TOKEN_USER, None, 0, ct.byref(size))
-        buf = ct.create_string_buffer(size.value)
-        if not api.GetTokenInformation(tok, _TOKEN_USER, buf, size, ct.byref(size)):
-            raise _winerr(api)
-        psid = ct.cast(buf, ct.POINTER(ct.c_void_p))[0]  # TOKEN_USER.User.Sid
-        return _sid_string(api, psid)
+        return _process_identity(api, proc)
     finally:
-        api.CloseHandle(tok)
+        api.CloseHandle(proc)
 
 
 def _security_info(api, handle, what):
@@ -282,10 +386,11 @@ def pipe_owner_sid(conn) -> str:
 
 
 def pipe_security_sddl(conn) -> str:
-    """Owner and DACL of the pipe behind a connection, read back from the handle."""
+    """Owner, DACL and mandatory label of the pipe, read back from the handle."""
     api = _api()
     return _security_info(api, conn._handle,
-                          _OWNER_SECURITY_INFORMATION | _DACL_SECURITY_INFORMATION)[1]
+                          _OWNER_SECURITY_INFORMATION | _DACL_SECURITY_INFORMATION
+                          | _LABEL_SECURITY_INFORMATION)[1]
 
 
 def _overlapped(api):
@@ -331,9 +436,14 @@ class PipeConnection:
     """One connected pipe end, with the socket methods the control code uses."""
 
     def __init__(self, handle):
-        self._api = _api()
+        self._closed = True  # until fully built, so __del__/close do nothing
+        self._api = api = _api()
         self._handle = handle
-        self._ov = _overlapped(self._api)
+        try:
+            self._ov = _overlapped(api)
+        except BaseException:
+            api.CloseHandle(handle)  # never leak the pipe end we were given
+            raise
         self._timeout = None
         self._closed = False
 
@@ -419,11 +529,13 @@ class PipeServer:
         self._in_accept = False
         self._pending = False
         self._cleaned = True  # nothing to release until fully built
+        self._broken = False
         self._handle = None
         self._sid = current_user_sid()
         sd = api.ctypes.c_void_p()
         if not api.ConvertStringSecurityDescriptorToSecurityDescriptorW(
-                owner_only_sddl(self._sid), _SDDL_REVISION_1, api.ctypes.byref(sd), None):
+                owner_only_sddl(self._sid, server_label_rid(current_integrity_rid())),
+                _SDDL_REVISION_1, api.ctypes.byref(sd), None):
             raise _winerr(api)
         self._sd = sd
         self._sa = api.SECURITY_ATTRIBUTES(api.ctypes.sizeof(api.SECURITY_ATTRIBUTES), sd, False)
@@ -472,20 +584,40 @@ class PipeServer:
                 raise OSError(9, "pipe server is closed")
             self._in_accept = True
         try:
-            if self._handle is None:  # a previous hand-over could not re-arm
-                self._handle = self._new_instance(first=False)
+            if self._broken:
+                self._pause()
+                raise OSError(6, "pipe server is broken (wait failed); recreate it")
+            if self._handle is None:
+                # A previous hand-over could not re-arm. Re-create as the FIRST
+                # instance: if anyone took the name meanwhile, fail rather than
+                # join them. Pause first so a persistent failure cannot spin
+                # the caller's accept loop.
+                try:
+                    self._handle = self._new_instance(first=True)
+                except OSError:
+                    self._pause()
+                    raise
             if not self._pending:
                 ok = api.ConnectNamedPipe(self._handle, ct.byref(self._ov))
                 err = 0 if ok else ct.get_last_error()
-                # Connected before we asked (PIPE_CONNECTED), or connected,
-                # wrote and closed already (NO_DATA): either way hand it over,
-                # so a fire-and-forget command still in the buffer is read.
-                if err in (_ERROR_PIPE_CONNECTED, _ERROR_NO_DATA):
+                # Nonzero: connected. PIPE_CONNECTED: connected before we
+                # asked. NO_DATA: connected, wrote and closed already. In every
+                # case hand it over, so a command still in the buffer is read.
+                if ok or err in (_ERROR_PIPE_CONNECTED, _ERROR_NO_DATA):
                     return self._hand_over()
                 if err != _ERROR_IO_PENDING:
                     raise _winerr(api, err or 6)
                 self._pending = True
             r = api.WaitForSingleObject(self._ov.hEvent, _ms(self._timeout))
+            if r not in (_WAIT_OBJECT_0, _WAIT_TIMEOUT):
+                # WAIT_FAILED: the event is unusable, so a blocking
+                # GetOverlappedResult could hang stop(). Cancel and give up on
+                # this server; the OVERLAPPED is kept alive for the cancel.
+                err = ct.get_last_error()
+                api.CancelIoEx(self._handle, ct.byref(self._ov))
+                self._broken = True
+                _ORPHANED.append(self._ov)
+                raise _winerr(api, err or 6)
             if r == _WAIT_TIMEOUT:
                 if self._closed:
                     raise OSError(9, "pipe server is closed")
@@ -503,6 +635,9 @@ class PipeServer:
                 self._in_accept = False
                 if self._closed:
                     self._cleanup_locked()
+
+    def _pause(self):
+        time.sleep(0.25 if self._timeout is None else max(0.0, min(self._timeout, 0.25)))
 
     def _hand_over(self):
         self._pending = False
@@ -541,8 +676,9 @@ class PipeServer:
         if h is not None:
             if self._pending:
                 api.CancelIoEx(h, api.ctypes.byref(self._ov))
-                api.GetOverlappedResult(h, api.ctypes.byref(self._ov),
-                                        api.ctypes.byref(api.w.DWORD()), True)
+                if not self._broken:  # a broken wait must not block close()
+                    api.GetOverlappedResult(h, api.ctypes.byref(self._ov),
+                                            api.ctypes.byref(api.w.DWORD()), True)
                 self._pending = False
             api.CloseHandle(h)
         api.CloseHandle(self._ov.hEvent)
@@ -566,10 +702,37 @@ def _win_create_server(name: str) -> PipeServer:
     return PipeServer(name)
 
 
+def _verify_server(conn, name) -> None:
+    """Raise PermissionError unless the pipe is ours and served by us.
+
+    Owner SID first (cheap), then the serving process: same user and an
+    integrity level at least our own, so a Low-integrity squatter of the same
+    user is refused. Any failure to find out is a refusal (fail closed)."""
+    try:
+        me = current_user_sid()
+        owner = pipe_owner_sid(conn)
+        if owner != me:
+            raise PermissionError(5, f"control pipe owner {owner} is not the current user {me}",
+                                  name)
+        server_sid, server_rid = server_identity(conn)
+        my_rid = current_integrity_rid()
+    except PermissionError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - cannot verify: refuse
+        raise PermissionError(5, f"cannot verify the control pipe's server: {exc}", name) from exc
+    if not server_is_trusted(server_sid, server_rid, me, my_rid):
+        raise PermissionError(
+            5, f"control pipe is served by {server_sid} at integrity {_hex(server_rid)}; "
+               f"need {me} at {_hex(my_rid)} or above", name)
+
+
+def _hex(rid) -> str:
+    return "unknown" if rid is None else hex(rid)
+
+
 def _win_connect(name: str, timeout) -> PipeConnection:
     api = _api()
     ct = api.ctypes
-    import time
     deadline = None if timeout is None else time.monotonic() + max(0.0, timeout)
     while True:
         h = api.CreateFileW(name, _GENERIC_READ | _GENERIC_WRITE, 0, None, _OPEN_EXISTING,
@@ -591,12 +754,12 @@ def _win_connect(name: str, timeout) -> PipeConnection:
                 raise socket.timeout("timed out")
             if err == _ERROR_FILE_NOT_FOUND:
                 raise FileNotFoundError(2, "no control pipe (nothing is listening)", name)
+            raise _winerr(api, err or 6)  # anything else: do not spin
+        # WaitNamedPipeW said an instance is free; loop and check the deadline,
+        # since another client may take it first.
     conn = PipeConnection(h)
     try:
-        owner, me = pipe_owner_sid(conn), current_user_sid()
-        if owner != me:
-            raise PermissionError(5, f"control pipe owner {owner} is not the current user {me}",
-                                  name)
+        _verify_server(conn, name)
     except BaseException:
         conn.close()
         raise

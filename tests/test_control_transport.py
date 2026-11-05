@@ -130,3 +130,47 @@ def test_invalid_handle_value_is_recognised_as_c_void_p_returns_it(ct):
     assert ct._handle_ok(None) is False
     assert ct._handle_ok(0) is False
     assert ct._handle_ok(0x1A4) is True
+
+
+def test_owner_only_sddl_with_mandatory_label(ct):
+    sid = "S-1-5-21-1-2-3-1001"
+    assert ct.owner_only_sddl(sid, label_rid=0x2000) == \
+        f"O:{sid}D:P(A;;GA;;;{sid})S:(ML;;NW;;;S-1-16-8192)"
+
+
+def test_label_never_above_medium(ct):
+    assert ct.server_label_rid(0x3000) == 0x2000   # elevated server: medium clients may write
+    assert ct.server_label_rid(0x2000) == 0x2000
+    assert ct.server_label_rid(0x1000) == 0x1000   # cannot label above itself
+
+
+def test_sddl_owner_only_check_tolerates_a_label(ct):
+    sid = "S-1-5-21-1-2-3-1001"
+    assert ct.sddl_is_owner_only(f"O:{sid}D:P(A;;FA;;;{sid})S:(ML;;NW;;;ME)", sid)
+
+
+@pytest.mark.parametrize("sddl, rid", [
+    ("O:XD:P(A;;FA;;;X)S:(ML;;NW;;;ME)", 0x2000),
+    ("O:XD:P(A;;FA;;;X)S:(ML;;NW;;;LW)", 0x1000),
+    ("O:XD:P(A;;FA;;;X)S:(ML;;NW;;;HI)", 0x3000),
+    ("O:XD:P(A;;FA;;;X)S:(ML;;NW;;;S-1-16-8192)", 0x2000),
+    ("O:XD:P(A;;FA;;;X)", None),
+])
+def test_sddl_label_rid(ct, sddl, rid):
+    assert ct.sddl_label_rid(sddl) == rid
+
+
+@pytest.mark.parametrize("server, mine, ok", [
+    (("U", 0x2000), ("U", 0x2000), True),
+    (("U", 0x3000), ("U", 0x2000), True),
+    (("U", 0x1000), ("U", 0x2000), False),
+    (("V", 0x2000), ("U", 0x2000), False),
+    (("U", None), ("U", 0x2000), False),     # unknown integrity fails closed
+])
+def test_server_is_trusted(ct, server, mine, ok):
+    assert ct.server_is_trusted(server[0], server[1], mine[0], mine[1]) is ok
+
+
+def test_docstring_records_the_accepted_denial_of_service(ct):
+    doc = ct.__doc__.lower()
+    assert "another user" in doc and "denies the channel" in doc

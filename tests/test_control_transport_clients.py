@@ -52,7 +52,7 @@ class FakeConn:
 
 class FakeTransport(types.ModuleType):
     def __init__(self, reply=b"", fail=None):
-        super().__init__("control_transport")
+        super().__init__("voice_mode.control_transport")
         self.calls, self.conns, self.reply, self.fail = [], [], reply, fail
 
     def connect(self, path, timeout):
@@ -67,8 +67,7 @@ class FakeTransport(types.ModuleType):
 @pytest.fixture()
 def no_af_unix(monkeypatch):
     def install(transport):
-        monkeypatch.setitem(sys.modules, "control_transport", transport)
-        monkeypatch.delitem(sys.modules, "voice_mode.control_transport", raising=False)
+        monkeypatch.setitem(sys.modules, "voice_mode.control_transport", transport)
         monkeypatch.delattr(socket, "AF_UNIX", raising=False)
         return transport
     return install
@@ -169,17 +168,44 @@ def test_pill_posix_never_touches_the_transport(vps, monkeypatch, tmp_path):
     class Poison(types.ModuleType):
         def __getattr__(self, name):
             raise AssertionError(name)
-    monkeypatch.setitem(sys.modules, "control_transport", Poison("control_transport"))
+    monkeypatch.setitem(sys.modules, "voice_mode.control_transport", Poison("control_transport"))
     assert vps._status(tmp_path / "missing.sock") == {}
     assert vps.send_control(tmp_path / "missing.sock", "stop") is False
 
 
 def test_missing_transport_module_reads_as_idle(vps, ptt, monkeypatch, tmp_path):
-    for name in ("control_transport", "voice_mode.control_transport", "voice_mode"):
-        monkeypatch.setitem(sys.modules, name, None)  # every import of it fails
+    monkeypatch.setitem(sys.modules, "voice_mode.control_transport", None)
+    monkeypatch.setitem(sys.modules, "voice_mode", None)  # no installed package
+    for mod in (vps, ptt):  # ...and nothing beside the client either
+        monkeypatch.setattr(mod, "_TRANSPORT_FILE", tmp_path / "absent" / "control_transport.py")
     monkeypatch.delattr(socket, "AF_UNIX", raising=False)
     monkeypatch.setenv("VOICEMODE_CONTROL_SOCKET", str(tmp_path / "control.sock"))
     assert vps._status(tmp_path / "control.sock") == {}
     assert vps.send_control(tmp_path / "control.sock", "stop") is False
     assert ptt.available() is False
     assert ptt.send("hold_start") is True
+
+
+@pytest.mark.parametrize("filename", ["ptt_control_client.py", "voice_pill_state.py"])
+def test_transport_never_comes_from_bare_sys_path(filename, monkeypatch, tmp_path):
+    """Only the installed voice_mode package or the file beside the client:
+    a `control_transport` anywhere else on sys.path must not be picked up."""
+    rogue = tmp_path / "rogue"
+    rogue.mkdir()
+    (rogue / "control_transport.py").write_text("ROGUE = True\n")
+    monkeypatch.syspath_prepend(str(rogue))
+    monkeypatch.setitem(sys.modules, "control_transport", types.ModuleType("control_transport"))
+    monkeypatch.delitem(sys.modules, "voice_mode.control_transport", raising=False)
+    monkeypatch.setitem(sys.modules, "voice_mode", None)  # no installed package
+    mod = _load("vml_loader_" + filename[:-3], filename)
+    t = mod._control_transport()
+    assert not hasattr(t, "ROGUE")
+    assert Path(t.__file__).resolve() == (PATCHES / "control_transport.py").resolve()
+
+
+@pytest.mark.parametrize("filename", ["ptt_control_client.py", "voice_pill_state.py"])
+def test_transport_prefers_the_installed_package(filename, monkeypatch):
+    installed = types.ModuleType("voice_mode.control_transport")
+    monkeypatch.setitem(sys.modules, "voice_mode.control_transport", installed)
+    mod = _load("vml_loader2_" + filename[:-3], filename)
+    assert mod._control_transport() is installed

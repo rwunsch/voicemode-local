@@ -35,6 +35,7 @@ key-listener thread.
 
 Installed into voice_mode/ptt_control_client.py by patches/apply.sh.
 """
+import importlib.util
 import json
 import logging
 import os
@@ -62,20 +63,27 @@ def socket_path() -> Path:
     return Path(os.path.expanduser(raw))
 
 
+# Where the transport may come from: the installed voice_mode package, or the
+# file beside this one (patches/ in the repo; voice_mode/ itself once installed).
+# Never a bare `control_transport` found elsewhere on sys.path.
+_TRANSPORT_FILE = Path(__file__).with_name("control_transport.py")
+_TRANSPORT = None
+
+
 def _control_transport():
     """The named-pipe transport, for Pythons without AF_UNIX (Windows)."""
-    for name in ("voice_mode.control_transport", "control_transport"):
-        mod = sys.modules.get(name)
-        if mod is not None:
-            return mod
-    try:
-        from voice_mode import control_transport
-    except ImportError:
-        try:
-            import control_transport
-        except ImportError as exc:  # an install that never copied the module
-            raise OSError(f"no control transport: {exc}") from exc
-    return control_transport
+    global _TRANSPORT
+    installed = sys.modules.get("voice_mode.control_transport")
+    if installed is not None:
+        return installed
+    if _TRANSPORT is None:
+        if not _TRANSPORT_FILE.is_file():  # an install that never copied the module
+            raise OSError(f"no control transport at {_TRANSPORT_FILE}")
+        spec = importlib.util.spec_from_file_location("_vml_control_transport", _TRANSPORT_FILE)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _TRANSPORT = mod
+    return _TRANSPORT
 
 
 def _connect(path: Path, timeout: float):
