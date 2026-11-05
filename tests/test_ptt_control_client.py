@@ -78,6 +78,7 @@ def server(tmp_path, monkeypatch, client_mod):
     def _make(status_payload=None):
         path = tmp_path / "control.sock"
         srv = FakeControlServer(path, status_payload)
+        monkeypatch.delenv("VOICEMODE_CONTROL_SOCKET", raising=False)  # takes precedence
         monkeypatch.setenv("VOICEMODE_CONTROL_SOCKET_PATH", str(path))
         return srv
     made = []
@@ -103,12 +104,14 @@ def test_available_is_true_when_bound(client_mod, server):
 
 
 def test_available_is_false_with_no_socket(client_mod, monkeypatch, tmp_path):
+    monkeypatch.delenv("VOICEMODE_CONTROL_SOCKET", raising=False)
     monkeypatch.setenv("VOICEMODE_CONTROL_SOCKET_PATH", str(tmp_path / "nope.sock"))
     assert client_mod.available() is False
 
 
 def test_send_never_raises_without_a_listener(client_mod, monkeypatch, tmp_path):
     """A dead control channel must make PTT inert, not crash the key listener."""
+    monkeypatch.delenv("VOICEMODE_CONTROL_SOCKET", raising=False)
     monkeypatch.setenv("VOICEMODE_CONTROL_SOCKET_PATH", str(tmp_path / "nope.sock"))
     assert client_mod.send("hold_start") is True  # fire-and-forget
     client_mod.on_action("hold_start")            # must not raise

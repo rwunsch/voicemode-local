@@ -39,13 +39,16 @@ import json
 import logging
 import os
 import socket
+import sys
 from pathlib import Path
 from typing import Optional
 
 logger = logging.getLogger("voicemode.ptt")
 
 # Matches upstream's config.CONTROL_SOCKET_PATH default. Read from the same env
-# var so a user who moved the socket does not have to configure it twice.
+# var (VOICEMODE_CONTROL_SOCKET, config.py) so a user who moved the socket does
+# not have to configure it twice. VOICEMODE_CONTROL_SOCKET_PATH is the name this
+# file used to read by mistake; still honoured as a fallback.
 DEFAULT_SOCKET = "~/.voicemode/control.sock"
 
 CONNECT_TIMEOUT = 0.5   # a local unix socket answers instantly or not at all
@@ -53,8 +56,40 @@ STATUS_TIMEOUT = 0.5
 
 
 def socket_path() -> Path:
-    raw = os.getenv("VOICEMODE_CONTROL_SOCKET_PATH") or DEFAULT_SOCKET
+    raw = (os.getenv("VOICEMODE_CONTROL_SOCKET")
+           or os.getenv("VOICEMODE_CONTROL_SOCKET_PATH")
+           or DEFAULT_SOCKET)
     return Path(os.path.expanduser(raw))
+
+
+def _control_transport():
+    """The named-pipe transport, for Pythons without AF_UNIX (Windows)."""
+    for name in ("voice_mode.control_transport", "control_transport"):
+        mod = sys.modules.get(name)
+        if mod is not None:
+            return mod
+    try:
+        from voice_mode import control_transport
+    except ImportError:
+        try:
+            import control_transport
+        except ImportError as exc:  # an install that never copied the module
+            raise OSError(f"no control transport: {exc}") from exc
+    return control_transport
+
+
+def _connect(path: Path, timeout: float):
+    """A connected client: AF_UNIX where it exists, else the owner-checked pipe."""
+    if not hasattr(socket, "AF_UNIX"):
+        return _control_transport().connect(path, timeout)
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        s.settimeout(timeout)
+        s.connect(str(path))
+    except BaseException:
+        s.close()
+        raise
+    return s
 
 
 def _send_line(payload: dict, read_reply: bool = False) -> Optional[str]:
@@ -65,9 +100,7 @@ def _send_line(payload: dict, read_reply: bool = False) -> Optional[str]:
     """
     path = socket_path()
     try:
-        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
-            s.settimeout(CONNECT_TIMEOUT)
-            s.connect(str(path))
+        with _connect(path, CONNECT_TIMEOUT) as s:
             s.sendall((json.dumps(payload) + "\n").encode("utf-8"))
             if not read_reply:
                 return None
@@ -132,9 +165,7 @@ def on_action(action: str) -> None:
 def available() -> bool:
     """True if the control socket exists and accepts a connection."""
     try:
-        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
-            s.settimeout(CONNECT_TIMEOUT)
-            s.connect(str(socket_path()))
+        with _connect(socket_path(), CONNECT_TIMEOUT):
             return True
     except Exception:  # noqa: BLE001
         return False

@@ -172,7 +172,9 @@ fi
 # Retired with the control-channel rewrite: ptt_ipc.py (event bus),
 # ptt_bridge.py (converse glue), ptt_playback_bridge.py (barge-in registry) --
 # upstream's control channel owns all three concerns now.
-for _m in ptt_core.py ptt_control_client.py ptt_relay.py ptt_listener_linux.py ptt_listener_macos.py voice_barge.py voice_pill_state.py voice_pill.py; do
+# control_transport.py is the named-pipe transport the patched control_socket,
+# ptt_control_client and voice_pill_state import where AF_UNIX is missing.
+for _m in control_transport.py ptt_core.py ptt_control_client.py ptt_relay.py ptt_listener_linux.py ptt_listener_macos.py voice_barge.py voice_pill_state.py voice_pill.py; do
     if [ -f "$SCRIPT_DIR/$_m" ]; then
         cp "$SCRIPT_DIR/$_m" "$VM_DIR/$_m"
         echo "[patches] installed $_m"
@@ -186,6 +188,14 @@ if [ -f "$SCRIPT_DIR/patch_voice_pill.py" ]; then
     "$PYBIN" "$SCRIPT_DIR/patch_voice_pill.py" "$VM_DIR/control_socket.py"
     "$PYBIN" "$SCRIPT_DIR/patch_voice_pill.py" "$VM_DIR/tools/converse.py"
     "$PYBIN" "$SCRIPT_DIR/patch_voice_pill.py" "$VM_DIR/streaming.py"
+fi
+
+# Control channel without AF_UNIX (native Windows): an owner-only named pipe.
+# Without it, enabling the channel natively raises AttributeError out of
+# start_control_listener and the converse turn is lost. A no-op where AF_UNIX
+# exists. Needs control_transport.py, installed by the module loop above.
+if [ -f "$SCRIPT_DIR/patch_control_transport.py" ]; then
+    "$PYBIN" "$SCRIPT_DIR/patch_control_transport.py" "$VM_DIR/control_socket.py"
 fi
 
 # MCP tool for switching voice barge-in from inside any client.

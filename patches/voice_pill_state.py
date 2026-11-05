@@ -359,10 +359,42 @@ def control_socket_path() -> Path:
     return Path(os.path.expanduser(os.getenv("VOICEMODE_CONTROL_SOCKET") or "~/.voicemode/control.sock"))
 
 
-def _exchange(path: Path, payload: dict, want_reply: bool):
-    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
-        s.settimeout(0.3)
+def _use_pipe() -> bool:
+    """No AF_UNIX (Windows): the control channel is a named pipe, with no file."""
+    return not hasattr(socket, "AF_UNIX")
+
+
+def _control_transport():
+    for name in ("voice_mode.control_transport", "control_transport"):
+        mod = sys.modules.get(name)
+        if mod is not None:
+            return mod
+    try:
+        from voice_mode import control_transport
+    except ImportError:
+        try:
+            import control_transport
+        except ImportError as exc:  # an install that never copied the module
+            raise OSError(f"no control transport: {exc}") from exc
+    return control_transport
+
+
+def _connect(path: Path, timeout: float):
+    if _use_pipe():
+        # Owner-checked: refuses a pipe that is not the current user's.
+        return _control_transport().connect(path, timeout)
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        s.settimeout(timeout)
         s.connect(str(path))
+    except BaseException:
+        s.close()
+        raise
+    return s
+
+
+def _exchange(path: Path, payload: dict, want_reply: bool):
+    with _connect(path, 0.3) as s:
         s.sendall((json.dumps(payload) + "\n").encode("utf-8"))
         if not want_reply:
             return None
@@ -378,7 +410,7 @@ def _exchange(path: Path, payload: dict, want_reply: bool):
 def _status(path: Path) -> dict:
     """The server's status, or {}. The socket exists only during an active
     converse, so an absent one is the normal idle state."""
-    if not path.exists():
+    if not _use_pipe() and not path.exists():
         return {}
     try:
         reply = _exchange(path, {"command": "status"}, want_reply=True)
@@ -389,7 +421,7 @@ def _status(path: Path) -> dict:
 
 def send_control(path: Path, command: str) -> bool:
     """Fire-and-forget control command. True if it was delivered to a live socket."""
-    if not path.exists():
+    if not _use_pipe() and not path.exists():
         return False
     try:
         _exchange(path, {"command": command}, want_reply=False)
