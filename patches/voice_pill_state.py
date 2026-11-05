@@ -518,19 +518,18 @@ BARGE_OFF_NOTE = ("Interrupt by voice is off. Tell the user once, in a few words
 
 
 def barge_state(home=None) -> bool | None:
-    """Whether interrupt by voice is on, or None where it cannot run (no parec). The file wins
-    over the environment: the switch writes the file, and the server loaded it only at start."""
+    """Whether interrupt by voice is on, or None where it cannot run (no parec).
+
+    voicemode.env wins when it sets VOICEMODE_VOICE_BARGE: the switch writes it while the
+    server runs, and the server's environment is from start-up. Without the key, the
+    environment decides: FELIX passes the setting there and writes no file."""
     if shutil.which("parec") is None:
         return None
-    value = ""
-    try:
-        path = Path(home) if home is not None else Path(os.path.expanduser("~")) / ".voicemode"
-        for line in (path / "voicemode.env").read_text(encoding="utf-8").splitlines():
-            if line.startswith("VOICEMODE_VOICE_BARGE="):
-                value = line.split("=", 1)[1].strip().strip('"').lower()
-    except OSError:
-        pass
-    return value == "true"
+    settings = read_env_file(home)
+    value = settings.get("VOICEMODE_VOICE_BARGE")
+    if value is None:
+        value = os.environ.get("VOICEMODE_VOICE_BARGE", "")
+    return value.strip().strip('"').lower() == "true"
 
 
 def _barge_note_once(pid: int, base) -> str:

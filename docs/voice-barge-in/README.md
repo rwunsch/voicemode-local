@@ -14,6 +14,13 @@ From inside Claude Code, Copilot or any MCP client, use the `voice_barge` tool w
 
 Voice-mode processes started before the patch ignore it, so run `/mcp` to reconnect.
 
+For a program that needs the state without a shell (FELIX reads it at voice start):
+`python -m voice_mode.voice_barge status` prints one line, `on`, `off` or
+`cannot run: <reason>`, and exits 0. It reads `VOICEMODE_VOICE_BARGE` from
+`~/.voicemode/voicemode.env` (upstream's home, whatever `VOICEMODE_BASE_DIR` says), and
+from the environment when the file does not set it. Today it says `cannot run` wherever
+`parec` is missing, which includes native Windows and macOS.
+
 ## How it works
 
 1. `patch_voice_barge.py` adds `speaking` and `listen_started_at` to the control

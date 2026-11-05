@@ -267,6 +267,7 @@ def test_no_barge_note_for_an_unregistered_session(base, monkeypatch):
 
 
 def test_barge_state_reads_the_last_setting_and_needs_parec(tmp_path, monkeypatch):
+    monkeypatch.delenv("VOICEMODE_VOICE_BARGE", raising=False)
     (tmp_path / "voicemode.env").write_text(
         "VOICEMODE_VOICE_BARGE=false\n# VOICEMODE_VOICE_BARGE=false\nVOICEMODE_VOICE_BARGE=true\n")
     monkeypatch.setattr(st.shutil, "which", lambda name: "/usr/bin/parec")
@@ -275,3 +276,38 @@ def test_barge_state_reads_the_last_setting_and_needs_parec(tmp_path, monkeypatc
     assert st.barge_state(home=tmp_path) is False
     monkeypatch.setattr(st.shutil, "which", lambda name: None)
     assert st.barge_state(home=tmp_path) is None
+
+
+def test_barge_state_falls_back_to_the_environment_when_the_file_lacks_the_key(tmp_path, monkeypatch):
+    """FELIX passes VOICEMODE_VOICE_BARGE in the server's environment, not in a file."""
+    (tmp_path / "voicemode.env").write_text("VOICEMODE_TTS_VOICE=am_puck\n")
+    monkeypatch.setattr(st.shutil, "which", lambda name: "/usr/bin/parec")
+    monkeypatch.setenv("VOICEMODE_VOICE_BARGE", "true")
+    assert st.barge_state(home=tmp_path) is True
+    monkeypatch.setenv("VOICEMODE_VOICE_BARGE", "false")
+    assert st.barge_state(home=tmp_path) is False
+
+
+def test_barge_state_file_still_wins_over_the_environment(tmp_path, monkeypatch):
+    """The switch writes the file while the server runs; its env is from start-up."""
+    (tmp_path / "voicemode.env").write_text("VOICEMODE_VOICE_BARGE=false\n")
+    monkeypatch.setattr(st.shutil, "which", lambda name: "/usr/bin/parec")
+    monkeypatch.setenv("VOICEMODE_VOICE_BARGE", "true")
+    assert st.barge_state(home=tmp_path) is False
+
+
+def test_barge_state_reads_upstreams_home_not_the_base_dir(tmp_path, monkeypatch):
+    """Upstream loads voicemode.env from Path.home()/.voicemode whatever VOICEMODE_BASE_DIR
+    says; FELIX gives each runtime its own HOME, so that is the file to read."""
+    home = tmp_path / "runtime-home"
+    (home / ".voicemode").mkdir(parents=True)
+    (home / ".voicemode" / "voicemode.env").write_text("VOICEMODE_VOICE_BARGE=true\n")
+    base = tmp_path / "base"
+    base.mkdir()
+    (base / "voicemode.env").write_text("VOICEMODE_VOICE_BARGE=false\n")
+    monkeypatch.setattr(st.shutil, "which", lambda name: "/usr/bin/parec")
+    monkeypatch.delenv("VOICEMODE_VOICE_BARGE", raising=False)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.setenv("VOICEMODE_BASE_DIR", str(base))
+    assert st.barge_state() is True

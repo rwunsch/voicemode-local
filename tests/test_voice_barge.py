@@ -343,3 +343,27 @@ class TestBargeControl:
 def test_tool_file_registers_a_voice_barge_mcp_tool():
     src = (MODULE.parent / "voice_barge_tool.py").read_text()
     assert "@mcp.tool()" in src and "async def voice_barge(" in src
+
+
+class TestStatusCommand:
+    """`python -m voice_mode.voice_barge status`: FELIX reads it at voice start (FELIX-voice,
+    2026-11-05). One line, exactly on / off / cannot run: <reason>, exit 0."""
+
+    def _run(self, monkeypatch, capsys, state):
+        monkeypatch.setattr(voice_barge, "barge_state", lambda home=None: state)
+        monkeypatch.setattr(sys, "argv", ["voice_barge", "status"])
+        code = voice_barge.main()
+        return code, capsys.readouterr().out
+
+    @pytest.mark.parametrize("state,line", [(True, "on\n"), (False, "off\n")])
+    def test_on_and_off(self, monkeypatch, capsys, state, line):
+        assert self._run(monkeypatch, capsys, state) == (0, line)
+
+    def test_cannot_run_says_why(self, monkeypatch, capsys):
+        code, out = self._run(monkeypatch, capsys, None)
+        assert code == 0
+        assert out.startswith("cannot run: ") and out.count("\n") == 1
+
+    def test_status_never_starts_the_trigger(self, monkeypatch, capsys):
+        monkeypatch.setattr(voice_barge, "run", lambda *a, **k: pytest.fail("trigger started"))
+        self._run(monkeypatch, capsys, True)

@@ -40,12 +40,12 @@ import numpy as np
 try:
     from voice_mode.voice_pill_state import (  # noqa: F401  (re-exported for callers)
         _exchange, _retrying, _status, barge_control, control_socket_path, is_paused,
-        read_env_file, record_interruption, voicemode_base)
+        barge_state, read_env_file, record_interruption, voicemode_base)
 except ImportError:  # run straight from the repo, not the installed package
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from voice_pill_state import (  # noqa: F401
         _exchange, _retrying, _status, barge_control, control_socket_path, is_paused,
-        read_env_file, record_interruption, voicemode_base)
+        barge_state, read_env_file, record_interruption, voicemode_base)
 
 logger = logging.getLogger("voicemode.voice_barge")
 
@@ -316,14 +316,28 @@ def install_stop_handlers(stop: threading.Event) -> None:
             pass
 
 
+CANNOT_RUN = "cannot run: voice barge-in needs PulseAudio or PipeWire (parec), which this machine lacks"
+
+
+def status_line() -> str:
+    """on, off or cannot run: <reason>. What FELIX reads at voice start."""
+    state = barge_state()
+    if state is None:
+        return CANNOT_RUN
+    return "on" if state else "off"
+
+
 def main() -> int:
+    if sys.argv[1:2] == ["status"]:
+        print(status_line())
+        return 0
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
     settings = trigger_settings()
     if shutil.which("parec") is None:
         logger.error("parec not found; voice barge-in needs PulseAudio or PipeWire tools")
         return 1
     if len(sys.argv) < 2:
-        logger.error("usage: python -m voice_mode.voice_barge <silero_vad.onnx>")
+        logger.error("usage: python -m voice_mode.voice_barge <silero_vad.onnx> | status")
         return 2
     model = Path(sys.argv[1])
     if not model.is_file():
