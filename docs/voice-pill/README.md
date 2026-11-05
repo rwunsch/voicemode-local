@@ -162,8 +162,10 @@ as pywebview's own dependencies). The main venv gains nothing. The backend is st
 - **Focus and Dock.** Windows blocks activation with a style bit. pywebview 6.2.1 asks for the
   Regular policy when its Cocoa module loads and activates itself when its loop starts, and with
   an Accessory switch afterwards Robert still saw a Python icon in the Dock and clicks still took
-  focus (2026-11-05, n=1 session, `69303d6`). So `quiet_app()` sets `LSUIElement` and installs an
+  focus (2026-11-05, n=1 session, `69303d6`). So `quiet_app()` sets `LSUIElement` in the bundle info and installs an
   `NSApplication` subclass that forces Accessory and ignores activation, before pywebview loads.
+  `FELIX-MAC` measured `LSUIElement` on its own at `69303d6`: no Dock icon in 4 of 4 launches (one
+  control run without it showed the icon), a small fading tile at 0.4 s in 3 of 3, and the 5 px hop gone in 3 of 3.
   `use_panel()` gives pywebview a non-activating `NSPanel` that never becomes key, and the web view
   accepts first clicks. It is shown with `orderFrontRegardless`, never pywebview's `show()`.
 - **Menu bar icon.** A template SF Symbol: a microphone when listening, a speaker when speaking,

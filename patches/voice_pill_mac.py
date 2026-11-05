@@ -291,11 +291,12 @@ def make_tray_target(app):
 
 def quiet_app():
     """Before pywebview loads: no Dock icon, and the app can never activate itself."""
-    import objc
-    from AppKit import NSApplication, NSApplicationActivationPolicyAccessory, NSBundle
+    from Foundation import NSBundle
     info = NSBundle.mainBundle().infoDictionary()
-    if info is not None:  # read when the app registers with the window server
-        info["LSUIElement"] = True
+    if info is not None:  # first, before AppKit: this is what removes the Dock icon (measured)
+        info["LSUIElement"] = "1"
+    import objc
+    from AppKit import NSApplication, NSApplicationActivationPolicyAccessory
 
     class PillApplication(NSApplication):
         def setActivationPolicy_(self, _policy):  # pywebview asks for Regular on import

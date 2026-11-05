@@ -491,7 +491,8 @@ def test_app_is_made_quiet_before_pywebview_can_set_regular():
 def test_quiet_app_forces_accessory_and_refuses_activation():
     src = (REPO / "patches/voice_pill_mac.py").read_text()
     body = src[src.index("def quiet_app("):src.index("def use_panel(")]
-    assert 'info["LSUIElement"] = True' in body
+    assert 'info["LSUIElement"] = "1"' in body
+    assert body.index("LSUIElement") < body.index("from AppKit")
     assert "def setActivationPolicy_" in body and "def activateIgnoringOtherApps_" in body
     assert body.index("LSUIElement") < body.index(".sharedApplication()")
 
