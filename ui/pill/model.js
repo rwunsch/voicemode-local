@@ -39,10 +39,10 @@
     var waiting = (s.sessions || []).filter(function (r) { return r.state === "waiting"; }).length;
     var name = s.floor ? (s.floor.label || "") : "";
     var voices = s.voice && VOICES.indexOf(s.voice) < 0 ? VOICES.concat([s.voice]) : VOICES;
-    var mode = ui.minimized ? "dot" : ui.docked ? "docked" : ui.expanded ? "expanded" : "pill";
+    var mode = ui.minimized ? "dot" : ui.docked ? (ui.tucked ? "tab" : ui.dockOpen ? "docked" : "rail") : ui.expanded ? "expanded" : "pill";
     return {
       connected: true, phase: phase, label: LABELS[phase] || LABELS.idle, mode: mode,
-      side: mode === "docked" ? (ui.side === "left" ? "left" : "right") : null,
+      side: mode === "docked" || mode === "rail" || mode === "tab" ? (ui.side === "left" ? "left" : "right") : null,
       interrupt: { enabled: phase === "speaking" || phase === "listening" },
       pause: { enabled: true, label: phase === "paused" ? "Resume" : "Pause",
         cmd: phase === "paused" ? "resume" : "pause", icon: phase === "paused" ? RESUME : PAUSE },

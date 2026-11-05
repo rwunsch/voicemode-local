@@ -22,13 +22,29 @@ select{flex:1;min-width:0}
 [data-mode=expanded] .more,[data-mode=docked] .more{display:flex}
 .q{display:flex;justify-content:space-between;padding:3px 0;border-top:1px solid var(--line)}
 kbd{border:1px solid var(--line);border-radius:4px;padding:0 4px;font:11px ui-monospace,monospace}
-.dot{display:none;width:16px;height:16px;border-radius:50%;border:2px solid var(--bg);padding:0;background:var(--m);cursor:pointer;box-shadow:0 0 0 1px var(--line)}
-[data-phase=speaking] .dot{background:var(--a)}[data-phase=listening] .dot{background:var(--g)}
-[data-mode=dot] .dot{display:block}[data-mode=dot] .card{display:none}
 :focus-visible{outline:2px solid var(--a);outline-offset:1px}
 .pic{width:28px;height:28px;padding:0;flex:none;font-size:14px;line-height:1}
 .btn.icon{width:24px;padding:4px 0;flex:none}
 .txt b{font-size:12.5px}.txt .m{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 option{background:var(--bg);color:var(--t)}
 html,body{height:100%}
-[data-mode=docked] .card{height:100vh}
+.edge{position:fixed;top:0;bottom:0;width:6px;cursor:ew-resize;z-index:5}
+.edge.left{left:0}.edge.right{right:0}
+[data-mode=docked] .edge,[data-mode=rail] .edge,[data-mode=tab] .edge{display:none}
+.tuck{display:none}
+[data-mode=docked] .tuck,[data-mode=rail] .tuck{display:block}
+[data-mode=docked] #expand,[data-mode=docked] #minimize,[data-mode=docked] #dockTop,[data-mode=rail] #dockTop{display:none}
+[data-mode=docked] .drag,[data-mode=rail] .drag{cursor:ns-resize}
+[data-mode=rail] #minimize,[data-mode=rail] #dismiss{display:none}
+[data-mode=rail] .card{padding:8px 6px}
+[data-mode=rail] .top{flex-wrap:wrap;justify-content:center}
+[data-mode=rail] .drag{flex:0 0 100%;flex-direction:column;gap:4px;text-align:center}
+[data-mode=rail] .txt{width:100%}
+[data-mode=rail] .txt b{white-space:normal;font-size:11px;line-height:1.2}
+[data-mode=rail] .txt .m{white-space:normal;font-size:10px;line-height:1.2;overflow-wrap:anywhere;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2}
+[data-mode=rail] .pic{flex:0 0 100%}
+[data-mode=rail] .btn.icon{width:28px;height:28px;padding:0}
+.tab{display:none;width:100vw;height:100vh;padding:0;border:1px solid var(--line);border-radius:12px;background:var(--bg);color:var(--m);font-size:18px;line-height:1;cursor:pointer}
+.tab:hover{background:var(--hover)}
+[data-phase=speaking] .tab{color:var(--a)}[data-phase=listening] .tab{color:var(--g)}
+[data-mode=tab] .tab{display:block}[data-mode=tab] .card{display:none}

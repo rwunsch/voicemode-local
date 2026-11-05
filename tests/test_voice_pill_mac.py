@@ -56,21 +56,19 @@ def test_shown_needs_snapshot_visible_and_not_dismissed():
 
 def test_geometry_per_mode():
     s = m.WindowState(visible=True)
-    assert m.geometry(s, AREA) == (1440 - 320 - 16, 25 + 800 - 46 - 16, 320, 46)
+    assert m.geometry(s, AREA) == (1440 - 350 - 16, 25 + 800 - 46 - 16, 350, 46)
     s.css_height = 200
-    assert m.geometry(s, AREA, pos=(100, 100)) == (100, 100, 320, 200)
-    s.mode = "dot"
-    assert m.geometry(s, AREA, pos=(100, 100)) == (100, 100, 16, 16)
+    assert m.geometry(s, AREA, pos=(100, 100)) == (100, 100, 350, 200)
     s.mode, s.side = "docked", "right"
-    assert m.geometry(s, AREA) == (1120, 25, 320, 800)
+    assert m.geometry(s, AREA) == (1090, 325, 350, 200)  # centred on the edge, its own height
     s.side = "left"
-    assert m.geometry(s, AREA) == (0, 25, 320, 800)
+    assert m.geometry(s, AREA) == (0, 325, 350, 200)
 
 
 def test_saved_position_is_clamped_onto_the_screen():
     s = m.WindowState(visible=True, css_height=100)
-    assert m.geometry(s, AREA, pos=(5000, -50)) == (1120, 25, 320, 100)
-    assert m.geometry(s, AREA, pos=(-9, 5000)) == (0, 725, 320, 100)
+    assert m.geometry(s, AREA, pos=(5000, -50)) == (1090, 25, 350, 100)
+    assert m.geometry(s, AREA, pos=(-9, 5000)) == (0, 725, 350, 100)
 
 
 def test_cocoa_coordinate_conversion():
@@ -253,6 +251,175 @@ def test_run_on_main_passes_exceptions_back():
         m.run_on_main(bad, schedule=lambda f: f(), is_main=lambda: False)
 
 
-def test_docked_card_fills_the_window_height():
+def test_docked_card_keeps_its_own_height():
     css = (REPO / "ui" / "pill" / "pill.css").read_text()
-    assert "[data-mode=docked] .card" in css and "100vh" in css
+    assert "[data-mode=docked] .card" not in css  # docked floats at its own height now
+
+
+# Horizontal resize from the window edges
+REPO = Path(__file__).resolve().parent.parent
+
+
+def test_right_edge_changes_width_and_keeps_the_left_side_still():
+    assert m.resized("right", 100, 320, 50, AREA) == (100, 370)
+    assert m.resized("right", 100, 400, -20, AREA) == (100, 380)
+
+
+def test_left_edge_keeps_the_right_side_still():
+    assert m.resized("left", 100, 320, -50, AREA) == (50, 370)
+    assert m.resized("left", 100, 400, 20, AREA) == (120, 380)
+
+
+def test_resize_stops_at_the_width_limits():
+    assert m.resized("right", 100, 320, -999, AREA) == (100, m.MIN_WIDTH)
+    assert m.resized("right", 100, 320, 999, AREA) == (100, m.MAX_WIDTH)
+    assert m.resized("left", 100, 320, 999, AREA) == (420 - m.MIN_WIDTH, m.MIN_WIDTH)
+
+
+def test_resize_stops_at_the_screen_edge():
+    assert m.resized("right", 1100, 280, 500, AREA) == (1100, 340)
+    assert m.resized("left", 10, 320, -500, AREA) == (0, 330)
+
+
+def test_geometry_uses_the_chosen_width_including_docked():
+    s = m.WindowState(visible=True, css_width=500)
+    assert m.geometry(s, AREA, pos=(100, 100))[2] == 500
+    s.mode = "docked"
+    assert m.geometry(s, AREA)[0::2] == (1440 - 500, 500)
+
+
+def test_resize_message_is_recognised_and_changes_nothing_by_itself():
+    s = m.WindowState(visible=True)
+    assert s.on_window({"resize": "left"}) == "resize"
+    assert s.css_width == m.WIDTH
+
+
+def test_saved_width_is_read_back_and_limited():
+    assert m.parse_saved_position("10 20 500 300") == ((10, 20), 500, 300)
+    assert m.parse_saved_position("10 20 500") == ((10, 20), 500, None)
+    assert m.parse_saved_position("10 20") == ((10, 20), None, None)
+    assert m.parse_saved_position("10 20 9000") == ((10, 20), m.MAX_WIDTH, None)
+    assert m.parse_saved_position("- - 400 300") == (None, 400, 300)
+    assert m.parse_saved_position("junk") == (None, None, None)
+
+
+def test_page_has_both_edges_and_windows_uses_the_same_limits():
+    page = (REPO / "ui/pill/index.html").read_text()
+    assert 'id="edgeL"' in page and 'id="edgeR"' in page
+    js = (REPO / "ui/pill/app.js").read_text()
+    assert 'resize: "left"' in js and 'resize: "right"' in js
+    ps1 = (REPO / "pill-windows.ps1").read_text()
+    assert f"MIN_WIDTH = {m.MIN_WIDTH}, MAX_WIDTH = {m.MAX_WIDTH}" in ps1
+
+
+# Floating dock: on the screen edge, slides away to a small tab, moves only up and down
+def test_tab_sits_on_the_edge_at_the_docked_height():
+    s = m.WindowState(visible=True, css_height=200)
+    s.mode = "docked"
+    _, y, _, h = m.geometry(s, AREA)
+    s.mode = "tab"
+    x, ty, w, th = m.geometry(s, AREA)
+    assert (x, w, th) == (1440 - m.TAB_W, m.TAB_W, m.TAB_H)
+    assert ty + th // 2 == y + h // 2
+    s.side = "left"
+    assert m.geometry(s, AREA)[0] == 0
+
+
+def test_dock_height_is_chosen_by_dragging_and_stays_on_screen():
+    s = m.WindowState(visible=True, css_height=200, mode="docked", dock_y=300)
+    assert m.geometry(s, AREA)[1] == 200
+    s.dock_y = -500
+    assert m.geometry(s, AREA)[1] == 25
+    s.dock_y = 5000
+    assert m.geometry(s, AREA)[1] == 625
+
+
+def test_docked_ignores_the_saved_free_position():
+    s = m.WindowState(visible=True, css_height=200, mode="docked")
+    assert m.geometry(s, AREA, pos=(100, 100))[0] == 1090
+
+
+def test_slide_message_is_recognised():
+    assert m.WindowState().on_window({"slide": "out"}) == "slide"
+
+
+def test_slide_steps_end_exactly_on_the_target():
+    xs = m.slide_steps(1000, 1440)
+    assert xs[-1] == 1440 and xs[0] > 1000 and xs == sorted(xs)
+
+
+def test_page_has_the_tab_and_slide_and_windows_matches():
+    page = (REPO / "ui/pill/index.html").read_text()
+    assert 'id="tab"' in page and 'id="tuck"' in page
+    assert 'slide: "out"' in (REPO / "ui/pill/app.js").read_text()
+    ps1 = (REPO / "pill-windows.ps1").read_text()
+    assert f"TAB_W = {m.TAB_W}, TAB_H = {m.TAB_H}" in ps1
+    assert "SHAppBarMessage" not in ps1  # docking no longer takes screen space
+
+
+# Minimized lives in the tray (Windows) or the menu bar (Mac), not on the desktop
+def test_minimized_leaves_the_screen_for_the_tray():
+    s = m.WindowState(visible=True, mode="dot")
+    assert s.in_tray and not s.on_screen
+    s.mode = "pill"
+    assert s.on_screen and not s.in_tray
+
+
+def test_no_tray_icon_when_the_pill_should_not_exist():
+    assert not m.WindowState(visible=False, mode="dot").in_tray
+    assert not m.WindowState(visible=True, mode="dot", dismissed=True).in_tray
+
+
+def test_phase_message_is_kept_for_the_tray_colour():
+    s = m.WindowState()
+    assert s.on_window({"phase": "speaking"}) == "phase"
+    assert s.phase == "speaking" and s.mode == "pill"
+
+
+def test_tray_replaces_the_dot_on_both_platforms():
+    assert 'id="dot"' not in (REPO / "ui/pill/index.html").read_text()
+    js = (REPO / "ui/pill/app.js").read_text()
+    assert '"restore"' in js and "phase: vm.phase" in js
+    ps1 = (REPO / "pill-windows.ps1").read_text()
+    assert "NotifyIcon" in ps1 and '{\\"cmd\\":\\"restore\\"}' in ps1
+
+
+# Docked starts as a slim rail; the full panel opens from it
+def test_rail_is_narrow_on_the_edge_at_its_own_height():
+    s = m.WindowState(visible=True, css_height=210, css_width=500, mode="rail")
+    x, y, w, h = m.geometry(s, AREA)
+    assert (x, w, h) == (1440 - m.RAIL_W, m.RAIL_W, 210)
+    assert y + h // 2 == 25 + 800 // 2
+    s.side = "left"
+    assert m.geometry(s, AREA)[0] == 0
+
+
+def test_rail_keeps_the_dragged_height():
+    s = m.WindowState(visible=True, css_height=200, mode="rail", dock_y=300)
+    assert m.geometry(s, AREA)[1] == 200
+
+
+def test_windows_uses_the_same_rail_width():
+    assert f"RAIL_W = {m.RAIL_W}" in (REPO / "pill-windows.ps1").read_text()
+
+
+# A slide still running when the tab is placed must not carry it off the monitor
+def test_placing_the_window_stops_a_running_slide():
+    ps1 = (REPO / "pill-windows.ps1").read_text()
+    body = ps1[ps1.index("void Place() {"):]
+    assert body.index("slideTimer.Stop()") < body.index("Move(new RECT")
+    mac = (REPO / "patches/voice_pill_mac.py").read_text()
+    apply_body = mac[mac.index("    def apply(self):"):]
+    assert "self.slide_gen += 1" in apply_body[:apply_body.index("def update_tray")]
+
+
+def test_top_row_order_is_expand_dock_minimize():
+    page = (REPO / "ui/pill/index.html").read_text()
+    assert page.index('id="expand"') < page.index('id="dockTop"') < page.index('id="minimize"') < page.index('id="dismiss"') < page.index('id="more"')
+    assert '$("dockTop").onclick' in (REPO / "ui/pill/app.js").read_text()
+    css = (REPO / "ui/pill/pill.css").read_text()
+    assert "[data-mode=docked] #dockTop" in css and "[data-mode=rail] #dockTop" in css
+
+
+def test_narrowest_width_still_shows_the_status_text():
+    assert m.MIN_WIDTH >= 320 and m.WIDTH >= 350

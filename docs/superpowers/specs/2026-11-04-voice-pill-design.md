@@ -40,8 +40,14 @@ all the time.
 Mockup: `.superpowers/brainstorm/871-1793830428/content/pill-or-panel.html`. Layout and
 colours are a starting point, not a spec.
 
-**(my call)** Docking reserves screen space on Windows and macOS where the OS allows it.
-Only one pill per machine, covering all sessions.
+**(Robert, 2026-11-05)** Docked is not a full-height strip. It floats on the right edge, always
+on top, in the middle by default, and moves only up and down that edge. An arrow slides it out of
+view, leaving only an arrow that brings it back. The side edges of the window change its width.
+This replaces my earlier call that docking reserves screen space.
+**(Robert, 2026-11-05)** The full panel takes too much room as the docked form. **(my call)** Docked
+starts as a slim rail with status and the three main controls, and the full panel opens from it.
+
+**(my call)** Only one pill per machine, covering all sessions.
 
 ## When it is visible
 
@@ -91,8 +97,9 @@ Native Linux is not a goal, but nothing should rule it out.
   hides the pill. It shows a neutral label such as "Not in a voice turn", and a dismiss
   control removes it. A wrong "Listening" is the worse failure.
 - With no floor holder, the status and picker follow the last session that held the floor.
-- Minimizing leaves a small dot that restores it. It stays minimized when new voice activity
-  starts, and the state survives its return. No tray or menu-bar icon in the first version.
+- **(Robert, 2026-11-05)** Minimizing goes to the Windows tray. **(my call)** The Mac equivalent is
+  the menu bar, and the icon's colour follows the phase. It stays minimized when new voice activity
+  starts, and the state survives its return.
 - A `converse` call during machine-wide Pause waits, and resumes on resume. Audio already
   recorded when Pause is pressed is discarded, because of "Whisper must not hear anything".
 - After a push-to-talk wake leads to a real conversation, the conversation rules apply and

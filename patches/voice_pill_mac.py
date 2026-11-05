@@ -24,7 +24,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-WIDTH, DOT, MARGIN, DEFAULT_H = 320, 16, 16, 46
+WIDTH, MARGIN, DEFAULT_H = 350, 16, 46
+MIN_WIDTH, MAX_WIDTH = 320, 640
+TAB_W, TAB_H, RAIL_W = 22, 64, 76
 BACKOFF_CAP_S = 30
 STABLE_RUN_S = 30
 
@@ -61,17 +63,36 @@ class WindowState:
     mode: str = "pill"
     side: str = "right"
     css_height: int = DEFAULT_H
+    css_width: int = WIDTH
+    dock_y: object = None  # centre of the docked window, top-left coordinates; None is the middle
     dismissed: bool = False
     visible: bool = False  # last snapshot's flag
+    phase: str = ""
 
     @property
     def shown(self):
         return self.visible and not self.dismissed
 
+    @property
+    def in_tray(self):
+        """Mode "dot" is minimized: the menu bar has it."""
+        return self.shown and self.mode == "dot"
+
+    @property
+    def on_screen(self):
+        return self.shown and self.mode != "dot"
+
     def on_window(self, w):
-        """Apply a page {"window": ...} message. Returns 'drag', 'changed' or None."""
+        """Apply a page {"window": ...} message. Returns 'drag', 'resize', 'changed' or None."""
         if "drag" in w:
             return "drag"
+        if "resize" in w:
+            return "resize"
+        if "slide" in w:
+            return "slide"
+        if isinstance(w.get("phase"), str):
+            self.phase = w["phase"]
+            return "phase"
         h = w.get("height")
         if isinstance(h, int) and not isinstance(h, bool):
             self.css_height = h
@@ -93,15 +114,45 @@ class WindowState:
 def geometry(state, area, pos=None):
     """(x, y, w, h) in points, y down. `area` is the usable screen (x, y, w, h).
 
-    Docked means snapped to the screen edge at full height. macOS has no AppBar, so
-    other windows are not pushed aside.
+    Docked floats on the screen edge at its own height, as a slim "rail" or the full "docked"
+    panel, and "tab" is what is left of it after sliding away. Both sit at dock_y, or the middle of the screen.
     """
     ax, ay, aw, ah = area
-    if state.mode == "docked":
-        return (ax if state.side == "left" else ax + aw - WIDTH, ay, WIDTH, ah)
-    w, h = (DOT, DOT) if state.mode == "dot" else (WIDTH, state.css_height)
+    if state.mode in ("docked", "rail", "tab"):
+        w = {"tab": TAB_W, "rail": RAIL_W}.get(state.mode, state.css_width)
+        h = TAB_H if state.mode == "tab" else state.css_height
+        cy = ay + ah // 2 if state.dock_y is None else state.dock_y
+        return (ax if state.side == "left" else ax + aw - w, max(ay, min(cy - h // 2, ay + ah - h)), w, h)
+    w, h = state.css_width, state.css_height
     x, y = pos if pos else (ax + aw - w - MARGIN, ay + ah - DEFAULT_H - MARGIN)
     return (max(ax, min(x, ax + aw - w)), max(ay, min(y, ay + ah - h)), w, h)
+
+
+def resized(edge, x, w, dx, area):
+    """(x, w) after dragging an edge by dx. The opposite edge stays where it is."""
+    ax, _, aw, _ = area
+    room = x + w - ax if edge == "left" else ax + aw - x
+    nw = max(MIN_WIDTH, min(MAX_WIDTH, room, w - dx if edge == "left" else w + dx))
+    return (x + w - nw, nw) if edge == "left" else (x, nw)
+
+
+def slide_steps(start, end, n=10):
+    """x positions for a slide, ending exactly on `end`."""
+    return [start + (end - start) * i // n for i in range(1, n + 1)]
+
+
+def parse_saved_position(text):
+    """'x y [width [dock_y]]' -> ((x, y) or None, width or None, dock_y or None). '-' means not set."""
+    p = text.split()
+    if len(p) < 2 or len(p) > 4:
+        return None, None, None
+    try:
+        pos = None if p[0] == "-" else (int(p[0]), int(p[1]))
+        width = max(MIN_WIDTH, min(MAX_WIDTH, int(p[2]))) if len(p) > 2 and p[2] != "-" else None
+        dock = int(p[3]) if len(p) > 3 and p[3] != "-" else None
+    except ValueError:
+        return None, None, None
+    return pos, width, dock
 
 
 def top_left_area(frame, visible):
@@ -214,6 +265,15 @@ def make_handler(app):
     return PillHandler.alloc().init()
 
 
+def make_tray_target(app):
+    from Foundation import NSObject
+
+    class PillTrayTarget(NSObject):
+        def clicked_(self, sender):
+            app.webview().evaluateJavaScript_completionHandler_("""window.pillReceive('{"cmd":"restore"}')""", None)
+    return PillTrayTarget.alloc().init()
+
+
 class App:
     def __init__(self, force, backend):
         self.force = force
@@ -222,14 +282,16 @@ class App:
         self.pos = None
         self.pos_file = Path.home() / ".voicemode" / "pill" / "window-position.txt"
         self.lock = threading.Lock()
-        self.proc = self.stdin = self.win = None
+        self.proc = self.stdin = self.win = self.tray = self.tray_target = None
+        self.slide_gen = 0
         self.closing = self.had_output = self.dragging = False
         self.backoff = 1.0
         self.started = None
         try:
-            x, y = self.pos_file.read_text().split()
-            self.pos = (int(x), int(y))
-        except (OSError, ValueError):
+            self.pos, width, self.state.dock_y = parse_saved_position(self.pos_file.read_text())
+            if width:
+                self.state.css_width = width
+        except OSError:
             pass
 
     def log(self, s):
@@ -308,11 +370,20 @@ class App:
             except (OSError, ValueError):
                 pass
             return
+        prev = self.state.mode
         what = self.state.on_window(r[1])
         if what == "drag":
             self.drag()
+        elif what == "resize":
+            self.resize(r[1]["resize"])
+        elif what == "phase":
+            self.update_tray()
+        elif what == "slide":
+            threading.Thread(target=self.slide, args=(True,), daemon=True).start()
         elif what == "changed":
             self.apply()
+            if prev == "tab" and self.state.mode in ("docked", "rail") and self.state.shown:
+                threading.Thread(target=self.slide, args=(False,), daemon=True).start()
 
     # window. Every AppKit call below runs on the main thread (run_on_main / callAfter).
     def webview(self):
@@ -337,8 +408,9 @@ class App:
         native = self.win.native if self.win else None
         if not native or self.closing:
             return
-        shown = self.state.shown
-        if not shown:
+        self.slide_gen += 1  # a slide still running must not carry the window past the screen edge
+        self.update_tray()
+        if not self.state.on_screen:
             return AppHelper.callAfter(native.orderOut_, None)
 
         def go():
@@ -347,6 +419,28 @@ class App:
             native.setFrame_display_(NSMakeRect(x, y, w, h), True)
             native.orderFrontRegardless()  # pywebview's own show() activates the app
         AppHelper.callAfter(go)
+
+    def update_tray(self):
+        from PyObjCTools import AppHelper
+        AppHelper.callAfter(self.update_tray_main)
+
+    def update_tray_main(self):
+        from AppKit import (NSAttributedString, NSColor, NSForegroundColorAttributeName, NSStatusBar,
+                            NSVariableStatusItemLength)
+        want = self.state.in_tray
+        if want and not self.tray:
+            self.tray = NSStatusBar.systemStatusBar().statusItemWithLength_(NSVariableStatusItemLength)
+            self.tray_target = make_tray_target(self)
+            self.tray.button().setTarget_(self.tray_target)
+            self.tray.button().setAction_("clicked:")
+        if not self.tray:
+            return
+        colour = {"speaking": NSColor.systemPurpleColor, "listening": NSColor.systemTealColor}.get(
+            self.state.phase, NSColor.secondaryLabelColor)()
+        title = NSAttributedString.alloc().initWithString_attributes_(
+            "\u25CF", {NSForegroundColorAttributeName: colour})
+        self.tray.button().setAttributedTitle_(title)
+        self.tray.setVisible_(want)
 
     def install_bridge_and_load(self):
         """Main thread. Add the handler and the user script, then load the page from its file."""
@@ -361,7 +455,7 @@ class App:
                                                 NSURL.fileURLWithPath_(str(ui_dir())))
 
     def drag(self):
-        if self.dragging or self.state.mode == "docked":
+        if self.dragging or self.state.mode == "tab":
             return
         self.dragging = True
         threading.Thread(target=self.drag_loop, daemon=True).start()
@@ -373,21 +467,75 @@ class App:
             native = self.win.native
             c0, o0 = NSEvent.mouseLocation(), run_on_main(lambda: native.frame().origin)
             moved = False
+            vertical = self.state.mode in ("docked", "rail")  # docked: up and down the screen edge only
             while NSEvent.pressedMouseButtons() & 1:
                 c = NSEvent.mouseLocation()
-                AppHelper.callAfter(native.setFrameOrigin_, NSMakePoint(o0.x + c.x - c0.x, o0.y + c.y - c0.y))
+                x = o0.x if vertical else o0.x + c.x - c0.x
+                AppHelper.callAfter(native.setFrameOrigin_, NSMakePoint(x, o0.y + c.y - c0.y))
                 moved = moved or c.x != c0.x or c.y != c0.y
                 time.sleep(0.016)
             if moved:
                 time.sleep(0.05)  # let the last move land
                 fr = run_on_main(lambda: native.frame())
                 o, size = fr.origin, fr.size
-                self.pos = (int(o.x), int(self.screen()[1] - o.y - size.height))
-                try:
-                    self.pos_file.write_text(f"{self.pos[0]} {self.pos[1]}")
-                except OSError as e:
-                    self.log(f"position not saved: {e}")
+                top = self.screen()[1] - o.y - size.height
+                if vertical:
+                    self.state.dock_y = int(top + size.height / 2)
+                else:
+                    self.pos = (int(o.x), int(top))
+                self.save_position()
                 self.apply()
+        finally:
+            self.dragging = False
+
+    def save_position(self):
+        try:
+            pos = f"{self.pos[0]} {self.pos[1]}" if self.pos else "- -"
+            dock = "-" if self.state.dock_y is None else self.state.dock_y
+            self.pos_file.write_text(f"{pos} {self.state.css_width} {dock}")
+        except OSError as e:
+            self.log(f"position not saved: {e}")
+
+    def slide(self, out):
+        """Move the window off the screen edge, or back onto it from there."""
+        from AppKit import NSMakePoint
+        from PyObjCTools import AppHelper
+        native = self.win.native
+        gen = self.slide_gen
+        if not out:
+            time.sleep(0.03)  # let apply() land
+        fr = run_on_main(lambda: native.frame())
+        area = self.screen()[0]
+        off = area[0] - int(fr.size.width) if self.state.side == "left" else area[0] + area[2]
+        here = int(fr.origin.x)
+        if not out:
+            AppHelper.callAfter(native.setFrameOrigin_, NSMakePoint(off, fr.origin.y))
+        for x in slide_steps(here, off) if out else slide_steps(off, here):
+            if gen != self.slide_gen:
+                return
+            AppHelper.callAfter(native.setFrameOrigin_, NSMakePoint(x, fr.origin.y))
+            time.sleep(0.016)
+
+    def resize(self, edge):
+        if self.dragging or self.state.mode in ("docked", "rail"):
+            return
+        self.dragging = True
+        threading.Thread(target=self.resize_loop, args=(edge,), daemon=True).start()
+
+    def resize_loop(self, edge):
+        from AppKit import NSEvent
+        try:
+            area = self.screen()[0]
+            x0, y0, w0, _ = geometry(self.state, area, self.pos)
+            c0, last = NSEvent.mouseLocation().x, w0
+            while NSEvent.pressedMouseButtons() & 1:
+                x, w = resized(edge, x0, w0, NSEvent.mouseLocation().x - c0, area)
+                if w != last:
+                    last, self.pos, self.state.css_width = w, (int(x), int(y0)), int(w)
+                    self.apply()
+                time.sleep(0.016)
+            if last != w0:
+                self.save_position()
         finally:
             self.dragging = False
 

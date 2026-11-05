@@ -83,15 +83,12 @@ RB = real `voice_pill.py` under a fake HOME with a registered dummy session.
 | `pill off` closes the window | With a backend (n=1), with a refused backend (n=1), during a backoff wait (n=1), all through the event, fake HOME |
 | Flag cleared during a backoff wait, no event | Window exits at the retry, no new backend (FB) |
 | `pill on` with a healthy window, and with one already up | "Voice pill on", and "already running" (n=1 each, fake HOME) |
-| Dock reserves the edge | Work area `0,0,1600,1032` right, `320,0,1920,1032` left |
-| Work area restored | On undock and on hide (n=1 each), on close and on hard kill (n=2 each) |
 
 CPU, all window processes together over 20 s on 20 logical CPUs (FB, n=1 unless stated):
 
 | State | % of machine | % of one core |
 |---|---|---|
 | Visible, idle | 0.10, 0.12 (n=2) | 2.0, 2.3 |
-| Docked, idle | 0.05 | 1.1 |
 | Hidden | 0.12 | 2.4 |
 | Listening | 0.09 | 1.7 |
 | Speaking | 0.11 | 2.2 |
@@ -114,7 +111,6 @@ now shows by colour only. Whether the old or new cost affects stutter was not me
 - A real login through the Startup folder. The generated `.cmd` was run from a temp folder.
 - More than one monitor, a monitor being unplugged, and scales other than 100%.
 - Fullscreen apps: the pill stays on top of them, and nothing handles that yet.
-- Explorer restarting while docked.
 
 ## Known limits
 
@@ -122,7 +118,6 @@ now shows by colour only. Whether the old or new cost affects stutter was not me
   It appears in `pill-window.log`. Run `pill off`, then `pill on`, to restart.
 - A restart attempt boots WSL. After `wsl --shutdown`, a running window starts it again within
   30 s. Use `voicemode-switch pill off` first.
-- Docked, the window takes 320 px of screen width at full height.
 
 # Voice pill: Mac window
 
@@ -154,10 +149,16 @@ as pywebview's own dependencies). The main venv gains nothing. The backend is st
 
 ## Differences from Windows
 
-- **Docked is not a reserved area.** macOS has no AppBar. "Docked" snaps the window to the
-  left or right edge of the usable screen (below the menu bar, above the Dock) at full height,
-  and other windows can still cover that strip. Pushing windows aside would need Accessibility
-  permission and fighting every app, so it is not attempted.
+- **Minimized goes to the tray on Windows and the menu bar on Mac.** The icon's colour follows the
+  phase, and a click restores the pill. It is not a taskbar button, because a taskbar window has
+  to take focus to come back, and push-to-talk only fires while a terminal has focus. Windows 11
+  may put a new tray icon in the overflow `^` until it is pinned.
+- **Docked floats, on both platforms.** It sits on the screen edge at its own height, always on
+  top, and takes no screen space. It starts as a slim rail (76 px: status, Interrupt, Pause, Stop);
+  `‹` opens the full panel, and `›` there goes back to the rail. Dragging moves it up and down the edge only. `›` slides it off
+  the edge, leaving a small `‹` tab at the same height; the tab cannot be dragged. Width comes
+  from dragging the side edges (320 to 640, default 350), which is not available while docked. Position,
+  width and dock height share one file: `x y width dock_y`, with `-` for not set.
 - **Focus.** Windows blocks activation with a style bit. Here the activation policy is
   Accessory (no Dock icon, no menu bar), set after pywebview's import because that resets it
   to Regular, and set again in the `shown` event. pywebview activates the app once when its loop
@@ -182,7 +183,6 @@ as pywebview's own dependencies). The main venv gains nothing. The backend is st
   and reads from other threads (screen, window frame) go through `run_on_main`.
 - **Files outside the repo.** WebKit caches and crash reports land under the real home directory
   whatever `HOME` is set to, so a test run with a fake `HOME` still writes there.
-- **Docked card** fills the window height on both platforms (`[data-mode=docked] .card{height:100vh}`).
 - **Dragging** polls `NSEvent.mouseLocation` while the left button is down, as on Windows.
 - **Corners** come from the page: the window is transparent.
 - **Primary screen only.** Placement and clamping use the main display. Display changes are not watched.
@@ -209,11 +209,12 @@ Window and focus (fake backend):
 - [ ] Above a full-screen app, and visible on a second Space (untested so far). If the window never gets that behaviour, check whether pywebview fires `shown` for a `hidden=True` window (the collection behaviour is set in that handler; look for "window behaviour not set" or its absence in `pill-window.log`)
 - [ ] The page renders from `file://` (the page's CSP says `'self'`): text and buttons present, no blank window; no listening socket (`lsof -nP -iTCP -sTCP:LISTEN | grep -i python` shows nothing from the pill)
 - [ ] Buttons reach the backend (Pause creates `~/.voicemode/pill/paused.json`), and snapshots reach the page (label changes with `state.json`) with the strict CSP
-- [ ] Docked: the card fills the full height, no transparent gap below it
+- [ ] Docked: floats on the edge at its own height, moves only up and down; `›` slides away to the tab, and the tab brings it back
+- [ ] Side edges resize the width and it is remembered
 - [ ] Transparent window with rounded corners, no square white edge; dark and light appearance
 - [ ] Hide and show: snapshot `visible` false then true (`state.json`)
 - [ ] Dismiss stays hidden while `visible` stays true; returns on false then true
-- [ ] Modes: pill, expanded (window grows to the card height), dot (16 px), docked left and right at full height
+- [ ] Modes: pill, expanded (window grows to the card height), minimized (tray on Windows, menu bar on Mac; a click brings it back), docked, tab
 - [ ] Drag moves it, position survives a restart, and a position off screen is pulled back
 - [ ] Disconnected when the backend dies (`echo 2 > /tmp/pillfb/exit_now`); backoff 1, 2, 4, 8, 16, 30 s in `pill-window.log`
 - [ ] Exit 1 before any output (`echo 1 > /tmp/pillfb/startup_exit`): the window exits with code 1

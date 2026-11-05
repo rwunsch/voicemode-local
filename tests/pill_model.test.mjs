@@ -82,8 +82,13 @@ test("queue row shows position", () => {
 test("dot and visibility come from ui and snapshot", () => {
   assert.equal(viewModel(snap({ ui: { minimized: true } }), 0, 0).mode, "dot");
   assert.equal(viewModel(snap({ ui: { expanded: true } }), 0, 0).mode, "expanded");
-  assert.equal(viewModel(snap({ ui: { docked: true, side: "left" } }), 0, 0).mode, "docked");
+  assert.equal(viewModel(snap({ ui: { docked: true, side: "left" } }), 0, 0).mode, "rail");
   assert.equal(viewModel(snap({ ui: { docked: true, side: "left" } }), 0, 0).side, "left");
+  assert.equal(viewModel(snap({ ui: { docked: true, dockOpen: true } }), 0, 0).mode, "docked");
+  assert.equal(viewModel(snap({ ui: { docked: true, dockOpen: true, tucked: true } }), 0, 0).mode, "tab");
+  assert.equal(viewModel(snap({ ui: { docked: true, tucked: true } }), 0, 0).mode, "tab");
+  assert.equal(viewModel(snap({ ui: { docked: true, tucked: true, side: "left" } }), 0, 0).side, "left");
+  assert.equal(viewModel(snap({ ui: { tucked: true } }), 0, 0).mode, "pill"); // only a docked pill can tuck
   assert.equal(viewModel(snap(), 0, 0).mode, "pill");
 });
 

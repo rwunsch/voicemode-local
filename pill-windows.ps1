@@ -130,9 +130,9 @@ try {
     $wv2 = Get-WebView2
     $core = Join-Path $wv2 "Microsoft.Web.WebView2.Core.dll"
     Set-Location $Local  # the C# compiler cannot start in a UNC directory
-    Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Web.Extensions, System.Drawing
+    Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Web.Extensions, System.Drawing, System.Windows.Forms
     Add-Type -Path $core
-    Add-Type -ReferencedAssemblies @("PresentationFramework", "PresentationCore", "WindowsBase", "System.Xaml",
+    Add-Type -ReferencedAssemblies @("PresentationFramework", "PresentationCore", "WindowsBase", "System.Xaml", "System.Windows.Forms",
         "System.Web.Extensions", "System.Drawing", $core) -TypeDefinition @'
 using System;
 using System.Collections.Generic;
@@ -151,7 +151,6 @@ public class VmlPill {
     [StructLayout(LayoutKind.Sequential)] public struct RECT { public int left, top, right, bottom; }
     [StructLayout(LayoutKind.Sequential)] public struct POINT { public int x, y; }
     [StructLayout(LayoutKind.Sequential)] public struct MONITORINFO { public int cbSize; public RECT rcMonitor, rcWork; public int dwFlags; }
-    [StructLayout(LayoutKind.Sequential)] public struct APPBARDATA { public int cbSize; public IntPtr hWnd; public uint uCallbackMessage, uEdge; public RECT rc; public IntPtr lParam; }
     [DllImport("user32.dll")] static extern int GetWindowLong(IntPtr h, int i);
     [DllImport("user32.dll")] static extern int SetWindowLong(IntPtr h, int i, int v);
     [DllImport("user32.dll")] static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int w, int ht, uint f);
@@ -163,11 +162,11 @@ public class VmlPill {
     [DllImport("user32.dll")] static extern short GetAsyncKeyState(int k);
     [DllImport("user32.dll")] static extern IntPtr MonitorFromPoint(POINT p, uint f);
     [DllImport("user32.dll")] static extern bool GetMonitorInfo(IntPtr m, ref MONITORINFO i);
-    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern uint RegisterWindowMessage(string s);
-    [DllImport("shell32.dll")] static extern UIntPtr SHAppBarMessage(uint m, ref APPBARDATA d);
 
     const uint NOACTIVATE = 0x10, NOSIZE = 0x1, NOZORDER = 0x4;
-    const int WIDTH = 320, DOT = 16;
+    const int WIDTH = 350;
+    const int MIN_WIDTH = 320, MAX_WIDTH = 640;
+    const int TAB_W = 22, TAB_H = 64, RAIL_W = 76;
     static readonly IntPtr TOPMOST = new IntPtr(-1);
     const string HOST = "pill.voicemode.example";
     const string BRIDGE = @"
@@ -185,7 +184,10 @@ document.addEventListener('DOMContentLoaded',function(){
     JavaScriptSerializer json = new JavaScriptSerializer();
     double backoff = 1; bool closing, started, hadOutput; int exitCode;
     bool snapshotVisible, dismissed; string mode = "pill", side = "right"; int cssHeight = 46;
-    bool hasPos; int posX, posY; bool appbar; uint abMsg;
+    bool hasPos, hasDock; int posX, posY, dockCy, cssWidth = WIDTH;
+    DispatcherTimer slideTimer;
+    System.Windows.Forms.NotifyIcon tray; string phase = "";
+    Dictionary<string, System.Drawing.Icon> trayIcons = new Dictionary<string, System.Drawing.Icon>();
     DispatcherTimer dragTimer; int dragDx, dragDy; bool moved;
 
     void Log(string s) {
@@ -218,11 +220,9 @@ document.addEventListener('DOMContentLoaded',function(){
             ShowInTaskbar = false, ShowActivated = false, Topmost = true, Width = WIDTH, Height = 46 };
         hwnd = new WindowInteropHelper(win).EnsureHandle();  // an HWND without ever showing it
         SetWindowLong(hwnd, -20, GetWindowLong(hwnd, -20) | 0x08000000 | 0x80);  // NOACTIVATE | TOOLWINDOW
-        abMsg = RegisterWindowMessage("VoiceModePillAppBar");
         HwndSource.FromHwnd(hwnd).AddHook(WndProc);
         ui = Dispatcher.CurrentDispatcher;
         ui.UnhandledException += (s, e) => { Log("FATAL: " + e.Exception); e.Handled = true; exitCode = 2; Shutdown(); };
-        AppDomain.CurrentDomain.ProcessExit += (s, e) => AppBarOff();
         Console.CancelKeyPress += (s, e) => { e.Cancel = true; Post(Shutdown); };
         win.Closed += (s, e) => { if (!closing) Shutdown(); };
         // `voicemode-switch pill off` sets this: the one stop path that needs no backend.
@@ -259,7 +259,6 @@ document.addEventListener('DOMContentLoaded',function(){
     IntPtr WndProc(IntPtr h, int msg, IntPtr w, IntPtr l, ref bool handled) {
         if (msg == 0x21) { handled = true; return new IntPtr(3); }  // WM_MOUSEACTIVATE: MA_NOACTIVATE
         if (msg == 0x7E) Apply();                                   // WM_DISPLAYCHANGE
-        if (abMsg != 0 && msg == abMsg && w.ToInt64() == 1 && appbar) Apply();  // ABN_POSCHANGED
         return IntPtr.Zero;
     }
 
@@ -360,14 +359,19 @@ document.addEventListener('DOMContentLoaded',function(){
     void OnWindowMessage(Dictionary<string, object> w) {
         object v;
         if (w.ContainsKey("drag")) { StartDrag(); return; }
+        if (w.ContainsKey("slide")) { SlideOut(); return; }
+        if (w.TryGetValue("phase", out v) && v is string) { phase = (string)v; UpdateTray(); return; }
+        if (w.ContainsKey("resize")) { StartResize(w["resize"] as string); return; }
         if (w.TryGetValue("height", out v) && v is int) { cssHeight = (int)v; Apply(); return; }
         if (w.TryGetValue("mode", out v) && v is string) {
             string next = (string)v;
             dismissed = next == "hidden";
+            string prev = mode;
             if (!dismissed) mode = next;
             object sv;
             side = w.TryGetValue("side", out sv) && (sv as string) == "left" ? "left" : "right";
             Apply();
+            if (prev == "tab" && (mode == "docked" || mode == "rail") && !dismissed) SlideIn();
         }
     }
 
@@ -381,15 +385,48 @@ document.addEventListener('DOMContentLoaded',function(){
         return i;
     }
 
+    // Minimized lives in the notification area. A click there tells the page, which owns the UI state.
+    void UpdateTray() {
+        if (closing) return;
+        bool want = snapshotVisible && !dismissed && mode == "dot";
+        if (want && tray == null) {
+            tray = new System.Windows.Forms.NotifyIcon();
+            tray.MouseUp += (s, e) => {
+                if (e.Button == System.Windows.Forms.MouseButtons.Left)
+                    ctl.CoreWebView2.PostWebMessageAsString("{\"cmd\":\"restore\"}");
+            };
+        }
+        if (tray == null) return;
+        tray.Icon = TrayIcon();
+        tray.Text = "Voice pill: " + phase;
+        tray.Visible = want;
+    }
+
+    System.Drawing.Icon TrayIcon() {
+        System.Drawing.Icon icon;
+        if (trayIcons.TryGetValue(phase, out icon)) return icon;
+        var colour = phase == "speaking" ? System.Drawing.Color.FromArgb(139, 92, 246)
+            : phase == "listening" ? System.Drawing.Color.FromArgb(13, 148, 136) : System.Drawing.Color.FromArgb(148, 163, 184);
+        using (var bmp = new System.Drawing.Bitmap(32, 32))
+        using (var g = System.Drawing.Graphics.FromImage(bmp))
+        using (var brush = new System.Drawing.SolidBrush(colour)) {
+            g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+            g.FillEllipse(brush, 3, 3, 26, 26);
+            icon = System.Drawing.Icon.FromHandle(bmp.GetHicon());  // kept for the life of the process
+        }
+        trayIcons[phase] = icon;
+        return icon;
+    }
+
     void Apply() {
         if (closing || ctl == null) return;
-        if (!snapshotVisible || dismissed) {
-            AppBarOff();
+        UpdateTray();
+        if (!snapshotVisible || dismissed || mode == "dot") {  // "dot" is minimized: the tray has it
             ShowWindow(hwnd, 0);
             ctl.IsVisible = false;
             return;
         }
-        if (mode == "docked") { AppBarOn(); } else { AppBarOff(); Place(); }
+        Place();
         ShowWindow(hwnd, 4);  // SW_SHOWNOACTIVATE
         ctl.IsVisible = true;
     }
@@ -401,58 +438,108 @@ document.addEventListener('DOMContentLoaded',function(){
     }
 
     void Place() {
-        int w = Scale(mode == "dot" ? DOT : WIDTH), h = Scale(mode == "dot" ? DOT : cssHeight);
+        // A slide outlasting the page's timer would otherwise carry the window past the monitor edge.
+        if (slideTimer != null) { slideTimer.Stop(); slideTimer = null; }
+        bool edge = mode == "docked" || mode == "rail" || mode == "tab";
+        int w = Scale(mode == "tab" ? TAB_W : mode == "rail" ? RAIL_W : cssWidth);
+        int h = Scale(mode == "tab" ? TAB_H : cssHeight);
         var a = (hasPos ? MonitorAt(posX, posY) : MonitorAt(0, 0)).rcWork;
         int x = hasPos ? posX : a.right - w - Scale(16), y = hasPos ? posY : a.bottom - Scale(46) - Scale(16);
+        if (edge) {  // floats on the screen edge, at the height it was dragged to, or the middle
+            x = side == "left" ? a.left : a.right - w;
+            y = (hasDock ? dockCy : (a.top + a.bottom) / 2) - h / 2;
+        }
         x = Math.Max(a.left, Math.Min(x, a.right - w));
         y = Math.Max(a.top, Math.Min(y, a.bottom - h));
         Move(new RECT { left = x, top = y, right = x + w, bottom = y + h });
-        int round = mode == "dot" ? w : Scale(32);
+        int round = mode == "tab" ? Scale(12) : Scale(32);
         SetWindowRgn(hwnd, CreateRoundRectRgn(0, 0, w + 1, h + 1, round, round), true);  // the OS owns the region now
-    }
-
-    void AppBarOn() {
-        var d = new APPBARDATA { cbSize = Marshal.SizeOf(typeof(APPBARDATA)), hWnd = hwnd, uCallbackMessage = abMsg };
-        if (!appbar) { SHAppBarMessage(0, ref d); appbar = true; }  // ABM_NEW
-        int w = Scale(WIDTH);
-        var mon = (hasPos ? MonitorAt(posX, posY) : MonitorAt(0, 0)).rcMonitor;
-        d.uEdge = side == "left" ? 0u : 2u;
-        d.rc = mon;
-        if (side == "left") d.rc.right = mon.left + w; else d.rc.left = mon.right - w;
-        SHAppBarMessage(2, ref d);  // ABM_QUERYPOS: the shell trims it around other bars
-        if (side == "left") d.rc.right = d.rc.left + w; else d.rc.left = d.rc.right - w;
-        SHAppBarMessage(3, ref d);  // ABM_SETPOS
-        Move(d.rc);
-        SetWindowRgn(hwnd, IntPtr.Zero, true);
-    }
-
-    void AppBarOff() {
-        if (!appbar) return;
-        appbar = false;
-        var d = new APPBARDATA { cbSize = Marshal.SizeOf(typeof(APPBARDATA)), hWnd = hwnd };
-        SHAppBarMessage(1, ref d);  // ABM_REMOVE
     }
 
     // Own drag loop: a drag started inside WebView2 has its mouse capture in another
     // process, and the system move loop would activate the window.
     void StartDrag() {
-        if (dragTimer != null || mode == "docked") return;
+        if (dragTimer != null || mode == "tab") return;
+        bool vertical = mode == "docked" || mode == "rail";  // docked: up and down the screen edge only
+        RECT start; GetWindowRect(hwnd, out start);
+        var area = MonitorAt(start.left, start.top).rcWork;
+        int height = start.bottom - start.top;
         POINT c; GetCursorPos(out c);
         var r = CurrentOrigin();
         dragDx = c.x - r.x; dragDy = c.y - r.y; moved = false;
         dragTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(16) };
         dragTimer.Tick += (s, e) => {
             POINT p; GetCursorPos(out p);
-            if (p.x - dragDx != r.x || p.y - dragDy != r.y) {
-                r.x = p.x - dragDx; r.y = p.y - dragDy; moved = true;
+            int nx = vertical ? r.x : p.x - dragDx;
+            int ny = vertical ? Math.Max(area.top, Math.Min(p.y - dragDy, area.bottom - height)) : p.y - dragDy;
+            if (nx != r.x || ny != r.y) {
+                r.x = nx; r.y = ny; moved = true;
                 SetWindowPos(hwnd, IntPtr.Zero, r.x, r.y, 0, 0, NOACTIVATE | NOSIZE | NOZORDER);
             }
             if ((GetAsyncKeyState(1) & 0x8000) == 0) {
                 dragTimer.Stop(); dragTimer = null;
-                if (moved) { posX = r.x; posY = r.y; hasPos = true; SavePosition(); Apply(); }
+                if (moved) {
+                    if (vertical) { dockCy = r.y + height / 2; hasDock = true; }
+                    else { posX = r.x; posY = r.y; hasPos = true; }
+                    SavePosition(); Apply();
+                }
             }
         };
         dragTimer.Start();
+    }
+
+    // Same loop as a drag, for the same reasons. The opposite edge stays where it is.
+    void StartResize(string edge) {
+        if (dragTimer != null || mode == "docked" || mode == "rail") return;
+        POINT c; GetCursorPos(out c);
+        RECT r0; GetWindowRect(hwnd, out r0);
+        var a = MonitorAt(r0.left, r0.top).rcWork;
+        int w0 = r0.right - r0.left, last = w0, min = Scale(MIN_WIDTH);
+        bool left = edge == "left";
+        int max = Math.Max(min, Math.Min(Scale(MAX_WIDTH), left ? r0.right - a.left : a.right - r0.left));
+        posX = r0.left; posY = r0.top; hasPos = true;
+        dragTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(16) };
+        dragTimer.Tick += (s, e) => {
+            POINT p; GetCursorPos(out p);
+            int w = Math.Max(min, Math.Min(max, left ? w0 - (p.x - c.x) : w0 + (p.x - c.x)));
+            if (w != last) {
+                last = w;
+                if (left) posX = r0.right - w;
+                cssWidth = (int)Math.Round(w * 96.0 / GetDpiForWindow(hwnd));
+                Place();
+            }
+            if ((GetAsyncKeyState(1) & 0x8000) == 0) {
+                dragTimer.Stop(); dragTimer = null;
+                SavePosition();
+            }
+        };
+        dragTimer.Start();
+    }
+
+    void SlideOut() {
+        RECT r; GetWindowRect(hwnd, out r);
+        var a = MonitorAt(r.left, r.top).rcWork;
+        Slide(r.left, side == "left" ? a.left - (r.right - r.left) : a.right, r.top);
+    }
+
+    void SlideIn() {
+        RECT r; GetWindowRect(hwnd, out r);
+        var a = MonitorAt(r.left, r.top).rcWork;
+        int from = side == "left" ? a.left - (r.right - r.left) : a.right;
+        SetWindowPos(hwnd, IntPtr.Zero, from, r.top, 0, 0, NOACTIVATE | NOSIZE | NOZORDER);
+        Slide(from, r.left, r.top);
+    }
+
+    void Slide(int from, int to, int y) {
+        if (slideTimer != null) slideTimer.Stop();
+        int i = 0;
+        var t = slideTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(16) };
+        t.Tick += (s, e) => {
+            i++;
+            SetWindowPos(hwnd, IntPtr.Zero, from + (to - from) * i / 10, y, 0, 0, NOACTIVATE | NOSIZE | NOZORDER);
+            if (i >= 10) { t.Stop(); if (slideTimer == t) slideTimer = null; }
+        };
+        t.Start();
     }
 
     POINT CurrentOrigin() {
@@ -465,17 +552,20 @@ document.addEventListener('DOMContentLoaded',function(){
         try {
             var p = File.ReadAllText(posFile).Split(' ');
             hasPos = int.TryParse(p[0], out posX) & int.TryParse(p[1], out posY);
+            int saved;
+            if (p.Length > 2 && int.TryParse(p[2], out saved)) cssWidth = Math.Max(MIN_WIDTH, Math.Min(MAX_WIDTH, saved));
+            hasDock = p.Length > 3 && int.TryParse(p[3], out dockCy);
         } catch (Exception) { hasPos = false; }
     }
 
     void SavePosition() {
-        try { File.WriteAllText(posFile, posX + " " + posY); } catch (IOException e) { Log("position not saved: " + e.Message); }
+        try { File.WriteAllText(posFile, (hasPos ? posX + " " + posY : "- -") + " " + cssWidth + " " + (hasDock ? dockCy.ToString() : "-")); } catch (IOException e) { Log("position not saved: " + e.Message); }
     }
 
     void Shutdown() {
         if (closing) return;
         closing = true;
-        AppBarOff();
+        if (tray != null) { tray.Visible = false; tray.Dispose(); }  // or a dead icon stays until hovered
         try { if (stdin != null) stdin.Close(); } catch (IOException) { }  // EOF ends the backend and lifts its Pause
         try { if (proc != null && !proc.WaitForExit(2000)) proc.Kill(); } catch (Exception) { }
         try { if (ctl != null) ctl.Close(); } catch (Exception e) { Log("webview close failed: " + e.Message); }

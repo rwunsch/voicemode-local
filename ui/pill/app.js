@@ -4,7 +4,7 @@
 // {"window":{"drag":true}}. "hidden" is sent once on Dismiss; the wrapper then hides the window.
 (function () {
   var M = window.PillModel, $ = function (id) { return document.getElementById(id); };
-  var hidden = false, snapshot = null, lastSeen = null, ui = null, lastMode = null, filled = false;
+  var hidden = false, snapshot = null, lastSeen = null, ui = null, lastMode = null, lastPhase = null, filled = false;
 
   function send(obj) {
     try { if (window.pillTransport) window.pillTransport.send(JSON.stringify(obj)); } catch (e) { /* no transport */ }
@@ -38,8 +38,8 @@
   function render() {
     var vm = M.viewModel(snapshot, lastSeen, Date.now());
     if (ui) { // local ui wins: it is what the user just chose, and the backend echoes it back
-      var mode = ui.minimized ? "dot" : ui.docked ? "docked" : ui.expanded ? "expanded" : "pill";
-      vm.mode = mode; vm.side = mode === "docked" ? (ui.side || "right") : null;
+      var mode = ui.minimized ? "dot" : ui.docked ? (ui.tucked ? "tab" : ui.dockOpen ? "docked" : "rail") : ui.expanded ? "expanded" : "pill";
+      vm.mode = mode; vm.side = mode === "docked" || mode === "rail" || mode === "tab" ? (ui.side || "right") : null;
     }
     document.body.dataset.mode = vm.mode;
     document.body.dataset.phase = vm.phase;
@@ -54,6 +54,13 @@
     $("pause").title = vm.pause.label; $("pause").setAttribute("aria-label", vm.pause.label);
     $("expand").setAttribute("aria-expanded", String(vm.mode === "expanded" || vm.mode === "docked"));
     $("dock").textContent = vm.mode === "docked" ? "Undock" : "Dock";
+    $("tuck").textContent = vm.side === "left" ? "\u2039" : "\u203A";
+    $("tuck").title = vm.mode === "docked" ? "Collapse" : "Slide out of view";
+    $("tuck").setAttribute("aria-label", $("tuck").title);
+    var rail = vm.mode === "rail";
+    $("expand").textContent = rail ? (vm.side === "left" ? "\u203A" : "\u2039") : "\u2304";
+    $("drag").title = rail ? vm.label + (vm.subText ? " \u00b7 " + vm.subText : "") : "";
+    $("tab").textContent = vm.side === "left" ? "\u203A" : "\u2039";
     fill($("voice"), vm.voices, vm.voice); fill($("language"), vm.languages, vm.language); filled = true;
     $("bargeRow").style.display = vm.barge.visible ? "" : "none";
     $("barge").textContent = vm.barge.on ? "On" : "Off";
@@ -66,12 +73,14 @@
       a.textContent = r.name; b.textContent = r.text; b.className = "m"; d.append(a, b); q.appendChild(d);
     });
     $("keys").replaceChildren.apply($("keys"), vm.keys.map(keysNode));
+    if (vm.phase !== lastPhase) { lastPhase = vm.phase; send({ window: { phase: vm.phase } }); } // tray colour
     if (vm.mode !== lastMode) { lastMode = vm.mode; send({ window: { mode: vm.mode, side: vm.side } }); }
   }
 
   window.pillReceive = function (json) {
     var s; try { s = JSON.parse(json); } catch (e) { return; }
     if (!s || typeof s !== "object") return;
+    if (s.cmd === "restore") { saveUi({ minimized: false }); return; } // the tray icon was clicked
     var wasStale = lastSeen === null || Date.now() - lastSeen > M.STALE_MS;
     var prevVisible = snapshot ? snapshot.visible : null;
     snapshot = s; lastSeen = Date.now();
@@ -90,11 +99,18 @@
   $("voice").onchange = function () { send({ cmd: "set_voice", voice: this.value }); };
   $("language").onchange = function () { send({ cmd: "set_language", language: this.value }); };
   $("barge").onclick = function () { send({ cmd: "set_barge", on: !(snapshot && snapshot.barge && snapshot.barge.enabled) }); };
-  $("expand").onclick = function () { saveUi({ expanded: !(ui && ui.expanded) && !(ui && ui.docked), docked: false }); };
+  $("expand").onclick = function () { if (ui && ui.docked) { saveUi({ dockOpen: true }); return; } saveUi({ expanded: !(ui && ui.expanded) && !(ui && ui.docked), docked: false }); };
   $("minimize").onclick = function () { saveUi({ minimized: true }); };
-  $("dot").onclick = function () { saveUi({ minimized: false }); };
-  $("dock").onclick = function () { var d = !(ui && ui.docked); saveUi({ docked: d, expanded: false, side: (ui && ui.side) || "right" }); };
+  $("dock").onclick = $("dockTop").onclick = function () { var d = !(ui && ui.docked); saveUi({ docked: d, expanded: false, tucked: false, dockOpen: false, side: (ui && ui.side) || "right" }); };
   $("drag").onmousedown = function (e) { if (e.button === 0) send({ window: { drag: true } }); };
+  // The wrapper moves the window off the edge; the page swaps to the tab once it has gone.
+  $("tuck").onclick = function () {
+    if (ui && ui.dockOpen) { saveUi({ dockOpen: false }); return; } // full panel: back to the rail
+    send({ window: { slide: "out" } }); setTimeout(function () { saveUi({ tucked: true }); }, 170); };
+  $("tab").onclick = function () { saveUi({ tucked: false }); };
+  // The wrapper runs the resize loop, as it does for a drag.
+  $("edgeL").onmousedown = function (e) { if (e.button === 0) { e.preventDefault(); send({ window: { resize: "left" } }); } };
+  $("edgeR").onmousedown = function (e) { if (e.button === 0) { e.preventDefault(); send({ window: { resize: "right" } }); } };
   setInterval(render, 1000);
   render();
 })();
