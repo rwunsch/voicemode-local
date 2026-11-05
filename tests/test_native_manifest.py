@@ -22,6 +22,8 @@ REPO = Path(__file__).resolve().parent.parent
 PATCHES = REPO / "patches"
 BEFORE = "d30ec68"  # the last commit before the native list existed
 FELIX_THREE = ["patch_no_ffmpeg_gate.py", "patch_no_ffmpeg_warning.py", "patch_load_scipy_early.py"]
+# Ours, native only: Windows cannot delete an open temp file (WinError 32). Runs last.
+NATIVE_OURS = ["patch_windows_tempfile.py"]
 SOURCES = {
     "control_channel.py": "control_channel.py", "control_socket.py": "control_socket.py",
     "core.py": "core.py", "simple_failover.py": "simple_failover.py", "streaming.py": "streaming.py",
@@ -96,7 +98,10 @@ def test_native_list_is_the_default_plus_felix_three_in_felixs_place():
     default, native = _steps("manifest.json"), _steps("manifest.windows.json")
     added = [s for s in native if s.get("patch") in FELIX_THREE]
     assert [s["patch"] for s in added] == FELIX_THREE
-    assert [s for s in native if s not in added] == default
+    ours = [s for s in native if s.get("patch") in NATIVE_OURS]
+    assert native[-len(ours):] == ours and [s["patch"] for s in ours] == NATIVE_OURS
+    assert ours[0]["targets"] == ["core.py", "streaming.py"]
+    assert [s for s in native if s not in added and s not in ours] == default
     # FELIX's order: listen_overrun, turns_playback_stop, simple_failover, then its three.
     names = [s.get("patch") or s.get("copy") for s in native]
     at = names.index("patch_simple_failover.py")
@@ -119,6 +124,8 @@ def test_native_list_applies_cleanly_and_is_idempotent(tmp_path, crlf):
     converse = once["tools/converse.py"].decode("utf-8")
     assert "FELIX: NO FFMPEG" in converse and "FELIX: LOAD SCIPY EARLY" in converse
     assert "FELIX: NO FFMPEG WARNING" in once["server.py"].decode("utf-8")
+    assert "VML: WINDOWS TEMPFILE" in once["core.py"].decode("utf-8")
+    assert "VML: WINDOWS TEMPFILE" in once["streaming.py"].decode("utf-8")
     for rel in SOURCES:
         data = once[rel]
         if crlf:
@@ -127,13 +134,15 @@ def test_native_list_applies_cleanly_and_is_idempotent(tmp_path, crlf):
             assert b"\r\n" not in data, rel
 
 
-def test_native_output_differs_from_default_only_by_felixs_three(tmp_path):
+def test_native_output_differs_from_default_only_by_felixs_three_and_the_tempfile_fix(tmp_path):
     default, native = _tree(tmp_path / "d"), _tree(tmp_path / "n")
     _apply(PATCHES / "apply.py", default)
     _apply(PATCHES / "apply.py", native, "--native-windows")
     d, n = _files(default), _files(native)
     assert set(d) == set(n)
-    assert {rel for rel in d if d[rel] != n[rel]} == {"tools/converse.py", "server.py"}
+    assert {rel for rel in d if d[rel] != n[rel]} == {"tools/converse.py", "server.py", "core.py", "streaming.py"}
+    assert "VML: WINDOWS TEMPFILE" not in d["core.py"].decode("utf-8")
+    assert "os.unlink(tmp_file.name)" not in n["core.py"].decode("utf-8")
 
 
 @pytest.mark.parametrize("script,rel", [("patch_no_ffmpeg_gate.py", "tools/converse.py"),
