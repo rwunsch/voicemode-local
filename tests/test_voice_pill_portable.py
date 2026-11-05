@@ -45,7 +45,10 @@ def clean_env(monkeypatch, tmp_path):
     for k in SETTINGS:
         monkeypatch.delenv(k, raising=False)
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.chdir(tmp_path)  # upstream walks up from the working folder for env files
     monkeypatch.setattr(st, "_retry_sleep", lambda s: None)
+    monkeypatch.setattr(st, "_ENV_CACHE", {})
+    monkeypatch.setattr(st, "_WARNED", set())
 
 
 @pytest.fixture
@@ -238,6 +241,28 @@ def test_setting_from_the_environment_beats_the_file(monkeypatch, tmp_path):
     _env_file(tmp_path, b"VOICEMODE_VOICE_BARGE=false\n")
     monkeypatch.setenv("VOICEMODE_VOICE_BARGE", "true")
     assert st.setting("VOICEMODE_VOICE_BARGE") == "true"
+
+
+def test_env_file_is_reread_only_after_it_changes(monkeypatch, tmp_path):
+    d = _env_file(tmp_path, b"VOICEMODE_PILL=true\n")
+    reads = []
+    real = st._read_bytes
+    monkeypatch.setattr(st, "_read_bytes", lambda p: reads.append(p) or real(p))
+    assert st.setting("VOICEMODE_PILL") == "true"
+    assert st.setting("VOICEMODE_PILL") == "true"
+    st.voicemode_base()
+    assert len(reads) == 1
+    (d / "voicemode.env").write_bytes(b"VOICEMODE_PILL=false\n")  # new size
+    assert st.setting("VOICEMODE_PILL") == "false" and len(reads) == 2
+    (d / "voicemode.env").write_bytes(b"VOICEMODE_PILL=fals\n\n")  # same size, new mtime
+    os.utime(d / "voicemode.env", ns=(1, 1))
+    assert st.setting("VOICEMODE_PILL") == "fals" and len(reads) == 3
+
+
+def test_a_cached_env_cannot_be_changed_by_a_caller(tmp_path):
+    _env_file(tmp_path, b"VOICEMODE_PILL=true\n")
+    st.read_env_file()["VOICEMODE_PILL"] = "false"
+    assert st.setting("VOICEMODE_PILL") == "true"
 
 
 def test_setting_default_when_absent(tmp_path):
@@ -482,6 +507,7 @@ def _flaky(real, failures, exc=PermissionError):
 
 
 def test_write_retries_a_busy_target_on_windows(monkeypatch, tmp_path, windows):
+    monkeypatch.setattr(st, "_BACKEND", True)  # the backend's longer retry
     flaky = _flaky(os.replace, 3)
     monkeypatch.setattr(st.os, "replace", flaky)
     st._write_json(tmp_path / "x.json", {"a": 1})
@@ -511,13 +537,14 @@ def test_written_state_is_utf8(tmp_path):
 
 
 def test_read_retries_on_windows(monkeypatch, tmp_path, windows):
-    monkeypatch.setattr(st, "_READ_RETRY", True)  # the backend's mode
+    monkeypatch.setattr(st, "_BACKEND", True)  # the backend's mode
     (tmp_path / "x.json").write_text('{"a": 1}')
     monkeypatch.setattr(st, "_read_bytes", _flaky(st._read_bytes, 2))
     assert st._read_json(tmp_path / "x.json") == {"a": 1}
 
 
 def test_unlink_retries_on_windows(monkeypatch, tmp_path, windows):
+    monkeypatch.setattr(st, "_BACKEND", True)
     st.set_paused(True, os.getpid(), base=tmp_path)
     monkeypatch.setattr(st.os, "unlink", _flaky(os.unlink, 2))
     st.set_paused(False, os.getpid(), base=tmp_path)
@@ -575,7 +602,7 @@ def test_preroll_read_never_sleeps(monkeypatch, tmp_path, windows, sleeps):
 
 
 def test_backend_reads_retry(monkeypatch, tmp_path, windows, sleeps):
-    monkeypatch.setattr(st, "_READ_RETRY", True)
+    monkeypatch.setattr(st, "_BACKEND", True)
     base = tmp_path / "pill"
     st.register_session(os.getpid(), "demo", None, base=base)
     _all_busy(monkeypatch)
@@ -584,10 +611,49 @@ def test_backend_reads_retry(monkeypatch, tmp_path, windows, sleeps):
 
 
 def test_the_backend_turns_read_retries_on(monkeypatch):
-    monkeypatch.setattr(st, "_READ_RETRY", False)
+    monkeypatch.setattr(st, "_BACKEND", False)
     monkeypatch.setattr(vp, "run_stdio", lambda ctx: None)
     assert vp.main([]) == 0
-    assert st._READ_RETRY is True
+    assert st._BACKEND is True
+
+
+def _always_busy(monkeypatch):
+    calls = []
+
+    def replace(*a):
+        calls.append(a)
+        raise PermissionError(13, "busy")
+    monkeypatch.setattr(st.os, "replace", replace)
+    return calls
+
+
+def test_server_writes_try_twice_with_one_short_sleep(monkeypatch, tmp_path, windows, sleeps):
+    monkeypatch.setattr(st, "_BACKEND", False)
+    base = tmp_path / "pill"
+    st.register_session(os.getpid(), "demo", None, base=base)
+    calls = _always_busy(monkeypatch)
+    with pytest.raises(PermissionError):
+        st.touch_session(os.getpid(), "v", base=base)
+    assert len(calls) == 2 and len(sleeps) <= 1 and all(x <= 0.025 for x in sleeps)
+
+
+def test_interruption_compaction_in_the_server_tries_twice(monkeypatch, tmp_path, windows, sleeps):
+    monkeypatch.setattr(st, "_BACKEND", False)
+    monkeypatch.setattr(st, "_MAX_INTERRUPTION_BYTES", 4)
+    base = tmp_path / "pill"
+    st.record_interruption(1.0, base=base)
+    calls = _always_busy(monkeypatch)
+    st.record_interruption(2.0, base=base)  # compaction fails quietly; the line is kept
+    assert len(calls) == 2 and len(sleeps) <= 1 and all(x <= 0.025 for x in sleeps)
+    assert st.interruptions_since(0, base=base) == 2
+
+
+def test_the_backend_keeps_its_longer_write_retry(monkeypatch, tmp_path, windows, sleeps):
+    monkeypatch.setattr(st, "_BACKEND", True)
+    calls = _always_busy(monkeypatch)
+    with pytest.raises(PermissionError):
+        st._write_json(tmp_path / "x.json", {})
+    assert len(calls) == st._RETRIES
 
 
 def _unreadable(monkeypatch, path):
@@ -624,19 +690,20 @@ def test_an_unreadable_pause_is_kept_and_reads_as_not_paused(monkeypatch, tmp_pa
 def test_an_alive_pid_with_an_unknown_start_is_kept(monkeypatch, tmp_path):
     base = tmp_path / "pill"
     st.register_session(os.getpid(), "demo", None, base=base)
-    monkeypatch.setattr(st, "process_start", lambda pid: None)  # e.g. ps failed
-    assert [s["pid"] for s in st.live_sessions(base=base)] == [os.getpid()]
     st.set_paused(True, os.getpid(), base=base)
+    monkeypatch.setattr(st, "process_start", lambda pid: None)  # now ps fails
+    assert [s["pid"] for s in st.live_sessions(base=base)] == [os.getpid()]
     assert st.is_paused(base=base) is True
 
 
-def test_a_session_registered_without_a_start_is_kept_while_alive(monkeypatch, tmp_path):
+def test_an_unknown_recorded_start_is_treated_the_old_way(tmp_path):
+    # A reused pid must not inherit a session or a Pause recorded without a start time.
     base = tmp_path / "pill"
-    monkeypatch.setattr(st, "process_start", lambda pid: None)
-    st.register_session(os.getpid(), "demo", None, base=base)
-    monkeypatch.undo()
-    monkeypatch.setattr(st, "_retry_sleep", lambda s: None)
-    assert [s["pid"] for s in st.live_sessions(base=base)] == [os.getpid()]
+    st._write_json(st._session_path(os.getpid(), base), {"pid": os.getpid(), "label": "x",
+                                                         "start": None})
+    assert st.live_sessions(base=base) == []
+    st._write_json(base / "paused.json", {"owner": os.getpid(), "start": None})
+    assert st.is_paused(base=base) is False
 
 
 def test_a_dead_pid_with_an_unknown_start_is_removed(monkeypatch, tmp_path):
@@ -725,6 +792,55 @@ def test_barge_command_in_voicemode_env_is_ignored(monkeypatch, tmp_path):
     monkeypatch.setattr(st, "default_switch", lambda: switch)
     assert st.barge_control("status") == "barge status"
     assert not marker.exists()
+
+
+def _upstream_loader():
+    """upstream's own find_voicemode_env_files + load_voicemode_env, run unmodified."""
+    import ast
+    raw = os.environ.get("VM_UPSTREAM_CONFIG")
+    if raw:
+        path = Path(raw)
+    else:
+        spec = importlib.util.find_spec("voice_mode")
+        if spec is None or not spec.submodule_search_locations:
+            pytest.skip("no upstream voice_mode config.py (set VM_UPSTREAM_CONFIG)")
+        path = Path(list(spec.submodule_search_locations)[0]) / "config.py"
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    funcs = [n for n in tree.body if isinstance(n, ast.FunctionDef)
+             and n.name in ("find_voicemode_env_files", "load_voicemode_env")]
+    assert len(funcs) == 2, f"upstream {path} drifted"
+    ns = {"Path": Path, "os": os}
+    exec(compile(ast.Module(body=funcs, type_ignores=[]), str(path), "exec"), ns)
+    return ns["load_voicemode_env"]
+
+
+@pytest.mark.parametrize("where", ["global", "project"])
+def test_a_command_the_server_loaded_from_a_file_is_refused(monkeypatch, tmp_path, caplog, where):
+    marker = tmp_path / "ran"
+    ctl = _script(tmp_path, body=f'touch "{marker}"')
+    line = f"VOICEMODE_BARGE_CONTROL_COMMAND={ctl}\n".encode()
+    if where == "global":  # what update_config writes
+        _env_file(tmp_path, line)
+    else:  # a project file upstream finds walking up from its working folder
+        (tmp_path / "proj" / "sub").mkdir(parents=True)
+        (tmp_path / "proj" / ".voicemode.env").write_bytes(line)
+        monkeypatch.chdir(tmp_path / "proj" / "sub")
+    _upstream_loader()()  # what config_reload, or a restart, does
+    assert os.environ.get("VOICEMODE_BARGE_CONTROL_COMMAND") == str(ctl)
+    switch = _script(tmp_path, "voicemode-switch")
+    monkeypatch.setattr(st, "default_switch", lambda: switch)
+    caplog.set_level(logging.WARNING, logger="voicemode.voice_pill_state")
+    assert st.barge_control("on") == "barge on"
+    assert st.barge_control("off") == "barge off"
+    assert not marker.exists()
+    assert len([r for r in caplog.records if "VOICEMODE_BARGE_CONTROL_COMMAND" in r.getMessage()]) == 1
+
+
+def test_a_command_only_in_the_environment_is_used(monkeypatch, tmp_path):
+    _env_file(tmp_path, b"VOICEMODE_PILL=true\n")
+    ctl = _script(tmp_path)
+    monkeypatch.setenv("VOICEMODE_BARGE_CONTROL_COMMAND", str(ctl))
+    assert st.barge_control("on") == "on"
 
 
 def test_barge_control_docstring_keeps_the_promise():

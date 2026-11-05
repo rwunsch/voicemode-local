@@ -417,7 +417,7 @@ def main(argv=None) -> int:
     if lock is None:
         print("voice_pill: another backend is running", file=sys.stderr)
         return 1
-    st.allow_read_retries()  # this process may sleep on a busy file; the server may not
+    st.enable_backend_mode()  # this process may sleep on a busy file; the server may not
     _install_stop_signals()
     try:
         run_stdio(ctx)

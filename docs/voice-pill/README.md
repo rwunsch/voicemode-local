@@ -148,6 +148,9 @@ now shows by colour only. Whether the old or new cost affects stutter was not me
   set: a JSON list of strings or one executable path. Otherwise it runs
   `voicemode-switch barge`. That setting is read from the process environment only, never
   from `voicemode.env`, because upstream's `update_config` tool lets a model write that file.
+  The voice server copies `voicemode.env` into its own environment on start and on
+  `config_reload`, so the command is also refused, with one warning, whenever any env file
+  upstream loads (global or project) holds the key.
 - For FELIX: there the toggle changes a FELIX preference, not `voicemode.env`, so the pill
   cannot read the new state from the file. FELIX's barge control command will also need a
   `status` mode that the pill can ask.

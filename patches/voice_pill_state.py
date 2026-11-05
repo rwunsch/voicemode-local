@@ -8,9 +8,10 @@ cached, because FELIX gives each runtime its own.  Writes are atomic (temp file 
 os.replace); a missing, corrupt or half-written file reads as empty and never
 raises.  On Windows a file another process has open cannot be replaced or
 deleted for a moment, so writes and deletes retry, and a file that could not be
-read is left alone rather than treated as gone.  Reads retry only in the pill
-backend (``allow_read_retries``): the server's recording and event loops read
-once and never sleep.
+read is left alone rather than treated as gone.  Only the pill backend
+(``enable_backend_mode``) retries reads, and writes for about half a second;
+elsewhere -- the voice server's recording and event loops -- a read happens
+once and a write is tried at most twice, with one 25 ms sleep.
 
 Upstream's own files stay where upstream keeps them, in the home folder's
 .voicemode whatever the base dir (conch.py:133 the conch, config.py:33
@@ -27,6 +28,7 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import json
+import logging
 import os
 import re
 import shutil
@@ -41,15 +43,26 @@ _MAX_INTERRUPTION_BYTES = 64 * 1024
 _KEEP_INTERRUPTIONS = 1000
 
 # Windows sharing violations: a reader's open handle blocks os.replace/unlink.
-_RETRIES = 20
+_RETRIES = 20          # the pill backend: about half a second
+_SERVER_ATTEMPTS = 2   # anywhere else (the voice server): one 25 ms sleep at most
 _RETRY_S = 0.025
-_READ_RETRY = False  # reads retry only where a sleep is harmless: the pill backend
+_BACKEND = False       # set by the pill backend's own process only
+
+logger = logging.getLogger("voicemode.voice_pill_state")
+_WARNED = set()
 
 
-def allow_read_retries(on: bool = True) -> None:
-    """For the pill backend's own process; never the voice server's."""
-    global _READ_RETRY
-    _READ_RETRY = bool(on)
+def enable_backend_mode(on: bool = True) -> None:
+    """For the pill backend's own process, never the voice server's: reads retry, and
+    writes retry longer. A sleep there costs nothing; in the server it stalls a turn."""
+    global _BACKEND
+    _BACKEND = bool(on)
+
+
+def _warn_once(message: str) -> None:
+    if message not in _WARNED:
+        _WARNED.add(message)
+        logger.warning(message)
 
 
 def _on_windows() -> bool:
@@ -61,14 +74,16 @@ def _retry_sleep(seconds: float) -> None:
 
 
 def _retrying(fn, *args):
-    """Call fn; on Windows retry a PermissionError (file busy) for about half a second."""
+    """Call fn; on Windows retry a PermissionError (file busy): about half a second in
+    the pill backend, else one retry after 25 ms."""
     if not _on_windows():
         return fn(*args)
-    for attempt in range(_RETRIES):
+    attempts = _RETRIES if _BACKEND else _SERVER_ATTEMPTS
+    for attempt in range(attempts):
         try:
             return fn(*args)
         except PermissionError:
-            if attempt == _RETRIES - 1:
+            if attempt == attempts - 1:
                 raise
             _retry_sleep(_RETRY_S)
 
@@ -89,7 +104,7 @@ def voicemode_base() -> Path:
     .voicemode.env files found walking up from its working folder; the pill backend
     has no session working folder, so those are not followed.
     """
-    raw = os.environ.get("VOICEMODE_BASE_DIR") or read_env_file().get("VOICEMODE_BASE_DIR")
+    raw = os.environ.get("VOICEMODE_BASE_DIR") or _env_view().get("VOICEMODE_BASE_DIR")
     if raw:
         return Path(os.path.expanduser(os.path.expandvars(raw)))
     return upstream_home()
@@ -106,13 +121,53 @@ def env_file(home=None) -> Path:
     return old if not path.exists() and old.exists() else path
 
 
+_ENV_CACHE = {}  # path -> ((mtime_ns, size), parsed): re-read only when it changes
+
+
 def read_env_file(home=None) -> dict:
-    """KEY=value pairs from voicemode.env: UTF-8 (BOM allowed), CRLF tolerated, comments
-    and ``export`` skipped, surrounding quotes dropped, the last assignment wins."""
+    """KEY=value pairs from voicemode.env (see _parse_env), a copy the caller may change."""
+    return dict(_env_view(home))
+
+
+def _env_view(home=None) -> dict:
+    """The cached parse of voicemode.env, else upstream's old name; never modify it.
+    One stat per call when unchanged: the base dir is resolved on every is_paused()."""
+    h = Path(home) if home is not None else upstream_home()
+    for path in (h / "voicemode.env", h / ".voicemode.env"):
+        try:
+            info = os.stat(path)
+        except OSError:
+            continue
+        return _cached_parse(path, info)
+    return {}
+
+
+def _read_env_path(path) -> dict:
     try:
-        text = _read_policy(env_file(home)).decode("utf-8-sig", errors="replace")
+        info = os.stat(path)
     except OSError:
         return {}
+    return _cached_parse(path, info)
+
+
+def _cached_parse(path, info) -> dict:
+    stamp = (info.st_mtime_ns, info.st_size)
+    key = str(path)
+    hit = _ENV_CACHE.get(key)
+    if hit is not None and hit[0] == stamp:
+        return hit[1]
+    try:
+        text = _read_policy(path).decode("utf-8-sig", errors="replace")
+    except OSError:
+        return {}
+    parsed = _parse_env(text)
+    _ENV_CACHE[key] = (stamp, parsed)
+    return parsed
+
+
+def _parse_env(text: str) -> dict:
+    """UTF-8 (BOM allowed), CRLF tolerated, comments and ``export`` skipped, surrounding
+    quotes dropped, the last assignment wins."""
     out = {}
     for line in text.splitlines():
         line = line.strip()
@@ -133,13 +188,13 @@ def setting(name: str, default=None, home=None):
     """The process environment first (FELIX passes settings that way), then voicemode.env."""
     if name in os.environ:
         return os.environ[name]
-    return read_env_file(home).get(name, default)
+    return _env_view(home).get(name, default)
 
 
 def file_first_setting(name: str, default=None, home=None):
     """For a setting the pill itself changes by writing voicemode.env: the file wins when
     it has the key, and the environment is only the default."""
-    file = read_env_file(home)
+    file = _env_view(home)
     if name in file:
         return file[name]
     return os.environ.get(name, default)
@@ -211,10 +266,13 @@ def pid_exists(pid) -> bool:
 
 
 def _alive_same(pid, start) -> bool:
-    """Same process as the one recorded. With either start time unknown (ps failed, or
-    none was recorded) an alive pid is kept: losing a live session is worse."""
-    cur = process_start(pid)
-    if cur is not None and start is not None:
+    """Same process as the one recorded. A record without a start time never matches, so a
+    reused pid cannot inherit it. If only the current start is unknown (ps failed), an
+    alive pid is kept: losing a live session is worse."""
+    cur = process_start(pid)  # first, as before: same spawns on a Mac as before
+    if start is None:
+        return False
+    if cur is not None:
         return cur == start
     return pid_exists(pid)
 
@@ -253,8 +311,8 @@ def _read_bytes(path) -> bytes:
 
 
 def _read_policy(path) -> bytes:
-    """One read, or retried reads in the pill backend only (see allow_read_retries)."""
-    return _retrying(_read_bytes, path) if _READ_RETRY else _read_bytes(path)
+    """One read, or retried reads in the pill backend only (see enable_backend_mode)."""
+    return _retrying(_read_bytes, path) if _BACKEND else _read_bytes(path)
 
 
 def _read_json_state(path: Path, want=dict):
@@ -636,6 +694,37 @@ def default_switch() -> Path:
 BARGE_COMMAND_SETTING = "VOICEMODE_BARGE_CONTROL_COMMAND"
 
 
+_PROJECT_DIR = ".voicemode"  # upstream's per-project folder name, below any parent
+
+
+def _env_files_upstream_loads() -> list:
+    """Every file upstream's load_voicemode_env may copy into os.environ: the global
+    voicemode.env (either name) and project files from the working folder up. Wider than
+    upstream's own walk (it stops at the first find), and upstream's own list is added
+    when voice_mode.config is loaded here."""
+    home = upstream_home()
+    files = [home / "voicemode.env", home / ".voicemode.env"]
+    try:
+        here = Path.cwd()
+    except OSError:
+        here = None
+    if here is not None:
+        for d in (here, *here.parents):
+            files += [d / ".voicemode.env", d / _PROJECT_DIR / "voicemode.env"]
+    config = sys.modules.get("voice_mode.config")
+    find = getattr(config, "find_voicemode_env_files", None)
+    if callable(find):
+        try:
+            files += [Path(f) for f in find()]
+        except Exception:  # noqa: BLE001 - our own list still applies
+            pass
+    return files
+
+
+def _command_came_from_a_file() -> bool:
+    return any(BARGE_COMMAND_SETTING in _read_env_path(f) for f in _env_files_upstream_loads())
+
+
 def barge_command(switch=None):
     """(argv prefix, error). The action is appended to the prefix.
 
@@ -643,9 +732,18 @@ def barge_command(switch=None):
     environment only -- never voicemode.env, which upstream's update_config tool lets a
     model write: a JSON list of strings, executable first, or a bare path to one
     executable; else ``voicemode-switch barge``.
+
+    The voice server copies voicemode.env into its own environment (load_voicemode_env,
+    on start and on config_reload), so the environment alone proves nothing there: if
+    any file upstream loads holds the key, the setting is refused with one warning.
     """
     if switch is None:
         raw = (os.environ.get(BARGE_COMMAND_SETTING) or "").strip()
+        if raw and _command_came_from_a_file():
+            _warn_once(f"{BARGE_COMMAND_SETTING} is set in a voicemode.env file, which a model "
+                       "can write; ignoring it and using voicemode-switch. Pass it in the "
+                       "environment only.")
+            raw = ""
         if raw:
             if raw.startswith("["):
                 try:

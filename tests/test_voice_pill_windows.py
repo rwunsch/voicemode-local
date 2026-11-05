@@ -126,7 +126,12 @@ def test_lock_is_exclusive_and_released_on_close(private_base):
 
 # -- atomic write against a reader holding the file open -----------------------
 
-def test_write_waits_out_a_reader_holding_the_file(private_base):
+@pytest.fixture
+def backend(monkeypatch):
+    monkeypatch.setattr(st, "_BACKEND", True)  # the pill backend's longer retry
+
+
+def test_write_waits_out_a_reader_holding_the_file(private_base, backend):
     path = private_base / "x.json"
     private_base.mkdir(parents=True, exist_ok=True)
     st._write_json(path, {"n": 1})
@@ -136,7 +141,20 @@ def test_write_waits_out_a_reader_holding_the_file(private_base):
     assert json.loads(path.read_text(encoding="utf-8")) == {"n": 2}
 
 
-def test_resume_removes_the_pause_even_while_it_is_being_read(private_base):
+def test_server_write_gives_up_fast_on_a_held_file(private_base):
+    # The voice server must not stall: two tries, one 25 ms sleep, then the error.
+    path = private_base / "x.json"
+    private_base.mkdir(parents=True, exist_ok=True)
+    st._write_json(path, {"n": 1})
+    with open(path, "rb"):
+        t0 = time.monotonic()
+        with pytest.raises(PermissionError):
+            st._write_json(path, {"n": 2})
+        assert time.monotonic() - t0 < 0.2
+    assert not list(private_base.glob(".tmp-*"))
+
+
+def test_resume_removes_the_pause_even_while_it_is_being_read(private_base, backend):
     st.set_paused(True, os.getpid())
     reader = open(private_base / "pill" / "paused.json", "rb")
     threading.Timer(0.15, reader.close).start()
