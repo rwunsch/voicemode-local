@@ -93,7 +93,8 @@ apart. The label comes from `VOICEMODE_SESSION_NAME`, else
 Opt-in: the `voice_barge` MCP tool (`on`, `off`, `status`), or `voicemode-switch barge
 on|off|status` from a shell. It stops TTS when the user talks over it and keeps the words
 they said. Off takes effect at once, so use it whenever the user asks to turn interruption
-on or off. See `docs/voice-barge-in/README.md`, including what has not
+on or off. The first turn of each session tells you its state once; say it to the user in a
+few words, with how to switch it. See `docs/voice-barge-in/README.md`, including what has not
 been tested.
 
 When the user says "stop voice mode", call the `voice_stop` MCP tool and continue in text.
