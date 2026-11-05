@@ -15,10 +15,10 @@ html,body{margin:0;background:transparent;color:var(--t);font:13px system-ui,san
 [data-phase=paused] .orb{background:transparent;border:3px solid var(--m)}
 [data-phase=disconnected] .orb{opacity:.35}
 .btn,select{-webkit-app-region:no-drag;border:1px solid var(--line);background:transparent;color:var(--t);border-radius:8px;padding:4px 7px;font:inherit;font-size:12px;cursor:pointer}
-.btn:hover:not(:disabled){background:var(--hover)}
+.btn:hover:not(:disabled),.btn.hover:not(:disabled){background:var(--hover)}
 .btn:disabled,select:disabled{opacity:.4;cursor:default}
 .btn.icon{padding:4px 6px}
-.stop:hover:not(:disabled){color:var(--r);border-color:var(--r)}
+.stop:hover:not(:disabled),.stop.hover:not(:disabled){color:var(--r);border-color:var(--r)}
 select{flex:1;min-width:0}
 .more{display:none;margin-top:10px;flex-direction:column;gap:8px}
 [data-mode=expanded] .more,[data-mode=docked] .more{display:flex}
@@ -29,7 +29,8 @@ kbd{border:1px solid var(--line);border-radius:4px;padding:0 4px;font:11px ui-mo
 .btn.icon{width:24px;padding:4px 0;flex:none}
 option{background:var(--bg);color:var(--t)}
 html,body{height:100%}
-.edge{position:fixed;top:0;bottom:0;width:6px;cursor:ew-resize;z-index:5}
+.edge{position:fixed;top:0;bottom:0;width:10px;cursor:ew-resize;z-index:5}
+.edge:hover::after,.edge.hover::after{content:"";position:absolute;top:25%;bottom:25%;left:4px;width:3px;border-radius:2px;background:var(--m)}
 .edge.left{left:0}.edge.right{right:0}
 [data-mode=docked] .edge,[data-mode=rail] .edge,[data-mode=tab] .edge{display:none}
 .tuck{display:none}
@@ -47,6 +48,6 @@ html,body{height:100%}
 [data-mode=rail] .pic{flex:0 0 100%}
 [data-mode=rail] .btn.icon{width:28px;height:28px;padding:0}
 .tab{display:none;width:100vw;height:100vh;padding:0;border:1px solid var(--line);border-radius:12px;background:var(--bg);color:var(--m);font-size:18px;line-height:1;cursor:pointer}
-.tab:hover{background:var(--hover)}
+.tab:hover,.tab.hover{background:var(--hover)}
 [data-phase=speaking] .tab{color:var(--a)}[data-phase=listening] .tab{color:var(--g)}
 [data-mode=tab] .tab{display:block}[data-mode=tab] .card{display:none}

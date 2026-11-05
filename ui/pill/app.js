@@ -121,6 +121,16 @@
   // The wrapper runs the resize loop, as it does for a drag.
   $("edgeL").onmousedown = function (e) { if (e.button === 0) { e.preventDefault(); send({ window: { resize: "left" } }); } };
   $("edgeR").onmousedown = function (e) { if (e.button === 0) { e.preventDefault(); send({ window: { resize: "right" } }); } };
+  // Mac: WebKit gives a panel that never takes focus no hover, so the wrapper reports the pointer.
+  var hovered = null;
+  window.pillHover = function (x, y) {
+    var el = x < 0 ? null : document.elementFromPoint(x, y);
+    el = el && el.closest(".btn,.tab,.edge");
+    if (el === hovered) return;
+    if (hovered) hovered.classList.remove("hover");
+    if (el) el.classList.add("hover");
+    hovered = el;
+  };
   setInterval(render, 1000);
   render();
 })();

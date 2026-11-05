@@ -168,11 +168,14 @@ as pywebview's own dependencies). The main venv gains nothing. The backend is st
   control run without it showed the icon), a small fading tile at 0.4 s in 3 of 3, and the 5 px hop gone in 3 of 3.
   `use_panel()` gives pywebview a non-activating `NSPanel` that never becomes key, and the web view
   accepts first clicks. It is shown with `orderFrontRegardless`, never pywebview's `show()`.
-- **Menu bar icon.** A template SF Symbol: a microphone when listening, a speaker when speaking,
-  a waveform otherwise. Robert could not find the earlier teal dot on his blue bar, so the phase is
-  shown by shape on Mac and by colour in the Windows tray.
-- **Full-screen apps.** The Mac pill joins all Spaces but does not ask to sit above full-screen
-  apps: Robert does not need it to.
+- **Hover.** With the panel never key, Robert saw no hover and no resize cursor at `909a3dc` (n=1
+  session). A tracking area that works while the app is inactive reports the pointer to the page's
+  `pillHover`, which sets a `.hover` class, and the wrapper sets the resize cursor at the edges.
+  The edge shows a small grip on hover, on both platforms, in case the cursor is not honoured.
+- **Menu bar icon.** A ball in the Windows tray's colours, with a white outline. Robert prefers
+  the ball to a white symbol; the outline answers the pale teal he could not find on his blue bar.
+- **Full-screen apps.** The Mac pill joins all Spaces. As a panel it also shows over full-screen
+  apps (Robert, n=1), which he says does no harm.
 - **Page and bridge (found by the first Mac run, 2026-11-05).** The page's CSP stays strict, so
   nothing may use `eval`. pywebview's `evaluate_js` wraps every call in `eval()` and builds its
   `js_api` functions with `new Function`, so neither works. Instead: page to Python goes through
@@ -215,7 +218,8 @@ Window and focus (fake backend):
 - [ ] No Dock icon, and no "python" in the menu bar
 - [ ] A real click on the pill from another app: the other app stays frontmost and keeps the keyboard (type into it straight after), and the click still acts on the first press
 - [ ] Voice picker: a real click opens it and a choice lands, with the pill never key. Hover colours still show
-- [ ] Menu bar icon: easy to find on the bar, changes shape with the phase
+- [ ] Menu bar ball: easy to find on the bar, changes colour with the phase
+- [ ] Width: the grip shows at each edge, dragging changes the width, `pill-window.log` has a `resize` line
 - [ ] Clicking Pause, Interrupt, the dropdown and the expand button: the frontmost app does not change. **Expected to be the weak spot**: a click on any window can activate its app. If it changes, report it; the fallback is a small Swift `NSPanel` (non-activating)
 - [ ] Always on top: another window dragged over it
 - [ ] Above a full-screen app, and visible on a second Space (untested so far). If the window never gets that behaviour, check whether pywebview fires `shown` for a `hidden=True` window (the collection behaviour is set in that handler; look for "window behaviour not set" or its absence in `pill-window.log`)

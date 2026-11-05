@@ -522,12 +522,54 @@ def test_window_joins_all_spaces_but_not_full_screen():
     assert m.WINDOW_BEHAVIOUR == 1 << 0
 
 
-def test_menu_bar_icon_follows_the_phase():
-    assert m.tray_symbol("speaking") == "speaker.wave.2.fill"
-    assert m.tray_symbol("listening") == "mic.fill"
-    assert m.tray_symbol("working") == m.tray_symbol(None) == "waveform"
+def test_menu_bar_ball_uses_the_windows_tray_colours():
+    assert m.tray_rgb("speaking") == (139, 92, 246)
+    assert m.tray_rgb("listening") == (13, 148, 136)
+    assert m.tray_rgb("working") == m.tray_rgb(None) == (148, 163, 184)
+    ps1 = (REPO / "pill-windows.ps1").read_text()
+    assert "FromArgb(139, 92, 246)" in ps1 and "FromArgb(13, 148, 136)" in ps1 and "FromArgb(148, 163, 184)" in ps1
 
 
-def test_menu_bar_icon_is_a_template_not_a_coloured_dot():
+def test_menu_bar_ball_is_outlined_and_not_a_template():
     src = (REPO / "patches/voice_pill_mac.py").read_text()
-    assert "setTemplate_(True)" in src and "systemTealColor" not in src
+    assert "setTemplate_" not in src and "imageWithSystemSymbolName" not in src
+    assert "path.fill()" in src and "path.stroke()" in src
+
+
+# A panel that is never key gets no hover from WebKit: the wrapper reports the pointer itself
+def test_hover_message_is_one_safe_expression():
+    assert m.hover_js(12.5, 30) == "window.pillHover&&window.pillHover(12.5,30)"
+    assert m.hover_js(None, None) == "window.pillHover&&window.pillHover(-1,-1)"
+
+
+def test_resize_cursor_only_on_the_edges_of_a_resizable_window():
+    assert m.on_resize_edge(9, 350, "pill") and m.on_resize_edge(341, 350, "expanded")
+    assert not m.on_resize_edge(11, 350, "pill") and not m.on_resize_edge(339, 350, "pill")
+    for mode in ("docked", "rail", "tab", "dot"):
+        assert not m.on_resize_edge(2, 350, mode)
+
+
+def test_edge_grab_area_is_the_same_width_in_page_and_wrapper():
+    css = (REPO / "ui/pill/pill.css").read_text()
+    assert f".edge{{position:fixed;top:0;bottom:0;width:{m.EDGE_W}px" in css
+    assert m.EDGE_W == 10
+
+
+def test_tracking_area_works_while_the_app_is_inactive():
+    src = (REPO / "patches/voice_pill_mac.py").read_text()
+    body = src[src.index("def install_bridge_and_load("):src.index("def drag(self")]
+    assert "NSTrackingActiveAlways" in body and "NSTrackingMouseMoved" in body and "addTrackingArea_" in body
+
+
+def test_page_has_a_hover_class_for_every_hover_rule():
+    css = (REPO / "ui/pill/pill.css").read_text()
+    assert ".btn.hover:not(:disabled)" in css and ".stop.hover:not(:disabled)" in css and ".tab.hover" in css
+    assert ".edge.hover::after" in css and ".edge:hover::after" in css
+    js = (REPO / "ui/pill/app.js").read_text()
+    assert "window.pillHover" in js and 'closest(".btn,.tab,.edge")' in js
+
+
+def test_resize_logs_what_it_did():
+    src = (REPO / "patches/voice_pill_mac.py").read_text()
+    body = src[src.index("def resize_loop("):src.index("def shutdown(self")]
+    assert "self.log(" in body

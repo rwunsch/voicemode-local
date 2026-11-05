@@ -30,8 +30,10 @@ MIN_WIDTH, MAX_WIDTH = 320, 640
 TAB_W, TAB_H, RAIL_W = 22, 64, 76
 BACKOFF_CAP_S = 30
 NONACTIVATING_PANEL = 1 << 7  # NSWindowStyleMaskNonactivatingPanel
-WINDOW_BEHAVIOUR = 1 << 0  # canJoinAllSpaces; Robert does not need it above full-screen apps
-TRAY_SYMBOLS = {"speaking": "speaker.wave.2.fill", "listening": "mic.fill"}
+WINDOW_BEHAVIOUR = 1 << 0  # canJoinAllSpaces
+EDGE_W = 10  # the page's .edge width
+TRAY_RGB = {"speaking": (139, 92, 246), "listening": (13, 148, 136)}  # as the Windows tray
+TRAY_RGB_IDLE = (148, 163, 184)
 STABLE_RUN_S = 30
 
 
@@ -235,9 +237,20 @@ def window_options():
                 transparent=True, easy_drag=False, hidden=True)
 
 
-def tray_symbol(phase):
-    """The menu bar icon's SF Symbol. A template image, so it contrasts with any bar colour."""
-    return TRAY_SYMBOLS.get(phase, "waveform")
+def tray_rgb(phase):
+    """The menu bar ball's colour, the same as the Windows tray's."""
+    return TRAY_RGB.get(phase, TRAY_RGB_IDLE)
+
+
+def hover_js(x, y):
+    """Tell the page where the pointer is; None means it has left the window."""
+    if x is None:
+        x, y = -1, -1
+    return f"window.pillHover&&window.pillHover({x},{y})"
+
+
+def on_resize_edge(x, width, mode):
+    return mode in ("pill", "expanded") and (x <= EDGE_W or x >= width - EDGE_W)
 
 
 def js_call(name, line):
@@ -278,6 +291,21 @@ def make_handler(app):
         def userContentController_didReceiveScriptMessage_(self, controller, message):
             app.from_page(str(message.body()))
     return PillHandler.alloc().init()
+
+
+def make_hover_tracker(app):
+    from Foundation import NSObject
+
+    class PillHoverTracker(NSObject):
+        def mouseEntered_(self, event):
+            app.hover_at(event.locationInWindow())
+
+        def mouseMoved_(self, event):
+            app.hover_at(event.locationInWindow())
+
+        def mouseExited_(self, _event):
+            app.hover_at(None)
+    return PillHoverTracker.alloc().init()
 
 
 def make_tray_target(app):
@@ -484,7 +512,7 @@ class App:
         AppHelper.callAfter(self.update_tray_main)
 
     def update_tray_main(self):
-        from AppKit import NSImage, NSStatusBar, NSVariableStatusItemLength
+        from AppKit import NSBezierPath, NSColor, NSImage, NSStatusBar, NSVariableStatusItemLength
         want = self.state.in_tray
         if want and not self.tray:
             self.tray = NSStatusBar.systemStatusBar().statusItemWithLength_(NSVariableStatusItemLength)
@@ -493,26 +521,46 @@ class App:
             self.tray.button().setAction_("clicked:")
         if not self.tray:
             return
-        image = NSImage.imageWithSystemSymbolName_accessibilityDescription_(
-            tray_symbol(self.state.phase), "Voice pill")
-        if image:
-            image.setTemplate_(True)
-            self.tray.button().setImage_(image)
-        else:
-            self.tray.button().setTitle_("\u25CF")
+        r, g, b = tray_rgb(self.state.phase)
+        image = NSImage.alloc().initWithSize_((16, 16))
+        image.lockFocus()
+        path = NSBezierPath.bezierPathWithOvalInRect_(((2, 2), (12, 12)))
+        path.setLineWidth_(1.5)
+        NSColor.colorWithSRGBRed_green_blue_alpha_(r / 255, g / 255, b / 255, 1).set()
+        path.fill()
+        NSColor.whiteColor().set()  # the outline keeps it readable on a coloured bar
+        path.stroke()
+        image.unlockFocus()
+        self.tray.button().setImage_(image)
         self.tray.setVisible_(want)
 
     def install_bridge_and_load(self):
         """Main thread. Add the handler and the user script, then load the page from its file."""
         from Foundation import NSURL
+        from AppKit import (NSTrackingActiveAlways, NSTrackingArea, NSTrackingInVisibleRect,
+                            NSTrackingMouseEnteredAndExited, NSTrackingMouseMoved)
         from WebKit import WKUserScript
         wv = self.webview()
+        self.hover = make_hover_tracker(self)
+        wv.addTrackingArea_(NSTrackingArea.alloc().initWithRect_options_owner_userInfo_(
+            wv.bounds(), NSTrackingMouseEnteredAndExited | NSTrackingMouseMoved
+            | NSTrackingActiveAlways | NSTrackingInVisibleRect, self.hover, None))
         ucc = wv.configuration().userContentController()
         self.handler = make_handler(self)
         ucc.addScriptMessageHandler_name_(self.handler, HANDLER)
         ucc.addUserScript_(WKUserScript.alloc().initWithSource_injectionTime_forMainFrameOnly_(BRIDGE, 0, True))
         wv.loadFileURL_allowingReadAccessToURL_(NSURL.URLWithString_(ui_file_url()),
                                                 NSURL.fileURLWithPath_(str(ui_dir())))
+
+    def hover_at(self, point):
+        """Main thread. WebKit gives a window that is never key no hover, so report the pointer."""
+        from AppKit import NSCursor
+        wv = self.webview()
+        size = wv.bounds().size
+        x, y = (point.x, size.height - point.y) if point is not None else (None, None)
+        wv.evaluateJavaScript_completionHandler_(hover_js(x, y), None)
+        edge = x is not None and on_resize_edge(x, size.width, self.state.mode)
+        (NSCursor.resizeLeftRightCursor() if edge else NSCursor.arrowCursor()).set()
 
     def drag(self):
         if self.dragging or self.state.mode == "tab":
@@ -601,6 +649,7 @@ class App:
                     last, self.pos, self.state.css_width = w, (int(x), int(y0)), int(w)
                     self.apply()
                 time.sleep(0.016)
+            self.log(f"resize {edge}: width {w0} -> {last}")
             if last != w0:
                 self.save_position()
         finally:
