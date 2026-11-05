@@ -150,7 +150,7 @@ load.
 FELIX phase after #1603 lands: F1 vendor bump and patch list; F2 control channel setting and
 barge; F3 Windows pill; F4 Mac pill venv. Tasks 1-8 do not wait on #1603.
 
-## 9. Open decisions (Robert)
+## 9. Open decisions (Robert; answered in section 11)
 
 1. One pill for both installs on a machine, or one per install?
 2. Barge per install, and may two triggers share one mic?
@@ -158,3 +158,27 @@ barge; F3 Windows pill; F4 Mac pill venv. Tasks 1-8 do not wait on #1603.
 4. Bluetooth headsets in scope for barge?
 5. German voices natively?
 6. Pull `C:\git\voicemode-local`, or install natively elsewhere?
+
+## 10. FELIX-voice review, 2026-11-05 (reported; to apply in the tasks)
+
+Line numbers in voice.py checked by FELIX-voice on aea841ffd. Direction right.
+
+Wrong:
+1. Pill and barge trigger start with the speech services from the connector (ensure_services), leased, stopped by the watchdog; not FELIX's detached WMI start, which is only for the install worker.
+2. FELIX overrides HOME, USERPROFILE, base dir, not LOCALAPPDATA. The Windows pill's %LOCALAPPDATA%\voicemode-local (DLLs, webview2-data, ui, position, log) would be shared between installs: move under the resolver's base dir or make it a setting.
+3. In FELIX the control.sock path changes on every runtime rebuild: never cache the pipe name; same for locks and the pill mutex. A fixed Local\VoiceModePillWindow lets one install's pill block the other's. Decision 1 needed before FELIX ships.
+
+Missing:
+4. A window started from a hidden process (launch.js windowsHide, CREATE_NO_WINDOW at voice.py:161, :701, :707): whether WPF/WebView2 shows and keeps no-focus is unmeasured. Test under the real app.
+5. Order: the pipe patch must be vendored before FELIX ever turns the channel on. Add a test that fails if the channel is on without the transport patch on Windows.
+6. FE settings: pill and barge on/off become FELIX preferences next to voice.local (fe-bootstrap/preferences/registry.json:79), read by voice.py; questions in #1608's approvals shape; the voice_barge MCP tool must change the preference, not a runtime file.
+7. Repair must check the Mac pill venv, Silero model and WebView2 DLLs; measure and state every size; low-disk check includes them; nuget.org joins the off-network hosts.
+8. Mac mic ownership: measure which app macOS asks permission for when the trigger (child of the Copilot app) opens the mic, and two processes opening the mic at once on a Mac.
+9. Fourth test tree: FELIX's patches (no_ffmpeg_gate, no_ffmpeg_warning, load_scipy_early) then barge and pill, in dependencies.json order.
+10. Stopping: kill_tree, leases, voice.py stop; on off they stop with the services and leave a personal install's trigger running. A Job Object belongs to FELIX's service process, not the pill.
+
+Minor: FELIX's kokoro copy already binds loopback. F1 re-anchoring rebuilds every runtime once; on #1603 the next chat repairs it.
+
+## 11. Robert's decisions, 2026-11-05
+
+1. One pill per install. 2. Barge per install, one trigger per mic. 4. Bluetooth headsets tested, not promised. 5. German later, on request. 6. Leave C:\git\voicemode-local; install natively elsewhere. 3 (FE questions and downloads) belongs to a FELIX session. Measured here: Silero model 2,327,524 bytes; WebView2 nupkg 9,818,548 bytes download, 906,432 kept.
