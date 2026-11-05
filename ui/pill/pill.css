@@ -1,0 +1,53 @@
+:root{--bg:#fff;--line:#d0d5dd;--t:#101828;--m:#667085;--a:#8b5cf6;--g:#0d9488;--r:#be123c;--hover:#f2f4f7}
+@media (prefers-color-scheme:dark){:root{--bg:#172033;--line:#334155;--t:#f1f5f9;--m:#94a3b8;--a:#c4a7ff;--g:#5eead4;--r:#fda4af;--hover:#243049}}
+*{box-sizing:border-box}
+html,body{margin:0;background:transparent;color:var(--t);font:13px system-ui,sans-serif;overflow:hidden;user-select:none}
+.card{background:var(--bg);border:1px solid var(--line);border-radius:16px;padding:8px 10px;max-width:100vw}
+.row{display:flex;align-items:center;gap:6px}.between{justify-content:space-between}
+.top{flex-wrap:wrap}
+.drag{display:flex;align-items:center;gap:8px;flex:0 0 100%;min-width:0;-webkit-app-region:drag;cursor:grab}
+.name{min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:12.5px}
+.state{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--m);font-size:12px;-webkit-app-region:drag;cursor:grab}
+.m{color:var(--m);font-size:12px}
+.orb{width:16px;height:16px;border-radius:50%;flex:none;background:var(--m);transition:background .2s}
+[data-phase=speaking] .orb{background:var(--a)}
+[data-phase=listening] .orb{background:var(--g)}
+[data-phase=paused] .orb{background:transparent;border:3px solid var(--m)}
+[data-phase=disconnected] .orb{opacity:.35}
+.btn,select{-webkit-app-region:no-drag;border:1px solid var(--line);background:transparent;color:var(--t);border-radius:8px;padding:4px 7px;font:inherit;font-size:12px;cursor:pointer}
+.btn:hover:not(:disabled),.btn.hover:not(:disabled){background:var(--hover)}
+.btn:disabled,select:disabled{opacity:.4;cursor:default}
+.btn.icon{padding:4px 6px}
+.stop:hover:not(:disabled),.stop.hover:not(:disabled){color:var(--r);border-color:var(--r)}
+select{flex:1;min-width:0}
+.more{display:none;margin-top:10px;flex-direction:column;gap:8px}
+[data-mode=expanded] .more,[data-mode=docked] .more{display:flex}
+.q{display:flex;justify-content:space-between;padding:3px 0;border-top:1px solid var(--line)}
+kbd{border:1px solid var(--line);border-radius:4px;padding:0 4px;font:11px ui-monospace,monospace}
+:focus-visible{outline:2px solid var(--a);outline-offset:1px}
+.pic{width:28px;height:28px;padding:0;flex:none;font-size:14px;line-height:1}
+.btn.icon{width:24px;padding:4px 0;flex:none}
+option{background:var(--bg);color:var(--t)}
+html,body{height:100%}
+.edge{position:fixed;top:0;bottom:0;width:10px;cursor:ew-resize;z-index:5}
+.edge:hover::after,.edge.hover::after{content:"";position:absolute;top:25%;bottom:25%;left:4px;width:3px;border-radius:2px;background:var(--m)}
+.edge.left{left:0}.edge.right{right:0}
+[data-mode=docked] .edge,[data-mode=rail] .edge,[data-mode=tab] .edge{display:none}
+.tuck{display:none}
+[data-mode=docked] .tuck,[data-mode=rail] .tuck{display:block}
+[data-mode=docked] #expand,[data-mode=docked] #minimize,[data-mode=docked] #dockTop,[data-mode=rail] #dockTop{display:none}
+[data-mode=docked] .drag,[data-mode=rail] .drag{cursor:ns-resize}
+.waiting{flex:none;margin-left:auto;color:var(--m);font-size:11px}
+[data-mode=rail] .waiting{margin:0;font-size:10px}
+[data-mode=rail] #minimize,[data-mode=rail] #dismiss{display:none}
+[data-mode=rail] .card{padding:8px 6px}
+[data-mode=rail] .top{flex-wrap:wrap;justify-content:center}
+[data-mode=rail] .drag{flex:0 0 100%;flex-direction:column;gap:4px;text-align:center}
+[data-mode=rail] .name{white-space:normal;font-size:11px;line-height:1.2;overflow-wrap:anywhere;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2}
+[data-mode=rail] .state{flex:0 0 100%;white-space:normal;text-align:center;font-size:10px;line-height:1.2}
+[data-mode=rail] .pic{flex:0 0 100%}
+[data-mode=rail] .btn.icon{width:28px;height:28px;padding:0}
+.tab{display:none;width:100vw;height:100vh;padding:0;border:1px solid var(--line);border-radius:12px;background:var(--bg);color:var(--m);font-size:18px;line-height:1;cursor:pointer}
+.tab:hover,.tab.hover{background:var(--hover)}
+[data-phase=speaking] .tab{color:var(--a)}[data-phase=listening] .tab{color:var(--g)}
+[data-mode=tab] .tab{display:block}[data-mode=tab] .card{display:none}

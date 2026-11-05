@@ -84,7 +84,9 @@ class FakeCapture:
 class Harness:
     """Drives run() with a scripted `speaking` timeline."""
 
-    def __init__(self, speaking, frames, warmup=0):
+    def __init__(self, speaking, frames, warmup=0, paused=None, on_fire=None):
+        self.paused = paused
+        self.on_fire = on_fire
         self.speaking = list(speaking)
         self.frames = frames
         self.opened = []
@@ -113,6 +115,8 @@ class Harness:
             sleep=lambda _s: None,
             warmup_windows=self.warmup,
             poll_every_windows=1,
+            **({"is_paused": self.paused} if self.paused else {}),
+            **({"on_fire": self.on_fire} if self.on_fire else {}),
         )
 
 
@@ -143,6 +147,27 @@ class TestRunLoop:
         h = Harness([True] * 6 + [False], [(SPEECH, LOUD)] * 3 + [(NOT_SPEECH, ECHO)] * 3, warmup=3)
         h.run()
         assert h.barges == 0
+
+    def test_mic_stays_closed_while_paused(self):
+        h = Harness([True] * 5, [(SPEECH, LOUD)] * 10, paused=lambda: True)
+        h.run()
+        assert h.opened == []
+        assert h.barges == 0
+
+    def test_open_mic_closes_when_pause_starts(self):
+        states = iter([False, False, True, True, True])
+        h = Harness([True] * 6, [(NOT_SPEECH, LOUD)] * 20, paused=lambda: next(states, True))
+        h.run()
+        assert len(h.opened) == 1
+        assert h.opened[0].closed
+        assert h.barges == 0
+
+    def test_fire_calls_on_fire_once(self):
+        calls = []
+        h = Harness([True] * 10, [(SPEECH, LOUD)] * 10, on_fire=lambda: calls.append(1))
+        h.run()
+        assert h.barges == 1
+        assert calls == [1]
 
     def test_each_utterance_starts_with_fresh_vad_state(self):
         h = Harness([True, False, True, False], [])

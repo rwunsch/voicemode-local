@@ -23,6 +23,8 @@ The conversation flows naturally. Claude's responses are typically 1-3 seconds t
 
 **Multi-session voice** — Run multiple Claude Code sessions and give each a different voice. When three terminals are talking to you, you can tell which is which by the voice alone. This is the killer feature for power users running parallel Claude Code sessions.
 
+**Voice pill** (off by default) — A small always-on-top window showing who is talking, with Interrupt, Pause, Stop, voice and language pickers and a Beeps switch. Windows through WSL, and macOS. `voicemode-switch pill on`; see [docs/voice-pill](docs/voice-pill/README.md).
+
 **Language switching** — Say "sprich Deutsch" and Claude switches to German mid-conversation. Whisper auto-detects your language, no manual configuration needed. Switch back with "speak English". The TTS voices handle multiple languages naturally.
 
 **Engine switching** — Swap between Kokoro (fast, good English), Piper (multilingual), or OpenAI (best quality) on the fly with the `voicemode-switch` CLI.

@@ -16,8 +16,8 @@
 
 Playback is bracketed by renaming each player function to ``<name>_inner`` and
 putting a small try/finally wrapper in its place, so upstream's body is
-untouched. Covers the buffered player and the turns[] player. The chunked
-streaming path does not report ``speaking``, so barge-in stays inert there.
+untouched. Covers the buffered player and the turns[] player. patch_voice_pill
+does the same for the chunked streaming path.
 
 Apply after patch_control_hold / patch_hold_barges_in, whose output it anchors on.
 Anchors verified against voice-mode 8.12.0 (2026-11-04). Idempotent; fails loudly

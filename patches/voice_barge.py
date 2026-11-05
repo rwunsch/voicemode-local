@@ -22,14 +22,11 @@ VOICEMODE_STREAMING_ENABLED=true this stays inert.
 Enable with ``voicemode-switch barge on``. Linux/WSL only for now (needs parec).
 Installed into voice_mode/voice_barge.py by patches/apply.sh.
 """
-import json
 import logging
 import os
-import re
 import select
 import shutil
 import signal
-import socket
 import struct
 import subprocess
 import sys
@@ -39,6 +36,14 @@ from collections import deque
 from pathlib import Path
 
 import numpy as np
+
+try:
+    from voice_mode.voice_pill_state import (  # noqa: F401  (re-exported for callers)
+        _exchange, _status, barge_control, control_socket_path, is_paused, record_interruption)
+except ImportError:  # run straight from the repo, not the installed package
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from voice_pill_state import (  # noqa: F401
+        _exchange, _status, barge_control, control_socket_path, is_paused, record_interruption)
 
 logger = logging.getLogger("voicemode.voice_barge")
 
@@ -147,39 +152,6 @@ class ParecCapture:
         self._proc.stdout.close()
 
 
-def control_socket_path() -> Path:
-    # Upstream's variable is VOICEMODE_CONTROL_SOCKET (config.py).
-    return Path(os.path.expanduser(os.getenv("VOICEMODE_CONTROL_SOCKET") or "~/.voicemode/control.sock"))
-
-
-def _exchange(path: Path, payload: dict, want_reply: bool):
-    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
-        s.settimeout(0.3)
-        s.connect(str(path))
-        s.sendall((json.dumps(payload) + "\n").encode("utf-8"))
-        if not want_reply:
-            return None
-        buf = b""
-        while b"\n" not in buf and len(buf) < 65536:
-            chunk = s.recv(4096)
-            if not chunk:
-                break
-            buf += chunk
-        return json.loads(buf.split(b"\n", 1)[0])
-
-
-def _status(path: Path) -> dict:
-    """The server's status, or {}. The socket exists only during an active
-    converse, so an absent one is the normal idle state."""
-    if not path.exists():
-        return {}
-    try:
-        reply = _exchange(path, {"command": "status"}, want_reply=True)
-    except (OSError, ValueError):
-        return {}
-    return reply if isinstance(reply, dict) else {}
-
-
 def is_speaking(path: Path) -> bool:
     """True only if a server says TTS is playing."""
     return bool(_status(path).get("speaking"))
@@ -238,27 +210,6 @@ def send_barge_in(path: Path) -> None:
         logger.debug("barge_in not delivered: %s", e)
 
 
-def barge_control(action: str, switch=None) -> str:
-    """Run ``voicemode-switch barge <action>`` for the MCP tool. The action is
-    checked against a fixed list, so model output never reaches the command line."""
-    action = (action or "").strip().lower()
-    if action not in ("on", "off", "status"):
-        return "action must be on, off or status"
-    # The venv lives in the repo, next to the script.
-    switch = Path(switch) if switch is not None else Path(sys.prefix).parent / "voicemode-switch"
-    if not switch.exists():
-        return f"voicemode-switch not found at {switch}"
-    try:
-        # `on` may download the Silero model.
-        done = subprocess.run([str(switch), "barge", action], capture_output=True, text=True, timeout=180)
-    except (OSError, subprocess.TimeoutExpired) as e:
-        return f"voice barge {action} failed: {e}"
-    output = re.sub(r"\x1b\[[0-9;]*m", "", (done.stdout + done.stderr)).strip()
-    if done.returncode != 0:
-        return f"voice barge {action} failed: {output}"
-    return output
-
-
 def _hand_off(capture, held, poll_listen_started, preroll_sink, poll_every_windows, clock) -> None:
     """Keep capturing until the server is listening, then pass on all of it."""
     last_read = clock()
@@ -276,13 +227,18 @@ def _hand_off(capture, held, poll_listen_started, preroll_sink, poll_every_windo
 def run(poll_speaking, open_capture, vad, detector, send_barge, sleep=time.sleep,
         warmup_windows=WARMUP_WINDOWS, poll_every_windows=POLL_EVERY_WINDOWS,
         idle_poll_s=IDLE_POLL_S, poll_listen_started=None, preroll_sink=None,
-        clock=time.time, preroll_windows=PREROLL_WINDOWS) -> None:
-    """Main loop. ``poll_speaking`` returns True, False, or None to shut down."""
+        clock=time.time, preroll_windows=PREROLL_WINDOWS,
+        is_paused=lambda: False, on_fire=None) -> None:
+    """Main loop. ``poll_speaking`` returns True, False, or None to shut down.
+
+    While ``is_paused()`` the mic stays closed (and an open one is closed at the
+    next poll). ``on_fire()`` is called once per barge-in sent.
+    """
     while True:
         speaking = poll_speaking()
         if speaking is None:
             return
-        if not speaking:
+        if not speaking or is_paused():
             sleep(idle_poll_s)
             continue
 
@@ -300,7 +256,7 @@ def run(poll_speaking, open_capture, vad, detector, send_barge, sleep=time.sleep
                     speaking = poll_speaking()
                     if speaking is None:
                         return
-                    if not speaking:
+                    if not speaking or is_paused():
                         break
                 if window is None or count <= warmup_windows:
                     continue
@@ -309,6 +265,11 @@ def run(poll_speaking, open_capture, vad, detector, send_barge, sleep=time.sleep
                 db = window_db(window)
                 if detector.feed(prob, db):
                     send_barge()
+                    if on_fire is not None:
+                        try:
+                            on_fire()
+                        except Exception:
+                            logger.exception("on_fire failed")
                     logger.info("barge-in sent: prob=%.2f level=%.1f dBFS", prob, db)
                     fired = True
                     if preroll_sink is not None:
@@ -374,6 +335,8 @@ def main() -> int:
         send_barge=lambda: send_barge_in(path),
         poll_listen_started=lambda: _status(path).get("listen_started_at"),
         preroll_sink=lambda samples, start_t: write_preroll(preroll_path(), samples, start_t),
+        is_paused=is_paused,
+        on_fire=lambda: record_interruption(time.time()),
     )
     logger.info("stopped")
     return 0

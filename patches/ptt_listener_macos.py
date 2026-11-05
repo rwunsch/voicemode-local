@@ -64,6 +64,18 @@ KEYCODE_SPACE = 49
 KEYCODE_ESC = 53
 
 
+def touch_pill() -> None:
+    """Tell the voice pill a key press happened (its two-minute rule). Never raises."""
+    try:
+        try:
+            from voice_mode import voice_pill_state as st
+        except ImportError:  # run from the repo, not installed
+            import voice_pill_state as st
+        st.touch_ptt()
+    except Exception:
+        logger.debug("pill touch failed", exc_info=True)
+
+
 # Keep this short. A 127-char line never submitted: Claude Code took the burst
 # for a paste and the Return after it did not send. ~50 chars works (2026-10-20).
 WAKE_TEXT = "[push-to-talk] listen now (converse, skip_tts=true)"
@@ -216,6 +228,7 @@ def run_listener() -> None:
             down.add(key)
             return
         if key == keyboard.Key.space and not held and _mods_down():
+            touch_pill()
             if wake_enabled and not ptt_control_client.available():
                 # Idle: no call to hold. Wake the last session instead.
                 now = time.monotonic()

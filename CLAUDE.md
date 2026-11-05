@@ -96,6 +96,8 @@ they said. Off takes effect at once, so use it whenever the user asks to turn in
 on or off. See `docs/voice-barge-in/README.md`, including what has not
 been tested.
 
+When the user says "stop voice mode", call the `voice_stop` MCP tool and continue in text.
+
 ## Never End a Voice Conversation on Your Own Initiative
 
 Only the **user** ends a voice conversation (e.g. "goodbye", "that's all",

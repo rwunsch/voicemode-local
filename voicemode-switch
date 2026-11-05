@@ -434,6 +434,107 @@ cmd_barge() {
     esac
 }
 
+# --- Voice pill: the small on-screen status window ----------------------------
+# Anchored on the interpreter: an editor or a shell whose command line merely names
+# the file must not match, as `pkill -f` matches the whole line.
+PILL_BACKEND_RE='^[^ ]*python[^ ]* (-m voice_mode\.voice_pill|[^ ]*/voice_pill\.py)( |$)'
+
+env_value() { sed -n "s/^$1=//p" "$HOME/.voicemode/voicemode.env" 2>/dev/null | tail -1; }
+
+set_env_value() {
+    local env_file="$HOME/.voicemode/voicemode.env"
+    mkdir -p "$(dirname "$env_file")"; touch "$env_file"
+    sed -i.bak "/^$1=/d" "$env_file" && rm -f "$env_file.bak"
+    echo "$1=$2" >> "$env_file"
+}
+
+# macOS: pywebview lives in its own venv, so the main venv gains no dependency.
+PILL_VENV="$HOME/.voicemode/pill-venv"
+# The interpreter may re-exec as .../Python.app/Contents/MacOS/Python: match either case.
+PILL_WINDOW_RE='^[^ ]*[Pp]ython[^ ]* ([^ ]+ )*[^ ]*/voice_pill_mac\.py( |$)'
+PILL_MAC_PINS="pywebview==6.2.1 pyobjc-core==13.0 pyobjc-framework-Cocoa==13.0 pyobjc-framework-Quartz==13.0 pyobjc-framework-WebKit==13.0 pyobjc-framework-Security==13.0 pyobjc-framework-UniformTypeIdentifiers==13.0"
+
+find_pill_python() {
+    local c
+    for c in python3.13 python3.12 python3.11 python3.10 python3; do
+        c="$(command -v "$c" 2>/dev/null)" || continue
+        "$c" -c 'import sys; sys.exit(sys.version_info < (3, 10))' 2>/dev/null && { echo "$c"; return 0; }
+    done
+    return 1
+}
+
+setup_pill_venv() {
+    # The pin list is the marker: a changed list reinstalls, an unchanged one does nothing.
+    if [ "$(cat "$PILL_VENV/.pins" 2>/dev/null)" = "$PILL_MAC_PINS" ] && [ -x "$PILL_VENV/bin/python" ]; then return 0; fi
+    echo "  Setting up the pill venv ($PILL_VENV)..."
+    local py; py="$(find_pill_python)" || { fail "The pill venv needs Python 3.10 or newer (pyobjc 13). Install one (brew install python@3.12) and retry"; return 1; }
+    { "$py" -m venv "$PILL_VENV" && "$PILL_VENV/bin/python" -m pip install --quiet $PILL_MAC_PINS; } \
+        || { fail "Could not set up the pill venv"; return 1; }
+    printf '%s' "$PILL_MAC_PINS" > "$PILL_VENV/.pins"
+}
+
+# The window takes its own single-instance lock, so a second `on` is harmless. Waits
+# for early failures, as the Windows path does.
+start_pill_window_mac() {
+    setup_pill_venv || return 1
+    mkdir -p "$HOME/.voicemode/logs"
+    local log="$HOME/.voicemode/logs/pill-window.log" pid
+    nohup "$PILL_VENV/bin/python" "$SCRIPT_DIR/patches/voice_pill_mac.py" >> "$log" 2>&1 < /dev/null &
+    pid=$!; disown 2>/dev/null || true
+    sleep 3
+    if kill -0 "$pid" 2>/dev/null; then return 0; fi
+    if wait "$pid" 2>/dev/null; then PILL_ALREADY=1; else fail "The pill window did not stay up. See $log"; return 1; fi
+}
+
+# Windows is the only other platform whose window this script can open. The window takes
+# its own single-instance lock, so a second `on` is harmless. Waits for the window's
+# early failures: a broken venv shows up within seconds, as exit 1.
+start_pill_window() {
+    [ "$(uname -s)" = "Darwin" ] && { start_pill_window_mac; return; }
+    [ -n "${WSL_DISTRO_NAME:-}" ] && command -v powershell.exe >/dev/null 2>&1 || return 0
+    local script result; script="$(wslpath -w "$SCRIPT_DIR/pill-windows.ps1")"
+    result="$(powershell.exe -NoProfile -Command "\$p=Start-Process powershell.exe -PassThru -WindowStyle Hidden -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File','\"$script\"'; \$h=\$p.Handle; if (\$p.WaitForExit(15000)) { \$p.ExitCode } else { 'running' }" 2>/dev/null | tr -d '\r' | tail -1)" || result=""
+    case "$result" in
+        running) ;;
+        0) PILL_ALREADY=1 ;;
+        "") warn "Could not confirm the pill window started; run pill-windows.ps1 by hand" ;;
+        *) fail "The pill window did not stay up (exit $result). See %LOCALAPPDATA%\\\\voicemode-local\\\\pill-window.log"; return 1 ;;
+    esac
+}
+
+# Stops a window that has no backend for pkill to find.
+signal_pill_window() {
+    [ -n "${WSL_DISTRO_NAME:-}" ] && command -v powershell.exe >/dev/null 2>&1 || return 0
+    powershell.exe -NoProfile -Command "\$e=\$null; if ([Threading.EventWaitHandle]::TryOpenExisting('Local\\VoiceModePillStop',[ref]\$e)) { [void]\$e.Set() }" >/dev/null 2>&1 || true
+}
+
+cmd_pill() {
+    case "${1:-status}" in
+        on)
+            set_env_value VOICEMODE_PILL true
+            set_env_value VOICEMODE_CONTROL_CHANNEL_ENABLED true  # upstream's default is off
+            start_pill_window || return 1
+            if [ -n "${PILL_ALREADY:-}" ]; then ok "Voice pill on (the window was already running). Voice sessions already running need /mcp reconnect."
+            else ok "Voice pill on. Voice sessions already running need /mcp reconnect."; fi
+            ;;
+        off)
+            set_env_value VOICEMODE_PILL false
+            signal_pill_window
+            # Where nothing can be signalled, the window sees the flag when its backend exits.
+            # On macOS the window goes first, so it cannot restart the backend; its exit ends the backend too.
+            pkill -f "$PILL_WINDOW_RE" 2>/dev/null || true
+            pkill -f "$PILL_BACKEND_RE" 2>/dev/null || true
+            ok "Voice pill off"
+            ;;
+        status)
+            if [ "$(env_value VOICEMODE_PILL)" = "true" ]; then echo "Voice pill: enabled"; else echo "Voice pill: disabled"; fi
+            if [ "$(env_value VOICEMODE_CONTROL_CHANNEL_ENABLED)" = "true" ]; then echo "Control channel: enabled"; else echo "Control channel: disabled"; fi
+            if pgrep -f "$PILL_BACKEND_RE" >/dev/null 2>&1; then echo "Backend: running"; else echo "Backend: not running"; fi
+            ;;
+        *) echo "usage: voicemode-switch pill [on|off|status]"; return 2 ;;
+    esac
+}
+
 # Structured health probe of the configured endpoints (exit 0 iff all up).
 cmd_health() {
     local all_up=0
@@ -793,6 +894,7 @@ case "${1:-}" in
     health) cmd_health ;;
     compute) cmd_compute "${2:-}" "${3:-}" ;;
     barge) cmd_barge "${2:-}" ;;
+    pill) cmd_pill "${2:-}" ;;
     queue)
         # Upstream's conch queue (8.8.0 epic VM-1610) replaced our voice_queue.py.
         # `voicemode conch status` shows the floor holder + the FIFO waiter list.
@@ -892,6 +994,7 @@ PY
         echo "  audio-token  Toggle cross-process audio device exclusivity: audio-token [on|off|status]"
         echo "  queue-log Tail the per-session queue event log (debug)"
         echo "  sysaudio  Fold system output into voice input: on|off|status|setup|teardown"
+        echo "  pill      Small on-screen status window: pill [on|off|status]"
         echo ""
         echo "After switching modes, restart Claude Code for changes to take effect."
         ;;

@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'none'; connect-src 'none'">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Voice pill</title>
+<link rel="stylesheet" href="pill.css">
+</head>
+<body data-mode="pill" data-phase="disconnected">
+<button id="tab" class="tab" title="Bring back" aria-label="Bring back">&#x2039;</button>
+<div id="edgeL" class="edge left"></div>
+<div id="edgeR" class="edge right"></div>
+<main id="card" class="card">
+  <div class="row top">
+    <div id="drag" class="drag"><div class="orb"></div><b id="sub" class="name"></b><span id="waiting" class="waiting"></span></div>
+    <div id="label" class="state">Disconnected</div>
+    <button id="interrupt" class="btn pic" title="Interrupt" aria-label="Interrupt">&#x23ED;&#xFE0E;</button>
+    <button id="pause" class="btn pic" title="Pause" aria-label="Pause">&#x23F8;&#xFE0E;</button>
+    <button id="stop" class="btn stop pic" title="Stop" aria-label="Stop">&#x25A0;&#xFE0E;</button>
+    <button id="expand" class="btn icon" title="Expand" aria-label="Expand" aria-expanded="false">&#x2304;</button>
+    <button id="dockTop" class="btn icon" title="Dock to the side" aria-label="Dock to the side">&#x203A;</button>
+    <button id="minimize" class="btn icon" title="Minimize" aria-label="Minimize">_</button>
+    <button id="dismiss" class="btn icon" title="Hide until the next voice session" aria-label="Hide until the next voice session">&#x2715;</button>
+    <button id="tuck" class="btn icon tuck" title="Slide out of view" aria-label="Slide out of view">&#x203A;</button>
+  </div>
+  <section id="more" class="more">
+    <div class="row">
+      <select id="voice" aria-label="Voice"></select>
+      <select id="language" aria-label="Language"></select>
+    </div>
+    <div id="bargeRow" class="row between"><label for="barge">Interrupt by voice</label>
+      <button id="barge" class="btn" role="switch" aria-checked="false">Off</button></div>
+    <div class="row between"><label for="beeps">Beeps</label>
+      <button id="beeps" class="btn" role="switch" aria-checked="false">Off</button></div>
+    <div id="count" class="m"></div>
+    <div id="queue"></div>
+    <div id="keys" class="m"></div>
+    <div class="row between foot">
+      <button id="dock" class="btn">Dock</button>
+    </div>
+  </section>
+</main>
+<script src="model.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
