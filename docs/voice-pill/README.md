@@ -123,3 +123,97 @@ now shows by colour only. Whether the old or new cost affects stutter was not me
 - A restart attempt boots WSL. After `wsl --shutdown`, a running window starts it again within
   30 s. Use `voicemode-switch pill off` first.
 - Docked, the window takes 320 px of screen width at full height.
+
+# Voice pill: Mac window
+
+> **TL;DR:** `patches/voice_pill_mac.py` shows the same `ui/pill` page in a frameless,
+> always-on-top pywebview window, with the same backend (`voice_pill.py`) and the same
+> message protocol as Windows. Written on Linux; **nothing in the GUI part has run yet**. The
+> checklist below is for `FELIX-MAC`.
+
+| Field | Value |
+|---|---|
+| Status | Implemented, untested on the Mac |
+| Measured on | Only the pure logic (`tests/test_voice_pill_mac.py`, on Linux). `FELIX-MAC` confirmed on 2026-11-04 (n=1, macOS 26.7.1, Apple silicon) that pywebview 6.2.1 with pyobjc 13.0 opens a frameless on-top window |
+
+## Use (macOS)
+
+```bash
+voicemode-switch pill on       # makes ~/.voicemode/pill-venv (pinned), sets the flag, opens the window
+voicemode-switch pill off      # clears the flag, stops the window and backend
+voicemode-switch pill status
+```
+
+`voicemode-mcp` also starts one window per machine when `VOICEMODE_PILL=true` and the venv
+exists (same lock and pidfile pattern as the PTT listener). Log: `~/.voicemode/logs/pill-window.log`.
+Position: `~/.voicemode/pill/window-position.txt`.
+
+The pill venv holds pywebview 6.2.1 and the six pyobjc packages it needs, pinned to 13.0
+(`PILL_MAC_PINS` in `voicemode-switch`; bottle, proxy_tools and typing_extensions come unpinned
+as pywebview's own dependencies). The main venv gains nothing. The backend is stdlib only and runs under the same interpreter.
+
+## Differences from Windows
+
+- **Docked is not a reserved area.** macOS has no AppBar. "Docked" snaps the window to the
+  left or right edge of the usable screen (below the menu bar, above the Dock) at full height,
+  and other windows can still cover that strip. Pushing windows aside would need Accessibility
+  permission and fighting every app, so it is not attempted.
+- **Focus.** Windows blocks activation with a style bit. Here the activation policy is
+  Accessory (no Dock icon, no menu bar), set after pywebview's import because that resets it
+  to Regular, and set again in the `shown` event. pywebview activates the app once when its loop
+  starts: the previously frontmost app is re-activated at once. The window is shown with
+  `orderFrontRegardless`, never pywebview's `show()`, which activates.
+- **Dragging** polls `NSEvent.mouseLocation` while the left button is down, as on Windows.
+- **Corners** come from the page: the window is transparent.
+- **Primary screen only.** Placement and clamping use the main display. Display changes are not watched.
+- **Barge-in stays hidden:** the backend reports `available: false` without `parec`, which macOS lacks, so the page hides it. Nothing is Mac-specific. (If someone installs PulseAudio's `parec`, it will appear; untested.)
+- **Stop:** `pill off` kills the window, whose death closes the backend's stdin and ends it. A plain `kill` of the window is the same.
+- **Key press:** `ptt_listener_macos.py` calls `touch_ptt()` on every hotkey press (best effort), so the two-minute rule applies here too.
+
+## Checklist for FELIX-MAC
+
+Setup: `git pull` on `feature/voice-pill`, run `patches/apply.sh`, `voicemode-switch pill on`.
+Do not touch the local changes to `piper-proxy.py` and `voices/piper-voices.json`.
+Screenshots stay on the Mac, cropped to the pill. Robert does what needs ears or macOS permissions.
+
+Without voice, use the fake backend (`tests/pill_fake_backend.py <dir>`); run the window by hand in a terminal:
+`~/.voicemode/pill-venv/bin/python patches/voice_pill_mac.py --force --backend "python3 $PWD/tests/pill_fake_backend.py /tmp/pillfb"`.
+Edit `/tmp/pillfb/state.json` to change what the pill shows (for example `{"phase":"speaking"}`; also `"platform": "macos"`).
+`--force` skips the VOICEMODE_PILL flag. Stop it with Ctrl-C.
+
+Window and focus (fake backend):
+- [ ] Opening the pill does not take focus from the frontmost app (read the frontmost app before and after, for example with `osascript -e 'tell application "System Events" to name of first process whose frontmost is true'`). A flicker is acceptable if it ends back on the same app; say so if you saw one
+- [ ] No Dock icon, and no "python" in the menu bar
+- [ ] Clicking Pause, Interrupt, the dropdown and the expand button: the frontmost app does not change. **Expected to be the weak spot**: a click on any window can activate its app. If it changes, report it; the fallback is a small Swift `NSPanel` (non-activating)
+- [ ] Always on top: another window dragged over it
+- [ ] Above a full-screen app, and visible on a second Space (untested so far)
+- [ ] The page renders from `file://` (the page's CSP says `'self'`): text and buttons present, no blank window
+- [ ] Transparent window with rounded corners, no square white edge; dark and light appearance
+- [ ] Hide and show: snapshot `visible` false then true (`state.json`)
+- [ ] Dismiss stays hidden while `visible` stays true; returns on false then true
+- [ ] Modes: pill, expanded (window grows to the card height), dot (16 px), docked left and right at full height
+- [ ] Drag moves it, position survives a restart, and a position off screen is pulled back
+- [ ] Disconnected when the backend dies (`echo 2 > /tmp/pillfb/exit_now`); backoff 1, 2, 4, 8, 16, 30 s in `pill-window.log`
+- [ ] Exit 1 before any output (`echo 1 > /tmp/pillfb/startup_exit`): the window exits with code 1
+- [ ] A second `pill on`: "already running", one window
+- [ ] `pill off` closes the window and the backend, no python process left (`pgrep -fl voice_pill`)
+- [ ] Closing while paused (real backend): `~/.voicemode/pill/paused.json` is gone
+
+Backend on macOS (real `voice_pill.py`):
+- [ ] A live voice session stays registered: `ps -o lstart= -p <pid>` works in `voice_pill_state.py` (check the session shows in the pill's queue after a minute, not pruned)
+- [ ] A dead session is pruned (kill a session, it leaves the queue within a few seconds)
+- [ ] CPU of the window processes while idle, speaking and hidden (Activity Monitor or `top`), as in the Windows table
+
+Needs Robert (voice, ears, permissions):
+- [ ] Pill appears on a real `converse`; states follow the turn
+- [ ] Kokoro through `streaming.py` shows Speaking (Task 2)
+- [ ] Interrupt, Pause, Resume and Stop work in a real turn
+- [ ] The hotkey press makes the pill appear (two-minute rule); Input Monitoring permission as for PTT
+- [ ] No new stutter (`voicemode-perf`)
+- [ ] Autostart at login: not provided on macOS; `voicemode-mcp` starts the window with the first session. (A LaunchAgent is not written.)
+
+## Not tested / known limits
+
+- Everything above, until `FELIX-MAC` runs it.
+- `evaluate_js` to a window that is ordered out may stall the reader thread. If snapshots stop arriving while hidden, that is why.
+- Display changes and more than one monitor.

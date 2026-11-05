@@ -96,6 +96,29 @@ ensure_ptt_listener() {
 }
 ensure_ptt_listener
 
+# --- One voice pill window per machine (macOS) -------------------------------
+# Only with VOICEMODE_PILL=true and a pill venv (made by `voicemode-switch pill on`).
+# The window holds its own single-instance lock; this lock only stops two sessions
+# starting at the same moment from spawning two launches.
+ensure_pill_window() {
+    [ "$(uname -s)" = "Darwin" ] || return 0
+    [ "$(sed -n 's/^VOICEMODE_PILL=//p' "$HOME/.voicemode/voicemode.env" 2>/dev/null | tail -1)" = "true" ] || return 0
+    local py="$HOME/.voicemode/pill-venv/bin/python" pidfile="$RUN_DIR/pill-window.pid" lock="$RUN_DIR/pill-window.launch.lock" old
+    [ -x "$py" ] || return 0
+    find "$lock" -maxdepth 0 -mmin +1 -exec rmdir {} \; 2>/dev/null
+    mkdir "$lock" 2>/dev/null || return 0
+    if old="$(cat "$pidfile" 2>/dev/null)" && [ -n "$old" ] && kill -0 "$old" 2>/dev/null \
+        && ps -o command= -p "$old" 2>/dev/null | grep -q 'voice_pill_mac'; then
+        rmdir "$lock"
+        return 0
+    fi
+    nohup "$py" "$SCRIPT_DIR/patches/voice_pill_mac.py" >> "$LOG_DIR/pill-window.log" 2>&1 < /dev/null &
+    printf '%s' "$!" > "$pidfile"
+    disown 2>/dev/null || true
+    rmdir "$lock"
+}
+ensure_pill_window
+
 # Best-effort: never let proxy startup block or fail the MCP launch.
 "$SCRIPT_DIR/voicemode-switch" ensure --quiet >> "$LOG_DIR/ensure.log" 2>&1 || true
 
