@@ -139,13 +139,13 @@ now shows by colour only. Whether the old or new cost affects stutter was not me
 ## Use (macOS)
 
 ```bash
-voicemode-switch pill on       # makes ~/.voicemode/pill-venv (pinned), sets the flag, opens the window
+voicemode-switch pill on       # makes ~/.voicemode/pill-venv (pinned; needs Python 3.10+, picks the newest found), sets the flag, opens the window
 voicemode-switch pill off      # clears the flag, stops the window and backend
 voicemode-switch pill status
 ```
 
 `voicemode-mcp` also starts one window per machine when `VOICEMODE_PILL=true` and the venv
-exists (same lock and pidfile pattern as the PTT listener). Log: `~/.voicemode/logs/pill-window.log`.
+exists (a launch lock like the PTT listener's, and `pgrep` instead of a pidfile, since a launch that loses the window's own lock exits at once). Log: `~/.voicemode/logs/pill-window.log`.
 Position: `~/.voicemode/pill/window-position.txt`.
 
 The pill venv holds pywebview 6.2.1 and the six pyobjc packages it needs, pinned to 13.0
@@ -186,7 +186,7 @@ Window and focus (fake backend):
 - [ ] No Dock icon, and no "python" in the menu bar
 - [ ] Clicking Pause, Interrupt, the dropdown and the expand button: the frontmost app does not change. **Expected to be the weak spot**: a click on any window can activate its app. If it changes, report it; the fallback is a small Swift `NSPanel` (non-activating)
 - [ ] Always on top: another window dragged over it
-- [ ] Above a full-screen app, and visible on a second Space (untested so far)
+- [ ] Above a full-screen app, and visible on a second Space (untested so far). If the window never gets that behaviour, check whether pywebview fires `shown` for a `hidden=True` window (the collection behaviour is set in that handler; look for "window behaviour not set" or its absence in `pill-window.log`)
 - [ ] The page renders from `file://` (the page's CSP says `'self'`): text and buttons present, no blank window
 - [ ] Transparent window with rounded corners, no square white edge; dark and light appearance
 - [ ] Hide and show: snapshot `visible` false then true (`state.json`)

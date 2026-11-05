@@ -103,18 +103,16 @@ ensure_ptt_listener
 ensure_pill_window() {
     [ "$(uname -s)" = "Darwin" ] || return 0
     [ "$(sed -n 's/^VOICEMODE_PILL=//p' "$HOME/.voicemode/voicemode.env" 2>/dev/null | tail -1)" = "true" ] || return 0
-    local py="$HOME/.voicemode/pill-venv/bin/python" pidfile="$RUN_DIR/pill-window.pid" lock="$RUN_DIR/pill-window.launch.lock" old
+    local py="$HOME/.voicemode/pill-venv/bin/python" lock="$RUN_DIR/pill-window.launch.lock"
     [ -x "$py" ] || return 0
     find "$lock" -maxdepth 0 -mmin +1 -exec rmdir {} \; 2>/dev/null
     mkdir "$lock" 2>/dev/null || return 0
-    if old="$(cat "$pidfile" 2>/dev/null)" && [ -n "$old" ] && kill -0 "$old" 2>/dev/null \
-        && ps -o command= -p "$old" 2>/dev/null | grep -q 'voice_pill_mac'; then
-        rmdir "$lock"
-        return 0
+    # Ask the process table, not a pidfile: a launch that loses the window's own
+    # single-instance lock exits at once and would leave a dead pid behind.
+    if ! pgrep -f '^[^ ]*[Pp]ython[^ ]* ([^ ]+ )*[^ ]*voice_pill_mac\.py( |$)' >/dev/null 2>&1; then
+        nohup "$py" "$SCRIPT_DIR/patches/voice_pill_mac.py" >> "$LOG_DIR/pill-window.log" 2>&1 < /dev/null &
+        disown 2>/dev/null || true
     fi
-    nohup "$py" "$SCRIPT_DIR/patches/voice_pill_mac.py" >> "$LOG_DIR/pill-window.log" 2>&1 < /dev/null &
-    printf '%s' "$!" > "$pidfile"
-    disown 2>/dev/null || true
     rmdir "$lock"
 }
 ensure_pill_window

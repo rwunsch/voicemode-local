@@ -122,3 +122,30 @@ def test_key_press_touches_the_pill_and_never_raises(tmp_path, monkeypatch):
     assert (tmp_path / ".voicemode" / "pill" / "ptt").exists()
     monkeypatch.setenv("HOME", "/proc/nonexistent/x")  # unwritable: still silent
     mod.touch_pill()
+
+
+def test_failed_spawns_back_off_and_do_not_recurse(tmp_path, monkeypatch):
+    import inspect
+    monkeypatch.setenv("HOME", str(tmp_path))
+    app = m.App(True, ["/nonexistent"])
+    app.started = 1.0  # a stale start time from an earlier run must not matter
+    delays, depths = [], []
+
+    def fake_sleep(s):
+        delays.append(s)
+        depths.append(len(inspect.stack()))
+        if len(delays) == 8:
+            app.closing = True
+
+    def boom(*a, **k):
+        raise OSError("no such file")
+
+    monkeypatch.setattr(m.subprocess, "Popen", boom)
+    monkeypatch.setattr(m.time, "sleep", fake_sleep)
+    monkeypatch.setattr(m.time, "monotonic", lambda: 1000.0)  # old code: ran = 1000 s -> backoff reset
+    app.start_backend()
+    t = getattr(app, "thread", None)
+    if t:
+        t.join(5)
+    assert delays == [1, 2, 4, 8, 16, 30, 30, 30]
+    assert max(depths) - min(depths) <= 1

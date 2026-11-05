@@ -185,47 +185,51 @@ class App:
 
     # backend
     def start_backend(self):
-        if self.closing:
-            return
-        cmd = self.backend
+        if not self.closing:
+            self.thread = threading.Thread(target=self.supervise, daemon=True)
+            self.thread.start()
+
+    def spawn(self):
         try:
-            p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                 text=True, encoding="utf-8")
+            p = subprocess.Popen(self.backend, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                 stderr=subprocess.PIPE, text=True, encoding="utf-8")
         except OSError as e:
             self.log(f"backend failed to start: {e}")
-            return self.after_exit(None, 0)
-        self.proc, self.stdin, self.started = p, p.stdin, time.monotonic()
+            return None
+        self.proc, self.stdin = p, p.stdin
         self.log(f"backend started: pid {p.pid}")
         threading.Thread(target=lambda: [self.log("backend: " + l.rstrip()) for l in p.stderr], daemon=True).start()
-        threading.Thread(target=self.read_loop, args=(p,), daemon=True).start()
+        return p
 
-    def read_loop(self, p):
-        lines = 0
-        for line in p.stdout:
-            lines += 1
-            self.on_line(line.strip())
-        p.wait()
-        self.after_exit(p.returncode, lines)
-
-    def after_exit(self, code, lines):
-        self.stdin = self.proc = None
-        if self.closing:
-            return
+    def supervise(self):
+        """Run the backend, and run it again by the exit policy. One loop: no recursion."""
         env = Path.home() / ".voicemode" / "voicemode.env"
-        try:
-            flag_on = self.force or pill_flag(env.read_text())
-        except OSError:
-            flag_on = True  # cannot tell: keep running
-        ran = time.monotonic() - self.started if self.started else 0
-        d = on_backend_exit(code if code is not None else 0, lines, self.had_output, ran, self.backoff, flag_on)
-        self.log(f"backend exited: code {code}, {lines} lines -> {d.action}")
-        if d.action == "exit":
-            self.exit_code = d.exit_code
-            return self.shutdown()
-        if d.action == "retry":
+        while not self.closing:
+            self.started = time.monotonic()
+            p, lines = self.spawn(), 0
+            if p:
+                for line in p.stdout:
+                    lines += 1
+                    self.on_line(line.strip())
+                p.wait()
+            ran = time.monotonic() - self.started if p else 0  # a failed start ran for nothing
+            code = p.returncode if p else 127
+            self.stdin = self.proc = None
+            if self.closing:
+                return
+            try:
+                flag_on = self.force or pill_flag(env.read_text())
+            except OSError:
+                flag_on = True  # cannot tell: keep running
+            d = on_backend_exit(code, lines, self.had_output, ran, self.backoff, flag_on)
+            self.log(f"backend exited: code {code}, {lines} lines -> {d.action}")
+            if d.action == "exit":
+                self.exit_code = d.exit_code
+                return self.shutdown()
+            if d.action == "stay":
+                return
             self.backoff = d.backoff
             time.sleep(d.delay)
-            self.start_backend()
 
     def on_line(self, line):
         self.had_output = True
@@ -330,6 +334,7 @@ class App:
                 pass
 
     exit_code = 0
+    thread = None
 
 
 def single_instance():
@@ -390,7 +395,7 @@ def main(argv=None):
 
     def loaded():
         app.win.evaluate_js(BRIDGE)
-        if app.proc is None and app.started is None:
+        if app.thread is None:
             app.start_backend()
 
     app.win.events.shown += shown
