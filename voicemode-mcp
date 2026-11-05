@@ -109,7 +109,7 @@ ensure_pill_window() {
     mkdir "$lock" 2>/dev/null || return 0
     # Ask the process table, not a pidfile: a launch that loses the window's own
     # single-instance lock exits at once and would leave a dead pid behind.
-    if ! pgrep -f '^[^ ]*[Pp]ython[^ ]* ([^ ]+ )*[^ ]*voice_pill_mac\.py( |$)' >/dev/null 2>&1; then
+    if ! pgrep -f '^[^ ]*[Pp]ython[^ ]* ([^ ]+ )*[^ ]*/voice_pill_mac\.py( |$)' >/dev/null 2>&1; then
         nohup "$py" "$SCRIPT_DIR/patches/voice_pill_mac.py" >> "$LOG_DIR/pill-window.log" 2>&1 < /dev/null &
         disown 2>/dev/null || true
     fi

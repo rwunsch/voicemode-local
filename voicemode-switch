@@ -451,7 +451,7 @@ set_env_value() {
 # macOS: pywebview lives in its own venv, so the main venv gains no dependency.
 PILL_VENV="$HOME/.voicemode/pill-venv"
 # The interpreter may re-exec as .../Python.app/Contents/MacOS/Python: match either case.
-PILL_WINDOW_RE='^[^ ]*[Pp]ython[^ ]* ([^ ]+ )*[^ ]*voice_pill_mac\.py( |$)'
+PILL_WINDOW_RE='^[^ ]*[Pp]ython[^ ]* ([^ ]+ )*[^ ]*/voice_pill_mac\.py( |$)'
 PILL_MAC_PINS="pywebview==6.2.1 pyobjc-core==13.0 pyobjc-framework-Cocoa==13.0 pyobjc-framework-Quartz==13.0 pyobjc-framework-WebKit==13.0 pyobjc-framework-Security==13.0 pyobjc-framework-UniformTypeIdentifiers==13.0"
 
 find_pill_python() {

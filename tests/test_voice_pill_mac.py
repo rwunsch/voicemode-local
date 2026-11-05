@@ -149,3 +149,50 @@ def test_failed_spawns_back_off_and_do_not_recurse(tmp_path, monkeypatch):
         t.join(5)
     assert delays == [1, 2, 4, 8, 16, 30, 30, 30]
     assert max(depths) - min(depths) <= 1
+
+
+REPO = Path(__file__).resolve().parent.parent
+WINDOW_CASES = [
+    ("/Users/me/.voicemode/pill-venv/bin/python /r/patches/voice_pill_mac.py", True),
+    ("/Users/me/.voicemode/pill-venv/bin/python /r/patches/voice_pill_mac.py --force", True),
+    ("/L/Python.app/Contents/MacOS/Python /r/patches/voice_pill_mac.py", True),
+    ("vim /r/patches/voice_pill_mac.py", False),
+    ("/usr/bin/python3 -m pytest tests/test_voice_pill_mac.py", False),
+    ("/usr/bin/python3 -m pytest /r/tests/test_voice_pill_mac.py -q", False),
+    ("tail -f /h/.voicemode/logs/pill-window.log", False),
+]
+BACKEND_CASES = [
+    ("/r/.venv/bin/python /r/patches/voice_pill.py --stdio", True),
+    ("python3 -m voice_mode.voice_pill --stdio", True),
+    ("vim /r/patches/voice_pill.py", False),
+    ("/usr/bin/python3 -m pytest tests/test_voice_pill.py", False),
+    ("/usr/bin/python3 -m pytest /r/tests/test_voice_pill_patch.py", False),
+]
+
+
+def _grep(regex, line):
+    import subprocess
+    return subprocess.run(["grep", "-E", regex], input=line + "\n", text=True,
+                          capture_output=True).returncode == 0
+
+
+def _script_regex(script, var):
+    import re
+    return re.search(rf"^{var}='(.*)'$", (REPO / script).read_text(), re.M).group(1)
+
+
+def test_window_pattern_table():
+    regex = _script_regex("voicemode-switch", "PILL_WINDOW_RE")
+    for line, want in WINDOW_CASES:
+        assert _grep(regex, line) == want, line
+
+
+def test_launcher_uses_the_same_pattern_as_pill_off():
+    regex = _script_regex("voicemode-switch", "PILL_WINDOW_RE")
+    assert f"pgrep -f '{regex}'" in (REPO / "voicemode-mcp").read_text()
+
+
+def test_backend_pattern_table():
+    regex = _script_regex("voicemode-switch", "PILL_BACKEND_RE")
+    for line, want in BACKEND_CASES:
+        assert _grep(regex, line) == want, line
