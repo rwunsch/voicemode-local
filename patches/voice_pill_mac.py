@@ -146,20 +146,72 @@ def pill_flag(env_text):
 
 # -- the window (needs macOS; not covered by pytest) -------------------------
 
+# pywebview wraps evaluate_js and builds its js_api functions with eval()/new Function, which
+# the page's strict CSP forbids. So: page -> Python through our own WKScriptMessageHandler
+# ("pill"), Python -> page through WKWebView.evaluateJavaScript, and this script is a
+# WKUserScript (WebKit exempts those from the page CSP).
+START_OPTIONS = {"http_server": False}
+HANDLER = "pill"
 BRIDGE = """
-window.pillTransport={send:function(j){if(window.pywebview&&window.pywebview.api)window.pywebview.api.send(j)}};
-(function(){var c=document.getElementById('card');
-function go(){new ResizeObserver(function(){if(c.offsetHeight)window.pillTransport.send(JSON.stringify({window:{height:c.offsetHeight}}))}).observe(c)}
-if(window.pywebview&&window.pywebview.api)go();else window.addEventListener('pywebviewready',go)})();
+window.pillTransport={send:function(j){window.webkit.messageHandlers.pill.postMessage(j)}};
+document.addEventListener('DOMContentLoaded',function(){var c=document.getElementById('card');
+new ResizeObserver(function(){if(c.offsetHeight)window.pillTransport.send(JSON.stringify({window:{height:c.offsetHeight}}))}).observe(c)});
 """
 
 
-class Api:  # pywebview exposes public methods only
-    def __init__(self, app):
-        self._app = app
+def ui_dir():
+    return HERE.parent / "ui" / "pill"
 
-    def send(self, text):
-        self._app.from_page(text)
+
+def ui_file_url():
+    # A plain path would make pywebview start a 127.0.0.1 HTTP server; file:// does not.
+    return (ui_dir() / "index.html").as_uri()
+
+
+def window_options():
+    """create_window kwargs. No url: the wrapper loads the page itself, after the bridge is in."""
+    return dict(title="Voice pill", width=WIDTH, height=DEFAULT_H, frameless=True, on_top=True,
+                transparent=True, easy_drag=False, hidden=True)
+
+
+def js_call(name, line):
+    """One JS expression calling window.<name>(<line as a JSON string literal>)."""
+    return f"window.{name}&&window.{name}({json.dumps(line)})"  # ensure_ascii: no raw U+2028
+
+
+def run_on_main(fn, schedule=None, is_main=None):
+    """Run fn on the AppKit main thread and return its result. AppKit aborts otherwise."""
+    if is_main is None:
+        from Foundation import NSThread
+        is_main = NSThread.isMainThread
+    if is_main():
+        return fn()
+    if schedule is None:
+        from PyObjCTools import AppHelper
+        schedule = AppHelper.callAfter
+    done, box = threading.Event(), {}
+
+    def go():
+        try:
+            box["r"] = fn()
+        except BaseException as e:
+            box["e"] = e
+        done.set()
+    schedule(go)
+    if not done.wait(10):
+        raise TimeoutError("main thread did not run the call")
+    if "e" in box:
+        raise box["e"]
+    return box.get("r")
+
+
+def make_handler(app):
+    from Foundation import NSObject
+
+    class PillHandler(NSObject):
+        def userContentController_didReceiveScriptMessage_(self, controller, message):
+            app.from_page(str(message.body()))
+    return PillHandler.alloc().init()
 
 
 class App:
@@ -238,10 +290,11 @@ class App:
         v = snapshot_visible(line)
         if v is not None and self.state.on_snapshot(v):
             self.apply()
-        try:
-            self.win.evaluate_js("window.pillReceive&&window.pillReceive(" + json.dumps(line) + ")")
-        except Exception as e:  # page not loaded yet, or closing
-            self.log(f"page send failed: {e}")
+        wv = self.webview()
+        if wv is not None and self.page_ready:
+            js = js_call("pillReceive", line)
+            from PyObjCTools import AppHelper
+            AppHelper.callAfter(wv.evaluateJavaScript_completionHandler_, js, None)  # not pywebview's eval wrapper
 
     def from_page(self, text):
         r = route_page_message(text)
@@ -261,13 +314,22 @@ class App:
         elif what == "changed":
             self.apply()
 
-    # window
+    # window. Every AppKit call below runs on the main thread (run_on_main / callAfter).
+    def webview(self):
+        """The WKWebView, from pywebview's cocoa backend."""
+        from webview.platforms.cocoa import BrowserView
+        i = BrowserView.instances.get(self.win.uid) if self.win else None
+        return i.webview if i else None
+
     def screen(self):
         from AppKit import NSScreen
-        s = NSScreen.screens()[0]  # the primary screen only
-        f, v = s.frame(), s.visibleFrame()
-        return top_left_area((f.origin.x, f.origin.y, f.size.width, f.size.height),
-                             (v.origin.x, v.origin.y, v.size.width, v.size.height))
+
+        def read():
+            s = NSScreen.screens()[0]  # the primary screen only
+            f, v = s.frame(), s.visibleFrame()
+            return top_left_area((f.origin.x, f.origin.y, f.size.width, f.size.height),
+                                 (v.origin.x, v.origin.y, v.size.width, v.size.height))
+        return run_on_main(read)
 
     def apply(self):
         from AppKit import NSMakeRect
@@ -275,15 +337,28 @@ class App:
         native = self.win.native if self.win else None
         if not native or self.closing:
             return
-        if not self.state.shown:
+        shown = self.state.shown
+        if not shown:
             return AppHelper.callAfter(native.orderOut_, None)
-        area, full_h = self.screen()
-        x, y, w, h = to_cocoa(geometry(self.state, area, self.pos), full_h)
 
         def go():
+            area, full_h = self.screen()  # inline: already on the main thread
+            x, y, w, h = to_cocoa(geometry(self.state, area, self.pos), full_h)
             native.setFrame_display_(NSMakeRect(x, y, w, h), True)
             native.orderFrontRegardless()  # pywebview's own show() activates the app
         AppHelper.callAfter(go)
+
+    def install_bridge_and_load(self):
+        """Main thread. Add the handler and the user script, then load the page from its file."""
+        from Foundation import NSURL
+        from WebKit import WKUserScript
+        wv = self.webview()
+        ucc = wv.configuration().userContentController()
+        self.handler = make_handler(self)
+        ucc.addScriptMessageHandler_name_(self.handler, HANDLER)
+        ucc.addUserScript_(WKUserScript.alloc().initWithSource_injectionTime_forMainFrameOnly_(BRIDGE, 0, True))
+        wv.loadFileURL_allowingReadAccessToURL_(NSURL.fileURLWithPath_(str(ui_dir() / "index.html")),
+                                                NSURL.fileURLWithPath_(str(ui_dir())))
 
     def drag(self):
         if self.dragging or self.state.mode == "docked":
@@ -296,7 +371,7 @@ class App:
         from PyObjCTools import AppHelper
         try:
             native = self.win.native
-            c0, o0 = NSEvent.mouseLocation(), native.frame().origin
+            c0, o0 = NSEvent.mouseLocation(), run_on_main(lambda: native.frame().origin)
             moved = False
             while NSEvent.pressedMouseButtons() & 1:
                 c = NSEvent.mouseLocation()
@@ -305,7 +380,8 @@ class App:
                 time.sleep(0.016)
             if moved:
                 time.sleep(0.05)  # let the last move land
-                o, size = native.frame().origin, native.frame().size
+                fr = run_on_main(lambda: native.frame())
+                o, size = fr.origin, fr.size
                 self.pos = (int(o.x), int(self.screen()[1] - o.y - size.height))
                 try:
                     self.pos_file.write_text(f"{self.pos[0]} {self.pos[1]}")
@@ -335,6 +411,9 @@ class App:
 
     exit_code = 0
     thread = None
+    handler = None
+    page_ready = False
+    stage = 0
 
 
 def single_instance():
@@ -370,21 +449,19 @@ def main(argv=None):
         return 0
     import webview  # imported here: it sets the activation policy to Regular on import
     from AppKit import NSApplication, NSApplicationActivationPolicyAccessory, NSWorkspace
+    from PyObjCTools import AppHelper
 
     def accessory():
         NSApplication.sharedApplication().setActivationPolicy_(NSApplicationActivationPolicyAccessory)
 
-    accessory()
+    accessory()  # main thread, before the loop starts
     prev = NSWorkspace.sharedWorkspace().frontmostApplication()
     app = App(args.force, shlex.split(args.backend))
-    ui = HERE.parent / "ui" / "pill" / "index.html"
-    app.win = webview.create_window("Voice pill", str(ui), width=WIDTH, height=DEFAULT_H, frameless=True,
-                                    on_top=True, transparent=True, easy_drag=False, hidden=True,
-                                    js_api=Api(app))
+    app.win = webview.create_window(**window_options())
 
-    def shown():
-        # pywebview activates the app once when the loop starts: give focus back.
+    def shown_on_main():
         accessory()
+        # pywebview activates the app once when the loop starts: give focus back.
         if prev is not None and prev.processIdentifier() != os.getpid():
             prev.activateWithOptions_(0)
         try:  # all Spaces and above full-screen apps; best effort
@@ -393,14 +470,19 @@ def main(argv=None):
         except Exception as e:
             app.log(f"window behaviour not set: {e}")
 
-    def loaded():
-        app.win.evaluate_js(BRIDGE)
-        if app.thread is None:
-            app.start_backend()
+    def loaded_on_main():
+        app.stage += 1
+        if app.stage == 1:  # pywebview's blank page: now put the real one in
+            app.install_bridge_and_load()
+        else:
+            app.page_ready = True
+            if app.thread is None:
+                app.start_backend()
 
-    app.win.events.shown += shown
-    app.win.events.loaded += loaded
-    webview.start()
+    # These events fire on worker threads: hop to the main thread for anything AppKit.
+    app.win.events.shown += lambda: AppHelper.callAfter(shown_on_main)
+    app.win.events.loaded += lambda: AppHelper.callAfter(loaded_on_main)
+    webview.start(**START_OPTIONS)
     app.shutdown()
     return app.exit_code
 

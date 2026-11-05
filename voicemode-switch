@@ -483,7 +483,7 @@ start_pill_window_mac() {
     pid=$!; disown 2>/dev/null || true
     sleep 3
     if kill -0 "$pid" 2>/dev/null; then return 0; fi
-    if wait "$pid" 2>/dev/null; then echo "  Pill window already running"; else fail "The pill window did not stay up. See $log"; return 1; fi
+    if wait "$pid" 2>/dev/null; then PILL_ALREADY=1; else fail "The pill window did not stay up. See $log"; return 1; fi
 }
 
 # Windows is the only other platform whose window this script can open. The window takes
@@ -496,7 +496,7 @@ start_pill_window() {
     result="$(powershell.exe -NoProfile -Command "\$p=Start-Process powershell.exe -PassThru -WindowStyle Hidden -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File','\"$script\"'; \$h=\$p.Handle; if (\$p.WaitForExit(15000)) { \$p.ExitCode } else { 'running' }" 2>/dev/null | tr -d '\r' | tail -1)" || result=""
     case "$result" in
         running) ;;
-        0) echo "  Pill window already running" ;;
+        0) PILL_ALREADY=1 ;;
         "") warn "Could not confirm the pill window started; run pill-windows.ps1 by hand" ;;
         *) fail "The pill window did not stay up (exit $result). See %LOCALAPPDATA%\\\\voicemode-local\\\\pill-window.log"; return 1 ;;
     esac
@@ -514,7 +514,8 @@ cmd_pill() {
             set_env_value VOICEMODE_PILL true
             set_env_value VOICEMODE_CONTROL_CHANNEL_ENABLED true  # upstream's default is off
             start_pill_window || return 1
-            ok "Voice pill on. Voice sessions already running need /mcp reconnect."
+            if [ -n "${PILL_ALREADY:-}" ]; then ok "Voice pill on (the window was already running). Voice sessions already running need /mcp reconnect."
+            else ok "Voice pill on. Voice sessions already running need /mcp reconnect."; fi
             ;;
         off)
             set_env_value VOICEMODE_PILL false

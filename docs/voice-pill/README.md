@@ -133,7 +133,7 @@ now shows by colour only. Whether the old or new cost affects stutter was not me
 
 | Field | Value |
 |---|---|
-| Status | Implemented, untested on the Mac |
+| Status | Implemented; first Mac run found two launch blockers, fixed in round 3 and awaiting a re-run |
 | Measured on | Only the pure logic (`tests/test_voice_pill_mac.py`, on Linux). `FELIX-MAC` confirmed on 2026-11-04 (n=1, macOS 26.7.1, Apple silicon) that pywebview 6.2.1 with pyobjc 13.0 opens a frameless on-top window |
 
 ## Use (macOS)
@@ -163,6 +163,26 @@ as pywebview's own dependencies). The main venv gains nothing. The backend is st
   to Regular, and set again in the `shown` event. pywebview activates the app once when its loop
   starts: the previously frontmost app is re-activated at once. The window is shown with
   `orderFrontRegardless`, never pywebview's `show()`, which activates.
+- **Page and bridge (found by the first Mac run, 2026-11-05).** The page's CSP stays strict, so
+  nothing may use `eval`. pywebview's `evaluate_js` wraps every call in `eval()` and builds its
+  `js_api` functions with `new Function`, so neither works. Instead: page to Python goes through
+  our own `WKScriptMessageHandler` named `pill` (`window.webkit.messageHandlers.pill.postMessage`),
+  and Python to page through `WKWebView.evaluateJavaScript` called directly, on the main thread,
+  with the line JSON-encoded as a string literal. The bridge script is a `WKUserScript`, which
+  WebKit exempts from the page CSP. The window is created without a URL; once pywebview's blank
+  page has loaded, the wrapper installs the handler and script and loads the page itself.
+- **Loaded from a file, not over HTTP.** At pywebview 6.2.1 a plain path (even with
+  `http_server=False`) makes `start()` open an HTTP server on `127.0.0.1:<random port>`
+  (`is_local_url` in `webview/util.py`; checked in the source), which breaks "no network
+  listener". Only a `file://` URL avoids it, so the wrapper passes `Path.as_uri()` and loads it
+  with `loadFileURL:allowingReadAccessToURL:` (relative CSS and JS then resolve from the folder).
+  Covered by a pure test; the Mac run confirms there is no listener (`lsof -i -P | grep python`).
+- **Main thread only.** AppKit aborts (SIGTRAP, exit 133) on any call off the main thread. pywebview
+  fires `shown` and `loaded` on worker threads, so their bodies run through `AppHelper.callAfter`,
+  and reads from other threads (screen, window frame) go through `run_on_main`.
+- **Files outside the repo.** WebKit caches and crash reports land under the real home directory
+  whatever `HOME` is set to, so a test run with a fake `HOME` still writes there.
+- **Docked card** fills the window height on both platforms (`[data-mode=docked] .card{height:100vh}`).
 - **Dragging** polls `NSEvent.mouseLocation` while the left button is down, as on Windows.
 - **Corners** come from the page: the window is transparent.
 - **Primary screen only.** Placement and clamping use the main display. Display changes are not watched.
@@ -187,7 +207,9 @@ Window and focus (fake backend):
 - [ ] Clicking Pause, Interrupt, the dropdown and the expand button: the frontmost app does not change. **Expected to be the weak spot**: a click on any window can activate its app. If it changes, report it; the fallback is a small Swift `NSPanel` (non-activating)
 - [ ] Always on top: another window dragged over it
 - [ ] Above a full-screen app, and visible on a second Space (untested so far). If the window never gets that behaviour, check whether pywebview fires `shown` for a `hidden=True` window (the collection behaviour is set in that handler; look for "window behaviour not set" or its absence in `pill-window.log`)
-- [ ] The page renders from `file://` (the page's CSP says `'self'`): text and buttons present, no blank window
+- [ ] The page renders from `file://` (the page's CSP says `'self'`): text and buttons present, no blank window; no listening socket (`lsof -nP -iTCP -sTCP:LISTEN | grep -i python` shows nothing from the pill)
+- [ ] Buttons reach the backend (Pause creates `~/.voicemode/pill/paused.json`), and snapshots reach the page (label changes with `state.json`) with the strict CSP
+- [ ] Docked: the card fills the full height, no transparent gap below it
 - [ ] Transparent window with rounded corners, no square white edge; dark and light appearance
 - [ ] Hide and show: snapshot `visible` false then true (`state.json`)
 - [ ] Dismiss stays hidden while `visible` stays true; returns on false then true
@@ -215,5 +237,5 @@ Needs Robert (voice, ears, permissions):
 ## Not tested / known limits
 
 - Everything above, until `FELIX-MAC` runs it.
-- `evaluate_js` to a window that is ordered out may stall the reader thread. If snapshots stop arriving while hidden, that is why.
+- Snapshots are sent with `evaluateJavaScript` to a window that may be ordered out; WebKit may throttle it. If the page is stale after being hidden, that is why.
 - Display changes and more than one monitor.

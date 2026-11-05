@@ -196,3 +196,63 @@ def test_backend_pattern_table():
     regex = _script_regex("voicemode-switch", "PILL_BACKEND_RE")
     for line, want in BACKEND_CASES:
         assert _grep(regex, line) == want, line
+
+
+def test_page_is_loaded_from_a_file_url_and_no_http_server_is_asked_for():
+    # pywebview starts its HTTP server for any plain path (is_local_url), even with
+    # http_server=False. Only a file:// URL avoids the listener.
+    ui = m.ui_file_url()
+    assert ui.startswith("file:///") and ui.endswith("/ui/pill/index.html")
+    assert m.START_OPTIONS == {"http_server": False}
+
+
+def test_window_options_are_frameless_on_top_hidden_and_have_no_url_or_js_api():
+    o = m.window_options()
+    assert o["frameless"] and o["on_top"] and o["hidden"] and o["transparent"]
+    assert "url" not in o and "js_api" not in o  # js_api needs eval; the page is loaded by the wrapper
+
+
+def test_js_call_is_one_safe_expression():
+    line = '{"label":"a\\u2028b</script>\'\\"x","n":1}\n'
+    js = m.js_call("pillReceive", line)
+    assert js.startswith("window.pillReceive&&window.pillReceive(") and js.endswith(")")
+    assert "\n" not in js and "\u2028" not in js and "\u2029" not in js
+    import json as _j
+    arg = js[len("window.pillReceive&&window.pillReceive("):-1]
+    assert _j.loads(arg) == line
+
+
+def test_run_on_main_runs_inline_on_the_main_thread_and_is_scheduled_off_it():
+    import threading
+    ran_in = []
+
+    def work():
+        ran_in.append(threading.current_thread())
+        return 7
+
+    assert m.run_on_main(work, schedule=lambda f: (_ for _ in ()).throw(AssertionError("scheduled")),
+                         is_main=lambda: True) == 7
+    assert ran_in == [threading.current_thread()]
+
+    main_stand_in = []
+
+    def schedule(f):  # a stand-in "main thread": a second thread that runs it later
+        t = threading.Thread(target=lambda: (main_stand_in.append(threading.current_thread()), f()))
+        t.start()
+
+    ran_in.clear()
+    assert m.run_on_main(work, schedule=schedule, is_main=lambda: False) == 7
+    assert ran_in == main_stand_in and ran_in[0] is not threading.current_thread()
+
+
+def test_run_on_main_passes_exceptions_back():
+    import pytest
+    def bad():
+        raise ValueError("x")
+    with pytest.raises(ValueError):
+        m.run_on_main(bad, schedule=lambda f: f(), is_main=lambda: False)
+
+
+def test_docked_card_fills_the_window_height():
+    css = (REPO / "ui" / "pill" / "pill.css").read_text()
+    assert "[data-mode=docked] .card" in css and "100vh" in css

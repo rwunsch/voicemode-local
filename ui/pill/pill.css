@@ -30,3 +30,5 @@ kbd{border:1px solid var(--line);border-radius:4px;padding:0 4px;font:11px ui-mo
 .btn.icon{width:24px;padding:4px 0;flex:none}
 .txt b{font-size:12.5px}.txt .m{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 option{background:var(--bg);color:var(--t)}
+html,body{height:100%}
+[data-mode=docked] .card{height:100vh}

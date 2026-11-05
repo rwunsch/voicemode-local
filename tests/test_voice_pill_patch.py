@@ -330,6 +330,11 @@ class _FakeStream:
 
 
 def _record_ns(work, st, control, on_chunk):
+    # Pause is only honoured while its owner's start token matches. On macOS that token is
+    # read by spawning `ps` (5 s timeout) on every chunk; one failed spawn under load makes
+    # the pause look stale and the loop keeps going (suspected cause of a 1-in-9 failure on
+    # the Mac, not reproduced). This test is about the loop, not about ps: pin the token.
+    st.process_start = lambda pid: "fixed-start-token"
     state = control.ControlState()
     ns = _base_ns(st)
     ns.update(
