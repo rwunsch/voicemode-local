@@ -475,3 +475,56 @@ def test_default_height_matches_the_two_line_pill_on_both_platforms():
 def test_waiting_count_sits_on_the_name_line():
     page = (REPO / "ui/pill/index.html").read_text()
     assert page.index('id="sub"') < page.index('id="waiting"') < page.index('id="label"')
+
+
+# No focus, no Dock icon, a menu bar icon that can be seen (Robert's real-mouse run, 69303d6)
+def _main_src():
+    src = (REPO / "patches/voice_pill_mac.py").read_text()
+    return src[src.index("def main("):]
+
+
+def test_app_is_made_quiet_before_pywebview_can_set_regular():
+    src = _main_src()
+    assert src.index("quiet_app()") < src.index("import webview")
+
+
+def test_quiet_app_forces_accessory_and_refuses_activation():
+    src = (REPO / "patches/voice_pill_mac.py").read_text()
+    body = src[src.index("def quiet_app("):src.index("def use_panel(")]
+    assert 'info["LSUIElement"] = True' in body
+    assert "def setActivationPolicy_" in body and "def activateIgnoringOtherApps_" in body
+    assert body.index("LSUIElement") < body.index(".sharedApplication()")
+
+
+def test_panel_is_set_before_the_window_is_created():
+    src = _main_src()
+    assert src.index("import webview") < src.index("use_panel()") < src.index("create_window")
+
+
+def test_panel_is_nonactivating_from_birth_and_never_key():
+    src = (REPO / "patches/voice_pill_mac.py").read_text()
+    body = src[src.index("def use_panel("):src.index("class App:")]
+    assert m.NONACTIVATING_PANEL == 1 << 7
+    assert "mask | NONACTIVATING_PANEL" in body
+    assert "def canBecomeKeyWindow" in body and "return False" in body
+    assert "def acceptsFirstMouse_" in body and "return True" in body
+    assert "BrowserView.WindowHost = PillPanel" in body
+
+
+def test_nothing_hands_focus_back_any_more():
+    assert "activateWithOptions_" not in (REPO / "patches/voice_pill_mac.py").read_text()
+
+
+def test_window_joins_all_spaces_but_not_full_screen():
+    assert m.WINDOW_BEHAVIOUR == 1 << 0
+
+
+def test_menu_bar_icon_follows_the_phase():
+    assert m.tray_symbol("speaking") == "speaker.wave.2.fill"
+    assert m.tray_symbol("listening") == "mic.fill"
+    assert m.tray_symbol("working") == m.tray_symbol(None) == "waveform"
+
+
+def test_menu_bar_icon_is_a_template_not_a_coloured_dot():
+    src = (REPO / "patches/voice_pill_mac.py").read_text()
+    assert "setTemplate_(True)" in src and "systemTealColor" not in src

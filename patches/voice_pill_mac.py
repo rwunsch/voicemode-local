@@ -8,13 +8,14 @@ pill-windows.ps1 does. Page -> wrapper: {"cmd":...} goes to the backend, {"windo
 is handled here. The top half of this file is pure logic with no GUI import, so pytest
 covers it on Linux. pywebview and pyobjc are imported lazily in main().
 
-Never takes focus and has no Dock icon: the activation policy is Accessory, set after
-pywebview's import (which resets it to Regular) and before the loop starts.
+Never takes focus and has no Dock icon. pywebview asks for the Regular policy on import and
+activates itself at start, so quiet_app() installs an application class that refuses both, before
+pywebview loads. use_panel() swaps pywebview's window for a non-activating panel, so a click on
+the pill leaves the frontmost app and its keyboard focus alone.
 """
 import argparse
 import fcntl
 import json
-import os
 import shlex
 import subprocess
 import sys
@@ -28,6 +29,9 @@ WIDTH, MARGIN, DEFAULT_H = 350, 16, 68
 MIN_WIDTH, MAX_WIDTH = 320, 640
 TAB_W, TAB_H, RAIL_W = 22, 64, 76
 BACKOFF_CAP_S = 30
+NONACTIVATING_PANEL = 1 << 7  # NSWindowStyleMaskNonactivatingPanel
+WINDOW_BEHAVIOUR = 1 << 0  # canJoinAllSpaces; Robert does not need it above full-screen apps
+TRAY_SYMBOLS = {"speaking": "speaker.wave.2.fill", "listening": "mic.fill"}
 STABLE_RUN_S = 30
 
 
@@ -231,6 +235,11 @@ def window_options():
                 transparent=True, easy_drag=False, hidden=True)
 
 
+def tray_symbol(phase):
+    """The menu bar icon's SF Symbol. A template image, so it contrasts with any bar colour."""
+    return TRAY_SYMBOLS.get(phase, "waveform")
+
+
 def js_call(name, line):
     """One JS expression calling window.<name>(<line as a JSON string literal>)."""
     return f"window.{name}&&window.{name}({json.dumps(line)})"  # ensure_ascii: no raw U+2028
@@ -278,6 +287,44 @@ def make_tray_target(app):
         def clicked_(self, sender):
             app.webview().evaluateJavaScript_completionHandler_("""window.pillReceive('{"cmd":"restore"}')""", None)
     return PillTrayTarget.alloc().init()
+
+
+def quiet_app():
+    """Before pywebview loads: no Dock icon, and the app can never activate itself."""
+    import objc
+    from AppKit import NSApplication, NSApplicationActivationPolicyAccessory, NSBundle
+    info = NSBundle.mainBundle().infoDictionary()
+    if info is not None:  # read when the app registers with the window server
+        info["LSUIElement"] = True
+
+    class PillApplication(NSApplication):
+        def setActivationPolicy_(self, _policy):  # pywebview asks for Regular on import
+            return objc.super(PillApplication, self).setActivationPolicy_(
+                NSApplicationActivationPolicyAccessory)
+
+        def activateIgnoringOtherApps_(self, _flag):  # pywebview activates at loop start
+            pass
+    PillApplication.sharedApplication().setActivationPolicy_(NSApplicationActivationPolicyAccessory)
+
+
+def use_panel():
+    """Before create_window: pywebview builds a non-activating panel that never becomes key."""
+    import objc
+    from AppKit import NSPanel
+    from webview.platforms.cocoa import BrowserView
+
+    class PillPanel(NSPanel):
+        def initWithContentRect_styleMask_backing_defer_(self, rect, mask, backing, defer):
+            return objc.super(PillPanel, self).initWithContentRect_styleMask_backing_defer_(
+                rect, mask | NONACTIVATING_PANEL, backing, defer)
+
+        def canBecomeKeyWindow(self):
+            return False
+
+    class PillFirstClick(objc.Category(BrowserView.WebKitHost)):
+        def acceptsFirstMouse_(self, _event):  # the window is never key, so every click is a first
+            return True
+    BrowserView.WindowHost = PillPanel
 
 
 class App:
@@ -428,7 +475,7 @@ class App:
             area, full_h = self.screen()  # inline: already on the main thread
             x, y, w, h = to_cocoa(geometry(self.state, area, self.pos), full_h)
             native.setFrame_display_(NSMakeRect(x, y, w, h), True)
-            native.orderFrontRegardless()  # pywebview's own show() activates the app
+            native.orderFrontRegardless()  # pywebview's own show() makes it key
         AppHelper.callAfter(go)
 
     def update_tray(self):
@@ -436,8 +483,7 @@ class App:
         AppHelper.callAfter(self.update_tray_main)
 
     def update_tray_main(self):
-        from AppKit import (NSAttributedString, NSColor, NSForegroundColorAttributeName, NSStatusBar,
-                            NSVariableStatusItemLength)
+        from AppKit import NSImage, NSStatusBar, NSVariableStatusItemLength
         want = self.state.in_tray
         if want and not self.tray:
             self.tray = NSStatusBar.systemStatusBar().statusItemWithLength_(NSVariableStatusItemLength)
@@ -446,11 +492,13 @@ class App:
             self.tray.button().setAction_("clicked:")
         if not self.tray:
             return
-        colour = {"speaking": NSColor.systemPurpleColor, "listening": NSColor.systemTealColor}.get(
-            self.state.phase, NSColor.secondaryLabelColor)()
-        title = NSAttributedString.alloc().initWithString_attributes_(
-            "\u25CF", {NSForegroundColorAttributeName: colour})
-        self.tray.button().setAttributedTitle_(title)
+        image = NSImage.imageWithSystemSymbolName_accessibilityDescription_(
+            tray_symbol(self.state.phase), "Voice pill")
+        if image:
+            image.setTemplate_(True)
+            self.tray.button().setImage_(image)
+        else:
+            self.tray.button().setTitle_("\u25CF")
         self.tray.setVisible_(want)
 
     def install_bridge_and_load(self):
@@ -613,25 +661,17 @@ def main(argv=None):
     if lock is None:
         print("voice_pill_mac: another pill window is running; exiting", file=sys.stderr)
         return 0
-    import webview  # imported here: it sets the activation policy to Regular on import
-    from AppKit import NSApplication, NSApplicationActivationPolicyAccessory, NSWorkspace
+    quiet_app()  # main thread, before pywebview's import can ask for Regular
+    import webview
     from PyObjCTools import AppHelper
 
-    def accessory():
-        NSApplication.sharedApplication().setActivationPolicy_(NSApplicationActivationPolicyAccessory)
-
-    accessory()  # main thread, before the loop starts
-    prev = NSWorkspace.sharedWorkspace().frontmostApplication()
+    use_panel()
     app = App(args.force, shlex.split(args.backend))
     app.win = webview.create_window(**window_options())
 
     def shown_on_main():
-        accessory()
-        # pywebview activates the app once when the loop starts: give focus back.
-        if prev is not None and prev.processIdentifier() != os.getpid():
-            prev.activateWithOptions_(0)
-        try:  # all Spaces and above full-screen apps; best effort
-            app.win.native.setCollectionBehavior_((1 << 0) | (1 << 8))
+        try:  # all Spaces; best effort
+            app.win.native.setCollectionBehavior_(WINDOW_BEHAVIOUR)
             app.win.native.setHidesOnDeactivate_(False)
         except Exception as e:
             app.log(f"window behaviour not set: {e}")

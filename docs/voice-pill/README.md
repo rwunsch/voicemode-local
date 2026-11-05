@@ -149,7 +149,7 @@ as pywebview's own dependencies). The main venv gains nothing. The backend is st
 
 ## Differences from Windows
 
-- **Minimized goes to the tray on Windows and the menu bar on Mac.** The icon's colour follows the
+- **Minimized goes to the tray on Windows and the menu bar on Mac.** The icon follows the
   phase, and a click restores the pill. It is not a taskbar button, because a taskbar window has
   to take focus to come back, and push-to-talk only fires while a terminal has focus. Windows 11
   may put a new tray icon in the overflow `^` until it is pinned.
@@ -159,11 +159,18 @@ as pywebview's own dependencies). The main venv gains nothing. The backend is st
   the edge, leaving a small `‹` tab at the same height; the tab cannot be dragged. Width comes
   from dragging the side edges (320 to 640, default 350), which is not available while docked. Position,
   width and dock height share one file: `x y width dock_y`, with `-` for not set.
-- **Focus.** Windows blocks activation with a style bit. Here the activation policy is
-  Accessory (no Dock icon, no menu bar), set after pywebview's import because that resets it
-  to Regular, and set again in the `shown` event. pywebview activates the app once when its loop
-  starts: the previously frontmost app is re-activated at once. The window is shown with
-  `orderFrontRegardless`, never pywebview's `show()`, which activates.
+- **Focus and Dock.** Windows blocks activation with a style bit. pywebview 6.2.1 asks for the
+  Regular policy when its Cocoa module loads and activates itself when its loop starts, and with
+  an Accessory switch afterwards Robert still saw a Python icon in the Dock and clicks still took
+  focus (2026-11-05, n=1 session, `69303d6`). So `quiet_app()` sets `LSUIElement` and installs an
+  `NSApplication` subclass that forces Accessory and ignores activation, before pywebview loads.
+  `use_panel()` gives pywebview a non-activating `NSPanel` that never becomes key, and the web view
+  accepts first clicks. It is shown with `orderFrontRegardless`, never pywebview's `show()`.
+- **Menu bar icon.** A template SF Symbol: a microphone when listening, a speaker when speaking,
+  a waveform otherwise. Robert could not find the earlier teal dot on his blue bar, so the phase is
+  shown by shape on Mac and by colour in the Windows tray.
+- **Full-screen apps.** The Mac pill joins all Spaces but does not ask to sit above full-screen
+  apps: Robert does not need it to.
 - **Page and bridge (found by the first Mac run, 2026-11-05).** The page's CSP stays strict, so
   nothing may use `eval`. pywebview's `evaluate_js` wraps every call in `eval()` and builds its
   `js_api` functions with `new Function`, so neither works. Instead: page to Python goes through
@@ -204,6 +211,9 @@ Edit `/tmp/pillfb/state.json` to change what the pill shows (for example `{"phas
 Window and focus (fake backend):
 - [ ] Opening the pill does not take focus from the frontmost app (read the frontmost app before and after, for example with `osascript -e 'tell application "System Events" to name of first process whose frontmost is true'`). A flicker is acceptable if it ends back on the same app; say so if you saw one
 - [ ] No Dock icon, and no "python" in the menu bar
+- [ ] A real click on the pill from another app: the other app stays frontmost and keeps the keyboard (type into it straight after), and the click still acts on the first press
+- [ ] Voice picker: a real click opens it and a choice lands, with the pill never key. Hover colours still show
+- [ ] Menu bar icon: easy to find on the bar, changes shape with the phase
 - [ ] Clicking Pause, Interrupt, the dropdown and the expand button: the frontmost app does not change. **Expected to be the weak spot**: a click on any window can activate its app. If it changes, report it; the fallback is a small Swift `NSPanel` (non-activating)
 - [ ] Always on top: another window dragged over it
 - [ ] Above a full-screen app, and visible on a second Space (untested so far). If the window never gets that behaviour, check whether pywebview fires `shown` for a `hidden=True` window (the collection behaviour is set in that handler; look for "window behaviour not set" or its absence in `pill-window.log`)
