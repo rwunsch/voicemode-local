@@ -4,10 +4,12 @@
 html,body{margin:0;background:transparent;color:var(--t);font:13px system-ui,sans-serif;overflow:hidden;user-select:none}
 .card{background:var(--bg);border:1px solid var(--line);border-radius:16px;padding:8px 10px;max-width:100vw}
 .row{display:flex;align-items:center;gap:6px}.between{justify-content:space-between}
-.drag{display:flex;align-items:center;gap:8px;flex:1;min-width:0;-webkit-app-region:drag;cursor:grab}
-.txt{min-width:0}.txt b{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:12.5px}
+.top{flex-wrap:wrap}
+.drag{display:flex;align-items:center;gap:8px;flex:0 0 100%;min-width:0;-webkit-app-region:drag;cursor:grab}
+.name{min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:12.5px}
+.state{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--m);font-size:12px;-webkit-app-region:drag;cursor:grab}
 .m{color:var(--m);font-size:12px}
-.orb{width:26px;height:26px;border-radius:50%;flex:none;background:var(--m);transition:background .2s}
+.orb{width:16px;height:16px;border-radius:50%;flex:none;background:var(--m);transition:background .2s}
 [data-phase=speaking] .orb{background:var(--a)}
 [data-phase=listening] .orb{background:var(--g)}
 [data-phase=paused] .orb{background:transparent;border:3px solid var(--m)}
@@ -16,7 +18,7 @@ html,body{margin:0;background:transparent;color:var(--t);font:13px system-ui,san
 .btn:hover:not(:disabled){background:var(--hover)}
 .btn:disabled,select:disabled{opacity:.4;cursor:default}
 .btn.icon{padding:4px 6px}
-.stop{color:var(--r);border-color:var(--r)}
+.stop:hover:not(:disabled){color:var(--r);border-color:var(--r)}
 select{flex:1;min-width:0}
 .more{display:none;margin-top:10px;flex-direction:column;gap:8px}
 [data-mode=expanded] .more,[data-mode=docked] .more{display:flex}
@@ -25,7 +27,6 @@ kbd{border:1px solid var(--line);border-radius:4px;padding:0 4px;font:11px ui-mo
 :focus-visible{outline:2px solid var(--a);outline-offset:1px}
 .pic{width:28px;height:28px;padding:0;flex:none;font-size:14px;line-height:1}
 .btn.icon{width:24px;padding:4px 0;flex:none}
-.txt b{font-size:12.5px}.txt .m{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 option{background:var(--bg);color:var(--t)}
 html,body{height:100%}
 .edge{position:fixed;top:0;bottom:0;width:6px;cursor:ew-resize;z-index:5}
@@ -39,9 +40,8 @@ html,body{height:100%}
 [data-mode=rail] .card{padding:8px 6px}
 [data-mode=rail] .top{flex-wrap:wrap;justify-content:center}
 [data-mode=rail] .drag{flex:0 0 100%;flex-direction:column;gap:4px;text-align:center}
-[data-mode=rail] .txt{width:100%}
-[data-mode=rail] .txt b{white-space:normal;font-size:11px;line-height:1.2}
-[data-mode=rail] .txt .m{white-space:normal;font-size:10px;line-height:1.2;overflow-wrap:anywhere;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2}
+[data-mode=rail] .name{white-space:normal;font-size:11px;line-height:1.2;overflow-wrap:anywhere;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2}
+[data-mode=rail] .state{flex:0 0 100%;white-space:normal;text-align:center;font-size:10px;line-height:1.2}
 [data-mode=rail] .pic{flex:0 0 100%}
 [data-mode=rail] .btn.icon{width:28px;height:28px;padding:0}
 .tab{display:none;width:100vw;height:100vh;padding:0;border:1px solid var(--line);border-radius:12px;background:var(--bg);color:var(--m);font-size:18px;line-height:1;cursor:pointer}

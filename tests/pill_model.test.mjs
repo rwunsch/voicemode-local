@@ -146,15 +146,16 @@ test("nextHidden: not hidden stays not hidden", () => {
   assert.equal(nextHidden(false, true, false, false), false);
 });
 
-test("subText shows floor session and waiting count", () => {
-  const sessions = [{ pid: 1, label: "voice-barge", state: "talking", position: null },
-    { pid: 2, label: "a", state: "waiting", position: 1 }, { pid: 3, label: "b", state: "working", position: null }];
-  assert.equal(viewModel(snap({ floor: { pid: 1, label: "voice-barge" }, sessions }), 0, 0).subText, "voice-barge \u00b7 +1 waiting");
-  sessions.push({ pid: 4, label: "c", state: "waiting", position: 2 });
-  assert.equal(viewModel(snap({ floor: { pid: 1, label: "voice-barge" }, sessions }), 0, 0).subText, "voice-barge \u00b7 +2 waiting");
-  assert.equal(viewModel(snap({ floor: { pid: 1, label: "voice-barge" }, sessions: sessions.slice(0, 1) }), 0, 0).subText, "voice-barge");
-  assert.equal(viewModel(snap({ floor: null }), 0, 0).subText, "");
-  assert.equal(viewModel(snap(), 0, 99999).subText, "");
+test("session name and state text are separate lines", () => {
+  const sessions = [{ pid: 1, label: "voice-barge", state: "talking" }, { pid: 2, label: "x", state: "waiting", position: 1 }, { pid: 3, label: "y", state: "working" }];
+  const vm = viewModel(snap({ phase: "speaking", floor: { pid: 1, label: "voice-barge" }, sessions }), 0, 0);
+  assert.equal(vm.session, "voice-barge");
+  assert.equal(vm.stateText, "Speaking \u00b7 +1 waiting");
+  const alone = viewModel(snap({ phase: "listening", floor: { pid: 1, label: "voice-barge" }, sessions: sessions.slice(0, 1) }), 0, 0);
+  assert.equal(alone.stateText, "Listening");
+  assert.equal(viewModel(snap({ floor: null }), 0, 0).session, "");
+  assert.equal(viewModel(snap(), 0, 99999).session, "");
+  assert.equal(viewModel(snap(), 0, 99999).stateText, "Disconnected");
 });
 
 test("a current voice missing from VOICES is added to the list", () => {

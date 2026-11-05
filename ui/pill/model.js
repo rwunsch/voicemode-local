@@ -31,7 +31,7 @@
       // Never show the last known state: a stale "Listening" is worse than none.
       return { connected: false, phase: "disconnected", label: LABELS.disconnected, mode: "pill", side: null,
         interrupt: off, pause: { enabled: false, label: "Pause", cmd: "pause", icon: PAUSE }, stop: off,
-        pickersEnabled: false, minimizeEnabled: true, dismissEnabled: true, queue: [], voice: null, language: null, keys: [], subText: "",
+        pickersEnabled: false, minimizeEnabled: true, dismissEnabled: true, queue: [], voice: null, language: null, keys: [], session: "", stateText: LABELS.disconnected,
         barge: { visible: false, on: false, enabled: false, countText: "" }, voices: VOICES, languages: LANGUAGES };
     }
     var s = snapshot, phase = s.phase || "idle", ui = s.ui || {}, barge = s.barge || {};
@@ -57,7 +57,8 @@
       barge: { visible: !!barge.available, on: !!barge.enabled, enabled: true,
         countText: count + (count === 1 ? " interruption today" : " interruptions today") },
       voices: voices, languages: LANGUAGES,
-      subText: name && waiting ? name + " \u00b7 +" + waiting + " waiting" : name,
+      session: name,
+      stateText: (LABELS[phase] || LABELS.idle) + (waiting ? " \u00b7 +" + waiting + " waiting" : ""),
     };
   }
 

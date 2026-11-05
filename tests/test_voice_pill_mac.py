@@ -446,3 +446,21 @@ def test_top_row_order_is_expand_dock_minimize():
 
 def test_narrowest_width_still_shows_the_status_text():
     assert m.MIN_WIDTH >= 320 and m.WIDTH >= 350
+
+
+# From the first real two-session run, 2026-11-05
+def test_stop_is_only_red_on_hover():
+    css = (REPO / "ui/pill/pill.css").read_text()
+    assert ".stop{" not in css and ".stop:hover" in css
+
+
+def test_pickers_let_go_after_a_choice_and_when_the_floor_moves():
+    # A focused select is not refreshed, so it kept showing the last session's voice.
+    js = (REPO / "ui/pill/app.js").read_text()
+    assert "this.blur()" in js
+    assert "floorPid" in js and "document.activeElement.blur()" in js
+
+
+def test_session_name_has_its_own_line():
+    page = (REPO / "ui/pill/index.html").read_text()
+    assert page.index('id="sub"') < page.index('id="label"') < page.index('id="interrupt"')
