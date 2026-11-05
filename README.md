@@ -64,7 +64,7 @@ The goal is for this list to get **shorter** over time.
 | **WSL2 on Windows 11** | Tested | Primary target. Requires WSLg for audio passthrough |
 | **Ubuntu 22.04+** | Should work | PulseAudio or PipeWire required for audio. Skip `~/.asoundrc` step |
 | **Fedora / RHEL** | Should work | Same as Ubuntu; use `dnf` instead of `apt` for system packages |
-| **macOS (Apple Silicon)** | Partially tested | Native mode, no Docker: whisper.cpp (Metal) + Kokoro ONNX + Piper. Manual setup — see [macOS (native, no Docker)](#macos-native-no-docker); `install.sh` is apt-based. Verified on macOS 26 / M2 Pro: services, TTS→STT round trip, MCP handshake. Live mic/speaker conversation verified 2026-10-19. Push-to-talk on Control-Option-Space verified 2026-10-20 (see below) |
+| **macOS (Apple Silicon)** | Partially tested | Native mode, no Docker: whisper.cpp (Metal) + Kokoro ONNX + Piper. Installer `./install-mac.sh` (not yet run on a Mac) or manual steps — see [macOS (native, no Docker)](#macos-native-no-docker); `install.sh` is apt-based and hands over to it on a Mac. Verified on macOS 26 / M2 Pro: services, TTS→STT round trip, MCP handshake. Live mic/speaker conversation verified 2026-10-19. Push-to-talk on Control-Option-Space verified 2026-10-20 (see below) |
 | **NixOS** | Untested | Docker works. System packages need a Nix derivation instead of `apt install` |
 | **Windows + WSL2 (Windows Claude Code)** | Tested | Windows Claude Code's MCP entry invokes `voice-mode` inside WSL via `wsl.exe`; audio routes through WSLg. Set up via `install.ps1`. Same containers + proxies are shared with WSL Claude Code. |
 | **Windows (native)** | In progress | Install scripts (`install.ps1`, `voicemode-services.ps1`) exist but voice-mode 8.6.1 has open Windows-side bugs (recording loop hangs, etc.). See [docs/windows-issues.md](docs/windows-issues.md). The wsl.exe bridge above is the recommended path until those land upstream. |
@@ -197,8 +197,21 @@ The installer offers three modes:
 
 ### macOS (native, no Docker)
 
-`install.sh` is apt-based, so on macOS set up by hand. STT uses Homebrew's
-whisper.cpp `whisper-server`, which serves `/v1/audio/transcriptions` itself (Metal
+Run the installer (Apple silicon and Homebrew required; Homebrew is never installed for you):
+
+```bash
+./install-mac.sh            # asks two questions: voice pill [y/N], German voice [y/N]
+./install-mac.sh --yes      # unattended: every default (no pill, no German)
+./install-mac.sh --help     # also: --pill, --german
+```
+
+It does the manual steps below, skips whatever is already present on a re-run, and ends with
+a list of what is still manual (the macOS permissions included). `./install.sh` on a Mac hands
+over to it. **Status: written and tested against stubs on Linux only; it has not yet been run
+on a Mac** ([docs/mac-installer](docs/mac-installer/README.md)). The steps below are the
+reference it follows, and what to do if you prefer to run them yourself.
+
+STT uses Homebrew's whisper.cpp `whisper-server`, which serves `/v1/audio/transcriptions` itself (Metal
 accelerated) — no whisper-proxy or Docker backend needed. `voicemode-switch ensure`
 starts it on :2022 when `WHISPER_CPP_MODEL` is set in `~/.voicemode-local/config`.
 
