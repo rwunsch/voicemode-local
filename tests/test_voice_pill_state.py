@@ -184,7 +184,8 @@ def test_live_pause_owner_keeps_the_pause_file(base):
     assert (base / "paused.json").exists()
 
 
-def test_stopped_session_tells_the_agent_until_it_comes_back(base):
+def test_stopped_session_tells_the_agent_until_it_comes_back(base, monkeypatch):
+    monkeypatch.setattr(st, "barge_state", lambda home=None: None)
     st.register_session(os.getpid(), "demo", None, base=base)
     assert st.result_note(os.getpid(), base=base) == ""
     st.mark_stopped(os.getpid(), True, base=base)
@@ -235,3 +236,42 @@ def test_barge_still_finds_the_switch_next_to_a_repo_venv(monkeypatch, tmp_path)
     monkeypatch.setattr(sys, "prefix", str(tmp_path / ".venv"))
     (tmp_path / "voicemode-switch").write_text("")
     assert st.default_switch() == tmp_path / "voicemode-switch"
+
+
+
+# Robert, 2026-11-05: at voice start, say once whether interrupt by voice is on, and that it can
+# be switched, like the Beeps switch.
+def test_the_first_result_says_once_that_barge_is_on(base, monkeypatch):
+    monkeypatch.setattr(st, "barge_state", lambda home=None: True)
+    st.register_session(os.getpid(), "demo", None, base=base)
+    first = st.result_note(os.getpid(), base=base)
+    assert "Interrupt by voice is on" in first and "voice_barge" in first
+    assert st.result_note(os.getpid(), base=base) == ""
+
+
+def test_the_first_result_says_when_barge_is_off(base, monkeypatch):
+    monkeypatch.setattr(st, "barge_state", lambda home=None: False)
+    st.register_session(os.getpid(), "demo", None, base=base)
+    assert "Interrupt by voice is off" in st.result_note(os.getpid(), base=base)
+
+
+def test_no_barge_note_where_barge_cannot_run(base, monkeypatch):
+    monkeypatch.setattr(st, "barge_state", lambda home=None: None)
+    st.register_session(os.getpid(), "demo", None, base=base)
+    assert st.result_note(os.getpid(), base=base) == ""
+
+
+def test_no_barge_note_for_an_unregistered_session(base, monkeypatch):
+    monkeypatch.setattr(st, "barge_state", lambda home=None: True)
+    assert st.result_note(os.getpid(), base=base) == ""
+
+
+def test_barge_state_reads_the_last_setting_and_needs_parec(tmp_path, monkeypatch):
+    (tmp_path / "voicemode.env").write_text(
+        "VOICEMODE_VOICE_BARGE=false\n# VOICEMODE_VOICE_BARGE=false\nVOICEMODE_VOICE_BARGE=true\n")
+    monkeypatch.setattr(st.shutil, "which", lambda name: "/usr/bin/parec")
+    assert st.barge_state(home=tmp_path) is True
+    (tmp_path / "voicemode.env").write_text("")
+    assert st.barge_state(home=tmp_path) is False
+    monkeypatch.setattr(st.shutil, "which", lambda name: None)
+    assert st.barge_state(home=tmp_path) is None

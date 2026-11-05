@@ -24,6 +24,11 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# macOS is a native, Docker-free setup with its own installer.
+if [ "$(uname -s)" = "Darwin" ]; then
+    exec "$SCRIPT_DIR/install-mac.sh" "$@"
+fi
+
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'

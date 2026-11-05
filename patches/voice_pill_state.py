@@ -34,6 +34,7 @@ import re
 import shutil
 import socket
 import subprocess
+import shutil
 import sys
 import tempfile
 import time
@@ -508,13 +509,51 @@ def effective_beeps(enabled: bool | None, base=None) -> bool | None:
     return choice
 
 
+BARGE_ON_NOTE = ("Interrupt by voice is on: the user can talk over you to stop you. Tell them "
+                 "once, in a few words, that they can switch it off or on at any time by asking "
+                 "(the voice_barge tool) or in the voice pill.")
+BARGE_OFF_NOTE = ("Interrupt by voice is off. Tell the user once, in a few words, that they can "
+                  "switch it on or off at any time by asking (the voice_barge tool) or in the "
+                  "voice pill.")
+
+
+def barge_state(home=None) -> bool | None:
+    """Whether interrupt by voice is on, or None where it cannot run (no parec). The file wins
+    over the environment: the switch writes the file, and the server loaded it only at start."""
+    if shutil.which("parec") is None:
+        return None
+    value = ""
+    try:
+        path = Path(home) if home is not None else Path(os.path.expanduser("~")) / ".voicemode"
+        for line in (path / "voicemode.env").read_text(encoding="utf-8").splitlines():
+            if line.startswith("VOICEMODE_VOICE_BARGE="):
+                value = line.split("=", 1)[1].strip().strip('"').lower()
+    except OSError:
+        pass
+    return value == "true"
+
+
+def _barge_note_once(pid: int, base) -> str:
+    """Said once per session, at its first turn (Robert, 2026-11-05)."""
+    path = _session_path(pid, base)
+    s = _read_json(path)
+    if not s or s.get("barge_told"):
+        return ""
+    state = barge_state()
+    if state is None:
+        return ""
+    s["barge_told"] = True
+    _write_json(path, s)
+    return "\n\n" + (BARGE_ON_NOTE if state else BARGE_OFF_NOTE)
+
+
 def result_note(pid: int, base=None, already: str = "") -> str:
     """Everything the agent should read after a turn. The stop note covers a turn cut by the
     socket, which only says playback stopped; our rule to keep talking would otherwise win."""
     note = language_note(pid, base)
     if _read_json(_session_path(pid, base)).get("stopped") and STOPPED_MESSAGE not in already:
         note += "\n\n" + STOPPED_MESSAGE
-    return note
+    return note + _barge_note_once(pid, base)
 
 
 # -- entering a voice turn --------------------------------------------------
