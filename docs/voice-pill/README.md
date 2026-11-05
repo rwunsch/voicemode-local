@@ -126,6 +126,18 @@ now shows by colour only. Whether the old or new cost affects stutter was not me
 
 - An unhandled Python exception before the first snapshot also exits 1, so it is not retried.
   It appears in `pill-window.log`. Run `pill off`, then `pill on`, to restart.
+- Native Windows (not WSL): run voice-mode and the pill at the same level. If the voice
+  server runs elevated (as administrator) and the pill does not, the pill refuses its control
+  pipe, because it cannot inspect the elevated server's process. The pill then shows no
+  speaking or listening state and its Interrupt, Pause and Stop do not reach the turn. The
+  backend logs the reason once, as `voice control channel refused: ... most likely the voice
+  server runs elevated`. Inferred from Windows' token rules and covered by a unit test; not
+  yet run with a real elevated server.
+- Native Windows: the backend's paths follow `VOICEMODE_BASE_DIR` (else `~/.voicemode`). Its
+  settings (`VOICEMODE_VOICE_BARGE`, `VOICEMODE_AUDIO_FEEDBACK`, `VOICEMODE_PILL`) are read
+  from its environment first, then that folder's `voicemode.env`. The barge toggle runs
+  `VOICEMODE_BARGE_CONTROL_COMMAND` with `on` or `off` appended, when set: a JSON list of
+  strings or one executable path. Otherwise it runs `voicemode-switch barge`.
 - A restart attempt boots WSL. After `wsl --shutdown`, a running window starts it again within
   30 s. Use `voicemode-switch pill off` first.
 

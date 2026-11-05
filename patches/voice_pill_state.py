@@ -2,8 +2,16 @@
 
 Used by the patched voice-mode server, the pill trigger and the pill backend,
 which all run on one machine.  Every file lives under ``base`` (default
-``~/.voicemode/pill``, mode 0700).  Writes are atomic (temp file + os.replace);
-a missing, corrupt or half-written file reads as empty and never raises.
+``<base dir>/pill``, mode 0700), where the base dir is upstream's
+``VOICEMODE_BASE_DIR``, else ``~/.voicemode`` -- resolved on every call, never
+cached, because FELIX gives each runtime its own.  Writes are atomic (temp file +
+os.replace); a missing, corrupt or half-written file reads as empty and never
+raises.  On Windows a file another process has open cannot be replaced or
+deleted for a moment, so writes and deletes retry, and a file that could not be
+read is left alone rather than treated as gone.
+
+Settings (``setting()``) come from the process environment first, then the base
+dir's voicemode.env, read as UTF-8 with CRLF tolerated.
 
 Pause is owned by a pid: if the owner dies (or its pid is reused), the pause
 is ignored, so a crashed pill can never leave every voice session hanging.
@@ -15,6 +23,7 @@ import importlib.util
 import json
 import os
 import re
+import shutil
 import socket
 import subprocess
 import sys
@@ -25,9 +34,83 @@ from pathlib import Path
 _MAX_INTERRUPTION_BYTES = 64 * 1024
 _KEEP_INTERRUPTIONS = 1000
 
+# Windows sharing violations: a reader's open handle blocks os.replace/unlink.
+_RETRIES = 20
+_RETRY_S = 0.025
+
+
+def _on_windows() -> bool:
+    return sys.platform == "win32"
+
+
+def _retry_sleep(seconds: float) -> None:
+    time.sleep(seconds)
+
+
+def _retrying(fn, *args):
+    """Call fn; on Windows retry a PermissionError (file busy) for about half a second."""
+    if not _on_windows():
+        return fn(*args)
+    for attempt in range(_RETRIES):
+        try:
+            return fn(*args)
+        except PermissionError:
+            if attempt == _RETRIES - 1:
+                raise
+            _retry_sleep(_RETRY_S)
+
+
+# -- where things live ------------------------------------------------------
+
+def voicemode_base() -> Path:
+    """Upstream's base dir (config.py: VOICEMODE_BASE_DIR, variables then ~ expanded),
+    else ~/.voicemode. Read on every call; an empty setting means unset."""
+    raw = os.environ.get("VOICEMODE_BASE_DIR")
+    if raw:
+        return Path(os.path.expanduser(os.path.expandvars(raw)))
+    return Path(os.path.expanduser("~")) / ".voicemode"
+
 
 def default_base() -> Path:
-    return Path(os.path.expanduser("~")) / ".voicemode" / "pill"
+    return voicemode_base() / "pill"
+
+
+def env_file(home=None) -> Path:
+    return (Path(home) if home is not None else voicemode_base()) / "voicemode.env"
+
+
+def read_env_file(home=None) -> dict:
+    """KEY=value pairs from voicemode.env: UTF-8 (BOM allowed), CRLF tolerated, comments
+    and ``export`` skipped, surrounding quotes dropped, the last assignment wins."""
+    try:
+        text = _retrying(_read_bytes, env_file(home)).decode("utf-8-sig", errors="replace")
+    except OSError:
+        return {}
+    out = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        if key.startswith("export "):
+            key = key[len("export "):].strip()
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        out[key] = value
+    return out
+
+
+def setting(name: str, default=None, home=None):
+    """The process environment first (FELIX passes settings that way), then voicemode.env."""
+    if name in os.environ:
+        return os.environ[name]
+    return read_env_file(home).get(name, default)
+
+
+def pill_enabled(home=None) -> bool:
+    return (setting("VOICEMODE_PILL", "", home) or "").strip() == "true"
 
 
 def _base(base) -> Path:
@@ -52,6 +135,12 @@ def _sub(base, name: str) -> Path:
 
 def process_start(pid: int) -> str | None:
     """Opaque start-time token for pid, or None if the process is gone."""
+    if _on_windows():
+        # OpenProcess + GetProcessTimes; never ps, /proc or os.kill(pid, 0).
+        try:
+            return _control_transport().process_start_time(int(pid))
+        except (OSError, ValueError, AttributeError):
+            return None
     try:
         if sys.platform.startswith("linux"):
             with open(f"/proc/{int(pid)}/stat", "rb") as f:
@@ -73,14 +162,22 @@ def _alive_same(pid, start) -> bool:
     return cur is not None and cur == start
 
 
+def windows_pid_alive(pid: int) -> bool:
+    """Liveness on Windows: a live process we may query, or one we may not (it exists)."""
+    try:
+        return bool(_control_transport().process_alive(int(pid)))
+    except (OSError, ValueError, AttributeError):
+        return False
+
+
 # -- file helpers -----------------------------------------------------------
 
 def _write_atomic(path: Path, text: str) -> None:
     fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".tmp-")
     try:
-        with os.fdopen(fd, "w") as f:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
             f.write(text)
-        os.replace(tmp, path)
+        _retrying(os.replace, tmp, path)
     except BaseException:
         try:
             os.unlink(tmp)
@@ -93,17 +190,34 @@ def _write_json(path: Path, obj) -> None:
     _write_atomic(path, json.dumps(obj))
 
 
-def _read_json(path: Path, want=dict):
+def _read_bytes(path) -> bytes:
+    with open(path, "rb") as f:
+        return f.read()
+
+
+def _read_json_state(path: Path, want=dict):
+    """(object, status): status is ok, missing, invalid (corrupt or the wrong shape) or
+    unreadable (it exists but could not be read: busy on Windows, or no access)."""
     try:
-        obj = json.loads(path.read_text())
-    except (OSError, ValueError):
-        return want()
-    return obj if isinstance(obj, want) else want()
+        raw = _retrying(_read_bytes, path)
+    except FileNotFoundError:
+        return want(), "missing"
+    except OSError:
+        return want(), "unreadable"
+    try:
+        obj = json.loads(raw.decode("utf-8"))
+    except ValueError:
+        return want(), "invalid"
+    return (obj, "ok") if isinstance(obj, want) else (want(), "invalid")
+
+
+def _read_json(path: Path, want=dict):
+    return _read_json_state(path, want)[0]
 
 
 def _unlink(path: Path) -> None:
     try:
-        path.unlink()
+        _retrying(os.unlink, path)
     except OSError:
         pass
 
@@ -152,7 +266,9 @@ def unregister_session(pid: int, base=None) -> None:
 def live_sessions(base=None) -> list[dict]:
     out = []
     for path in sorted(_sub(base, "sessions").glob("*.json")):
-        s = _read_json(path)
+        s, status = _read_json_state(path)
+        if status == "unreadable":  # busy for a moment, or no access: never delete it
+            continue
         pid = s.get("pid")
         if not isinstance(pid, int) or not _alive_same(pid, s.get("start")):
             _unlink(path)
@@ -173,7 +289,7 @@ def request_stop(pid: int, base=None) -> None:
 
 def take_stop(pid: int, base=None) -> bool:
     try:
-        (_sub(base, "stop") / str(int(pid))).unlink()
+        _retrying(os.unlink, _sub(base, "stop") / str(int(pid)))
         return True
     except OSError:
         return False
@@ -192,7 +308,10 @@ def set_paused(on: bool, owner_pid: int, base=None) -> None:
 
 def is_paused(base=None) -> bool:
     path = _base(base) / "paused.json"
-    p = _read_json(path)
+    p, status = _read_json_state(path)
+    if status == "unreadable":
+        # Not known to be paused, and not known to be stale: keep the file.
+        return False
     if not p:
         return False
     owner = p.get("owner")
@@ -311,7 +430,7 @@ def record_interruption(t: float, base=None) -> None:
 
 def _interruption_times(path: Path) -> list[float]:
     try:
-        lines = path.read_text(errors="replace").splitlines()
+        lines = _retrying(_read_bytes, path).decode("utf-8", errors="replace").splitlines()
     except OSError:
         return []
     out = []
@@ -356,8 +475,11 @@ def save_ui(ui: dict, base=None) -> None:
 # -- control socket (shared by the barge trigger and the pill backend) -------
 
 def control_socket_path() -> Path:
-    # Upstream's variable is VOICEMODE_CONTROL_SOCKET (config.py).
-    return Path(os.path.expanduser(os.getenv("VOICEMODE_CONTROL_SOCKET") or "~/.voicemode/control.sock"))
+    # Upstream's variable is VOICEMODE_CONTROL_SOCKET, default BASE_DIR/control.sock (config.py).
+    explicit = os.getenv("VOICEMODE_CONTROL_SOCKET")
+    if explicit:
+        return Path(os.path.expanduser(os.path.expandvars(explicit)))
+    return voicemode_base() / "control.sock"
 
 
 def _use_pipe() -> bool:
@@ -445,18 +567,56 @@ def default_switch() -> Path:
     return beside if beside.exists() else Path(sys.prefix).parent / "voicemode-switch"
 
 
+BARGE_COMMAND_SETTING = "VOICEMODE_BARGE_CONTROL_COMMAND"
+
+
+def barge_command(switch=None):
+    """(argv prefix, error). The action is appended to the prefix.
+
+    An explicit ``switch`` wins; else the setting VOICEMODE_BARGE_CONTROL_COMMAND
+    (environment first, then voicemode.env): a JSON list of strings, executable
+    first, or a bare path to one executable; else ``voicemode-switch barge``.
+    """
+    if switch is None:
+        raw = (setting(BARGE_COMMAND_SETTING, "") or "").strip()
+        if raw:
+            if raw.startswith("["):
+                try:
+                    argv = json.loads(raw)
+                except ValueError:
+                    argv = None
+                if not (isinstance(argv, list) and argv and all(isinstance(a, str) and a for a in argv)):
+                    return None, f"{BARGE_COMMAND_SETTING} must be a JSON list of strings or a path"
+            elif raw.startswith("{"):
+                return None, f"{BARGE_COMMAND_SETTING} must be a JSON list of strings or a path"
+            else:
+                argv = [raw]
+            exe = Path(argv[0])
+            if not (exe.exists() or (not exe.is_absolute() and shutil.which(argv[0]))):
+                return None, f"barge control command not found: {argv[0]}"
+            return argv, None
+        switch = default_switch()
+    switch = Path(switch)
+    if not switch.exists():
+        return None, f"voicemode-switch not found at {switch}"
+    return [str(switch), "barge"], None
+
+
 def barge_control(action: str, switch=None) -> str:
-    """Run ``voicemode-switch barge <action>``. The action is checked against a
-    fixed list, so model output never reaches the command line."""
+    """Run the barge control command with ``<action>``, by default
+    ``voicemode-switch barge <action>``. The action is checked against a fixed
+    list, so model output never reaches the command line."""
     action = (action or "").strip().lower()
     if action not in ("on", "off", "status"):
         return "action must be on, off or status"
-    switch = Path(switch) if switch is not None else default_switch()
-    if not switch.exists():
-        return f"voicemode-switch not found at {switch}"
+    argv, error = barge_command(switch)
+    if error:
+        return error
+    extra = {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)} if _on_windows() else {}
     try:
         # `on` may download the Silero model.
-        done = subprocess.run([str(switch), "barge", action], capture_output=True, text=True, timeout=180)
+        done = subprocess.run([*argv, action], capture_output=True, text=True, encoding="utf-8",
+                              errors="replace", timeout=180, **extra)
     except (OSError, subprocess.TimeoutExpired) as e:
         return f"voice barge {action} failed: {e}"
     output = re.sub(r"\x1b\[[0-9;]*m", "", (done.stdout + done.stderr)).strip()

@@ -42,7 +42,12 @@ def sock_dir():
 
 
 @pytest.fixture
-def ctx(tmp_path, sock_dir):
+def ctx(tmp_path, sock_dir, monkeypatch):
+    # Settings are read from the environment first. Importing the installed voice_mode
+    # elsewhere in the run loads the real voicemode.env into os.environ: keep it out.
+    for key in ("VOICEMODE_VOICE_BARGE", "VOICEMODE_AUDIO_FEEDBACK", "VOICEMODE_PILL",
+                "VOICEMODE_BARGE_CONTROL_COMMAND", "VOICEMODE_BASE_DIR"):
+        monkeypatch.delenv(key, raising=False)
     return vp.Context(base=tmp_path / "pill", home=tmp_path / "vm",
                       sock=sock_dir / "control.sock", switch=None)
 

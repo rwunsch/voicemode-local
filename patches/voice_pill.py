@@ -5,26 +5,30 @@ Run by a window wrapper as a child process (``python voice_pill.py --stdio``, or
 imports the whole voice_mode package.  This module is stdlib only (no numpy, no
 voice_mode.server, no voice_mode.conch, which would pull in psutil) because the
 machine's audio stutters when idle helpers compete for CPU.  It exits when stdin
-closes, so a closed window ends it and a Pause it owns cannot outlive it.
+closes, so a closed window ends it and a Pause it owns cannot outlive it.  On
+Windows stdin is read by a thread (select takes only sockets there) and the lock
+is an msvcrt byte lock; POSIX keeps select and flock.
 
-Data sources, all read directly (never by spawning the voicemode CLI):
+Data sources, all read directly (never by spawning the voicemode CLI), under the
+base dir (VOICEMODE_BASE_DIR, else ~/.voicemode; see voice_pill_state):
   control socket   status: speaking / listening   (absent between turns: normal)
-  ~/.voicemode/conch, conch.queue.d/*.json         who holds the floor, who waits
-  ~/.voicemode/pill/...                            sessions, pause, overrides, ui
+  <base>/conch, conch.queue.d/*.json               who holds the floor, who waits
+  <base>/pill/...                                  sessions, pause, overrides, ui
 
 The conch file formats are those of voice-mode 8.12.0 (conch.py, conch_queue.py).
 Installed as voice_mode/voice_pill.py by patches/apply.sh.
 """
+import errno
 import json
 import os
 import platform as _platform
+import queue
 import select
 import signal
 import shutil
 import sys
 import threading
 import time
-from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
@@ -36,26 +40,36 @@ except ImportError:
 
 try:
     import fcntl
-except ImportError:  # Windows: no single-instance guard
+except ImportError:  # Windows
     fcntl = None
+try:
+    import msvcrt
+except ImportError:  # POSIX
+    msvcrt = None
 
 IDLE_INTERVAL_S = 1.0
 TURN_INTERVAL_S = 0.25
+# Windows byte-range locks are mandatory: lock a byte far past any content.
+# Kept under 2**31 in case the CRT treats the offset as 32-bit (not checked).
+LOCK_OFFSET = 1 << 30
 
 
-@dataclass
 class Context:
-    base: Path = None            # pill state dir
-    home: Path = None            # ~/.voicemode (conch files, voicemode.env)
-    sock: Path = None            # control socket
-    switch: Path = None          # voicemode-switch, None = next to the venv
-    dismissed: frozenset = None  # session keys hidden by Dismiss
-    barge_thread: threading.Thread = None
+    """Paths left unset are resolved on every access, so they follow the base dir."""
 
-    def __post_init__(self):
-        self.base = Path(self.base) if self.base else st.default_base()
-        self.home = Path(self.home) if self.home else Path(os.path.expanduser("~")) / ".voicemode"
-        self.sock = Path(self.sock) if self.sock else st.control_socket_path()
+    def __init__(self, base=None, home=None, sock=None, switch=None, dismissed=None,
+                 barge_thread=None):
+        self.base, self.home, self.sock = base, home, sock
+        self.switch = switch              # barge command: None = the setting, else voicemode-switch
+        self.dismissed = dismissed        # session keys hidden by Dismiss
+        self.barge_thread = barge_thread
+
+    base = property(lambda self: Path(self._base) if self._base else st.default_base(),
+                    lambda self, v: setattr(self, "_base", v), doc="pill state dir")
+    home = property(lambda self: Path(self._home) if self._home else st.voicemode_base(),
+                    lambda self, v: setattr(self, "_home", v), doc="base dir: conch, voicemode.env")
+    sock = property(lambda self: Path(self._sock) if self._sock else st.control_socket_path(),
+                    lambda self, v: setattr(self, "_sock", v), doc="control socket")
 
 
 # -- conch files -------------------------------------------------------------
@@ -63,8 +77,8 @@ class Context:
 def pid_alive(pid) -> bool:
     if not isinstance(pid, int) or pid <= 0:
         return False
-    if sys.platform.startswith("win"):
-        return st.process_start(pid) is not None
+    if st._on_windows():
+        return st.windows_pid_alive(pid)  # os.kill(pid, 0) would terminate it there
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -185,14 +199,7 @@ def build_snapshot(status, sessions, conch, *, paused=False, ptt=False, dismisse
 
 
 def _barge_enabled(home) -> bool:
-    value = ""
-    try:
-        for line in (Path(home) / "voicemode.env").read_text().splitlines():
-            if line.startswith("VOICEMODE_VOICE_BARGE="):
-                value = line.split("=", 1)[1].strip()
-    except OSError:
-        pass
-    return value == "true"
+    return (st.setting("VOICEMODE_VOICE_BARGE", "", home) or "").strip() == "true"
 
 
 def _beeps_on(ctx) -> bool:
@@ -200,13 +207,7 @@ def _beeps_on(ctx) -> bool:
     choice = st.beeps_choice(ctx.base)
     if choice is not None:
         return choice
-    value = "true"
-    try:
-        for line in (Path(ctx.home) / "voicemode.env").read_text().splitlines():
-            if line.startswith("VOICEMODE_AUDIO_FEEDBACK="):
-                value = line.split("=", 1)[1].strip().lower()
-    except OSError:
-        pass
+    value = (st.setting("VOICEMODE_AUDIO_FEEDBACK", "true", ctx.home) or "").strip().lower()
     return value in ("true", "1", "yes", "on")
 
 
@@ -301,12 +302,15 @@ def handle_command(msg, ctx=None) -> None:
 def acquire_lock(base):
     """Open file holding the single-instance lock, or None if another backend has it."""
     f = open(st._base(base) / "backend.lock", "a+")
-    if fcntl is not None:
-        try:
+    try:
+        if fcntl is not None:
             fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
-            f.close()
-            return None
+        elif msvcrt is not None:
+            f.seek(LOCK_OFFSET)
+            msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+    except OSError:
+        f.close()
+        return None
     return f
 
 
@@ -324,15 +328,57 @@ def _emit(ctx, out) -> float:
     return TURN_INTERVAL_S if snap["phase"] in ("speaking", "listening") else IDLE_INTERVAL_S
 
 
+class SelectInput:
+    """POSIX: wait on the fd itself."""
+
+    def __init__(self, fd):
+        self._fd = fd
+
+    def wait(self, timeout):
+        """Bytes read, b"" at end of input, or None if nothing came in time."""
+        ready, _, _ = select.select([self._fd], [], [], timeout)
+        return os.read(self._fd, 65536) if ready else None
+
+
+class ThreadInput:
+    """Windows: select() takes only sockets, so a daemon thread reads the pipe."""
+
+    def __init__(self, fd):
+        self._queue = queue.Queue()
+        self._thread = threading.Thread(target=self._read, args=(fd,), daemon=True,
+                                        name="voice-pill-stdin")
+        self._thread.start()
+
+    def _read(self, fd):
+        while True:
+            try:
+                chunk = os.read(fd, 65536)
+            except OSError:  # a broken pipe is the window gone: same as EOF
+                chunk = b""
+            self._queue.put(chunk)
+            if not chunk:
+                return
+
+    def wait(self, timeout):
+        try:
+            return self._queue.get(timeout=timeout)
+        except queue.Empty:
+            return None
+
+
+def _input_source(fd):
+    return ThreadInput(fd) if st._on_windows() else SelectInput(fd)
+
+
 def run_stdio(ctx, stdin_fd=0, out=None) -> None:
     out = out or sys.stdout
+    source = _input_source(stdin_fd)
     buf, interval = b"", _emit(ctx, out)
     next_at = time.monotonic() + interval
     while True:
-        ready, _, _ = select.select([stdin_fd], [], [], max(0.0, next_at - time.monotonic()))
+        chunk = source.wait(max(0.0, next_at - time.monotonic()))
         sent = False
-        if ready:
-            chunk = os.read(stdin_fd, 65536)
+        if chunk is not None:
             if not chunk:
                 return
             buf += chunk
@@ -348,18 +394,35 @@ def run_stdio(ctx, stdin_fd=0, out=None) -> None:
             next_at = time.monotonic() + interval
 
 
+def _install_stop_signals() -> None:
+    """The wrapper stops us with SIGTERM (Ctrl-Break on Windows): treat it like Ctrl-C so
+    the finally runs. Windows' TerminateProcess sends no signal at all; stdin EOF is the
+    clean exit there. Signals this platform lacks, or a non-main thread, are skipped."""
+    for name in ("SIGTERM", "SIGBREAK"):
+        sig = getattr(signal, name, None)
+        if sig is None:
+            continue
+        try:
+            signal.signal(sig, signal.default_int_handler)
+        except (ValueError, OSError):
+            pass
+
+
 def main(argv=None) -> int:
     ctx = Context()
     lock = acquire_lock(ctx.base)
     if lock is None:
         print("voice_pill: another backend is running", file=sys.stderr)
         return 1
-    # The wrapper stops us with SIGTERM: treat it like Ctrl-C so the finally runs.
-    signal.signal(signal.SIGTERM, signal.default_int_handler)
+    _install_stop_signals()
     try:
         run_stdio(ctx)
     except (BrokenPipeError, KeyboardInterrupt):
         pass
+    except OSError as e:
+        # Windows reports a write to a closed pipe as EINVAL, not EPIPE.
+        if not (st._on_windows() and e.errno == errno.EINVAL):
+            raise
     finally:
         _release_pause(ctx)
         lock.close()

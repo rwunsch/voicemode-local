@@ -39,11 +39,13 @@ import numpy as np
 
 try:
     from voice_mode.voice_pill_state import (  # noqa: F401  (re-exported for callers)
-        _exchange, _status, barge_control, control_socket_path, is_paused, record_interruption)
+        _exchange, _retrying, _status, barge_control, control_socket_path, is_paused,
+        read_env_file, record_interruption, voicemode_base)
 except ImportError:  # run straight from the repo, not the installed package
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from voice_pill_state import (  # noqa: F401
-        _exchange, _status, barge_control, control_socket_path, is_paused, record_interruption)
+        _exchange, _retrying, _status, barge_control, control_socket_path, is_paused,
+        read_env_file, record_interruption, voicemode_base)
 
 logger = logging.getLogger("voicemode.voice_barge")
 
@@ -158,7 +160,7 @@ def is_speaking(path: Path) -> bool:
 
 
 def preroll_path() -> Path:
-    return Path.home() / ".voicemode" / "barge_preroll.bin"
+    return voicemode_base() / "barge_preroll.bin"
 
 
 def write_preroll(path: Path, samples: np.ndarray, start_t: float) -> None:
@@ -168,7 +170,7 @@ def write_preroll(path: Path, samples: np.ndarray, start_t: float) -> None:
     fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "wb") as f:
         f.write(PREROLL_HEADER.pack(start_t) + pcm)
-    os.replace(tmp, path)
+    _retrying(os.replace, tmp, path)  # Windows: the server may be reading the last one
 
 
 def prepend_preroll(audio: np.ndarray, listen_started_at, sample_rate: int, path=None,
@@ -184,10 +186,13 @@ def prepend_preroll(audio: np.ndarray, listen_started_at, sample_rate: int, path
         sleep(0.02)
         waited += 0.02
     try:
-        raw = path.read_bytes()
-        path.unlink()
+        raw = _retrying(path.read_bytes)
     except OSError:
-        return audio
+        return audio  # unreadable: leave it; the age check discards it later
+    try:
+        _retrying(os.unlink, path)
+    except OSError:
+        pass  # Windows, still busy: the age check discards a leftover
     if len(raw) < PREROLL_HEADER.size or listen_started_at is None:
         return audio
     start_t = PREROLL_HEADER.unpack_from(raw)[0]
@@ -289,22 +294,30 @@ def run(poll_speaking, open_capture, vad, detector, send_barge, sleep=time.sleep
             sleep(idle_poll_s)
 
 
-def _read_env_file() -> dict:
-    env = {}
-    path = Path.home() / ".voicemode" / "voicemode.env"
-    try:
-        for line in path.read_text().splitlines():
-            if line.startswith("VOICEMODE_VOICE_BARGE") and "=" in line:
-                key, value = line.split("=", 1)
-                env[key] = value.strip()
-    except OSError:
-        pass
-    return env
+def trigger_settings() -> dict:
+    """The VOICEMODE_VOICE_BARGE* settings: the environment over the base dir's voicemode.env."""
+    def ours(d):
+        return {k: v for k, v in d.items() if k.startswith("VOICEMODE_VOICE_BARGE")}
+    return {**ours(read_env_file()), **ours(os.environ)}
+
+
+def install_stop_handlers(stop: threading.Event) -> None:
+    """Ctrl-C / SIGTERM (and Ctrl-Break on Windows) set ``stop``. Signals the platform
+    lacks, or a call off the main thread, are skipped: the owner then stops us by
+    ending the process."""
+    for name in ("SIGINT", "SIGTERM", "SIGBREAK"):
+        sig = getattr(signal, name, None)
+        if sig is None:
+            continue
+        try:
+            signal.signal(sig, lambda *_: stop.set())
+        except (ValueError, OSError):
+            pass
 
 
 def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
-    settings = {**_read_env_file(), **{k: v for k, v in os.environ.items() if k.startswith("VOICEMODE_VOICE_BARGE")}}
+    settings = trigger_settings()
     if shutil.which("parec") is None:
         logger.error("parec not found; voice barge-in needs PulseAudio or PipeWire tools")
         return 1
@@ -322,8 +335,7 @@ def main() -> int:
     need = max(1, round(min_ms / (WINDOW_S * 1000)))
 
     stop = threading.Event()
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        signal.signal(sig, lambda *_: stop.set())
+    install_stop_handlers(stop)
 
     path = control_socket_path()
     logger.info("started: gate=%.1f dBFS need=%d windows device=%s socket=%s", gate_db, need, device, path)

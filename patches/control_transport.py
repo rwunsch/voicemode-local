@@ -44,12 +44,28 @@ the normalised absolute ``control.sock`` path, so each install's base dir gets
 its own pipe. The name is derived on every call and never cached: FELIX moves
 ``control.sock`` whenever it rebuilds a runtime.
 
+Elevation
+=========
+The label is capped at Medium, so an elevated (administrator) server's pipe can
+still be *opened* by a Medium client. The client then refuses it anyway: it
+cannot open an elevated process's token to check who serves the pipe, and an
+unverifiable server is refused. That refusal is logged once per reason, naming
+elevation as the likely cause. Run the voice server and its clients at the same
+level. (Inferred from Windows' token access rules; not yet run elevated.)
+
+Process identity
+================
+``process_start_time`` and ``process_alive`` answer "is this pid still the
+process that registered?" for the pill, through ``OpenProcess`` and
+``GetProcessTimes`` -- never ``os.kill(pid, 0)``, which on Windows terminates.
+
 On POSIX nothing here is used; importing the module loads no Windows API.
 Installed into voice_mode/control_transport.py by patches/apply.sh.
 """
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
 import re
 import socket
@@ -61,6 +77,9 @@ PIPE_PREFIX = "\\\\.\\pipe\\voicemode-control-"
 
 _API = None  # Windows API bindings, loaded on first use
 _ORPHANED = []  # OVERLAPPEDs whose cancelled I/O was not waited for; never freed
+_REFUSALS_LOGGED = set()  # refusal reasons already logged by this process
+
+logger = logging.getLogger("voicemode.control_transport")
 
 
 def use_pipe() -> bool:
@@ -94,9 +113,11 @@ def owner_only_sddl(sid: str, label_rid=None) -> str:
 
 
 def server_label_rid(own_rid: int) -> int:
-    """The server's label: its own level, capped at Medium. Capped so a medium
-    client can still reach an elevated server; never above its own, which
-    Windows would refuse anyway."""
+    """The server's label: its own level, capped at Medium; never above its own,
+    which Windows would refuse anyway. The cap only keeps the label from blocking
+    a Medium client's open of an elevated server's pipe. It does not make that
+    pairing work: the client's own check (``_verify_server``) then refuses the
+    server, because a Medium process cannot read an elevated process's token."""
     return min(own_rid, _MEDIUM_RID)
 
 
@@ -217,6 +238,14 @@ def _api():
     api.OpenProcess = sig(k32.OpenProcess, w.HANDLE, w.DWORD, w.BOOL, w.DWORD)
     api.GetSidSubAuthorityCount = sig(adv.GetSidSubAuthorityCount, LP(ctypes.c_ubyte), P)
     api.GetSidSubAuthority = sig(adv.GetSidSubAuthority, LP(w.DWORD), P, w.DWORD)
+
+    class FILETIME(ctypes.Structure):
+        _fields_ = [("dwLowDateTime", w.DWORD), ("dwHighDateTime", w.DWORD)]
+
+    api.FILETIME = FILETIME
+    api.GetProcessTimes = sig(k32.GetProcessTimes, w.BOOL, w.HANDLE, LP(FILETIME), LP(FILETIME),
+                              LP(FILETIME), LP(FILETIME))
+    api.GetExitCodeProcess = sig(k32.GetExitCodeProcess, w.BOOL, w.HANDLE, LP(w.DWORD))
     _API = api
     return api
 
@@ -253,6 +282,9 @@ _TOKEN_QUERY = 0x0008
 _TOKEN_USER = 1
 _TOKEN_INTEGRITY_LEVEL = 25
 _PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+_SYNCHRONIZE = 0x00100000
+_STILL_ACTIVE = 259
+_ERROR_ACCESS_DENIED = 5
 _LABEL_SECURITY_INFORMATION = 0x10
 _WAIT_FAILED = 0xFFFFFFFF
 _SE_KERNEL_OBJECT = 6
@@ -338,6 +370,67 @@ def current_integrity_rid() -> int:
     """This process's integrity level RID (0x1000 Low, 0x2000 Medium, ...)."""
     api = _api()
     return _process_identity(api, api.GetCurrentProcess())[1]
+
+
+def filetime_token(high: int, low: int) -> str:
+    """A process creation FILETIME as an opaque, comparable text token."""
+    return str((int(high) << 32) | int(low))
+
+
+def _open_for_query(api, pid):
+    """(handle, can_wait) for a pid, or (None, last error). SYNCHRONIZE first, so a
+    wait can tell an exited process from one with exit code 259; without it,
+    fall back to the exit code."""
+    h = api.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION | _SYNCHRONIZE, False, int(pid))
+    if _handle_ok(h):
+        return h, True
+    h = api.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, int(pid))
+    if _handle_ok(h):
+        return h, False
+    return None, api.ctypes.get_last_error()
+
+
+def _still_running(api, h, can_wait) -> bool:
+    # An exited process lives on while anyone holds a handle to it.
+    if can_wait:
+        return api.WaitForSingleObject(h, 0) == _WAIT_TIMEOUT
+    code = api.w.DWORD()
+    return bool(api.GetExitCodeProcess(h, api.ctypes.byref(code))) and code.value == _STILL_ACTIVE
+
+
+def process_start_time(pid: int):
+    """Creation-time token of a running pid, or None if it is gone or cannot be queried
+    (Windows only; raises OSError elsewhere)."""
+    api = _api()
+    if int(pid) <= 0:
+        return None
+    h, can_wait = _open_for_query(api, pid)
+    if h is None:
+        return None
+    try:
+        if not _still_running(api, h, can_wait):
+            return None
+        ft = [api.FILETIME() for _ in range(4)]
+        if not api.GetProcessTimes(h, *(api.ctypes.byref(f) for f in ft)):
+            return None
+        return filetime_token(ft[0].dwHighDateTime, ft[0].dwLowDateTime)
+    finally:
+        api.CloseHandle(h)
+
+
+def process_alive(pid: int) -> bool:
+    """True if pid is a running process, including one we may not open (access
+    denied means it exists). Windows only; raises OSError elsewhere."""
+    api = _api()
+    if int(pid) <= 0:
+        return False
+    h, can_wait = _open_for_query(api, pid)
+    if h is None:
+        return can_wait == _ERROR_ACCESS_DENIED
+    try:
+        return _still_running(api, h, can_wait)
+    finally:
+        api.CloseHandle(h)
 
 
 def server_identity(conn):
@@ -711,19 +804,32 @@ def _verify_server(conn, name) -> None:
     try:
         me = current_user_sid()
         owner = pipe_owner_sid(conn)
-        if owner != me:
-            raise PermissionError(5, f"control pipe owner {owner} is not the current user {me}",
-                                  name)
+    except Exception as exc:  # noqa: BLE001 - cannot verify: refuse
+        raise PermissionError(5, f"cannot verify the control pipe: {exc}", name) from exc
+    if owner != me:
+        raise PermissionError(5, f"control pipe owner {owner} is not the current user {me}", name)
+    try:
         server_sid, server_rid = server_identity(conn)
         my_rid = current_integrity_rid()
-    except PermissionError:
-        raise
     except Exception as exc:  # noqa: BLE001 - cannot verify: refuse
+        if getattr(exc, "winerror", None) == _ERROR_ACCESS_DENIED:
+            reason = ("the process serving the control pipe cannot be inspected (access denied); "
+                      "most likely the voice server runs elevated (as administrator) and this "
+                      "client does not. Run both elevated, or neither")
+            _log_refusal_once(reason)
+            raise PermissionError(5, f"control pipe refused: {reason}", name) from exc
         raise PermissionError(5, f"cannot verify the control pipe's server: {exc}", name) from exc
     if not server_is_trusted(server_sid, server_rid, me, my_rid):
         raise PermissionError(
             5, f"control pipe is served by {server_sid} at integrity {_hex(server_rid)}; "
                f"need {me} at {_hex(my_rid)} or above", name)
+
+
+def _log_refusal_once(reason: str) -> None:
+    """Clients poll often (the pill every second): say why once, not every time."""
+    if reason not in _REFUSALS_LOGGED:
+        _REFUSALS_LOGGED.add(reason)
+        logger.warning("voice control channel refused: %s", reason)
 
 
 def _hex(rid) -> str:
