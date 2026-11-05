@@ -1146,8 +1146,11 @@ def launch(root):
         with forwarded_signals(lambda: child, stopping):
             ports = ensure_services(root, runtime, runtime_environment(runtime))
             env = runtime_environment(runtime, ports)
+            # Upstream loads every .voicemode/voicemode.env walking up from its working folder;
+            # from a WSL checkout that was the WSL setup's file. The label still gets the folder.
+            env["VOICEMODE_CLIENT_FOLDER"] = os.getcwd()
             child = spawn([str(venv_program(runtime, "voice-mode"))], job=connector_job(), env=env,
-                          **connector_options())
+                          cwd=str(runtime), **connector_options())
             # If this launcher dies, its voice-mode keeps the lease alive until it ends too.
             atomic_json(root / "run" / "clients" / str(os.getpid()), {"child": child.pid, "runtime": str(runtime)})
             while True:

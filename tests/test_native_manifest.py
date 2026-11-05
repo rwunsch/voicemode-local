@@ -23,7 +23,7 @@ PATCHES = REPO / "patches"
 BEFORE = "d30ec68"  # the last commit before the native list existed
 FELIX_THREE = ["patch_no_ffmpeg_gate.py", "patch_no_ffmpeg_warning.py", "patch_load_scipy_early.py"]
 # Ours, native only: Windows cannot delete an open temp file (WinError 32). Runs last.
-NATIVE_OURS = ["patch_windows_tempfile.py"]
+NATIVE_OURS = ["patch_windows_tempfile.py", "patch_native_client_folder.py"]
 SOURCES = {
     "control_channel.py": "control_channel.py", "control_socket.py": "control_socket.py",
     "core.py": "core.py", "simple_failover.py": "simple_failover.py", "streaming.py": "streaming.py",
@@ -111,6 +111,7 @@ def test_native_list_is_the_default_plus_felix_three_in_felixs_place():
     ours = [s for s in native if s.get("patch") in NATIVE_OURS]
     assert native[-len(ours):] == ours and [s["patch"] for s in ours] == NATIVE_OURS
     assert ours[0]["targets"] == ["core.py", "streaming.py"]
+    assert ours[1]["targets"] == ["tools/converse.py"]
     assert [s for s in native if s not in added and s not in ours] == default
     # FELIX's order: listen_overrun, turns_playback_stop, simple_failover, then its three.
     names = [s.get("patch") or s.get("copy") for s in native]

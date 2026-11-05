@@ -618,3 +618,31 @@ def test_watchdog_stops_everything_when_no_lease_is_left(vn, home, tmp_path, mon
     (root / "run" / "clients" / str(vn.os.getpid())).unlink()
     assert vn.watch_tick(root, {}) is False
     assert sorted(e for e in world.events if e.startswith("kill:")) == ["kill:stt", "kill:tts"]
+
+
+def test_voice_mode_starts_in_the_runtime_folder_not_the_clients(vn, home, tmp_path, monkeypatch):
+    """Upstream loads every .voicemode/voicemode.env found walking up from its working folder.
+    Started in the client's folder (2026-11-06: \\\\wsl.localhost\\...\\voicemode-local) it read
+    the WSL setup's file: streaming off, debug on, audio saved. The client's folder still
+    reaches the session label through VOICEMODE_CLIENT_FOLDER."""
+    root = tmp_path / "root"
+    world = FakeWorld(vn, monkeypatch, root)
+    runtime = _fake_runtime(vn, root)
+    client = tmp_path / "work" / "my-project"
+    client.mkdir(parents=True)
+    monkeypatch.chdir(client)
+    seen = {}
+    plain = world.spawn
+
+    def spawn(command, job=None, **kwargs):
+        if world.kind_of(command) == "voice-mode":
+            seen.update(kwargs)
+        return plain(command, job=job, **kwargs)
+
+    monkeypatch.setattr(vn, "spawn", spawn)
+    monkeypatch.setattr(vn, "configured_runtime", lambda root, expected: (runtime, True))
+    monkeypatch.setattr(vn, "check_models", lambda runtime: None)
+    monkeypatch.setattr(vn, "optional_services", lambda: [])
+    assert vn.launch(root) == 0
+    assert Path(seen["cwd"]) == runtime
+    assert seen["env"]["VOICEMODE_CLIENT_FOLDER"] == str(client)

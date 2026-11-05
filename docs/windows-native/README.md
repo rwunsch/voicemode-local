@@ -121,6 +121,21 @@ VML_MODEL_SOURCE='C:\path\to\<sha256>\<file> folder' VM812_SRC=<pristine 8.12.0>
 
 ## Gotchas
 
+- **voice-mode runs in the runtime folder, not the client's.** Upstream loads every
+  `.voicemode/voicemode.env` it finds walking up from its working folder. Started from a WSL
+  checkout (`\\wsl.localhost\Ubuntu\home\...`), native voice-mode read the WSL setup's file on
+  2026-11-06: streaming off and debug on, so TTS took the buffered path and audio was saved to
+  `C:\Users\<you>\.voicemode\audio`. The launcher now passes `cwd=<runtime>` and hands the
+  client's folder to the session label as `VOICEMODE_CLIENT_FOLDER`
+  (`patch_native_client_folder.py`). Cost: per-project `voicemode.env` files are not read
+  natively; `~\.voicemode\voicemode.env` and the environment still are.
+- **Windows cannot delete an open file.** voice-mode deleted each TTS temp file inside the
+  `with` that held it open: WinError 32 after playback, so every buffered turn failed and
+  never listened. `patch_windows_tempfile.py` closes first. Upstream 9.0.2 still has it.
+- **Check the default input before a spoken test.** On Robert's laptop the default input
+  (Jabra Engage 75) recorded digital silence (rms 0.5 over 120 s, n=2) while other mics had
+  signal; voice-mode then reports "No speech detected" after the full listen.
+
 - **No ffmpeg natively.** voice-mode 8.12 refuses `converse` without ffmpeg. Native setup
   therefore applies `patches/manifest.windows.json` (`apply.py --native-windows`): our list
   plus FELIX's `patch_no_ffmpeg_gate.py`, `patch_no_ffmpeg_warning.py` and
