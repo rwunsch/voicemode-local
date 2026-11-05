@@ -68,7 +68,9 @@ def test_base_dir_honours_the_setting(monkeypatch, tmp_path):
     assert st.default_base() == base / "pill"
     assert st.control_socket_path() == base / "control.sock"
     assert vb.preroll_path() == base / "barge_preroll.bin"
-    assert st.env_file() == base / "voicemode.env"
+    # upstream's own files stay under the home folder (config.py:33, conch.py:133)
+    assert st.env_file() == tmp_path / "home" / ".voicemode" / "voicemode.env"
+    assert st.upstream_home() == tmp_path / "home" / ".voicemode"
 
 
 def test_base_dir_expands_variables_and_tilde_like_upstream(monkeypatch, tmp_path):
@@ -93,11 +95,11 @@ def test_explicit_control_socket_still_wins(monkeypatch, tmp_path):
 def test_a_base_dir_change_is_seen_without_a_restart(monkeypatch, tmp_path):
     ctx = vp.Context()
     monkeypatch.setenv("VOICEMODE_BASE_DIR", str(tmp_path / "one"))
-    assert (ctx.base, ctx.home, ctx.sock) == (
-        tmp_path / "one" / "pill", tmp_path / "one", tmp_path / "one" / "control.sock")
+    assert (ctx.base, ctx.sock) == (tmp_path / "one" / "pill", tmp_path / "one" / "control.sock")
     monkeypatch.setenv("VOICEMODE_BASE_DIR", str(tmp_path / "two"))
-    assert (ctx.base, ctx.home, ctx.sock) == (
-        tmp_path / "two" / "pill", tmp_path / "two", tmp_path / "two" / "control.sock")
+    assert (ctx.base, ctx.sock) == (tmp_path / "two" / "pill", tmp_path / "two" / "control.sock")
+    monkeypatch.setenv("HOME", str(tmp_path / "h3"))
+    assert ctx.home == tmp_path / "h3" / ".voicemode"
     assert vb.preroll_path() == tmp_path / "two" / "barge_preroll.bin"
 
 
@@ -115,11 +117,72 @@ def test_state_without_a_base_lands_in_the_base_dir(monkeypatch, tmp_path):
     assert not (tmp_path / "home" / ".voicemode").exists()
 
 
-def test_conch_files_are_read_from_the_base_dir(monkeypatch, tmp_path):
+def test_conch_files_are_read_where_upstream_writes_them(monkeypatch, tmp_path):
+    # upstream: Conch.LOCK_FILE = Path.home() / ".voicemode" / "conch", whatever the base dir
     monkeypatch.setenv("VOICEMODE_BASE_DIR", str(tmp_path / "rt"))
+    home = tmp_path / "home" / ".voicemode"
+    (home / "conch.queue.d").mkdir(parents=True)
     (tmp_path / "rt").mkdir()
-    (tmp_path / "rt" / "conch").write_text(json.dumps({"pid": os.getpid(), "agent": "a"}))
-    assert vp.read_conch(vp.Context().home)["holder"]["pid"] == os.getpid()
+    (home / "conch").write_text(json.dumps({"pid": os.getpid(), "agent": "a"}))
+    (home / "conch.queue.d" / "w.json").write_text(json.dumps({"pid": os.getpid(), "seq": 1}))
+    (tmp_path / "rt" / "conch").write_text(json.dumps({"pid": 1, "agent": "wrong"}))
+    conch = vp.read_conch(vp.Context().home)
+    assert conch["holder"]["pid"] == os.getpid() and len(conch["waiters"]) == 1
+
+
+def test_env_file_falls_back_to_the_old_name_like_upstream(tmp_path):
+    d = tmp_path / "home" / ".voicemode"
+    d.mkdir(parents=True)
+    (d / ".voicemode.env").write_text("VOICEMODE_PILL=true\n")
+    assert st.env_file() == d / ".voicemode.env" and st.pill_enabled() is True
+    (d / "voicemode.env").write_text("VOICEMODE_PILL=false\n")
+    assert st.env_file() == d / "voicemode.env" and st.pill_enabled() is False
+
+
+def _upstream_source(name):
+    spec = importlib.util.find_spec("voice_mode")  # finds the package; does not import it
+    if spec is None or not spec.submodule_search_locations:
+        pytest.skip("no installed voice_mode to compare against")
+    path = Path(list(spec.submodule_search_locations)[0]) / name
+    if not path.is_file():
+        pytest.skip(f"installed voice_mode has no {name}")
+    return path.read_text(encoding="utf-8")
+
+
+def _upstream_eval(expr):
+    ns = {"Path": Path, "os": os, "BASE_DIR": st.voicemode_base(),
+          "expand_path": lambda v: Path(os.path.expanduser(os.path.expandvars(v)))}
+    return eval(expr, ns)  # noqa: S307 - fixed expressions from this file
+
+
+# (file, expression as upstream writes it, what ours resolves to)
+UPSTREAM_PATHS = [
+    ("conch.py", 'Path.home() / ".voicemode" / "conch"', lambda: vp.Context().home / "conch"),
+    ("conch_queue.py", 'QUEUE_DIRNAME = "conch.queue.d"', None),
+    ("conch_queue.py", "return Conch.LOCK_FILE.parent", None),
+    ("config.py", 'Path.home() / ".voicemode" / "voicemode.env"', lambda: st.env_file()),
+    ("config.py", 'expand_path(os.getenv("VOICEMODE_BASE_DIR", str(Path.home() / ".voicemode")))',
+     lambda: st.voicemode_base()),
+    ("config.py", 'os.getenv("VOICEMODE_CONTROL_SOCKET", str(BASE_DIR / "control.sock"))',
+     lambda: st.control_socket_path()),
+]
+
+
+@pytest.mark.parametrize("filename,expr,ours", UPSTREAM_PATHS)
+@pytest.mark.parametrize("base_dir", [None, "rt"])
+def test_paths_are_pinned_to_upstream_expressions(monkeypatch, tmp_path, filename, expr, ours,
+                                                  base_dir):
+    assert expr in _upstream_source(filename), f"upstream {filename} drifted: {expr}"
+    if base_dir:
+        monkeypatch.setenv("VOICEMODE_BASE_DIR", str(tmp_path / base_dir))
+    if ours is not None:
+        assert Path(_upstream_eval(expr)) == ours()
+
+
+def test_control_socket_follows_upstream_expansion(monkeypatch, tmp_path):
+    monkeypatch.setenv("VML_S", str(tmp_path))
+    monkeypatch.setenv("VOICEMODE_CONTROL_SOCKET", "$VML_S/c.sock")
+    assert st.control_socket_path() == tmp_path / "c.sock"
 
 
 @pytest.mark.parametrize("filename", ["voice_pill_state.py", "voice_pill.py", "voice_barge.py"])
@@ -128,7 +191,7 @@ def test_no_fixed_voicemode_path_outside_the_resolver(filename):
             if not ln.lstrip().startswith("#")]
     hits = [ln for ln in code if '"~/.voicemode' in ln or '/ ".voicemode"' in ln
             or "Path.home()" in ln]
-    allowed = 1 if filename == "voice_pill_state.py" else 0  # the resolver itself
+    allowed = 1 if filename == "voice_pill_state.py" else 0  # upstream_home() itself
     assert len(hits) == allowed, hits
 
 
@@ -174,11 +237,29 @@ def test_pill_flag(monkeypatch, tmp_path):
     assert st.pill_enabled() is False
 
 
-def test_pill_barge_flag_env_first(monkeypatch, tmp_path):
+def test_pill_barge_flag_file_wins_when_it_has_the_key(monkeypatch, tmp_path):
+    # The pill's own toggle writes voicemode.env: read the flag from where it lands.
     home = _env_file(tmp_path, b"VOICEMODE_VOICE_BARGE=false\r\n")
+    monkeypatch.setenv("VOICEMODE_VOICE_BARGE", "true")
     assert vp._barge_enabled(home) is False
+
+
+def test_pill_barge_flag_env_is_the_default(monkeypatch, tmp_path):
+    home = _env_file(tmp_path, b"OTHER=1\n")
     monkeypatch.setenv("VOICEMODE_VOICE_BARGE", "true")
     assert vp._barge_enabled(home) is True
+
+
+def test_a_barge_toggle_shows_even_with_the_old_value_in_the_environment(monkeypatch, tmp_path):
+    monkeypatch.setenv("VOICEMODE_VOICE_BARGE", "false")
+    home = tmp_path / "home" / ".voicemode"
+    switch = _script(tmp_path, "voicemode-switch",
+                     f'mkdir -p "{home}"; echo "VOICEMODE_VOICE_BARGE=true" > "{home}/voicemode.env"')
+    ctx = vp.Context(base=tmp_path / "pill", sock=tmp_path / "none.sock", switch=switch)
+    assert vp.gather(ctx)["barge"]["enabled"] is False
+    vp.handle_command({"cmd": "set_barge", "on": True}, ctx)
+    ctx.barge_thread.join(5)
+    assert vp.gather(ctx)["barge"]["enabled"] is True
 
 
 def test_pill_barge_flag_reads_crlf_file(tmp_path):

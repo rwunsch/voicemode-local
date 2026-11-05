@@ -10,8 +10,12 @@ raises.  On Windows a file another process has open cannot be replaced or
 deleted for a moment, so writes and deletes retry, and a file that could not be
 read is left alone rather than treated as gone.
 
-Settings (``setting()``) come from the process environment first, then the base
-dir's voicemode.env, read as UTF-8 with CRLF tolerated.
+Upstream's own files stay where upstream keeps them, in the home folder's
+.voicemode whatever the base dir (conch.py:133 the conch, config.py:33
+voicemode.env): ``upstream_home()``.  Settings (``setting()``) come from the
+process environment first, then that voicemode.env, read as UTF-8 with CRLF
+tolerated -- except a setting the pill itself changes, read from where its
+change lands (``file_first_setting()``).
 
 Pause is owned by a pid: if the owner dies (or its pid is reused), the pause
 is ignored, so a crashed pill can never leave every voice session hanging.
@@ -62,13 +66,18 @@ def _retrying(fn, *args):
 
 # -- where things live ------------------------------------------------------
 
+def upstream_home() -> Path:
+    """Where upstream keeps the conch and voicemode.env, whatever the base dir."""
+    return Path.home() / ".voicemode"
+
+
 def voicemode_base() -> Path:
-    """Upstream's base dir (config.py: VOICEMODE_BASE_DIR, variables then ~ expanded),
+    """Upstream's base dir (config.py:545: VOICEMODE_BASE_DIR, variables then ~ expanded),
     else ~/.voicemode. Read on every call; an empty setting means unset."""
     raw = os.environ.get("VOICEMODE_BASE_DIR")
     if raw:
         return Path(os.path.expanduser(os.path.expandvars(raw)))
-    return Path(os.path.expanduser("~")) / ".voicemode"
+    return upstream_home()
 
 
 def default_base() -> Path:
@@ -76,7 +85,10 @@ def default_base() -> Path:
 
 
 def env_file(home=None) -> Path:
-    return (Path(home) if home is not None else voicemode_base()) / "voicemode.env"
+    """voicemode.env, or upstream's old name .voicemode.env when only that exists."""
+    h = Path(home) if home is not None else upstream_home()
+    path, old = h / "voicemode.env", h / ".voicemode.env"
+    return old if not path.exists() and old.exists() else path
 
 
 def read_env_file(home=None) -> dict:
@@ -107,6 +119,15 @@ def setting(name: str, default=None, home=None):
     if name in os.environ:
         return os.environ[name]
     return read_env_file(home).get(name, default)
+
+
+def file_first_setting(name: str, default=None, home=None):
+    """For a setting the pill itself changes by writing voicemode.env: the file wins when
+    it has the key, and the environment is only the default."""
+    file = read_env_file(home)
+    if name in file:
+        return file[name]
+    return os.environ.get(name, default)
 
 
 def pill_enabled(home=None) -> bool:

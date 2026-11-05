@@ -9,10 +9,12 @@ closes, so a closed window ends it and a Pause it owns cannot outlive it.  On
 Windows stdin is read by a thread (select takes only sockets there) and the lock
 is an msvcrt byte lock; POSIX keeps select and flock.
 
-Data sources, all read directly (never by spawning the voicemode CLI), under the
-base dir (VOICEMODE_BASE_DIR, else ~/.voicemode; see voice_pill_state):
+Data sources, all read directly (never by spawning the voicemode CLI). Upstream's
+files are read where upstream keeps them; the pill's own follow the base dir
+(VOICEMODE_BASE_DIR, else ~/.voicemode; see voice_pill_state):
   control socket   status: speaking / listening   (absent between turns: normal)
-  <base>/conch, conch.queue.d/*.json               who holds the floor, who waits
+  ~/.voicemode/conch, conch.queue.d/*.json         who holds the floor, who waits
+  ~/.voicemode/voicemode.env                       barge flag, beeps default
   <base>/pill/...                                  sessions, pause, overrides, ui
 
 The conch file formats are those of voice-mode 8.12.0 (conch.py, conch_queue.py).
@@ -66,8 +68,9 @@ class Context:
 
     base = property(lambda self: Path(self._base) if self._base else st.default_base(),
                     lambda self, v: setattr(self, "_base", v), doc="pill state dir")
-    home = property(lambda self: Path(self._home) if self._home else st.voicemode_base(),
-                    lambda self, v: setattr(self, "_home", v), doc="base dir: conch, voicemode.env")
+    home = property(lambda self: Path(self._home) if self._home else st.upstream_home(),
+                    lambda self, v: setattr(self, "_home", v),
+                    doc="upstream's ~/.voicemode: conch, voicemode.env")
     sock = property(lambda self: Path(self._sock) if self._sock else st.control_socket_path(),
                     lambda self, v: setattr(self, "_sock", v), doc="control socket")
 
@@ -199,7 +202,8 @@ def build_snapshot(status, sessions, conch, *, paused=False, ptt=False, dismisse
 
 
 def _barge_enabled(home) -> bool:
-    return (st.setting("VOICEMODE_VOICE_BARGE", "", home) or "").strip() == "true"
+    # The toggle (voicemode-switch barge) writes voicemode.env: read it from there first.
+    return (st.file_first_setting("VOICEMODE_VOICE_BARGE", "", home) or "").strip() == "true"
 
 
 def _beeps_on(ctx) -> bool:

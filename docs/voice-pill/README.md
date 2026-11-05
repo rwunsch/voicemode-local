@@ -133,11 +133,20 @@ now shows by colour only. Whether the old or new cost affects stutter was not me
   backend logs the reason once, as `voice control channel refused: ... most likely the voice
   server runs elevated`. Inferred from Windows' token rules and covered by a unit test; not
   yet run with a real elevated server.
-- Native Windows: the backend's paths follow `VOICEMODE_BASE_DIR` (else `~/.voicemode`). Its
-  settings (`VOICEMODE_VOICE_BARGE`, `VOICEMODE_AUDIO_FEEDBACK`, `VOICEMODE_PILL`) are read
-  from its environment first, then that folder's `voicemode.env`. The barge toggle runs
-  `VOICEMODE_BARGE_CONTROL_COMMAND` with `on` or `off` appended, when set: a JSON list of
-  strings or one executable path. Otherwise it runs `voicemode-switch barge`.
+- Paths: the pill's own files (the `pill` folder, barge pre-roll, interruptions) follow
+  `VOICEMODE_BASE_DIR`, else `~/.voicemode`. The conch, its queue and `voicemode.env` are
+  read from the home folder's `.voicemode`, where upstream keeps them whatever the base dir
+  (`conch.py:133`, `config.py:33`). The control socket follows upstream's `config.py:697`.
+- Settings: `VOICEMODE_PILL` and `VOICEMODE_AUDIO_FEEDBACK` come from the environment first,
+  then `voicemode.env`. `VOICEMODE_VOICE_BARGE` is the other way round, because the pill's
+  own toggle writes it to `voicemode.env`: the file wins when it has the key, and the
+  environment is only the default.
+- The barge toggle runs `VOICEMODE_BARGE_CONTROL_COMMAND` with `on` or `off` appended, when
+  set: a JSON list of strings or one executable path. Otherwise it runs
+  `voicemode-switch barge`.
+- For FELIX: there the toggle changes a FELIX preference, not `voicemode.env`, so the pill
+  cannot read the new state from the file. FELIX's barge control command will also need a
+  `status` mode that the pill can ask.
 - A restart attempt boots WSL. After `wsl --shutdown`, a running window starts it again within
   30 s. Use `voicemode-switch pill off` first.
 

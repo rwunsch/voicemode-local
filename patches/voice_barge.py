@@ -295,7 +295,7 @@ def run(poll_speaking, open_capture, vad, detector, send_barge, sleep=time.sleep
 
 
 def trigger_settings() -> dict:
-    """The VOICEMODE_VOICE_BARGE* settings: the environment over the base dir's voicemode.env."""
+    """The VOICEMODE_VOICE_BARGE* settings: the environment over ~/.voicemode/voicemode.env."""
     def ours(d):
         return {k: v for k, v in d.items() if k.startswith("VOICEMODE_VOICE_BARGE")}
     return {**ours(read_env_file()), **ours(os.environ)}

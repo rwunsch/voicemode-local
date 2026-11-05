@@ -3,7 +3,8 @@
 Run from WSL with tests/run_windows_transport_tests.sh, which copies this file and
 the modules it loads into a Windows temp folder, runs it with Windows Python, and
 deletes the folder. On any other OS every test skips. Every state file goes to
-pytest's tmp_path through VOICEMODE_BASE_DIR, never to the user's ~/.voicemode.
+pytest's tmp_path (VOICEMODE_BASE_DIR, and USERPROFILE for upstream's files), never
+to the user's ~/.voicemode.
 """
 import importlib.util
 import json
@@ -37,6 +38,8 @@ if sys.platform == "win32":
 @pytest.fixture(autouse=True)
 def private_base(monkeypatch, tmp_path):
     monkeypatch.setenv("VOICEMODE_BASE_DIR", str(tmp_path / "vm"))
+    for k in ("USERPROFILE", "HOME"):  # upstream's own files: Path.home() / ".voicemode"
+        monkeypatch.setenv(k, str(tmp_path / "home"))
     monkeypatch.delenv("VOICEMODE_CONTROL_SOCKET", raising=False)
     return tmp_path / "vm"
 
@@ -145,6 +148,7 @@ def test_resume_removes_the_pause_even_while_it_is_being_read(private_base):
 
 def test_backend_serves_stdin_and_exits_on_eof(private_base):
     env = {**os.environ, "VOICEMODE_BASE_DIR": str(private_base), "PYTHONUTF8": "1"}
+    assert Path(env["USERPROFILE"]) == private_base.parent / "home"
     p = subprocess.Popen([sys.executable, str(PATCHES / "voice_pill.py"), "--stdio"],
                          stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                          env=env, text=True, encoding="utf-8")
