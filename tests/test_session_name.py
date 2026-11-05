@@ -170,3 +170,101 @@ def test_venv_patched_before_the_queue_site_existed_gets_it(tmp_path, src_dir):
     assert "# voicemode-local queue name" in out
     assert 'agent="converse"' not in out
     assert out.count("\ndef _vml_session_name() -> str:") == 0  # helper not re-added
+
+
+# --- the name the user gave the Claude session (Robert, 2026-11-05) ----------
+# Claude Code keeps ~/.claude/sessions/<pid>.json with sessionId, name and nameSource
+# ("user" after /rename or a launch name, "derived" otherwise). Read 2026-11-05 on this
+# machine: 48 user, 17 derived, 80 without a name, n=150 files.
+
+def _claude_session(home, pid, sid, name, source):
+    d = home / ".claude" / "sessions"
+    d.mkdir(parents=True, exist_ok=True)
+    rec = {"pid": pid, "sessionId": sid, "cwd": "/x", "kind": "interactive"}
+    if name is not None:
+        rec.update(name=name, nameSource=source)
+    (d / f"{pid}.json").write_text(__import__("json").dumps(rec))
+
+
+def test_a_name_the_user_set_wins_over_the_label_file(resolver, monkeypatch, clean_env, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "s1")
+    _claude_session(tmp_path, 4242, "s1", "FELIX-MAC", "user")
+    labels = tmp_path / ".voicemode" / "session_names"
+    labels.mkdir(parents=True)
+    (labels / "s1.txt").write_text("agent-label")
+    assert resolver() == "FELIX-MAC"
+
+
+def test_a_derived_name_is_not_used(resolver, monkeypatch, clean_env, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "s1")
+    _claude_session(tmp_path, 4242, "s1", "felix-framework-30", "derived")
+    monkeypatch.chdir(tmp_path)
+    assert resolver() == tmp_path.name
+
+
+def test_the_session_is_found_by_its_id_not_by_another_session(resolver, monkeypatch, clean_env, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "mine")
+    _claude_session(tmp_path, 1, "other", "NOT-ME", "user")
+    _claude_session(tmp_path, 2, "mine", "ME", "user")
+    assert resolver() == "ME"
+
+
+def test_without_a_session_id_the_parent_process_is_used(resolver, monkeypatch, clean_env, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    _claude_session(tmp_path, os.getppid(), "whatever", "PARENT", "user")
+    assert resolver() == "PARENT"
+
+
+def test_claude_config_dir_is_honoured(resolver, monkeypatch, clean_env, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "cfg"))
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "s1")
+    d = tmp_path / "cfg" / "sessions"
+    d.mkdir(parents=True)
+    (d / "9.json").write_text('{"sessionId": "s1", "name": "CFG", "nameSource": "user"}')
+    assert resolver() == "CFG"
+
+
+def test_a_broken_session_file_falls_through(resolver, monkeypatch, clean_env, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "s1")
+    d = tmp_path / ".claude" / "sessions"
+    d.mkdir(parents=True)
+    (d / "1.json").write_text("{not json")
+    (d / "2.json").write_text('{"sessionId": "s1", "name": 7, "nameSource": "user"}')
+    monkeypatch.chdir(tmp_path)
+    assert resolver() == tmp_path.name
+
+
+def test_env_still_wins_over_the_session_name(resolver, monkeypatch, clean_env, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "s1")
+    monkeypatch.setenv("VOICEMODE_SESSION_NAME", "explicit")
+    _claude_session(tmp_path, 4242, "s1", "FELIX-MAC", "user")
+    assert resolver() == "explicit"
+
+
+def test_a_venv_patched_before_the_session_name_lookup_gets_it(tmp_path, src_dir):
+    sys.path.insert(0, str(PATCHES))
+    try:
+        import importlib
+        mod = importlib.reload(importlib.import_module("patch_session_name"))
+    finally:
+        sys.path.remove(str(PATCHES))
+    target = tmp_path / "converse.py"
+    shutil.copy(src_dir / "converse.py", target)
+    assert subprocess.run([sys.executable, str(PATCHES / "patch_session_name.py"), str(target)],
+                          capture_output=True).returncode == 0
+    # What a venv patched by the previous version holds: helper without the new step.
+    target.write_text(target.read_text().replace(mod.R_CLAUDE_NAME, mod.A_CLAUDE_NAME))
+    assert mod.CLAUDE_NAME_MARKER not in target.read_text()
+    r = subprocess.run([sys.executable, str(PATCHES / "patch_session_name.py"), str(target)],
+                       capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert target.read_text().count(mod.CLAUDE_NAME_MARKER) == 1
+    r = subprocess.run([sys.executable, str(PATCHES / "patch_session_name.py"), str(target)],
+                       capture_output=True, text=True)
+    assert "already patched" in r.stdout

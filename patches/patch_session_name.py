@@ -23,11 +23,13 @@ The fix
 Resolve a real label, in priority order:
 
   1. ``VOICEMODE_SESSION_NAME`` -- explicit launch-time override, always wins.
-  2. ``~/.voicemode/session_names/<CLAUDE_CODE_SESSION_ID>.txt`` -- the label the
+  2. The name the user gave the Claude session, from Claude Code's
+     ``~/.claude/sessions/<pid>.json`` (``nameSource`` "user"), matched by session id.
+  3. ``~/.voicemode/session_names/<CLAUDE_CODE_SESSION_ID>.txt`` -- the label the
      agent writes at voice-mode start. The MCP server inherits the same session
      id at spawn, so it keys on its own environment with no plumbing.
-  3. The current directory's basename -- a decent default (the repo name).
-  4. ``"converse"`` -- upstream's value, if even the cwd is unavailable.
+  4. The current directory's basename -- a decent default (the repo name).
+  5. ``"converse"`` -- upstream's value, if even the cwd is unavailable.
 
 Every step is best-effort and can never raise into the voice path: a bad label
 must not cost you a turn.
@@ -54,6 +56,38 @@ MARKER = "voicemode-local session name"
 # `conch status` showed every *waiter* as "converse" even with the holder fixed.
 # Own marker, so venvs patched before this site existed still pick it up.
 QUEUE_MARKER = "voicemode-local queue name"
+
+# Third step: the name the user gave the Claude session (/rename or a launch name), read
+# from Claude Code's own ~/.claude/sessions/<pid>.json, matched by session id. Its own
+# marker, so venvs patched earlier pick it up. Internal Claude Code file: any surprise falls
+# through to the next step. Robert, 2026-11-05: the session's name when set, else the folder.
+CLAUDE_NAME_MARKER = "voicemode-local claude session name"
+A_CLAUDE_NAME = (
+    "        sid = _os.getenv(\"CLAUDE_CODE_SESSION_ID\")\n"
+    "        if sid:\n"
+)
+R_CLAUDE_NAME = (
+    "        sid = _os.getenv(\"CLAUDE_CODE_SESSION_ID\")\n"
+    "        try:  # voicemode-local claude session name\n"
+    "            import json as _json\n"
+    "            _cfg = _os.getenv(\"CLAUDE_CONFIG_DIR\") or _os.path.expanduser(\"~/.claude\")\n"
+    "            _dir = _Path(_cfg) / \"sessions\"\n"
+    "            _parent = _dir / f\"{_os.getppid()}.json\"\n"
+    "            for _f in [_parent] + (sorted(_dir.glob(\"*.json\")) if sid else []):\n"
+    "                try:\n"
+    "                    _rec = _json.loads(_f.read_text())\n"
+    "                except (OSError, ValueError):\n"
+    "                    continue\n"
+    "                if not isinstance(_rec, dict) or (sid and _rec.get(\"sessionId\") != sid):\n"
+    "                    continue\n"
+    "                _name = _rec.get(\"name\")\n"
+    "                if _rec.get(\"nameSource\") == \"user\" and isinstance(_name, str) and _name.strip():\n"
+    "                    return _name.strip()[:64]\n"
+    "                break\n"
+    "        except Exception:  # noqa: BLE001\n"
+    "            pass\n"
+    "        if sid:\n"
+)
 A_QUEUE = (
     "                        queue_session_id,\n"
     "                        agent=\"converse\",\n"
@@ -95,8 +129,8 @@ def _vml_session_name() -> str:
     voicemode-local session name. Upstream hardcodes agent_name="converse", so
     concurrent sessions are indistinguishable in `voicemode conch status`.
 
-    Order: VOICEMODE_SESSION_NAME env > ~/.voicemode/session_names/<session
-    id>.txt > cwd basename > "converse". Never raises -- a label is a
+    Order: VOICEMODE_SESSION_NAME env > the Claude session's user-set name >
+    ~/.voicemode/session_names/<session id>.txt > cwd basename > "converse". Never raises -- a label is a
     convenience and must not cost the caller a turn.
     """
     import os as _os
@@ -126,7 +160,7 @@ def _vml_session_name() -> str:
 
 def apply(target: Path) -> int:
     src = target.read_text()
-    if MARKER in src and QUEUE_MARKER in src:
+    if MARKER in src and QUEUE_MARKER in src and CLAUDE_NAME_MARKER in src:
         print(f"  already patched: {target}")
         return 0
 
@@ -169,6 +203,17 @@ def apply(target: Path) -> int:
             )
             return 1
         out = out.replace(A_QUEUE, R_QUEUE, 1)
+
+    if CLAUDE_NAME_MARKER not in out and "\ndef _vml_session_name() -> str:" in out:
+        count = out.count(A_CLAUDE_NAME)
+        if count != 1:
+            print(
+                f"ANCHOR DRIFT: 'claude session name' matched {count} times (expected 1) in "
+                f"{target}. Update patches/patch_session_name.py.",
+                file=sys.stderr,
+            )
+            return 1
+        out = out.replace(A_CLAUDE_NAME, R_CLAUDE_NAME, 1)
 
     compile(out, str(target), "exec")  # syntax safety net before writing
     target.write_text(out)
