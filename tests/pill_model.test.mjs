@@ -168,3 +168,21 @@ test("a current voice missing from VOICES is added to the list", () => {
   assert.equal(known.length, VOICES.length);
   assert.equal(VOICES.includes("am_onyx"), false);
 });
+
+test("a stopped session reads Stopped and cannot be stopped again", () => {
+  const vm = viewModel(snap({ phase: "stopped" }), 0, 0);
+  assert.equal(vm.label, "Stopped");
+  assert.equal(vm.stop.enabled, false);
+  assert.equal(viewModel(snap({ phase: "speaking" }), 0, 0).stop.enabled, true);
+});
+
+test("panel lists at most ten sessions, talking first, then a count of the rest", () => {
+  const sessions = [{ pid: 99, label: "busy", state: "working", position: null }];
+  for (let i = 12; i >= 1; i--) sessions.push({ pid: i, label: "w" + i, state: "waiting", position: i });
+  sessions.push({ pid: 50, label: "now", state: "talking", position: null });
+  const vm = viewModel(snap({ sessions }), 0, 0);
+  assert.equal(vm.queue.length, 10);
+  assert.deepEqual(vm.queue.slice(0, 3).map((r) => r.name), ["now", "w1", "w2"]);
+  assert.equal(vm.queueMore, "+4 more queued");
+  assert.equal(viewModel(snap({ sessions: sessions.slice(0, 3) }), 0, 0).queueMore, "");
+});

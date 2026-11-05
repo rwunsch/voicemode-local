@@ -1,7 +1,7 @@
 // Pure view logic for the voice pill. No DOM. Classic script so it loads from file://
 // in a WebView, and CommonJS-exported so `node --test` can import it.
 (function () {
-  var STALE_MS = 3000;
+  var STALE_MS = 3000, MAX_ROWS = 10;
   var VOICES = ["af_sky", "af_bella", "af_heart", "af_jessica", "af_nicole", "af_nova", "af_sarah", "af_alloy",
     "am_adam", "am_echo", "am_eric", "am_michael", "am_liam", "am_puck", "am_fenrir",
     "bf_alice", "bf_emma", "bf_lily", "bm_daniel", "bm_george", "bm_lewis",
@@ -9,11 +9,16 @@
   var LANGUAGES = ["English", "German"];
   var PAUSE = "\u23F8\uFE0E", RESUME = "\u25B6\uFE0E";
   var LABELS = { speaking: "Speaking", listening: "Listening", working: "Between turns",
-    idle: "Not in a voice turn", paused: "Paused", disconnected: "Disconnected" };
+    idle: "Not in a voice turn", paused: "Paused", stopped: "Stopped", disconnected: "Disconnected" };
 
   function ordinal(n) {
     var s = ["th", "st", "nd", "rd"], v = n % 100;
     return n + (s[(v - 20) % 10] || s[v] || s[0]);
+  }
+
+  function rowRank(r) {
+    if (r.state === "talking") return 0;
+    return r.state === "waiting" ? r.position || 1e6 : 2e6;
   }
 
   function keysFor(platform) {
@@ -31,11 +36,14 @@
       // Never show the last known state: a stale "Listening" is worse than none.
       return { connected: false, phase: "disconnected", label: LABELS.disconnected, mode: "pill", side: null,
         interrupt: off, pause: { enabled: false, label: "Pause", cmd: "pause", icon: PAUSE }, stop: off,
-        pickersEnabled: false, minimizeEnabled: true, dismissEnabled: true, queue: [], voice: null, language: null, keys: [], session: "", stateText: LABELS.disconnected,
+        pickersEnabled: false, minimizeEnabled: true, dismissEnabled: true, queue: [], queueMore: "", voice: null, language: null, keys: [], session: "", stateText: LABELS.disconnected,
         barge: { visible: false, on: false, enabled: false, countText: "" }, voices: VOICES, languages: LANGUAGES };
     }
     var s = snapshot, phase = s.phase || "idle", ui = s.ui || {}, barge = s.barge || {};
     var count = barge.count || 0;
+    var rows = (s.sessions || []).map(function (r, i) { return { r: r, i: i }; }).sort(function (a, b) {
+      return rowRank(a.r) - rowRank(b.r) || a.i - b.i; // whoever is talking first, then the queue in order
+    }).map(function (x) { return x.r; });
     var waiting = (s.sessions || []).filter(function (r) { return r.state === "waiting"; }).length;
     var name = s.floor ? (s.floor.label || "") : "";
     var voices = s.voice && VOICES.indexOf(s.voice) < 0 ? VOICES.concat([s.voice]) : VOICES;
@@ -46,12 +54,13 @@
       interrupt: { enabled: phase === "speaking" || phase === "listening" },
       pause: { enabled: true, label: phase === "paused" ? "Resume" : "Pause",
         cmd: phase === "paused" ? "resume" : "pause", icon: phase === "paused" ? RESUME : PAUSE },
-      stop: { enabled: !!s.floor },
+      stop: { enabled: !!s.floor && phase !== "stopped" },
       pickersEnabled: !!s.floor, minimizeEnabled: true, dismissEnabled: true,
-      queue: (s.sessions || []).map(function (r) {
+      queue: rows.slice(0, MAX_ROWS).map(function (r) {
         var text = r.state === "waiting" && r.position ? "waiting, " + ordinal(r.position) : r.state;
         return { name: r.label || "session " + r.pid, text: text, state: r.state };
       }),
+      queueMore: rows.length > MAX_ROWS ? "+" + (rows.length - MAX_ROWS) + " more queued" : "",
       voice: s.voice || null, language: s.language || null,
       keys: keysFor(s.platform),
       barge: { visible: !!barge.available, on: !!barge.enabled, enabled: true,

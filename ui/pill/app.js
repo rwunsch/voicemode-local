@@ -78,6 +78,9 @@
       var a = document.createElement("span"), b = document.createElement("span");
       a.textContent = r.name; b.textContent = r.text; b.className = "m"; d.append(a, b); q.appendChild(d);
     });
+    if (vm.queueMore) {
+      var more = document.createElement("div"); more.className = "q m"; more.textContent = vm.queueMore; q.appendChild(more);
+    }
     $("keys").replaceChildren.apply($("keys"), vm.keys.map(keysNode));
     if (vm.phase !== lastPhase) { lastPhase = vm.phase; send({ window: { phase: vm.phase } }); } // tray colour
     if (vm.mode !== lastMode) { lastMode = vm.mode; send({ window: { mode: vm.mode, side: vm.side } }); }
