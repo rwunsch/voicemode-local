@@ -9,6 +9,7 @@ when stdin closes, and leaves nothing behind when it is killed outright.
 
 No audio and no microphone: nothing calls converse, speech or transcription.
 HOME and USERPROFILE point into the temp folder, so ~/.voicemode is never touched.
+PATH for everything started has no folder holding ffmpeg or ffprobe.
 
 VML_MODEL_SOURCE, a folder laid out <sha256>/<file name> (FELIX's models folder is),
 is read to seed the ~500 MB of pinned downloads instead of fetching them; setup still
@@ -94,6 +95,16 @@ def install():
            if not k.startswith(("VOICEMODE_", "FELIX_")) and k != "CLAUDE_CODE_SESSION_ID"}
     env.update(HOME=str(home), USERPROFILE=str(home), VOICEMODE_NATIVE_ROOT=str(root),
                VOICEMODE_PILL="false", VOICEMODE_PTT_ENABLED="false", PYTHONUTF8="1")
+    # No ffmpeg for anything we start, as on a machine without it: drop every PATH folder
+    # holding ffmpeg or ffprobe. uv may share such a folder, so it is passed by full path.
+    uv = shutil.which("uv")
+    assert uv, "uv is needed on PATH to run this test"
+    env["VOICEMODE_UV"] = uv
+    env["PATH"] = os.pathsep.join(
+        f for f in env.get("PATH", "").split(os.pathsep)
+        if f and not any(Path(f.strip('"'), n).is_file() for n in ("ffmpeg.exe", "ffprobe.exe")))
+    assert shutil.which("ffmpeg", path=env["PATH"]) is None
+    assert shutil.which("ffprobe", path=env["PATH"]) is None
     try:
         _seed(root)
         started = time.monotonic()
@@ -123,6 +134,9 @@ def test_setup_installs_and_selects_a_patched_runtime(install):
     for name in ("control_transport.py", "voice_pill_state.py", "voice_barge.py", "tools/voice_barge_tool.py"):
         assert (package / name).is_file(), name
     assert (runtime / "services" / "whisper" / "whisper-server.exe").is_file()
+    converse = (package / "tools" / "converse.py").read_text(encoding="utf-8")
+    assert "FELIX: NO FFMPEG" in converse and "FELIX: LOAD SCIPY EARLY" in converse
+    assert "FELIX: NO FFMPEG WARNING" in (package / "server.py").read_text(encoding="utf-8")
     assert (runtime / "services" / "kokoro-onnx-server.py").is_file()
     for item in json.loads(DEPENDENCIES.read_text(encoding="utf-8"))["models"]:
         assert os.stat(runtime / item["path"]).st_nlink >= 2  # a hard link, not a copy

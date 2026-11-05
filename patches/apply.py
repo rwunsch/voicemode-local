@@ -21,6 +21,7 @@ exist is an error, not a skip.
 Usage:
   apply.py [venv-path]               venv-path defaults to the .venv beside patches/
   apply.py --package-dir <voice_mode-dir>
+  add --native-windows for native Windows' list (manifest.windows.json), which has no ffmpeg
 """
 import argparse
 import json
@@ -32,6 +33,8 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 MANIFEST = HERE / "manifest.json"
+# Native Windows only: manifest.json plus FELIX's no-ffmpeg and early-scipy patches.
+NATIVE_WINDOWS_MANIFEST = HERE / "manifest.windows.json"
 
 
 def find_package(venv: Path):
@@ -102,8 +105,15 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("venv", nargs="?", default=str(HERE.parent / ".venv"))
     ap.add_argument("--package-dir", help="the voice_mode directory itself")
-    ap.add_argument("--manifest", default=str(MANIFEST))
+    ap.add_argument("--manifest", default=None, help="default: manifest.json")
+    ap.add_argument("--native-windows", action="store_true",
+                    help="use manifest.windows.json: native Windows, no ffmpeg")
     args = ap.parse_args(argv)
+    if args.manifest and args.native_windows:
+        print("[patches] ERROR: give --manifest or --native-windows, not both")
+        return 1
+    manifest_path = Path(args.manifest) if args.manifest else (
+        NATIVE_WINDOWS_MANIFEST if args.native_windows else MANIFEST)
     if args.package_dir:
         pkg = Path(args.package_dir)
         if not pkg.is_dir():
@@ -114,7 +124,7 @@ def main(argv=None) -> int:
         if pkg is None:
             print(f"[patches] ERROR: Could not find voice_mode in {args.venv}")
             return 1
-    return run(pkg, load_manifest(Path(args.manifest)))
+    return run(pkg, load_manifest(manifest_path))
 
 
 if __name__ == "__main__":

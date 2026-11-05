@@ -28,7 +28,7 @@ where it came from.
 - **Install** (`setup`). Into `<root>\runtime\<digest12>-<random>`: `uv venv --managed-python`
   for Python 3.12, then `uv pip sync --require-hashes --only-binary :all: --link-mode copy
   --compile-bytecode` from `scripts/windows/requirements.lock` (FELIX's lock, unchanged).
-  `patches/apply.py` patches it. whisper-server comes from the pinned zip, and the models are
+  `patches/apply.py --native-windows` patches it. whisper-server comes from the pinned zip, and the models are
   hard links to `<root>\downloads\<sha256>\`. `active.json` is written last, atomically, so a
   half-built runtime is never selected. The folder name has a random suffix, as in FELIX, so a
   rebuild never touches a runtime that is still in use. Setup refuses a root inside FELIX's
@@ -69,26 +69,26 @@ task 8.
 
 ## What is installed, measured
 
-Measured 2026-11-05 on this machine (Windows 11, x64), n=2 installs, by
+Measured 2026-11-05 on this machine (Windows 11, x64), n=3 installs, by
 `tests/test_voicemode_native_windows.py` and a separate `pip download`.
 
 | Item | Download (bytes) | On disk (bytes) | How measured |
 |---|---|---|---|
-| Python packages: 115 wheels, cp312 win_amd64 | 131,574,458 | `.venv` 473,371,861 (20,558 files) | `pip download --require-hashes --only-binary :all: --platform win_amd64 --python-version 3.12` of the lock, filtered by its markers for that target, into a temp folder (deleted); `.venv` summed after setup |
+| Python packages: 115 wheels, cp312 win_amd64 | 131,574,458 | `.venv` 473,371,898 (20,558 files; native patch list) | `pip download --require-hashes --only-binary :all: --platform win_amd64 --python-version 3.12` of the lock, filtered by its markers for that target, into a temp folder (deleted); `.venv` summed after setup |
 | `kokoro-v1.0.onnx` | 325,532,387 | same, in `downloads\` | size and SHA-256 checked by setup |
 | `voices-v1.0.bin` | 28,214,398 | same | as above |
 | `ggml-base.bin` (Whisper base) | 147,951,465 | same | as above |
 | `whisper-bin-x64.zip` (whisper.cpp b5454) | 8,928,640 | zip kept in `downloads\`; unpacked `services\whisper` 17,687,552 | as above; folder summed |
 | Model links in the runtime | 0 | 0 extra | hard links, `st_nlink >= 2` asserted |
 | uv cache | | 0 after setup | removed; asserted absent |
-| **Total** | **642,201,348** | **1,001,686,303** plus two small files (`kokoro-onnx-server.py`, `dependencies.json`) | sums of the rows |
+| **Total** | **642,201,348** | **1,001,686,340** plus two small files (`kokoro-onnx-server.py`, `dependencies.json`) | sums of the rows |
 
 The `downloads\` folder summed to 510,626,890 bytes, exactly the four pinned sizes. Not
 measured: Python 3.12 itself. uv downloads it when it has no managed 3.12, and this machine
 already had one. In the test the four pinned files were copied, read-only, from FELIX's models
 folder (`VML_MODEL_SOURCE`) instead of being downloaded, and setup verified every one.
-Setup took 111 s and 92 s with the models seeded. voice-mode answered `initialize`
-in 10.7-13.0 s (n=4).
+Setup took 111 s, 92 s and 99 s with the models seeded. voice-mode answered `initialize`
+in 10.7-13.0 s (n=4), and 14.0-15.0 s with ffmpeg off PATH (n=2).
 
 ## How to recreate
 
@@ -108,9 +108,13 @@ VML_MODEL_SOURCE='C:\path\to\<sha256>\<file> folder' VM812_SRC=<pristine 8.12.0>
 
 ## Gotchas
 
-- voice-mode 8.12 refuses `converse` when ffmpeg is not on PATH. FELIX patches that gate
-  out; our manifest does not. On this machine ffmpeg is on PATH (from another app), and
-  on a clean machine it would not be. `status` prints a note. This is an open decision.
+- **No ffmpeg natively.** voice-mode 8.12 refuses `converse` without ffmpeg. Native setup
+  therefore applies `patches/manifest.windows.json` (`apply.py --native-windows`): our list
+  plus FELIX's `patch_no_ffmpeg_gate.py`, `patch_no_ffmpeg_warning.py` and
+  `patch_load_scipy_early.py`, in FELIX's place right after `patch_simple_failover.py`. They are copied from
+  aea841ffd and changed only to keep CRLF. WSL and Mac keep ffmpeg and `manifest.json`;
+  `tests/test_native_manifest.py` checks that their output is byte-identical to d30ec68.
+  The Windows test strips every ffmpeg/ffprobe folder from PATH.
 - The root path must stay short: the espeak data path has a 160-byte limit, and Windows a
   260-character one. Setup checks both.
 - The settings resolver reads `~/.voicemode/voicemode.env`, the user's own. The tests point

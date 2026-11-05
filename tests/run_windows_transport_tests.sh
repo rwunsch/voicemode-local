@@ -32,7 +32,7 @@ cleanup() { rm -rf "$DIR"; }
 trap cleanup EXIT
 
 # The whole patch set: apply.py needs every script and module the manifest lists.
-cp "$REPO/patches/"*.py "$REPO/patches/manifest.json" "$DIR/patches/"
+cp "$REPO/patches/"*.py "$REPO/patches/manifest.json" "$REPO/patches/manifest.windows.json" "$DIR/patches/"
 # The native launcher and what it installs.
 cp "$REPO/scripts/windows/voicemode_native.py" "$REPO/scripts/windows/dependencies.json" \
    "$REPO/scripts/windows/requirements.lock" "$DIR/scripts/windows/"

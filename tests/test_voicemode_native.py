@@ -327,13 +327,19 @@ def test_owned_needs_marker_and_port(vn, monkeypatch):
 
 def test_runtime_inputs_cover_lock_servers_and_every_patch(vn):
     names = {p.relative_to(REPO).as_posix() for p in vn.runtime_inputs()}
-    manifest = json.loads((REPO / "patches" / "manifest.json").read_text(encoding="utf-8"))
+    manifest = json.loads((REPO / "patches" / "manifest.windows.json").read_text(encoding="utf-8"))
     listed = {f"patches/{s.get('patch') or s.get('copy')}" for s in manifest["steps"]}
     assert {"scripts/windows/dependencies.json", "scripts/windows/requirements.lock",
-            "kokoro-onnx-server.py", "patches/apply.py", "patches/manifest.json"} <= names
+            "kokoro-onnx-server.py", "patches/apply.py", "patches/manifest.windows.json",
+            "patches/patch_no_ffmpeg_gate.py", "patches/patch_load_scipy_early.py"} <= names
     assert listed <= names
     data, digest = vn.manifest()
     assert re.fullmatch(r"[0-9a-f]{64}", digest)
+
+
+def test_setup_patches_with_the_native_windows_list():
+    source = SCRIPT.read_text(encoding="utf-8")
+    assert '"--native-windows"' in source
 
 
 def test_dependencies_pin_url_size_and_hash(vn):

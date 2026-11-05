@@ -229,10 +229,10 @@ def url(port):
 
 def runtime_inputs():
     """Every file whose bytes go into a runtime; a change to any of them means a new runtime."""
-    patches = json.loads((PATCHES / "manifest.json").read_text(encoding="utf-8"))
+    patches = json.loads((PATCHES / "manifest.windows.json").read_text(encoding="utf-8"))
     steps = [PATCHES / (step.get("patch") or step.get("copy")) for step in patches["steps"]]
     return [DEPENDENCIES, HERE / "requirements.lock", TTS_SERVER,
-            PATCHES / "apply.py", PATCHES / "manifest.json", *steps]
+            PATCHES / "apply.py", PATCHES / "manifest.windows.json", *steps]
 
 
 def manifest():
@@ -465,7 +465,9 @@ def setup(root):
                 if not package_index_reachable():
                     raise OffNetwork(f"Could not reach {PACKAGE_INDEX}") from error
                 raise
-            run([venv_program(runtime, "python"), PATCHES / "apply.py",
+            # The native list: ours plus FELIX's no-ffmpeg and early-scipy patches, as Windows has
+            # no ffmpeg (patches/manifest.windows.json).
+            run([venv_program(runtime, "python"), PATCHES / "apply.py", "--native-windows",
                  "--package-dir", site_packages(venv, data) / "voice_mode"],
                 env={**os.environ, "PYTHONUTF8": "1"})
             install_whisper(data, root, runtime)
@@ -1064,8 +1066,6 @@ def status(root):
             f"{kind} {LOOPBACK}:{e['port']}" if e.get("port") else kind for kind, e in running.items()) + ".")
     else:
         print("Not running; the services start with the voice connector.")
-    if not on_path("ffmpeg"):
-        print("Note: ffmpeg is not on PATH. voice-mode 8.12 refuses to converse without it.")
     print(f"Installed at {runtime}.")
     if not current:
         print("The runtime is out of date: run setup.")
