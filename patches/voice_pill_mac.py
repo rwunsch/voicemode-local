@@ -136,6 +136,12 @@ def resized(edge, x, w, dx, area):
     return (x + w - nw, nw) if edge == "left" else (x, nw)
 
 
+def slide_off(side, area, width):
+    """Where a slide ends, off the screen edge. AppKit refuses a fully off-screen move, so
+    one point stays on screen."""
+    return area[0] - width + 1 if side == "left" else area[0] + area[2] - 1
+
+
 def slide_steps(start, end, n=10):
     """x positions for a slide, ending exactly on `end`."""
     return [start + (end - start) * i // n for i in range(1, n + 1)]
@@ -284,6 +290,7 @@ class App:
         self.lock = threading.Lock()
         self.proc = self.stdin = self.win = self.tray = self.tray_target = None
         self.slide_gen = 0
+        self.sliding = False
         self.closing = self.had_output = self.dragging = False
         self.backoff = 1.0
         self.started = None
@@ -371,6 +378,11 @@ class App:
                 pass
             return
         prev = self.state.mode
+        if "mode" in r[1]:
+            self.slide_gen += 1  # a slide still running must not carry the window past the screen edge
+        elif "height" in r[1] and self.sliding:
+            self.state.on_window(r[1])  # the slide lands through apply() when it ends
+            return
         what = self.state.on_window(r[1])
         if what == "drag":
             self.drag()
@@ -408,7 +420,6 @@ class App:
         native = self.win.native if self.win else None
         if not native or self.closing:
             return
-        self.slide_gen += 1  # a slide still running must not carry the window past the screen edge
         self.update_tray()
         if not self.state.on_screen:
             return AppHelper.callAfter(native.orderOut_, None)
@@ -502,19 +513,26 @@ class App:
         from PyObjCTools import AppHelper
         native = self.win.native
         gen = self.slide_gen
-        if not out:
-            time.sleep(0.03)  # let apply() land
-        fr = run_on_main(lambda: native.frame())
-        area = self.screen()[0]
-        off = area[0] - int(fr.size.width) if self.state.side == "left" else area[0] + area[2]
-        here = int(fr.origin.x)
-        if not out:
-            AppHelper.callAfter(native.setFrameOrigin_, NSMakePoint(off, fr.origin.y))
-        for x in slide_steps(here, off) if out else slide_steps(off, here):
+        self.sliding = True
+        try:
+            if not out:
+                time.sleep(0.03)  # let apply() land
             if gen != self.slide_gen:
                 return
-            AppHelper.callAfter(native.setFrameOrigin_, NSMakePoint(x, fr.origin.y))
-            time.sleep(0.016)
+            fr = run_on_main(lambda: native.frame())
+            off = slide_off(self.state.side, self.screen()[0], int(fr.size.width))
+            here = int(fr.origin.x)
+            if not out:
+                AppHelper.callAfter(native.setFrameOrigin_, NSMakePoint(off, fr.origin.y))
+            for x in slide_steps(here, off) if out else slide_steps(off, here):
+                if gen != self.slide_gen:
+                    return
+                AppHelper.callAfter(native.setFrameOrigin_, NSMakePoint(x, fr.origin.y))
+                time.sleep(0.016)
+        finally:
+            self.sliding = False
+        if not out:
+            self.apply()  # the height may have changed on the way in
 
     def resize(self, edge):
         if self.dragging or self.state.mode in ("docked", "rail"):

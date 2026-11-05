@@ -408,9 +408,32 @@ def test_placing_the_window_stops_a_running_slide():
     ps1 = (REPO / "pill-windows.ps1").read_text()
     body = ps1[ps1.index("void Place() {"):]
     assert body.index("slideTimer.Stop()") < body.index("Move(new RECT")
+
+
+# FELIX-MAC, e4729cd: back from the tab, height messages staled the slide-in after its jump
+# off screen, so nothing brought the rail back. AppKit also refuses a fully off-screen move.
+def _mac_method(name):
     mac = (REPO / "patches/voice_pill_mac.py").read_text()
-    apply_body = mac[mac.index("    def apply(self):"):]
-    assert "self.slide_gen += 1" in apply_body[:apply_body.index("def update_tray")]
+    body = mac[mac.index(f"    def {name}(self"):]
+    return body[:body.index("\n    def ", 10)]
+
+
+def test_off_screen_target_keeps_one_point_on_screen():
+    assert m.slide_off("right", AREA, 76) == 1439
+    assert m.slide_off("left", AREA, 76) == -75
+
+
+def test_only_a_mode_change_cancels_a_slide():
+    body = _mac_method("from_page")
+    assert '"mode" in r[1]' in body and "self.slide_gen += 1" in body
+    assert "slide_gen" not in _mac_method("apply")
+
+
+def test_slide_in_checks_for_a_newer_slide_before_its_jump_and_lands_exactly():
+    body = _mac_method("slide")
+    jump = body.index("setFrameOrigin_")
+    assert "gen != self.slide_gen" in body[:jump]
+    assert "self.apply()" in body[body.index("for x in"):]
 
 
 def test_top_row_order_is_expand_dock_minimize():
