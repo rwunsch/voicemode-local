@@ -92,6 +92,50 @@ def synthesize_wav_bytes(voice, text):
     return buf.getvalue()
 
 
+# voice-mode streams TTS as raw PCM and plays it at a fixed 24 kHz
+# (voice_mode.config.SAMPLE_RATE). Piper models emit their native rate
+# (eva_k-x_low is 16 kHz, thorsten-high 22.05 kHz), so unconverted audio plays
+# back too fast and too high — 1.5x for Eva ("helium voice").
+TARGET_SAMPLE_RATE = 24000
+
+
+def convert_wav(wav_bytes, response_format):
+    """Resample piper WAV output to 24 kHz mono s16, returned as WAV, or as
+    headerless PCM when the client asked for response_format='pcm'."""
+    import io
+    import wave
+    from math import gcd
+
+    import numpy as np
+
+    with wave.open(io.BytesIO(wav_bytes), "rb") as w:
+        rate = w.getframerate()
+        channels = w.getnchannels()
+        frames = w.readframes(w.getnframes())
+
+    samples = np.frombuffer(frames, dtype=np.int16)
+    if channels > 1:
+        samples = samples.reshape(-1, channels).mean(axis=1)
+
+    if rate != TARGET_SAMPLE_RATE:
+        from scipy.signal import resample_poly
+
+        g = gcd(TARGET_SAMPLE_RATE, rate)
+        samples = resample_poly(samples.astype(np.float32), TARGET_SAMPLE_RATE // g, rate // g)
+    pcm = np.clip(np.round(samples), -32768, 32767).astype(np.int16).tobytes()
+
+    if response_format == "pcm":
+        return pcm, "audio/pcm"
+
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(TARGET_SAMPLE_RATE)
+        w.writeframes(pcm)
+    return buf.getvalue(), "audio/wav"
+
+
 class PiperProxyHandler(BaseHTTPRequestHandler):
 
     voices_config = {}
@@ -181,11 +225,17 @@ class PiperProxyHandler(BaseHTTPRequestHandler):
                 return  # error already sent by _synthesize_cli
 
         try:
+            audio_bytes, content_type = convert_wav(wav_bytes, payload.get("response_format", "wav"))
+        except Exception as e:
+            self.send_error(500, f"audio conversion failed: {str(e)[:200]}")
+            return
+
+        try:
             self.send_response(200)
-            self.send_header("Content-Type", "audio/wav")
-            self.send_header("Content-Length", str(len(wav_bytes)))
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(audio_bytes)))
             self.end_headers()
-            self.wfile.write(wav_bytes)
+            self.wfile.write(audio_bytes)
         except BrokenPipeError:
             # Client (voice-mode) gave up before we finished writing. Nothing to
             # recover — just don't crash the handler with a traceback.

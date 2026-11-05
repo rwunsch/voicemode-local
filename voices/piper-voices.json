@@ -21,6 +21,36 @@
       "sample_rate": 16000
     },
     {
+      "id": "p_de_thorsten_emotional",
+      "language": "de",
+      "language_name": "German",
+      "gender": "male",
+      "name": "Thorsten (emotional)",
+      "piper_model": "de_DE-thorsten_emotional-medium",
+      "quality": "medium",
+      "sample_rate": 22050
+    },
+    {
+      "id": "p_de_kerstin",
+      "language": "de",
+      "language_name": "German",
+      "gender": "female",
+      "name": "Kerstin",
+      "piper_model": "de_DE-kerstin-low",
+      "quality": "low",
+      "sample_rate": 16000
+    },
+    {
+      "id": "p_de_ramona",
+      "language": "de",
+      "language_name": "German",
+      "gender": "female",
+      "name": "Ramona",
+      "piper_model": "de_DE-ramona-low",
+      "quality": "low",
+      "sample_rate": 16000
+    },
+    {
       "id": "p_nl_nathalie",
       "language": "nl",
       "language_name": "Dutch",
