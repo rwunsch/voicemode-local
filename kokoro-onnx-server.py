@@ -9,7 +9,7 @@ Requirements:
     pip install kokoro-onnx soundfile numpy
 
 Usage:
-    python3 kokoro-onnx-server.py [--port 8880] [--model-dir ./models/kokoro]
+    python3 kokoro-onnx-server.py [--host 0.0.0.0] [--port 8880] [--model-dir ./models/kokoro]
 """
 
 import argparse
@@ -250,6 +250,9 @@ class TTSHandler(BaseHTTPRequestHandler):
 def main():
     parser = argparse.ArgumentParser(description="Kokoro ONNX TTS Server")
     parser.add_argument("--port", type=int, default=8880, help="Port to listen on")
+    # 0.0.0.0 by default, as before, so WSL (reached from Windows through localhost
+    # forwarding) and Docker keep working. The native Windows launcher passes 127.0.0.1.
+    parser.add_argument("--host", default="0.0.0.0", help="Address to bind (default: 0.0.0.0)")
     parser.add_argument("--model-dir", type=str, default="./models/kokoro",
                         help="Directory for model files")
     parser.add_argument("--de-model-dir", type=str, default=None,
@@ -270,8 +273,8 @@ def main():
     get_kokoro()
     get_kokoro_de()
 
-    server = HTTPServer(("0.0.0.0", args.port), TTSHandler)
-    print(f"Kokoro ONNX TTS server listening on port {args.port}")
+    server = HTTPServer((args.host, args.port), TTSHandler)
+    print(f"Kokoro ONNX TTS server listening on {args.host}:{args.port}", flush=True)
     print(f"  POST /v1/audio/speech  - Generate speech")
     print(f"  GET  /v1/models        - List models")
     print(f"  GET  /health           - Health check")

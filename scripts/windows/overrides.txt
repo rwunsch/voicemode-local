@@ -1,0 +1,3 @@
+# Copied from felix-framework plugins/voicemode/runtime/overrides.txt at commit aea841ffd.
+# simpleaudio is unused by voice-mode but would need a C compiler; never install it.
+simpleaudio ; python_version < "3.0"
