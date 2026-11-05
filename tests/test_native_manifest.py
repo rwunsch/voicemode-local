@@ -68,7 +68,17 @@ def _patches_at(commit, dest):
                           capture_output=True, check=True).stdout
     with tarfile.open(fileobj=io.BytesIO(data)) as archive:
         archive.extractall(dest, filter="data")
-    return dest / "patches"
+    return current_modules(dest / "patches")
+
+
+def current_modules(old):
+    """Lay today's copied modules (manifest.json "copy" steps) over an old patches/ tree.
+    These byte tests check the patching mechanism; a module's content changes by design
+    (main's 5a6cb8d changed voice_pill_state.py) and is covered by its own tests."""
+    steps = json.loads((PATCHES / "manifest.json").read_text(encoding="utf-8"))["steps"]
+    for name in {s["copy"] for s in steps if "copy" in s}:
+        shutil.copyfile(PATCHES / name, old / name)
+    return old
 
 
 def _steps(name):
