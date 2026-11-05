@@ -1,7 +1,7 @@
 # Native Windows runtime, speech services and launcher
 
 > **TL;DR:** `scripts/windows/voicemode_native.py` installs a private runtime under
-> `%LOCALAPPDATA%\voicemode-local`, starts loopback-only speech services on private
+> `%LOCALAPPDATA%\voicemode-local-native`, starts loopback-only speech services on private
 > ports, and is the MCP command on native Windows (no WSL, no Docker). Tested on
 > Windows from install to stop, with no audio. A real spoken conversation is
 > still unproven.
@@ -32,7 +32,13 @@ where it came from.
   hard links to `<root>\downloads\<sha256>\`. `active.json` is written last, atomically, so a
   half-built runtime is never selected. The folder name has a random suffix, as in FELIX, so a
   rebuild never touches a runtime that is still in use. Setup refuses a root inside FELIX's
-  folders. Every download is checked against the URL, size and SHA-256 pinned in
+  folders, and outside the profile and `%LOCALAPPDATA%` unless `--allow-root-outside-profile`
+  is given, because the runtime runs code from that folder. The default root is not the
+  WSL pill's `%LOCALAPPDATA%\voicemode-local`. uv's Python (`UV_PYTHON_INSTALL_DIR`) and its
+  cache live under the root, and the cache is removed after setup, whether it succeeded or
+  failed. Before selecting a runtime, setup has Kokoro synthesise one short text into memory;
+  no sound is output. After selecting it, setup removes every runtime that is neither active
+  nor named by a live lease or a running service. Every download is checked against the URL, size and SHA-256 pinned in
   `scripts/windows/dependencies.json`.
 - **Services.** Kokoro (`kokoro-onnx-server.py --host 127.0.0.1`) and whisper-server
   (`--host 127.0.0.1`, no `--convert`, so no ffmpeg), each on the first free port of
@@ -43,8 +49,9 @@ where it came from.
   `whisper-proxy.py` already had one (commit 951d46e), and a test now pins its default.
   Natively, STT is whisper-server itself, so the proxy is not used.
 - **Launcher** (`launch`, the MCP command). It writes the lease, starts the watchdog, then the
-  TTS and STT services, then the pill (`VOICEMODE_PILL=true`) and the push-to-talk listener
-  (`VOICEMODE_PTT_ENABLED=true`). It waits until TTS and STT answer and checks that the process
+  TTS and STT services, then the pill (`VOICEMODE_PILL=true`). Push-to-talk is refused natively, with
+  one line of explanation on stderr, until task 7: `ptt-listener-windows.ps1` still sends to
+  the WSL relay on 127.0.0.1:8765, so it would drive the WSL install. It waits until TTS and STT answer and checks that the process
   answering is the one it started. Then it runs voice-mode with stdin, stdout and stderr passed
   by name (FELIX's `connector_options`). Settings come from the environment first, then
   `voicemode.env`, through `patches/voice_pill_state.setting`.
@@ -57,6 +64,12 @@ where it came from.
   process is created suspended, put in its job, then resumed, so it cannot start a child
   outside the job first. Process trees are stopped with `kill_tree` (psutil). Nothing calls
   `os.kill(pid, 0)`; a test checks the source for it.
+- **A crashed service.** The watchdog checks every 3 s. If the TTS or STT service has died, it
+  starts it again with the recorded command on the recorded port, but only while that port is
+  free, and at most 3 times in 5 minutes. Each restart is written to `run\watch.log`. Past that limit, or when another program has
+  taken the port, nothing restarts the service until the next connector starts. A connector
+  that is already running keeps the URL it was given. The pill and the listener are never
+  restarted.
 - **Tests.** `tests/test_voicemode_native.py` has 37 Linux tests, and `tests/test_conftest_release_check.py` 3 more. `tests/test_voicemode_native_windows.py`
   has 4 Windows tests, run by `tests/run_windows_transport_tests.sh`. `tests/conftest.py`
   turns a skip caused by a missing `VM812_SRC` into a failure under `VOICEMODE_RELEASE_CHECK=1`,
@@ -64,30 +77,30 @@ where it came from.
 
 Not done here: native modes of `pill-windows.ps1` (task 6; it still throws without
 `-Distro`) and `ptt-listener-windows.ps1` (task 7; it still sends to the WSL relay).
-The launcher starts both only when enabled. MCP registration and `install.ps1` belong to
+The launcher starts the pill only when enabled, and push-to-talk not at all yet. MCP registration and `install.ps1` belong to
 task 8.
 
 ## What is installed, measured
 
-Measured 2026-11-05 on this machine (Windows 11, x64), n=3 installs, by
+Measured 2026-11-05 on this machine (Windows 11, x64), n=4 installs; sizes from the last, by
 `tests/test_voicemode_native_windows.py` and a separate `pip download`.
 
 | Item | Download (bytes) | On disk (bytes) | How measured |
 |---|---|---|---|
-| Python packages: 115 wheels, cp312 win_amd64 | 131,574,458 | `.venv` 473,371,898 (20,558 files; native patch list) | `pip download --require-hashes --only-binary :all: --platform win_amd64 --python-version 3.12` of the lock, filtered by its markers for that target, into a temp folder (deleted); `.venv` summed after setup |
+| Python packages: 115 wheels, cp312 win_amd64 | 131,574,458 | `.venv` 472,963,284 (20,558 files) | `pip download --require-hashes --only-binary :all: --platform win_amd64 --python-version 3.12` of the lock, filtered by its markers for that target, into a temp folder (deleted); `.venv` summed after setup |
 | `kokoro-v1.0.onnx` | 325,532,387 | same, in `downloads\` | size and SHA-256 checked by setup |
 | `voices-v1.0.bin` | 28,214,398 | same | as above |
 | `ggml-base.bin` (Whisper base) | 147,951,465 | same | as above |
 | `whisper-bin-x64.zip` (whisper.cpp b5454) | 8,928,640 | zip kept in `downloads\`; unpacked `services\whisper` 17,687,552 | as above; folder summed |
 | Model links in the runtime | 0 | 0 extra | hard links, `st_nlink >= 2` asserted |
+| Python 3.12, uv-managed, in `<root>\python` | not measured | 125,879,649 | folder summed |
 | uv cache | | 0 after setup | removed; asserted absent |
-| **Total** | **642,201,348** | **1,001,686,340** plus two small files (`kokoro-onnx-server.py`, `dependencies.json`) | sums of the rows |
+| **Total** | **642,201,348** plus Python | **1,064,229,839** in 23,919 files | the whole root after one setup, each hard-linked file counted once |
 
 The `downloads\` folder summed to 510,626,890 bytes, exactly the four pinned sizes. Not
-measured: Python 3.12 itself. uv downloads it when it has no managed 3.12, and this machine
-already had one. In the test the four pinned files were copied, read-only, from FELIX's models
+measured: the size of Python 3.12's download. uv fetches it into the root at setup. In the test the four pinned files were copied, read-only, from FELIX's models
 folder (`VML_MODEL_SOURCE`) instead of being downloaded, and setup verified every one.
-Setup took 111 s, 92 s and 99 s with the models seeded. voice-mode answered `initialize`
+Setup took 111 s, 92 s, 99 s and 105 s with the models seeded. voice-mode answered `initialize`
 in 10.7-13.0 s (n=4), and 14.0-15.0 s with ffmpeg off PATH (n=2).
 
 ## How to recreate

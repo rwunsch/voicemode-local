@@ -118,9 +118,52 @@ def test_optional_services_are_off_unless_enabled(vn, home):
 def test_native_root_default_and_override(vn, home, tmp_path, monkeypatch):
     monkeypatch.setattr(vn, "WINDOWS", True)
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "Local"))
-    assert vn.native_root() == (tmp_path / "Local" / "voicemode-local").resolve()
-    monkeypatch.setenv("VOICEMODE_NATIVE_ROOT", str(tmp_path / "elsewhere"))
-    assert vn.native_root() == (tmp_path / "elsewhere").resolve()
+    assert vn.native_root() == (tmp_path / "Local" / "voicemode-local-native").resolve()
+    monkeypatch.setenv("VOICEMODE_NATIVE_ROOT", str(tmp_path / "Local" / "elsewhere"))
+    assert vn.native_root() == (tmp_path / "Local" / "elsewhere").resolve()
+    monkeypatch.setenv("VOICEMODE_NATIVE_ROOT", str(home / "vml"))
+    assert vn.native_root() == (home / "vml").resolve()
+
+
+def test_default_root_is_not_the_wsl_pills_folder(vn, home, tmp_path, monkeypatch):
+    import re as _re
+    text = (REPO / "pill-windows.ps1").read_text(encoding="utf-8")
+    pill_name = _re.search(r'Join-Path \$env:LOCALAPPDATA "([^"]+)"', text).group(1)
+    monkeypatch.setattr(vn, "WINDOWS", True)
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "Local"))
+    root, pill = vn.native_root(), (tmp_path / "Local" / pill_name).resolve()
+    assert root != pill and pill not in root.parents and root not in pill.parents
+
+
+def test_root_outside_profile_is_refused_unless_allowed(vn, home, tmp_path, monkeypatch):
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "Local"))
+    monkeypatch.setenv("VOICEMODE_NATIVE_ROOT", str(tmp_path / "shared"))
+    with pytest.raises(vn.VoiceError, match="outside your profile"):
+        vn.native_root()
+    assert vn.native_root(allow_outside=True) == (tmp_path / "shared").resolve()
+    rc = vn.main(["status"])
+    assert rc == 1
+
+
+def test_allow_flag_reaches_the_watchdog(vn, tmp_path, monkeypatch):
+    seen = []
+    monkeypatch.setattr(vn, "process_command", lambda pid: None)
+    monkeypatch.setattr(vn.subprocess, "Popen", lambda args, **kw: seen.append(args) or type("P", (), {"pid": 7})())
+    monkeypatch.setattr(vn, "ALLOW_OUTSIDE", True)
+    (tmp_path / "run").mkdir()
+    vn.start_watchdog(tmp_path)
+    assert seen[0][-2:] == ["watch", "--allow-root-outside-profile"]
+
+
+def test_push_to_talk_is_refused_natively_until_task_7(vn, home, monkeypatch, capsys):
+    monkeypatch.setattr(vn, "WINDOWS", True)
+    _env_file(home, "VOICEMODE_PILL=true\nVOICEMODE_PTT_ENABLED=true\n")
+    assert vn.optional_services() == ["pill"]
+    err = capsys.readouterr().err.strip().splitlines()
+    assert len(err) == 1 and "push-to-talk" in err[0] and "8765" in err[0]
+    _env_file(home, "VOICEMODE_PILL=true\n")
+    assert vn.optional_services() == ["pill"]
+    assert capsys.readouterr().err == ""
 
 
 @pytest.mark.parametrize("felix_var", [None, "FELIX_HOME", "FELIX_VOICE_ROOT"])
@@ -173,6 +216,9 @@ class FakeWorld:
         self.vn, self.root, self.events, self.commands, self.next_pid = vn, root, [], {}, 1000
         self.commands[vn.os.getpid()] = "python voicemode_native.py launch"
         monkeypatch.setattr(vn, "spawn", self.spawn)
+        # Fake pids are real numbers on this machine: no signal may ever reach them.
+        monkeypatch.setattr(vn, "WINDOWS", True)
+        monkeypatch.setattr(vn.os, "kill", self.no_signals)
         monkeypatch.setattr(vn, "process_command", lambda pid: self.commands.get(pid))
         monkeypatch.setattr(vn, "process_tree", lambda pid: {pid})
         monkeypatch.setattr(vn, "listener_pids", self.listeners)
@@ -184,6 +230,10 @@ class FakeWorld:
         monkeypatch.setattr(vn, "connector_job", lambda: None)
         monkeypatch.setattr(vn, "connector_options", lambda: {})
         monkeypatch.setattr(vn, "background_options", lambda: {})
+
+    @staticmethod
+    def no_signals(pid, sig):
+        raise AssertionError(f"a test sent signal {sig} to real pid {pid}")
 
     def spawn(self, command, job=None, **kwargs):
         lease = self.root / "run" / "clients" / str(self.vn.os.getpid())
@@ -224,6 +274,7 @@ class FakeProcess:
 def _fake_runtime(vn, root):
     runtime = root / "runtime" / "abc"
     (runtime / "services" / "whisper").mkdir(parents=True)
+    (runtime / ".complete.json").write_text("{}")
     return runtime
 
 
@@ -427,3 +478,143 @@ def test_whisper_proxy_host_default_and_loopback(monkeypatch):
     assert _serve_once(module, monkeypatch, "ThreadingHTTPServer", ["w"]) == ("0.0.0.0", 2022)
     argv = ["w", "--host", "127.0.0.1", "--port", "20"]
     assert _serve_once(module, monkeypatch, "ThreadingHTTPServer", argv) == ("127.0.0.1", 20)
+
+
+# -- leases name their runtime; old runtimes are pruned ----------------------
+
+def test_lease_records_its_runtime(vn, home, tmp_path, monkeypatch):
+    root = tmp_path / "root"
+    FakeWorld(vn, monkeypatch, root)
+    runtime = _fake_runtime(vn, root)
+    vn.ensure_services(root, runtime, {}, optional=[])
+    lease = json.loads((root / "run" / "clients" / str(vn.os.getpid())).read_text())
+    assert lease["runtime"] == str(runtime)
+    state = json.loads((root / "run" / "state.json").read_text())
+    assert state["tts"]["runtime"] == str(runtime) and state["tts"]["command"]
+
+
+def test_a_runtime_replaced_meanwhile_is_not_started(vn, home, tmp_path, monkeypatch):
+    root = tmp_path / "root"
+    world = FakeWorld(vn, monkeypatch, root)
+    runtime = _fake_runtime(vn, root)
+    (runtime / ".complete.json").unlink()
+    with pytest.raises(vn.VoiceError, match="replaced"):
+        vn.ensure_services(root, runtime, {}, optional=[])
+    assert not [e for e in world.events if e.startswith("spawn:")]
+
+
+def test_prune_keeps_active_leased_and_serving_runtimes(vn, tmp_path, monkeypatch):
+    root = tmp_path / "root"
+    for name in ("active", "leased", "serving", "old1", "old2"):
+        (root / "runtime" / name / ".venv").mkdir(parents=True)
+    clients = root / "run" / "clients"
+    clients.mkdir(parents=True)
+    (clients / "50").write_text(json.dumps({"runtime": str(root / "runtime" / "leased")}))
+    (clients / "51").write_text(json.dumps({"runtime": str(root / "runtime" / "old2")}))  # dead
+    commands = {50: "python voicemode_native.py launch", 60: "python kokoro-onnx-server.py --port 28880"}
+    monkeypatch.setattr(vn, "process_command", lambda pid: commands.get(pid))
+    vn.atomic_json(root / "run" / "state.json", {"tts": {
+        "pid": 60, "port": 28880, "marker": "kokoro-onnx-server.py", "runtime": str(root / "runtime" / "serving")}})
+    removed = vn.prune_runtimes(root, "active")
+    assert sorted(removed) == ["old1", "old2"]
+    assert sorted(p.name for p in (root / "runtime").iterdir()) == ["active", "leased", "serving"]
+
+
+# -- setup: uv under the root, cache removed on failure, Kokoro synthesises ----
+
+def test_failed_setup_removes_uv_cache_and_runtime(vn, home, tmp_path, monkeypatch):
+    root = tmp_path / "root"
+    calls = []
+
+    def fake_run(args, **kwargs):
+        calls.append((list(map(str, args)), kwargs.get("env") or {}))
+        Path(kwargs["env"]["UV_CACHE_DIR"]).mkdir(parents=True, exist_ok=True)
+        if "sync" in map(str, args):
+            raise vn.subprocess.CalledProcessError(1, args)
+
+    monkeypatch.setattr(vn, "check_machine", lambda: None)
+    monkeypatch.setattr(vn, "MAX_ESPEAK_PATH", 10_000)  # pytest's tmp paths are long
+    monkeypatch.setattr(vn, "download", lambda item, target: None)
+    monkeypatch.setattr(vn, "run", fake_run)
+    monkeypatch.setattr(vn, "package_index_reachable", lambda: True)
+    monkeypatch.setenv("VOICEMODE_UV", "uv")
+    with pytest.raises(vn.subprocess.CalledProcessError):
+        vn.setup(root)
+    venv_call = calls[0]
+    assert venv_call[1]["UV_PYTHON_INSTALL_DIR"] == str(root / "python")
+    assert venv_call[1]["UV_CACHE_DIR"] == str(root / ".uv-cache")
+    assert not (root / ".uv-cache").exists()
+    assert not list((root / "runtime").iterdir())
+
+
+def _fake_kokoro(tmp_path, samples):
+    pkg = tmp_path / "fake" / "kokoro_onnx"
+    pkg.mkdir(parents=True)
+    (pkg / "__init__.py").write_text(
+        "class Kokoro:\n"
+        "    def __init__(self, model, voices):\n        self.args = (model, voices)\n"
+        f"    def create(self, text, voice, lang):\n        return {samples!r}, 24000\n")
+    return tmp_path / "fake"
+
+
+@pytest.mark.parametrize("samples,ok", [([0.1, 0.2], True), ([], False)])
+def test_synth_check_needs_audio_and_plays_none(vn, tmp_path, samples, ok):
+    import subprocess as sp
+    assert "play" not in vn.SYNTH_CHECK and "sounddevice" not in vn.SYNTH_CHECK
+    env = dict(vn.os.environ, PYTHONPATH=str(_fake_kokoro(tmp_path, samples)))
+    r = sp.run([sys.executable, "-c", vn.SYNTH_CHECK, "m.onnx", "v.bin", "af_sky"],
+               capture_output=True, text=True, env=env)
+    assert (r.returncode == 0) is ok, r.stderr
+
+
+def test_setup_runs_the_synth_check():
+    assert "SYNTH_CHECK" in SCRIPT.read_text(encoding="utf-8").split("def setup(", 1)[1]
+
+
+# -- the watchdog restarts a crashed speech service on its port ---------------
+
+def _serving(vn, monkeypatch, tmp_path):
+    root = tmp_path / "root"
+    world = FakeWorld(vn, monkeypatch, root)
+    runtime = _fake_runtime(vn, root)
+    monkeypatch.setattr(vn, "runtime_environment", lambda runtime, ports=None: {})
+    ports = vn.ensure_services(root, runtime, {}, optional=[])
+    return root, world, ports
+
+
+def _state(root):
+    return json.loads((root / "run" / "state.json").read_text())
+
+
+def test_watchdog_restarts_a_crashed_service_on_the_same_port(vn, home, tmp_path, monkeypatch):
+    root, world, ports = _serving(vn, monkeypatch, tmp_path)
+    old = _state(root)["tts"]["pid"]
+    world.commands.pop(old)  # it crashed
+    world.events.clear()
+    assert vn.watch_tick(root, {}) is True
+    entry = _state(root)["tts"]
+    assert entry["pid"] != old and entry["port"] == ports["tts"]
+    assert [e for e in world.events if e.startswith("spawn:")] == ["spawn:tts"]
+    assert "restarted tts" in (root / "run" / "watch.log").read_text()
+
+
+def test_watchdog_does_not_restart_on_a_taken_port_or_too_often(vn, home, tmp_path, monkeypatch):
+    root, world, ports = _serving(vn, monkeypatch, tmp_path)
+    world.commands.pop(_state(root)["stt"]["pid"])
+    monkeypatch.setattr(vn, "port_free", lambda p: False)
+    world.events.clear()
+    assert vn.watch_tick(root, {}) is True
+    assert not [e for e in world.events if e.startswith("spawn:")]
+    monkeypatch.setattr(vn, "port_free", lambda p: True)
+    restarts = {}
+    for _ in range(vn.MAX_RESTARTS + 2):
+        world.commands.pop(_state(root)["stt"]["pid"], None)
+        vn.watch_tick(root, restarts)
+    assert len([e for e in world.events if e == "spawn:stt"]) == vn.MAX_RESTARTS
+
+
+def test_watchdog_stops_everything_when_no_lease_is_left(vn, home, tmp_path, monkeypatch):
+    root, world, ports = _serving(vn, monkeypatch, tmp_path)
+    (root / "run" / "clients" / str(vn.os.getpid())).unlink()
+    assert vn.watch_tick(root, {}) is False
+    assert sorted(e for e in world.events if e.startswith("kill:")) == ["kill:stt", "kill:tts"]

@@ -19,8 +19,11 @@ Commands
   stop    stop this install's services
   watch   internal: stops the services once no connector is left, then exits
 
-<root> is VOICEMODE_NATIVE_ROOT, else %LOCALAPPDATA%\\voicemode-local, and never inside
-FELIX's folders. Settings come from the process environment first, then voicemode.env,
+<root> is VOICEMODE_NATIVE_ROOT, else %LOCALAPPDATA%\\voicemode-local-native (not the
+WSL pill's %LOCALAPPDATA%\\voicemode-local), never inside FELIX's folders, and inside the
+user's profile or %LOCALAPPDATA% unless --allow-root-outside-profile is given: the
+runtime runs code from it, and a folder elsewhere may be writable by other accounts.
+uv's Python and cache live under it too. Settings come from the process environment first, then voicemode.env,
 through patches/voice_pill_state.setting (the shared resolver).
 
 Speech services listen on 127.0.0.1 only, on the first free port of 28880-28899 (TTS)
@@ -30,7 +33,9 @@ and 12022-12041.
 
 Lifetime: a connector holds a lease while it runs. The services, the pill and the
 listener live in one named Job Object per install that kills them when its last handle
-closes; every connector and the watchdog hold a handle. voice-mode lives in its
+closes; every connector and the watchdog hold a handle. The watchdog restarts a crashed
+TTS or STT service on its own port, at most MAX_RESTARTS times in RESTART_WINDOW
+seconds; past that, the next connector starts a new one. voice-mode lives in its
 connector's own Job Object, so it dies with the connector. Never os.kill(pid, 0): on
 Windows that ends the process instead of checking it.
 
@@ -90,6 +95,19 @@ REQUIRED_FILES = (
     *(("services/whisper/whisper-server.exe",) if WINDOWS else ()),
 )
 WATCH_INTERVAL = 3
+MAX_RESTARTS = 3
+RESTART_WINDOW = 300
+ALLOW_OUTSIDE = False  # --allow-root-outside-profile
+# Kokoro synthesises one short text into a buffer; nothing is played (FELIX's setup check).
+SYNTH_CHECK = (
+    "import sys\n"
+    "from kokoro_onnx import Kokoro\n"
+    "samples, rate = Kokoro(sys.argv[1], sys.argv[2]).create('Voice setup check.', voice=sys.argv[3], "
+    "lang='en-us')\n"
+    "if len(samples) == 0 or rate <= 0:\n"
+    "    sys.exit('Kokoro produced no audio')\n"
+    "print(f'Kokoro synthesised {len(samples)} samples at {rate} Hz into memory; no sound was output')\n"
+)
 START_TIMEOUT = 60
 STOP_TIMEOUT = 5
 MAX_ESPEAK_PATH = 160
@@ -143,8 +161,16 @@ def setting(name, default=None):
 
 
 def optional_services():
-    """The pill and the push-to-talk listener, each only when its setting is exactly true."""
-    return [kind for kind in OPTIONAL if (setting(OPTIONAL_SETTINGS[kind], "") or "").strip() == "true"]
+    """The pill and the push-to-talk listener, each only when its setting is exactly true.
+    Push-to-talk is refused natively until task 7: ptt-listener-windows.ps1 still sends to the WSL
+    relay on 127.0.0.1:8765, so it would drive the WSL install, not this one."""
+    enabled = [kind for kind in OPTIONAL if (setting(OPTIONAL_SETTINGS[kind], "") or "").strip() == "true"]
+    if WINDOWS and "ptt" in enabled:
+        enabled.remove("ptt")
+        print("voicemode-local: push-to-talk not started: its Windows listener still sends to the WSL "
+              "relay on 127.0.0.1:8765 and would drive the WSL install (native mode is task 7).",
+              file=sys.stderr, flush=True)
+    return enabled
 
 
 def felix_roots():
@@ -155,19 +181,39 @@ def felix_roots():
     return {Path(os.path.expanduser(str(r))).resolve() for r in roots}
 
 
-def native_root():
+def profile_folders():
+    """The folders only this user should be able to write: the profile, and LOCALAPPDATA."""
+    folders = [Path.home()]
+    for name in ("USERPROFILE", "LOCALAPPDATA"):
+        if os.environ.get(name):
+            folders.append(Path(os.environ[name]))
+    return [f.resolve() for f in folders]
+
+
+def _inside(path, folder):
+    child, parent = os.path.normcase(str(path)), os.path.normcase(str(folder)).rstrip("\\/")
+    return child == parent or child.startswith(parent + os.sep)
+
+
+def native_root(allow_outside=None):
+    allow_outside = ALLOW_OUTSIDE if allow_outside is None else allow_outside
     raw = setting("VOICEMODE_NATIVE_ROOT")
     if raw:
         root = Path(os.path.expanduser(os.path.expandvars(raw)))
     elif WINDOWS:
-        root = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local") / "voicemode-local"
+        root = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local") / "voicemode-local-native"
     else:
-        root = Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local" / "share") / "voicemode-local"
+        root = Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local" / "share") / "voicemode-local-native"
     root = root.resolve()
     for felix in felix_roots():
         if root == felix or felix in root.parents:
             raise VoiceError(f"{root} is inside FELIX's folder {felix}; voicemode-local never writes there.",
                              "Set VOICEMODE_NATIVE_ROOT to a folder of its own.")
+    if not allow_outside and not any(_inside(root, folder) for folder in profile_folders()):
+        raise VoiceError(f"VOICEMODE_NATIVE_ROOT={root} is outside your profile and LOCALAPPDATA "
+                         f"({', '.join(map(str, profile_folders()))}). The runtime runs code from that "
+                         "folder, and other accounts may be able to write there.",
+                         "Choose a folder inside your profile, or pass --allow-root-outside-profile.")
     return root
 
 
@@ -433,8 +479,16 @@ def setup(root):
     if not uv:
         raise VoiceError("Missing command: uv.", "Install uv (https://docs.astral.sh/uv/), then retry setup.")
     root.mkdir(parents=True, exist_ok=True)
-    uv_cache = root / ".uv-cache"  # private, removed afterwards
-    uv_env = {**os.environ, "UV_CACHE_DIR": str(uv_cache)}
+    uv_cache = root / ".uv-cache"  # private, removed afterwards, also after a failure
+    # uv's Python lives under the root too, so the runtime depends on nothing outside it.
+    uv_env = {**os.environ, "UV_CACHE_DIR": str(uv_cache), "UV_PYTHON_INSTALL_DIR": str(root / "python")}
+    try:
+        return _setup_locked(root, data, expected, uv, uv_env)
+    finally:
+        shutil.rmtree(uv_cache, ignore_errors=True)
+
+
+def _setup_locked(root, data, expected, uv, uv_env):
     with exclusive(root / ".setup.lock"):
         for item in data["models"]:
             download(item, model_source(root, item))
@@ -446,6 +500,7 @@ def setup(root):
             else:
                 if current:
                     relink_models(runtime, data, root)
+                    prune_runtimes(root, runtime.name)
                     print(f"Already installed at {runtime}. Nothing was started.")
                     return runtime
         holders = root / RUNTIMES
@@ -483,14 +538,44 @@ def setup(root):
                  "import voice_mode, kokoro_onnx, soundfile, sounddevice, psutil, "
                  "voice_mode.voice_pill_state, voice_mode.control_transport"],
                 env=runtime_environment(runtime))
+            run([venv_program(runtime, "python"), "-c", SYNTH_CHECK, runtime / "models/kokoro/kokoro-v1.0.onnx",
+                 runtime / "models/kokoro/voices-v1.0.bin", DEFAULT_VOICE], env=runtime_environment(runtime))
             atomic_json(runtime / ".complete.json", {"manifest": expected, "layout": LAYOUT})
             atomic_json(root / "active.json", {"manifest": expected, "runtime": runtime.name})
         except BaseException:
             shutil.rmtree(runtime, ignore_errors=True)
             raise
-        shutil.rmtree(uv_cache, ignore_errors=True)
+    removed = prune_runtimes(root, runtime.name)
+    if removed:
+        print(f"Removed runtimes no longer in use: {', '.join(removed)}.")
     print(f"Installed at {runtime}. Nothing was started and no audio was played or recorded.")
     return runtime
+
+
+def prune_runtimes(root, active):
+    """Remove every runtime that is neither active, nor named by a live lease, nor serving."""
+    run_dir = root / "run"
+    holders = root / RUNTIMES
+    if not holders.is_dir():
+        return []
+    with service_lock(run_dir):
+        keep = {active}
+        for pid in live_leases(run_dir):
+            record = read_json(run_dir / "clients" / str(pid), {})
+            if isinstance(record, dict) and record.get("runtime"):
+                keep.add(Path(record["runtime"]).name)
+        for entry in (read_json(run_dir / "state.json", {}) or {}).values():
+            if owned(entry) and entry.get("runtime"):
+                keep.add(Path(entry["runtime"]).name)
+        removed = []
+        for folder in sorted(holders.iterdir()):
+            if folder.is_dir() and folder.name not in keep:
+                try:
+                    shutil.rmtree(folder)
+                    removed.append(folder.name)
+                except OSError as error:  # a file in use: it is not selected, so the next setup retries
+                    print(f"voicemode-local: could not remove {folder} yet: {error}", file=sys.stderr)
+        return removed
 
 
 # -- Windows Job Objects -------------------------------------------------------
@@ -877,8 +962,11 @@ def ensure_services(root, runtime, env, optional=None):
     with service_lock(run_dir):
         # The lease and the watchdog first: a launcher killed at any later point cannot leave
         # services without supervision.
+        if not (runtime / ".complete.json").is_file():
+            raise VoiceError(f"The runtime {runtime.name} was replaced while starting.",
+                             "Restart the voice connector.")
         (run_dir / "clients").mkdir(exist_ok=True)
-        (run_dir / "clients" / str(os.getpid())).write_text("")
+        atomic_json(run_dir / "clients" / str(os.getpid()), {"runtime": str(runtime)})
         start_watchdog(root)
         state = read_json(run_dir / "state.json", {}) or {}
         for kind in (*SPEECH, *optional):
@@ -896,7 +984,8 @@ def ensure_services(root, runtime, env, optional=None):
             with log.open("a") as output:
                 process = spawn(command, job=job, env=env, stdin=subprocess.DEVNULL, stdout=output,
                                 stderr=output, **background_options())
-            state[kind] = {"pid": process.pid, "port": port, "marker": marker, "log": str(log)}
+            state[kind] = {"pid": process.pid, "port": port, "marker": marker, "log": str(log),
+                           "command": [str(c) for c in command], "runtime": str(runtime)}
             started[kind] = process
             try:
                 atomic_json(run_dir / "state.json", state)
@@ -939,21 +1028,63 @@ def start_watchdog(root):
         if command and "voicemode_native.py watch" in command:
             return
     env = dict(os.environ, VOICEMODE_NATIVE_ROOT=str(root))
-    process = subprocess.Popen([sys.executable, str(SCRIPT), "watch"], env=env, stdin=subprocess.DEVNULL,
+    command = [sys.executable, str(SCRIPT), "watch", *(["--allow-root-outside-profile"] if ALLOW_OUTSIDE else [])]
+    process = subprocess.Popen(command, env=env, stdin=subprocess.DEVNULL,
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **background_options())
     pid_file.write_text(str(process.pid))
 
 
 def watch(root):
-    """Hold the services' job open; stop the services once no lease is alive, then exit."""
+    """Hold the services' job open; restart a crashed speech service; stop the services once no
+    lease is alive, then exit."""
     services_job(root)
-    run_dir = root / "run"
+    restarts = {}
     while True:
         time.sleep(WATCH_INTERVAL)
-        with service_lock(run_dir):
-            if not live_leases(run_dir):
-                stop_recorded(run_dir, read_json(run_dir / "state.json", {}) or {})
-                return
+        if not watch_tick(root, restarts):
+            return
+
+
+def _watch_log(run_dir, line):
+    with (run_dir / "watch.log").open("a", encoding="utf-8") as log:
+        log.write(time.strftime("%Y-%m-%d %H:%M:%S ") + line + "\n")
+
+
+def watch_tick(root, restarts):
+    """One look: False once everything is stopped. A TTS or STT service that died is started again
+    with its recorded command on its recorded port, at most MAX_RESTARTS times in RESTART_WINDOW
+    seconds, and only while that port is free."""
+    run_dir = root / "run"
+    with service_lock(run_dir):
+        if not live_leases(run_dir):
+            stop_recorded(run_dir, read_json(run_dir / "state.json", {}) or {})
+            return False
+        state = read_json(run_dir / "state.json", {}) or {}
+        changed = False
+        now = time.monotonic()
+        for kind in SPEECH:
+            entry = state.get(kind)
+            if not isinstance(entry, dict) or not entry.get("command") or owned(entry):
+                continue
+            recent = [t for t in restarts.get(kind, []) if now - t < RESTART_WINDOW]
+            restarts[kind] = recent
+            if len(recent) >= MAX_RESTARTS:
+                continue  # the next connector starts a new one
+            if not port_free(entry["port"]):
+                _watch_log(run_dir, f"{kind} died; port {entry['port']} is taken, not restarted")
+                continue
+            with open(entry["log"], "a") as output:
+                process = spawn(entry["command"], job=services_job(root),
+                                env=runtime_environment(Path(entry["runtime"])), stdin=subprocess.DEVNULL,
+                                stdout=output, stderr=output, **background_options())
+            _watch_log(run_dir, f"restarted {kind} on port {entry['port']}: process {process.pid} "
+                                f"(was {entry['pid']})")
+            entry["pid"] = process.pid
+            restarts[kind].append(now)
+            changed = True
+        if changed:
+            atomic_json(run_dir / "state.json", state)
+    return True
 
 
 def release(root):
@@ -1018,7 +1149,7 @@ def launch(root):
             child = spawn([str(venv_program(runtime, "voice-mode"))], job=connector_job(), env=env,
                           **connector_options())
             # If this launcher dies, its voice-mode keeps the lease alive until it ends too.
-            atomic_json(root / "run" / "clients" / str(os.getpid()), {"child": child.pid})
+            atomic_json(root / "run" / "clients" / str(os.getpid()), {"child": child.pid, "runtime": str(runtime)})
             while True:
                 try:
                     return child.wait(timeout=1)
@@ -1090,7 +1221,8 @@ def restart_with_runtime_python(root, command):
         return None  # the command itself reports what is missing
     # Only the inner launcher is in this job: its services and voice-mode go in jobs of their own.
     job = Job(silent_breakaway=True)
-    child = spawn([str(python), str(SCRIPT), command], job=job,
+    flag = ["--allow-root-outside-profile"] if ALLOW_OUTSIDE else []
+    child = spawn([str(python), str(SCRIPT), command, *flag], job=job,
                   env=dict(os.environ, VOICEMODE_NATIVE_ROOT=str(root)), **connector_options())
     return child.wait()
 
@@ -1098,7 +1230,11 @@ def restart_with_runtime_python(root, command):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("command", choices=["setup", "launch", "serve", "status", "stop", "watch"])
+    parser.add_argument("--allow-root-outside-profile", action="store_true",
+                        help="accept a VOICEMODE_NATIVE_ROOT outside the profile and LOCALAPPDATA")
     args = parser.parse_args(argv)
+    global ALLOW_OUTSIDE
+    ALLOW_OUTSIDE = args.allow_root_outside_profile
     try:
         root = native_root()
         if WINDOWS and args.command != "setup":

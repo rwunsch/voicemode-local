@@ -150,7 +150,17 @@ def test_setup_installs_and_selects_a_patched_runtime(install):
           f".venv {size(runtime / '.venv'):,}; whisper {size(runtime / 'services' / 'whisper'):,}; "
           f"downloads {size(root / 'downloads'):,}; files in .venv "
           f"{sum(1 for p in (runtime / '.venv').rglob('*') if p.is_file()):,}")
-    again =subprocess.run([sys.executable, str(SCRIPT), "setup"], env=install["env"],
+    seen, total = set(), 0
+    for path in root.rglob("*"):
+        if path.is_file():
+            info = path.stat()
+            if (info.st_dev, info.st_ino) not in seen:  # a hard-linked model counts once
+                seen.add((info.st_dev, info.st_ino))
+                total += info.st_size
+    print(f"[sizes] root after one setup {total:,} bytes in {len(seen):,} files; "
+          f"uv Python {size(root / 'python'):,}")
+    assert (root / "python").is_dir()  # uv's Python lives under the root
+    again = subprocess.run([sys.executable, str(SCRIPT), "setup"], env=install["env"],
                            capture_output=True, text=True, timeout=300)
     assert again.returncode == 0 and "Already installed" in again.stdout, again.stdout + again.stderr
 
@@ -200,6 +210,23 @@ def test_services_answer_on_loopback_only_then_stop(install):
                     assert probe.connect_ex((address, port)) != 0, f"{address}:{port} answered"
         running = _ours(install["base"])
         print(f"[serve] our processes while serving: {len(running)}")
+        # A crashed TTS service: the watchdog starts it again on the same port.
+        state = json.loads((install["root"] / "run" / "state.json").read_text(encoding="utf-8"))
+        crashed = state["tts"]["pid"]
+        subprocess.run(["taskkill", "/PID", str(crashed), "/T", "/F"], capture_output=True)
+        deadline, back = time.monotonic() + 90, False
+        while time.monotonic() < deadline and not back:
+            time.sleep(1)
+            try:
+                with NO_PROXY.open(f"http://127.0.0.1:{ports['tts']}/v1/models", timeout=2) as r:
+                    back = r.status == 200
+            except OSError:
+                pass
+        state = json.loads((install["root"] / "run" / "state.json").read_text(encoding="utf-8"))
+        print(f"[serve] TTS killed (process {crashed}); back on port {ports['tts']}: {back}, "
+              f"now process {state['tts']['pid']}")
+        assert back and state["tts"]["pid"] != crashed and state["tts"]["port"] == ports["tts"]
+        assert _listening_addresses(ports["tts"]) == {"127.0.0.1"}
         proc.stdin.close()
         assert proc.wait(60) == 0
     finally:
