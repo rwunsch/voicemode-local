@@ -357,13 +357,29 @@ def use_panel():
     BrowserView.WindowHost = PillPanel
 
 
+def _pill_state():
+    """voice_pill_state beside this file, by path (it is stdlib only)."""
+    mod = sys.modules.get("_vml_pill_state")
+    if mod is None:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("_vml_pill_state", HERE / "voice_pill_state.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        sys.modules["_vml_pill_state"] = mod
+    return mod
+
+
 class App:
+    @property
+    def pos_file(self) -> Path:
+        """In the pill's own folder, which follows VOICEMODE_BASE_DIR."""
+        return _pill_state().default_base() / "window-position.txt"
+
     def __init__(self, force, backend):
         self.force = force
         self.backend = backend
         self.state = WindowState()
         self.pos = None
-        self.pos_file = Path.home() / ".voicemode" / "pill" / "window-position.txt"
         self.lock = threading.Lock()
         self.proc = self.stdin = self.win = self.tray = self.tray_target = None
         self.slide_gen = 0

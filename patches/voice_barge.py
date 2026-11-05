@@ -185,12 +185,13 @@ def prepend_preroll(audio: np.ndarray, listen_started_at, sample_rate: int, path
     while not path.exists() and waited < wait_s:
         sleep(0.02)
         waited += 0.02
+    # Server side, after recording: one read and one delete, never a retry sleep.
     try:
-        raw = _retrying(path.read_bytes)
+        raw = path.read_bytes()
     except OSError:
         return audio  # unreadable: leave it; the age check discards it later
     try:
-        _retrying(os.unlink, path)
+        os.unlink(path)
     except OSError:
         pass  # Windows, still busy: the age check discards a leftover
     if len(raw) < PREROLL_HEADER.size or listen_started_at is None:

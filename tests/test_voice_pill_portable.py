@@ -81,6 +81,21 @@ def test_base_dir_expands_variables_and_tilde_like_upstream(monkeypatch, tmp_pat
     assert st.voicemode_base() == tmp_path / "home" / "vm2"
 
 
+def test_base_dir_from_voicemode_env_like_the_server(monkeypatch, tmp_path):
+    # config.py loads voicemode.env into the environment before reading BASE_DIR.
+    _env_file(tmp_path, f"VOICEMODE_BASE_DIR={tmp_path / 'fb'}\r\n".encode())
+    assert st.voicemode_base() == tmp_path / "fb"
+    assert st.default_base() == tmp_path / "fb" / "pill"
+    assert st.control_socket_path() == tmp_path / "fb" / "control.sock"
+    monkeypatch.setenv("VOICEMODE_BASE_DIR", str(tmp_path / "env"))
+    assert st.voicemode_base() == tmp_path / "env"
+
+
+def test_base_dir_from_the_file_expands_like_upstream(monkeypatch, tmp_path):
+    _env_file(tmp_path, b"VOICEMODE_BASE_DIR=~/vmx\n")
+    assert st.voicemode_base() == tmp_path / "home" / "vmx"
+
+
 def test_empty_base_dir_means_the_default(monkeypatch, tmp_path):
     monkeypatch.setenv("VOICEMODE_BASE_DIR", "")
     assert st.voicemode_base() == tmp_path / "home" / ".voicemode"
@@ -374,6 +389,22 @@ def test_lock_uses_a_far_byte_with_msvcrt(monkeypatch, tmp_path):
         f.close()
 
 
+def test_msvcrt_lock_is_unlocked_before_close(monkeypatch, tmp_path):
+    fake = FakeMsvcrt()
+    monkeypatch.setattr(vp, "fcntl", None)
+    monkeypatch.setattr(vp, "msvcrt", fake)
+    f = vp.acquire_lock(tmp_path / "pill")
+    vp.release_lock(f)
+    assert fake.calls[-1] == (vp.LOCK_OFFSET, fake.LK_UNLCK, 1)
+    assert f.closed
+
+
+def test_release_lock_on_posix_just_closes(tmp_path):
+    f = vp.acquire_lock(tmp_path / "pill")
+    vp.release_lock(f)
+    assert f.closed and vp.acquire_lock(tmp_path / "pill") is not None
+
+
 def test_lock_taken_with_msvcrt_returns_none(monkeypatch, tmp_path):
     monkeypatch.setattr(vp, "fcntl", None)
     monkeypatch.setattr(vp, "msvcrt", FakeMsvcrt(held=True))
@@ -480,6 +511,7 @@ def test_written_state_is_utf8(tmp_path):
 
 
 def test_read_retries_on_windows(monkeypatch, tmp_path, windows):
+    monkeypatch.setattr(st, "_READ_RETRY", True)  # the backend's mode
     (tmp_path / "x.json").write_text('{"a": 1}')
     monkeypatch.setattr(st, "_read_bytes", _flaky(st._read_bytes, 2))
     assert st._read_json(tmp_path / "x.json") == {"a": 1}
@@ -490,6 +522,72 @@ def test_unlink_retries_on_windows(monkeypatch, tmp_path, windows):
     monkeypatch.setattr(st.os, "unlink", _flaky(os.unlink, 2))
     st.set_paused(False, os.getpid(), base=tmp_path)
     assert not (tmp_path / "paused.json").exists()
+
+
+@pytest.fixture
+def sleeps(monkeypatch):
+    seen = []
+    monkeypatch.setattr(st, "_retry_sleep", seen.append)
+    return seen
+
+
+def _all_busy(monkeypatch):
+    def busy(p):
+        raise PermissionError(13, "sharing violation")
+    monkeypatch.setattr(st, "_read_bytes", busy)
+
+
+def test_server_side_reads_never_sleep(monkeypatch, tmp_path, windows, sleeps):
+    base = tmp_path / "pill"
+    st.set_paused(True, os.getpid(), base=base)
+    st.register_session(os.getpid(), "demo", None, base=base)
+    _all_busy(monkeypatch)
+    assert st.is_paused(base=base) is False
+    assert st.get_override(1, base=base) == {}
+    assert st.effective_voice(1, "v", base=base) == "v"
+    assert st.beeps_choice(base=base) is None
+    assert st.result_note(1, base=base) == ""
+    assert st.interruptions_since(0, base=base) == 0
+    st.voicemode_base()
+    assert sleeps == []
+
+
+def test_a_stale_pause_is_removed_without_sleeping(monkeypatch, tmp_path, windows, sleeps):
+    base = tmp_path / "pill"
+    st._base(base)
+    (base / "paused.json").write_text(json.dumps({"owner": 999999999, "start": "x"}))
+    monkeypatch.setattr(st, "_control_transport", lambda: FakeTransport({}))
+    monkeypatch.setattr(st.os, "unlink", _flaky(os.unlink, 10 ** 6))
+    assert st.is_paused(base=base) is False
+    assert sleeps == []
+
+
+def test_preroll_read_never_sleeps(monkeypatch, tmp_path, windows, sleeps):
+    import numpy as np
+    path = tmp_path / "pre.bin"
+    vb.write_preroll(path, np.zeros(160, dtype=np.float32), 1.0)
+    monkeypatch.setattr(vb, "_retrying", st._retrying)
+    real = Path.read_bytes
+    monkeypatch.setattr(Path, "read_bytes", lambda self: (_ for _ in ()).throw(PermissionError(13, "busy"))
+                        if self == path else real(self))
+    out = vb.prepend_preroll(np.zeros(10, dtype=np.int16), 1.5, 16000, path=path, wait_s=0)
+    assert len(out) == 10 and sleeps == []
+
+
+def test_backend_reads_retry(monkeypatch, tmp_path, windows, sleeps):
+    monkeypatch.setattr(st, "_READ_RETRY", True)
+    base = tmp_path / "pill"
+    st.register_session(os.getpid(), "demo", None, base=base)
+    _all_busy(monkeypatch)
+    st.live_sessions(base=base)
+    assert sleeps
+
+
+def test_the_backend_turns_read_retries_on(monkeypatch):
+    monkeypatch.setattr(st, "_READ_RETRY", False)
+    monkeypatch.setattr(vp, "run_stdio", lambda ctx: None)
+    assert vp.main([]) == 0
+    assert st._READ_RETRY is True
 
 
 def _unreadable(monkeypatch, path):
@@ -523,6 +621,33 @@ def test_an_unreadable_pause_is_kept_and_reads_as_not_paused(monkeypatch, tmp_pa
     assert (base / "paused.json").exists()
 
 
+def test_an_alive_pid_with_an_unknown_start_is_kept(monkeypatch, tmp_path):
+    base = tmp_path / "pill"
+    st.register_session(os.getpid(), "demo", None, base=base)
+    monkeypatch.setattr(st, "process_start", lambda pid: None)  # e.g. ps failed
+    assert [s["pid"] for s in st.live_sessions(base=base)] == [os.getpid()]
+    st.set_paused(True, os.getpid(), base=base)
+    assert st.is_paused(base=base) is True
+
+
+def test_a_session_registered_without_a_start_is_kept_while_alive(monkeypatch, tmp_path):
+    base = tmp_path / "pill"
+    monkeypatch.setattr(st, "process_start", lambda pid: None)
+    st.register_session(os.getpid(), "demo", None, base=base)
+    monkeypatch.undo()
+    monkeypatch.setattr(st, "_retry_sleep", lambda s: None)
+    assert [s["pid"] for s in st.live_sessions(base=base)] == [os.getpid()]
+
+
+def test_a_dead_pid_with_an_unknown_start_is_removed(monkeypatch, tmp_path):
+    base = tmp_path / "pill"
+    import subprocess as sp
+    p = sp.Popen([sys.executable, "-c", "pass"]); p.wait()
+    monkeypatch.setattr(st, "process_start", lambda pid: None)
+    st.register_session(p.pid, "ghost", None, base=base)
+    assert st.live_sessions(base=base) == []
+
+
 def test_a_missing_or_corrupt_session_is_still_removed(tmp_path):
     base = tmp_path / "pill"
     st.register_session(os.getpid(), "demo", None, base=base)
@@ -538,6 +663,35 @@ def test_read_json_state_tells_missing_from_unreadable(monkeypatch, tmp_path):
     (tmp_path / "ok.json").write_text('{"a": 1}')
     _unreadable(monkeypatch, tmp_path / "ok.json")
     assert st._read_json_state(tmp_path / "ok.json") == ({}, "unreadable")
+
+
+# -- other clients of the resolver ---------------------------------------------
+
+def test_ptt_client_socket_follows_upstream_config(monkeypatch, tmp_path):
+    ptt = _load("vml_ptt_portable", "ptt_control_client.py")
+    monkeypatch.delenv("VOICEMODE_CONTROL_SOCKET_PATH", raising=False)
+    assert ptt.socket_path() == tmp_path / "home" / ".voicemode" / "control.sock"
+    monkeypatch.setenv("VOICEMODE_BASE_DIR", str(tmp_path / "rt"))
+    assert ptt.socket_path() == tmp_path / "rt" / "control.sock"
+    monkeypatch.setenv("VOICEMODE_CONTROL_SOCKET_PATH", str(tmp_path / "old.sock"))
+    assert ptt.socket_path() == tmp_path / "old.sock"
+    monkeypatch.setenv("VOICEMODE_CONTROL_SOCKET", str(tmp_path / "up.sock"))
+    assert ptt.socket_path() == tmp_path / "up.sock"
+
+
+def test_mac_pill_position_file_is_in_the_pill_folder(monkeypatch, tmp_path):
+    mac = _load("vml_mac_portable", "voice_pill_mac.py")
+    app = mac.App(False, "backend")
+    assert app.pos_file == tmp_path / "home" / ".voicemode" / "pill" / "window-position.txt"
+    monkeypatch.setenv("VOICEMODE_BASE_DIR", str(tmp_path / "rt"))
+    assert app.pos_file == tmp_path / "rt" / "pill" / "window-position.txt"
+
+
+@pytest.mark.parametrize("filename", ["ptt_control_client.py", "voice_pill_mac.py"])
+def test_no_fixed_pill_or_socket_path_in_other_clients(filename):
+    src = (PATCHES / filename).read_text(encoding="utf-8")
+    assert '"~/.voicemode/control.sock"' not in src
+    assert '".voicemode" / "pill"' not in src
 
 
 # -- 7. a configurable barge control command ----------------------------------
@@ -561,10 +715,21 @@ def test_barge_command_from_a_bare_path(monkeypatch, tmp_path):
     assert st.barge_control("off") == "off"
 
 
-def test_barge_command_from_voicemode_env(tmp_path):
-    ctl = _script(tmp_path)
+def test_barge_command_in_voicemode_env_is_ignored(monkeypatch, tmp_path):
+    # upstream's update_config lets a model write any key into voicemode.env:
+    # a command there must never run.
+    marker = tmp_path / "ran"
+    ctl = _script(tmp_path, body=f'touch "{marker}"')
     _env_file(tmp_path, f"VOICEMODE_BARGE_CONTROL_COMMAND={ctl}\r\n".encode())
-    assert st.barge_control("status") == "status"
+    switch = _script(tmp_path, "voicemode-switch")
+    monkeypatch.setattr(st, "default_switch", lambda: switch)
+    assert st.barge_control("status") == "barge status"
+    assert not marker.exists()
+
+
+def test_barge_control_docstring_keeps_the_promise():
+    assert "model output never reaches" in st.barge_control.__doc__
+    assert "environment only" in st.barge_command.__doc__
 
 
 def test_barge_command_missing_executable(monkeypatch, tmp_path):

@@ -8,7 +8,9 @@ cached, because FELIX gives each runtime its own.  Writes are atomic (temp file 
 os.replace); a missing, corrupt or half-written file reads as empty and never
 raises.  On Windows a file another process has open cannot be replaced or
 deleted for a moment, so writes and deletes retry, and a file that could not be
-read is left alone rather than treated as gone.
+read is left alone rather than treated as gone.  Reads retry only in the pill
+backend (``allow_read_retries``): the server's recording and event loops read
+once and never sleep.
 
 Upstream's own files stay where upstream keeps them, in the home folder's
 .voicemode whatever the base dir (conch.py:133 the conch, config.py:33
@@ -41,6 +43,13 @@ _KEEP_INTERRUPTIONS = 1000
 # Windows sharing violations: a reader's open handle blocks os.replace/unlink.
 _RETRIES = 20
 _RETRY_S = 0.025
+_READ_RETRY = False  # reads retry only where a sleep is harmless: the pill backend
+
+
+def allow_read_retries(on: bool = True) -> None:
+    """For the pill backend's own process; never the voice server's."""
+    global _READ_RETRY
+    _READ_RETRY = bool(on)
 
 
 def _on_windows() -> bool:
@@ -72,9 +81,15 @@ def upstream_home() -> Path:
 
 
 def voicemode_base() -> Path:
-    """Upstream's base dir (config.py:545: VOICEMODE_BASE_DIR, variables then ~ expanded),
-    else ~/.voicemode. Read on every call; an empty setting means unset."""
-    raw = os.environ.get("VOICEMODE_BASE_DIR")
+    """Upstream's base dir (config.py:545: VOICEMODE_BASE_DIR, variables then ~ expanded).
+
+    From the environment, else from upstream_home()'s voicemode.env (the server loads
+    that file into its environment first, config.py:521-527), else ~/.voicemode. Read
+    on every call; an empty setting means unset. Limit: upstream also loads project
+    .voicemode.env files found walking up from its working folder; the pill backend
+    has no session working folder, so those are not followed.
+    """
+    raw = os.environ.get("VOICEMODE_BASE_DIR") or read_env_file().get("VOICEMODE_BASE_DIR")
     if raw:
         return Path(os.path.expanduser(os.path.expandvars(raw)))
     return upstream_home()
@@ -95,7 +110,7 @@ def read_env_file(home=None) -> dict:
     """KEY=value pairs from voicemode.env: UTF-8 (BOM allowed), CRLF tolerated, comments
     and ``export`` skipped, surrounding quotes dropped, the last assignment wins."""
     try:
-        text = _retrying(_read_bytes, env_file(home)).decode("utf-8-sig", errors="replace")
+        text = _read_policy(env_file(home)).decode("utf-8-sig", errors="replace")
     except OSError:
         return {}
     out = {}
@@ -178,9 +193,30 @@ def process_start(pid: int) -> str | None:
         return None
 
 
+def pid_exists(pid) -> bool:
+    """Is there a process with this pid? Never os.kill(pid, 0) on Windows: it terminates."""
+    if not isinstance(pid, int) or pid <= 0:
+        return False
+    if _on_windows():
+        return windows_pid_alive(pid)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
 def _alive_same(pid, start) -> bool:
+    """Same process as the one recorded. With either start time unknown (ps failed, or
+    none was recorded) an alive pid is kept: losing a live session is worse."""
     cur = process_start(pid)
-    return cur is not None and cur == start
+    if cur is not None and start is not None:
+        return cur == start
+    return pid_exists(pid)
 
 
 def windows_pid_alive(pid: int) -> bool:
@@ -216,11 +252,16 @@ def _read_bytes(path) -> bytes:
         return f.read()
 
 
+def _read_policy(path) -> bytes:
+    """One read, or retried reads in the pill backend only (see allow_read_retries)."""
+    return _retrying(_read_bytes, path) if _READ_RETRY else _read_bytes(path)
+
+
 def _read_json_state(path: Path, want=dict):
     """(object, status): status is ok, missing, invalid (corrupt or the wrong shape) or
     unreadable (it exists but could not be read: busy on Windows, or no access)."""
     try:
-        raw = _retrying(_read_bytes, path)
+        raw = _read_policy(path)
     except FileNotFoundError:
         return want(), "missing"
     except OSError:
@@ -340,7 +381,11 @@ def is_paused(base=None) -> bool:
         return True
     # Remove it: on non-Linux every owner check spawns ps, and the recording loop
     # calls this each chunk, so a crashed pill must cost one spawn, not one per chunk.
-    _unlink(path)
+    # One attempt, no retry sleeps: this is the recording loop.
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
     return False
 
 
@@ -451,7 +496,7 @@ def record_interruption(t: float, base=None) -> None:
 
 def _interruption_times(path: Path) -> list[float]:
     try:
-        lines = _retrying(_read_bytes, path).decode("utf-8", errors="replace").splitlines()
+        lines = _read_policy(path).decode("utf-8", errors="replace").splitlines()
     except OSError:
         return []
     out = []
@@ -594,12 +639,13 @@ BARGE_COMMAND_SETTING = "VOICEMODE_BARGE_CONTROL_COMMAND"
 def barge_command(switch=None):
     """(argv prefix, error). The action is appended to the prefix.
 
-    An explicit ``switch`` wins; else the setting VOICEMODE_BARGE_CONTROL_COMMAND
-    (environment first, then voicemode.env): a JSON list of strings, executable
-    first, or a bare path to one executable; else ``voicemode-switch barge``.
+    An explicit ``switch`` wins; else VOICEMODE_BARGE_CONTROL_COMMAND, read from the
+    environment only -- never voicemode.env, which upstream's update_config tool lets a
+    model write: a JSON list of strings, executable first, or a bare path to one
+    executable; else ``voicemode-switch barge``.
     """
     if switch is None:
-        raw = (setting(BARGE_COMMAND_SETTING, "") or "").strip()
+        raw = (os.environ.get(BARGE_COMMAND_SETTING) or "").strip()
         if raw:
             if raw.startswith("["):
                 try:
@@ -626,7 +672,8 @@ def barge_command(switch=None):
 def barge_control(action: str, switch=None) -> str:
     """Run the barge control command with ``<action>``, by default
     ``voicemode-switch barge <action>``. The action is checked against a fixed
-    list, so model output never reaches the command line."""
+    list and the command comes from the environment or the caller only, so
+    model output never reaches the command line."""
     action = (action or "").strip().lower()
     if action not in ("on", "off", "status"):
         return "action must be on, off or status"

@@ -133,8 +133,11 @@ now shows by colour only. Whether the old or new cost affects stutter was not me
   backend logs the reason once, as `voice control channel refused: ... most likely the voice
   server runs elevated`. Inferred from Windows' token rules and covered by a unit test; not
   yet run with a real elevated server.
-- Paths: the pill's own files (the `pill` folder, barge pre-roll, interruptions) follow
-  `VOICEMODE_BASE_DIR`, else `~/.voicemode`. The conch, its queue and `voicemode.env` are
+- Paths: the pill's own files (the `pill` folder, barge pre-roll, interruptions, the Mac
+  window position) follow `VOICEMODE_BASE_DIR`, taken from the environment, else from
+  `~/.voicemode/voicemode.env`, else `~/.voicemode`. Project `.voicemode.env` files, which
+  upstream finds by walking up from its working folder, are not followed: the backend has
+  no session working folder. The conch, its queue and `voicemode.env` are
   read from the home folder's `.voicemode`, where upstream keeps them whatever the base dir
   (`conch.py:133`, `config.py:33`). The control socket follows upstream's `config.py:697`.
 - Settings: `VOICEMODE_PILL` and `VOICEMODE_AUDIO_FEEDBACK` come from the environment first,
@@ -143,7 +146,8 @@ now shows by colour only. Whether the old or new cost affects stutter was not me
   environment is only the default.
 - The barge toggle runs `VOICEMODE_BARGE_CONTROL_COMMAND` with `on` or `off` appended, when
   set: a JSON list of strings or one executable path. Otherwise it runs
-  `voicemode-switch barge`.
+  `voicemode-switch barge`. That setting is read from the process environment only, never
+  from `voicemode.env`, because upstream's `update_config` tool lets a model write that file.
 - For FELIX: there the toggle changes a FELIX preference, not `voicemode.env`, so the pill
   cannot read the new state from the file. FELIX's barge control command will also need a
   `status` mode that the pill can ask.

@@ -78,19 +78,7 @@ class Context:
 # -- conch files -------------------------------------------------------------
 
 def pid_alive(pid) -> bool:
-    if not isinstance(pid, int) or pid <= 0:
-        return False
-    if st._on_windows():
-        return st.windows_pid_alive(pid)  # os.kill(pid, 0) would terminate it there
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    except OSError:
-        return False
-    return True
+    return st.pid_exists(pid)  # never os.kill(pid, 0) on Windows: it terminates
 
 
 def _expired(iso) -> bool:
@@ -318,6 +306,17 @@ def acquire_lock(base):
     return f
 
 
+def release_lock(f) -> None:
+    """Unlock, then close: Windows releases a closed handle's locks only eventually."""
+    if fcntl is None and msvcrt is not None:
+        try:
+            f.seek(LOCK_OFFSET)
+            msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
+        except OSError:
+            pass
+    f.close()
+
+
 def _release_pause(ctx):
     """If this process owns the pause, lift it, and tell the server (harmless without a socket)."""
     if st._read_json(ctx.base / "paused.json").get("owner") == os.getpid():
@@ -418,6 +417,7 @@ def main(argv=None) -> int:
     if lock is None:
         print("voice_pill: another backend is running", file=sys.stderr)
         return 1
+    st.allow_read_retries()  # this process may sleep on a busy file; the server may not
     _install_stop_signals()
     try:
         run_stdio(ctx)
@@ -429,7 +429,7 @@ def main(argv=None) -> int:
             raise
     finally:
         _release_pause(ctx)
-        lock.close()
+        release_lock(lock)
     return 0
 
 

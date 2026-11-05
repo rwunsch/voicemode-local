@@ -46,21 +46,40 @@ from typing import Optional
 
 logger = logging.getLogger("voicemode.ptt")
 
-# Matches upstream's config.CONTROL_SOCKET_PATH default. Read from the same env
-# var (VOICEMODE_CONTROL_SOCKET, config.py) so a user who moved the socket does
-# not have to configure it twice. VOICEMODE_CONTROL_SOCKET_PATH is the name this
-# file used to read by mistake; still honoured as a fallback.
-DEFAULT_SOCKET = "~/.voicemode/control.sock"
+# Upstream's config.CONTROL_SOCKET_PATH (config.py:697): VOICEMODE_CONTROL_SOCKET,
+# else BASE_DIR/control.sock, resolved by voice_pill_state so a user who moved
+# the socket or the base dir does not have to configure it twice.
+# VOICEMODE_CONTROL_SOCKET_PATH is the name this file used to read by mistake;
+# still honoured as a fallback.
 
 CONNECT_TIMEOUT = 0.5   # a local unix socket answers instantly or not at all
 STATUS_TIMEOUT = 0.5
 
 
 def socket_path() -> Path:
-    raw = (os.getenv("VOICEMODE_CONTROL_SOCKET")
-           or os.getenv("VOICEMODE_CONTROL_SOCKET_PATH")
-           or DEFAULT_SOCKET)
-    return Path(os.path.expanduser(raw))
+    legacy = os.getenv("VOICEMODE_CONTROL_SOCKET_PATH")
+    if legacy and not os.getenv("VOICEMODE_CONTROL_SOCKET"):
+        return Path(os.path.expanduser(legacy))
+    return _pill_state().control_socket_path()
+
+
+_STATE_FILE = Path(__file__).with_name("voice_pill_state.py")
+_STATE = None
+
+
+def _pill_state():
+    """The path resolver: the installed voice_mode's, or the file beside this one."""
+    global _STATE
+    installed = sys.modules.get("voice_mode.voice_pill_state")
+    if installed is not None:
+        return installed
+    if _STATE is None:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("_vml_pill_state", _STATE_FILE)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _STATE = mod
+    return _STATE
 
 
 # Where the transport may come from: the installed voice_mode package, or the
