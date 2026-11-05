@@ -29,8 +29,11 @@
 The logic lives in voice_pill_state.py, which needs no server imports. A failure
 there must not cost a turn, so the converse helpers catch and log.
 
-Apply after patch_voice_barge, whose output it anchors on. Anchors verified against
-voice-mode 8.12.0 (2026-11-04). Idempotent; fails loudly on drift.
+Apply after patch_voice_barge, whose output it anchors on. The session label comes
+from patch_session_name's ``_vml_session_name`` when that patch has run; without it
+(FELIX's tree) the patch carries a smaller label of its own: VOICEMODE_SESSION_NAME,
+else the folder name. Anchors verified against voice-mode 8.12.0 (2026-11-05), with
+and without the hold and session-name patches. Idempotent; fails loudly on drift.
 
 Usage: patch_voice_pill.py <control_channel.py|control_socket.py|converse.py|streaming.py>
 """
@@ -221,6 +224,17 @@ CONVERSE = [
 ]
 
 
+def _read(target: Path):
+    """The file as LF text, and whether it used CRLF. UTF-8 whatever the locale."""
+    text = target.read_bytes().decode("utf-8")
+    return text.replace("\r\n", "\n"), "\r\n" in text
+
+
+def _write(target: Path, text: str, crlf: bool) -> None:
+    """Write UTF-8 in the file's own line endings."""
+    target.write_bytes((text.replace("\n", "\r\n") if crlf else text).encode("utf-8"))
+
+
 def _stream_wrapper(name: str):
     return (f"{name}: report live playback",
             f"async def {name}(\n",
@@ -240,6 +254,36 @@ def _stream_wrapper(name: str):
 STREAMING = [_stream_wrapper(n) for n in
              ("stream_pcm_audio", "stream_cartesia_pcm", "stream_with_buffering")]
 
+# Without patch_session_name: the label patch_session_name would give, minus the
+# files under fixed home paths (an install may move its home, so none are read here).
+SESSION_NAME_DEF = "\ndef _vml_session_name() -> str:"
+OWN_LABEL_CALL = "_voice_pill_session_name()"
+OWN_LABEL = (
+    "def _voice_pill_session_name() -> str:\n"
+    '    """The session label without patch_session_name: the env override, else the folder."""\n'
+    "    try:\n"
+    '        name = (os.getenv("VOICEMODE_SESSION_NAME") or "").strip() or Path(os.getcwd()).name\n'
+    '        return name[:64] or "converse"\n'
+    "    except Exception:  # a label must never cost the turn\n"
+    '        return "converse"\n'
+    "\n"
+    "\n"
+)
+
+
+def _converse_edits(src: str):
+    if SESSION_NAME_DEF in src:
+        return CONVERSE
+    edits = []
+    for name, anchor, repl in CONVERSE:
+        if name == "helpers and recording wrapper":
+            enter = "async def _voice_pill_enter(voice: Optional[str]) -> Optional[str]:\n"
+            assert repl.count(enter) == 1 and repl.count("_vml_session_name()") == 1
+            repl = repl.replace("_vml_session_name()", OWN_LABEL_CALL).replace(enter, OWN_LABEL + enter)
+        edits.append((name, anchor, repl))
+    return edits
+
+
 TARGETS = {"control_channel.py": CHANNEL, "control_socket.py": SOCKET,
            "converse.py": CONVERSE, "streaming.py": STREAMING}
 
@@ -249,10 +293,12 @@ def apply(target: Path) -> int:
     if edits is None:
         print(f"[patch_voice_pill] ERROR: unexpected target {target.name}", file=sys.stderr)
         return 1
-    src = target.read_text()
+    src, crlf = _read(target)
     if MARKER in src:
         print(f"  already patched: {target}")
         return 0
+    if edits is CONVERSE:
+        edits = _converse_edits(src)
     for name, anchor, _ in edits:
         count = src.count(anchor)
         if count != 1:
@@ -263,7 +309,7 @@ def apply(target: Path) -> int:
     for _, anchor, repl in edits:
         out = out.replace(anchor, repl, 1)
     compile(out, str(target), "exec")
-    target.write_text(out)
+    _write(target, out, crlf)
     print(f"  patched (voice pill): {target}")
     return 0
 

@@ -651,11 +651,21 @@ def test_anchor_drift_fails_loudly(tmp_path):
     assert "ANCHOR DRIFT" in r.stderr
 
 
-def test_apply_sh_runs_it_after_barge_on_every_target():
-    text = (PATCHES / "apply.sh").read_text()
-    barge = text.index('"$SCRIPT_DIR/patch_voice_barge.py" "$VM_DIR/tools/converse.py"')
+def test_manifest_runs_it_after_barge_on_every_target():
+    barge = _manifest_index(patch="patch_voice_barge.py", targets="tools/converse.py")
     for target in ("control_channel.py", "control_socket.py", "tools/converse.py", "streaming.py"):
-        assert text.index(f'"$SCRIPT_DIR/patch_voice_pill.py" "$VM_DIR/{target}"') > barge
+        assert _manifest_index(patch="patch_voice_pill.py", targets=target) > barge
+
+
+def _manifest_index(**match):
+    """Position of the first manifest step whose fields contain ``match``."""
+    import json
+    steps = json.loads((PATCHES / "manifest.json").read_text(encoding="utf-8"))["steps"]
+    for i, step in enumerate(steps):
+        if all(v in step.get(k, ()) if isinstance(step.get(k), list) else step.get(k) == v
+               for k, v in match.items()):
+            return i
+    raise AssertionError(f"no manifest step with {match}")
 
 
 def test_beeps_switch_gates_every_chime(work):
@@ -682,7 +692,8 @@ def test_chime_obeys_the_switch(work, st, choice, env_on, plays):
     assert bool(played) is plays
 
 
-def test_apply_sh_installs_the_modules_before_patching_code_that_imports_them():
-    # A patch failing under set -e must not leave a converse.py importing a module not yet there.
-    src = (PATCHES / "apply.sh").read_text()
-    assert src.index('cp "$SCRIPT_DIR/$_m" "$VM_DIR/$_m"') < src.index('patch_voice_pill.py" "$VM_DIR/control_channel.py"')
+def test_manifest_installs_the_modules_before_patching_code_that_imports_them():
+    # apply.py stops at a failing patch, so a converse.py must never import a module not yet there.
+    pill = _manifest_index(patch="patch_voice_pill.py", targets="control_channel.py")
+    for module in ("voice_pill_state.py", "voice_barge.py", "control_transport.py"):
+        assert _manifest_index(copy=module) < pill

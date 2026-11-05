@@ -19,9 +19,12 @@ putting a small try/finally wrapper in its place, so upstream's body is
 untouched. Covers the buffered player and the turns[] player. patch_voice_pill
 does the same for the chunked streaming path.
 
-Apply after patch_control_hold / patch_hold_barges_in, whose output it anchors on.
-Anchors verified against voice-mode 8.12.0 (2026-11-04). Idempotent; fails loudly
-on drift.
+With the hold patches (patch_control_hold) present, control_channel.py is edited on
+their output exactly as before; without them, on pristine 8.12 text. The hold marker
+decides, so a hold-patched file whose anchors drifted fails rather than falling back.
+The other three files never needed the hold patches. Anchors verified against
+voice-mode 8.12.0 (2026-11-05), with and without the hold patches. Idempotent; fails
+loudly on drift.
 
 Usage: patch_voice_barge.py <control_channel.py|control_socket.py|core.py|converse.py>
 """
@@ -29,7 +32,61 @@ import sys
 from pathlib import Path
 
 MARKER = "voicemode-local voice barge"
+HOLD_MARKER = "voicemode-local ptt hold"
 
+SPEAKING_FIELDS = (
+    f"        self._speaking: bool = False  # {MARKER}\n"
+    "        self._barged: bool = False\n"
+    "        self._listen_started_at = None\n"
+)
+SPEAKING_METHODS = (
+    f"    # {MARKER}: live playback state, set by the players.\n"
+    "    def set_speaking(self, speaking: bool) -> None:\n"
+    "        with self._cond:\n"
+    "            self._speaking = speaking\n"
+    "\n"
+    "    @property\n"
+    "    def is_speaking(self) -> bool:\n"
+    "        with self._cond:\n"
+    "            return self._speaking\n"
+    "\n"
+    "    def request_barge_in(self) -> bool:\n"
+    '        """Cut TTS and advance to listening, only if TTS is playing. Checked\n'
+    "        under the lock, so it cannot land after playback ended and be read as\n"
+    '        "end this turn". Stop still dominates."""\n'
+    "        with self._cond:\n"
+    "            if not self._speaking or self._state == STATE_STOPPED:\n"
+    "                return False\n"
+    "            self._state = STATE_SKIP_FORWARD\n"
+    "            self._barged = True\n"
+    "            self._listen_started_at = None\n"
+    "            self._cond.notify_all()\n"
+    "            return True\n"
+    "\n"
+    "    def take_barged(self) -> bool:\n"
+    '        """Was the last cut made by voice? Separate from reset(), which runs\n'
+    '        before the listen path needs the answer."""\n'
+    "        with self._cond:\n"
+    "            barged, self._barged = self._barged, False\n"
+    "            return barged\n"
+    "\n"
+    "    def mark_listen_started(self, t: float) -> None:\n"
+    "        with self._cond:\n"
+    "            self._listen_started_at = t\n"
+    "\n"
+    "    @property\n"
+    "    def listen_started_at(self):\n"
+    "        with self._cond:\n"
+    "            return self._listen_started_at\n"
+    "\n"
+)
+
+BARGE_DISPATCH = (
+    "        elif self.command == COMMAND_BARGE_IN:\n"
+    f"            state.request_barge_in()  # {MARKER}\n"
+)
+
+# control_channel.py after patch_control_hold.
 CHANNEL = [
     ("command constant",
      'COMMAND_HOLD_END = "hold_end"\n',
@@ -41,57 +98,41 @@ CHANNEL = [
      "                  COMMAND_HOLD_START, COMMAND_HOLD_END, COMMAND_BARGE_IN)\n"),
     ("command dispatch",
      "            state.request_hold_end()  # voicemode-local ptt hold\n",
-     "            state.request_hold_end()  # voicemode-local ptt hold\n"
-     "        elif self.command == COMMAND_BARGE_IN:\n"
-     f"            state.request_barge_in()  # {MARKER}\n"),
+     "            state.request_hold_end()  # voicemode-local ptt hold\n" + BARGE_DISPATCH),
     ("speaking field",
      "        self._holding: bool = False\n",
-     "        self._holding: bool = False\n"
-     f"        self._speaking: bool = False  # {MARKER}\n"
-     "        self._barged: bool = False\n"
-     "        self._listen_started_at = None\n"),
+     "        self._holding: bool = False\n" + SPEAKING_FIELDS),
     ("speaking methods",
      "    def request_hold_start(self) -> bool:\n",
-     f"    # {MARKER}: live playback state, set by the players.\n"
-     "    def set_speaking(self, speaking: bool) -> None:\n"
-     "        with self._cond:\n"
-     "            self._speaking = speaking\n"
+     SPEAKING_METHODS + "    def request_hold_start(self) -> bool:\n"),
+]
+
+# control_channel.py without the hold patches (pristine 8.12, or FELIX's tree).
+PRISTINE_ALLOWLIST = ("VALID_COMMANDS = (COMMAND_PAUSE, COMMAND_RESUME, COMMAND_STOP, "
+                      "COMMAND_SKIP_FORWARD, COMMAND_SKIP_BACK")
+CHANNEL_NO_HOLD = [
+    ("command constant and allowlist",
+     PRISTINE_ALLOWLIST + ")\n",
+     f"# {MARKER}: skip_forward, but a no-op unless TTS is playing.\n"
+     'COMMAND_BARGE_IN = "barge_in"\n'
      "\n"
-     "    @property\n"
-     "    def is_speaking(self) -> bool:\n"
-     "        with self._cond:\n"
-     "            return self._speaking\n"
+     + PRISTINE_ALLOWLIST + ",\n"
+     "                  COMMAND_BARGE_IN)\n"),
+    ("command dispatch",
+     "        elif self.command == COMMAND_SKIP_FORWARD:\n"
+     "            state.request_skip_forward()\n",
+     "        elif self.command == COMMAND_SKIP_FORWARD:\n"
+     "            state.request_skip_forward()\n" + BARGE_DISPATCH),
+    ("speaking field",
+     "        self._pending_transport: Optional[str] = None\n"
      "\n"
-     "    def request_barge_in(self) -> bool:\n"
-     '        """Cut TTS and advance to listening, only if TTS is playing. Checked\n'
-     "        under the lock, so it cannot land after playback ended and be read as\n"
-     '        "end this turn". Stop still dominates."""\n'
-     "        with self._cond:\n"
-     "            if not self._speaking or self._state == STATE_STOPPED:\n"
-     "                return False\n"
-     "            self._state = STATE_SKIP_FORWARD\n"
-     "            self._barged = True\n"
-     "            self._listen_started_at = None\n"
-     "            self._cond.notify_all()\n"
-     "            return True\n"
+     "    # --- mutations (listener side) ---------------------------------------\n",
+     "        self._pending_transport: Optional[str] = None\n" + SPEAKING_FIELDS +
      "\n"
-     "    def take_barged(self) -> bool:\n"
-     '        """Was the last cut made by voice? Separate from reset(), which runs\n'
-     '        before the listen path needs the answer."""\n'
-     "        with self._cond:\n"
-     "            barged, self._barged = self._barged, False\n"
-     "            return barged\n"
-     "\n"
-     "    def mark_listen_started(self, t: float) -> None:\n"
-     "        with self._cond:\n"
-     "            self._listen_started_at = t\n"
-     "\n"
-     "    @property\n"
-     "    def listen_started_at(self):\n"
-     "        with self._cond:\n"
-     "            return self._listen_started_at\n"
-     "\n"
-     "    def request_hold_start(self) -> bool:\n"),
+     "    # --- mutations (listener side) ---------------------------------------\n"),
+    ("speaking methods",
+     "    def reset(self) -> None:\n",
+     SPEAKING_METHODS + "    def reset(self) -> None:\n"),
 ]
 
 SOCKET = [
@@ -182,15 +223,28 @@ TARGETS = {"control_channel.py": CHANNEL, "control_socket.py": SOCKET,
            "core.py": CORE, "converse.py": CONVERSE}
 
 
+def _read(target: Path):
+    """The file as LF text, and whether it used CRLF. UTF-8 whatever the locale."""
+    text = target.read_bytes().decode("utf-8")
+    return text.replace("\r\n", "\n"), "\r\n" in text
+
+
+def _write(target: Path, text: str, crlf: bool) -> None:
+    """Write UTF-8 in the file's own line endings."""
+    target.write_bytes((text.replace("\n", "\r\n") if crlf else text).encode("utf-8"))
+
+
 def apply(target: Path) -> int:
     edits = TARGETS.get(target.name)
     if edits is None:
         print(f"[patch_voice_barge] ERROR: unexpected target {target.name}", file=sys.stderr)
         return 1
-    src = target.read_text()
+    src, crlf = _read(target)
     if MARKER in src:
         print(f"  already patched: {target}")
         return 0
+    if edits is CHANNEL and HOLD_MARKER not in src:
+        edits = CHANNEL_NO_HOLD
     for name, anchor, _ in edits:
         count = src.count(anchor)
         if count != 1:
@@ -201,7 +255,7 @@ def apply(target: Path) -> int:
     for _, anchor, repl in edits:
         out = out.replace(anchor, repl, 1)
     compile(out, str(target), "exec")
-    target.write_text(out)
+    _write(target, out, crlf)
     print(f"  patched (voice barge): {target}")
     return 0
 

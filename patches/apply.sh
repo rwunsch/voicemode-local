@@ -1,11 +1,14 @@
 #!/bin/bash
 # Apply voicemode-local patches to the installed voice_mode package.
-# Portable: works on Linux/WSL, macOS, and Windows (Git Bash/WSL).
 #
 # Usage: ./patches/apply.sh [venv-path]
 #   venv-path defaults to the .venv in this repo directory.
 #
-# Anchors verified against voice-mode 8.12.0 (2026-09-05).
+# The work is done by patches/apply.py, in the order patches/manifest.json lists:
+# the hard-link break, every patch run and every copied module. This wrapper only
+# picks the venv's Python, as it always did, so callers need not change. apply.py
+# was checked byte-identical to the shell version it replaced
+# (tests/test_apply_py.py); docs/patching/README.md says why each step is there.
 #
 # HISTORY — what used to live here and why it is gone (see
 # docs/superpowers/plans/artifacts/2026-09-05-patch-audit.md for the evidence):
@@ -28,180 +31,8 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_DIR="$(dirname "$SCRIPT_DIR")"
 VENV_DIR="${1:-$REPO_DIR/.venv}"
 
-# Find the voice_mode package directory
-VM_DIR=""
-for pyver in "$VENV_DIR"/lib/python*/site-packages/voice_mode; do
-    if [ -d "$pyver" ]; then
-        VM_DIR="$pyver"
-        break
-    fi
-done
-
-# Also check Windows-style venv layout
-if [ -z "$VM_DIR" ] && [ -d "$VENV_DIR/Lib/site-packages/voice_mode" ]; then
-    VM_DIR="$VENV_DIR/Lib/site-packages/voice_mode"
-fi
-
-if [ -z "$VM_DIR" ]; then
-    echo "[patches] ERROR: Could not find voice_mode in $VENV_DIR"
-    exit 1
-fi
-
 PYBIN="$VENV_DIR/bin/python"
 [ -x "$PYBIN" ] || PYBIN="$VENV_DIR/Scripts/python.exe"
 [ -x "$PYBIN" ] || PYBIN="python3"
 
-# Break hardlinks before patching (validated 2026-09-05).
-#
-# `uv pip install` populates a venv by HARDLINKING from ~/.cache/uv, so a file
-# in site-packages typically has link count > 1 and is shared with the cache
-# entry AND with every other venv built from it. Patching in place therefore
-# writes through to all of them: measured 4 test venvs sharing inode 14004386
-# with links=5, where patching one made a supposedly pristine venv report
-# "already patched" and poisoned the cache for every future install.
-#
-# Replacing each target with a private copy first makes patching local to this
-# venv. Cheap, idempotent, and a no-op when pip (which copies) was used instead.
-unshare_file() {
-    if [ -f "$1" ] && [ "$(stat -c %h "$1" 2>/dev/null || stat -f %l "$1" 2>/dev/null || echo 1)" -gt 1 ]; then
-        cp -p "$1" "$1.vmltmp" && mv -f "$1.vmltmp" "$1"
-        echo "[patches] unshared hardlink: $1"
-    fi
-}
-for _f in "$VM_DIR/tools/converse.py" "$VM_DIR/simple_failover.py" \
-          "$VM_DIR/control_channel.py" "$VM_DIR/core.py" \
-          "$VM_DIR/control_socket.py" "$VM_DIR/streaming.py"; do
-    unshare_file "$_f"
-done
-
-# Never truncate active speech at listen_duration_max: once the user has
-# started speaking, the listen window extends until the normal silence exit
-# (bounded by VOICEMODE_LISTEN_OVERRUN).
-#
-# STILL NEEDED as of 8.12.0. Upstream's stall backstop (8.11.0) is explicitly
-# NOT a length cap — converse.py:1462 says so — so the loop is still bounded by
-# `recording_duration < max_duration` and a user still talking at 60s/120s is
-# cut off mid-word. Upstreamed as docs/upstream/pr-listen-overrun.md.
-if [ -f "$SCRIPT_DIR/patch_listen_overrun.py" ]; then
-    "$PYBIN" "$SCRIPT_DIR/patch_listen_overrun.py" "$VM_DIR/tools/converse.py"
-fi
-
-# Stop the turns[] playback thread when converse is cancelled. Without it a
-# cancelled multi-turn converse plays its turn to the end, and on shutdown
-# mcp.run() cannot return (asyncio.Runner.close() joins the default executor),
-# so the old process lingers and its WSLg sink-input mixes with the next
-# instance's -> stutter + stale trailing audio. (Paired with the reap logic in
-# voicemode-mcp.) Downstream carry of upstream PR #555 / issue #554.
-#
-# Replaced patch_shutdown_abort.py on 2026-10-01: that force-exited AFTER
-# mcp.run() returned, but the wait is inside mcp.run(), so it could not reach
-# this (12.6s vs 13.0s linger, n=1 each; this fix: 0.37-0.46s, n=3).
-if [ -f "$SCRIPT_DIR/patch_turns_playback_stop.py" ]; then
-    "$PYBIN" "$SCRIPT_DIR/patch_turns_playback_stop.py" "$VM_DIR/tools/converse.py"
-fi
-
-# Remove the silent OpenAI voice swap: upstream maps a local voice (af_sky) to
-# an OpenAI voice (nova) when it falls through to the OpenAI endpoint, so a
-# Kokoro/Piper outage silently switches the user to a cloud voice mid-
-# conversation. Policy here is "OpenAI last-resort, no silent swaps".
-#
-# STILL NEEDED as of 8.12.0 — simple_failover.py:84-97 still carries the
-# voice_mapping table. Upstreamed as docs/upstream/pr-no-silent-voice-swap.md.
-if [ -f "$SCRIPT_DIR/patch_simple_failover.py" ]; then
-    "$PYBIN" "$SCRIPT_DIR/patch_simple_failover.py" "$VM_DIR/simple_failover.py"
-fi
-
-# Give each session a distinguishable name in the conch. Upstream hardcodes
-# agent_name="converse" (converse.py:3360), so concurrent sessions are
-# indistinguishable in `voicemode conch status` -- the one thing that makes a
-# multi-session queue readable. The payload field already exists; only the
-# population is missing. Restores what voice_queue.session_project() did.
-# Upstreamed as docs/upstream/pr-session-names.md.
-if [ -f "$SCRIPT_DIR/patch_session_name.py" ]; then
-    "$PYBIN" "$SCRIPT_DIR/patch_session_name.py" "$VM_DIR/tools/converse.py"
-fi
-
-# Push-to-talk: a level-triggered *hold* on upstream's control channel.
-#
-# 8.11's control channel already covers two thirds of PTT -- skip_forward is
-# press-to-barge-in AND short-press-to-end-turn. The missing third is the hold:
-# mic open exactly while the key is down, with silence detection suppressed so
-# a pause mid-thought doesn't end the turn. These two patches add a hold_start/
-# hold_end intent pair mirroring the existing skip_forward pair (~100 lines),
-# replacing the old 1,984-line patch_converse_ptt/patch_core_ptt approach.
-#
-# Order-independent of patch_listen_overrun (verified byte-identical either way):
-# that one rewrites the `while (...)` header, these touch the init line above it
-# and two sites in the body.
-if [ -f "$SCRIPT_DIR/patch_control_hold.py" ]; then
-    "$PYBIN" "$SCRIPT_DIR/patch_control_hold.py" "$VM_DIR/control_channel.py"
-fi
-if [ -f "$SCRIPT_DIR/patch_converse_hold.py" ]; then
-    "$PYBIN" "$SCRIPT_DIR/patch_converse_hold.py" "$VM_DIR/tools/converse.py"
-fi
-
-# A hold also cuts TTS, so PTT is a single command. A client cannot tell whether
-# playback is live (status' now_playing is the previous COMPLETED utterance), so
-# pairing hold_start with a guessed skip_forward was unreliable -- the hold does
-# the barge-in itself instead. Touches both playback poll sites.
-if [ -f "$SCRIPT_DIR/patch_hold_barges_in.py" ]; then
-    "$PYBIN" "$SCRIPT_DIR/patch_hold_barges_in.py" "$VM_DIR/core.py"
-    "$PYBIN" "$SCRIPT_DIR/patch_hold_barges_in.py" "$VM_DIR/tools/converse.py"
-    "$PYBIN" "$SCRIPT_DIR/patch_hold_barges_in.py" "$VM_DIR/streaming.py"
-fi
-
-# Tool-description note: German voices (dm_martin, p_de_*) get German text only.
-# Reaches every MCP client, unlike the CLAUDE.md rule. See docs/german-kokoro/.
-if [ -f "$SCRIPT_DIR/patch_voice_language.py" ]; then
-    "$PYBIN" "$SCRIPT_DIR/patch_voice_language.py" "$VM_DIR/tools/converse.py"
-fi
-
-# Voice barge-in: report live playback, and a barge_in command that only acts
-# while TTS is playing. Anchors on the hold patches above, so it must follow them.
-# See docs/voice-barge-in/README.md.
-if [ -f "$SCRIPT_DIR/patch_voice_barge.py" ]; then
-    "$PYBIN" "$SCRIPT_DIR/patch_voice_barge.py" "$VM_DIR/control_channel.py"
-    "$PYBIN" "$SCRIPT_DIR/patch_voice_barge.py" "$VM_DIR/control_socket.py"
-    "$PYBIN" "$SCRIPT_DIR/patch_voice_barge.py" "$VM_DIR/core.py"
-    "$PYBIN" "$SCRIPT_DIR/patch_voice_barge.py" "$VM_DIR/tools/converse.py"
-fi
-
-# PTT support modules, copied in (not patches). The listener talks to upstream's
-# control socket directly; ptt_relay is only the WSL2 Windows->guest hop, since
-# a Windows-side key press cannot reach the guest's AF_UNIX socket.
-# Retired with the control-channel rewrite: ptt_ipc.py (event bus),
-# ptt_bridge.py (converse glue), ptt_playback_bridge.py (barge-in registry) --
-# upstream's control channel owns all three concerns now.
-# control_transport.py is the named-pipe transport the patched control_socket,
-# ptt_control_client and voice_pill_state import where AF_UNIX is missing.
-for _m in control_transport.py ptt_core.py ptt_control_client.py ptt_relay.py ptt_listener_linux.py ptt_listener_macos.py voice_barge.py voice_pill_state.py voice_pill.py; do
-    if [ -f "$SCRIPT_DIR/$_m" ]; then
-        cp "$SCRIPT_DIR/$_m" "$VM_DIR/$_m"
-        echo "[patches] installed $_m"
-    fi
-done
-
-# Voice pill: report listening and streaming playback, register sessions, and
-# honour Pause and Stop before the floor is taken. Anchors on voice barge above.
-if [ -f "$SCRIPT_DIR/patch_voice_pill.py" ]; then
-    "$PYBIN" "$SCRIPT_DIR/patch_voice_pill.py" "$VM_DIR/control_channel.py"
-    "$PYBIN" "$SCRIPT_DIR/patch_voice_pill.py" "$VM_DIR/control_socket.py"
-    "$PYBIN" "$SCRIPT_DIR/patch_voice_pill.py" "$VM_DIR/tools/converse.py"
-    "$PYBIN" "$SCRIPT_DIR/patch_voice_pill.py" "$VM_DIR/streaming.py"
-fi
-
-# Control channel without AF_UNIX (native Windows): an owner-only named pipe.
-# Without it, enabling the channel natively raises AttributeError out of
-# start_control_listener and the converse turn is lost. A no-op where AF_UNIX
-# exists. Needs control_transport.py, installed by the module loop above.
-if [ -f "$SCRIPT_DIR/patch_control_transport.py" ]; then
-    "$PYBIN" "$SCRIPT_DIR/patch_control_transport.py" "$VM_DIR/control_socket.py"
-fi
-
-# MCP tool for switching voice barge-in from inside any client.
-if [ -f "$SCRIPT_DIR/voice_barge_tool.py" ]; then
-    cp "$SCRIPT_DIR/voice_barge_tool.py" "$VM_DIR/tools/voice_barge_tool.py"
-    echo "[patches] installed tools/voice_barge_tool.py"
-fi
-
-echo "[patches] Done. Restart Claude Code for changes to take effect."
+exec "$PYBIN" "$SCRIPT_DIR/apply.py" "$VENV_DIR"

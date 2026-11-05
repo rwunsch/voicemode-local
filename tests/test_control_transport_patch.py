@@ -307,12 +307,20 @@ def test_missing_transport_module_is_non_fatal(patched, monkeypatch):
         cs.send_control_command("stop")
 
 
-def test_apply_sh_installs_the_module_and_runs_the_patch():
-    text = (PATCHES / "apply.sh").read_text()
-    run = text.index('"$SCRIPT_DIR/patch_control_transport.py" "$VM_DIR/control_socket.py"')
-    copy_loop = text.index("for _m in ")
-    assert "control_transport.py" in text[copy_loop:text.index("done", copy_loop)]
-    assert copy_loop < run
+def test_manifest_installs_the_module_before_running_the_patch():
+    run = _manifest_index(patch="patch_control_transport.py", targets="control_socket.py")
+    assert _manifest_index(copy="control_transport.py") < run
+
+
+def _manifest_index(**match):
+    """Position of the first manifest step whose fields contain ``match``."""
+    import json
+    steps = json.loads((PATCHES / "manifest.json").read_text(encoding="utf-8"))["steps"]
+    for i, step in enumerate(steps):
+        if all(v in step.get(k, ()) if isinstance(step.get(k), list) else step.get(k) == v
+               for k, v in match.items()):
+            return i
+    raise AssertionError(f"no manifest step with {match}")
 
 
 def _wait(pred, timeout=2.0):

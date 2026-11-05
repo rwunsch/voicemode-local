@@ -116,8 +116,19 @@ EDITS = [
 ]
 
 
+def _read(target: Path):
+    """The file as LF text, and whether it used CRLF. UTF-8 whatever the locale."""
+    text = target.read_bytes().decode("utf-8")
+    return text.replace("\r\n", "\n"), "\r\n" in text
+
+
+def _write(target: Path, text: str, crlf: bool) -> None:
+    """Write UTF-8 in the file's own line endings."""
+    target.write_bytes((text.replace("\n", "\r\n") if crlf else text).encode("utf-8"))
+
+
 def apply(target: Path) -> int:
-    src = target.read_text()
+    src, crlf = _read(target)
     if MARKER in src:
         print(f"  already patched: {target}")
         return 0
@@ -135,7 +146,7 @@ def apply(target: Path) -> int:
     for _, anchor, repl, expected in EDITS:
         out = out.replace(anchor, repl, expected)
     compile(out, str(target), "exec")  # syntax safety net before writing
-    target.write_text(out)
+    _write(target, out, crlf)
     print(f"  patched (control transport): {target}")
     return 0
 

@@ -83,9 +83,20 @@ T_OLD = "                timeout=60.0,  # Allow time for slower transcriptions\n
 T_NEW = "                timeout=_stt_timeout(base_url),  # voicemode-local: see _stt_timeout\n"
 
 
+def _read(target: Path):
+    """The file as LF text, and whether it used CRLF. UTF-8 whatever the locale."""
+    text = target.read_bytes().decode("utf-8")
+    return text.replace("\r\n", "\n"), "\r\n" in text
+
+
+def _write(target: Path, text: str, crlf: bool) -> None:
+    """Write UTF-8 in the file's own line endings."""
+    target.write_bytes((text.replace("\n", "\r\n") if crlf else text).encode("utf-8"))
+
+
 def apply_timeout_knob(target: Path) -> int:
     """Edit 2: make the STT client's 60s read timeout configurable."""
-    src = target.read_text()
+    src, crlf = _read(target)
     if MARKER_TIMEOUT in src:
         print(f"  already patched (stt timeout knob): {target}")
         return 0
@@ -97,13 +108,13 @@ def apply_timeout_knob(target: Path) -> int:
             return 1
     out = src.replace(T_ANCHOR, T_HELPER + T_ANCHOR, 1).replace(T_OLD, T_NEW, 1)
     compile(out, str(target), "exec")
-    target.write_text(out)
+    _write(target, out, crlf)
     print(f"  patched (stt timeout knob): {target}")
     return 0
 
 
 def apply(target: Path) -> int:
-    src = target.read_text()
+    src, crlf = _read(target)
     if MARKER in src:
         print(f"  already patched: {target}")
         return 0
@@ -119,7 +130,7 @@ def apply(target: Path) -> int:
         return 1
     out = src[:si] + B_REPLACE + src[ei:]
     compile(out, str(target), "exec")
-    target.write_text(out)
+    _write(target, out, crlf)
     print(f"  patched (no silent swap): {target}")
     return 0
 
