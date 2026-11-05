@@ -8,7 +8,7 @@
     "dm_martin", "p_de_thorsten"];
   var LANGUAGES = ["English", "German"];
   var PAUSE = "\u23F8\uFE0E", RESUME = "\u25B6\uFE0E";
-  var LABELS = { speaking: "Speaking", listening: "Listening", working: "Not in a voice turn",
+  var LABELS = { speaking: "Speaking", listening: "Listening", working: "Between turns",
     idle: "Not in a voice turn", paused: "Paused", disconnected: "Disconnected" };
 
   function ordinal(n) {
@@ -31,11 +31,14 @@
       // Never show the last known state: a stale "Listening" is worse than none.
       return { connected: false, phase: "disconnected", label: LABELS.disconnected, mode: "pill", side: null,
         interrupt: off, pause: { enabled: false, label: "Pause", cmd: "pause", icon: PAUSE }, stop: off,
-        pickersEnabled: false, minimizeEnabled: true, dismissEnabled: true, queue: [], voice: null, language: null, keys: [],
+        pickersEnabled: false, minimizeEnabled: true, dismissEnabled: true, queue: [], voice: null, language: null, keys: [], subText: "",
         barge: { visible: false, on: false, enabled: false, countText: "" }, voices: VOICES, languages: LANGUAGES };
     }
     var s = snapshot, phase = s.phase || "idle", ui = s.ui || {}, barge = s.barge || {};
     var count = barge.count || 0;
+    var waiting = (s.sessions || []).filter(function (r) { return r.state === "waiting"; }).length;
+    var name = s.floor ? (s.floor.label || "") : "";
+    var voices = s.voice && VOICES.indexOf(s.voice) < 0 ? VOICES.concat([s.voice]) : VOICES;
     var mode = ui.minimized ? "dot" : ui.docked ? "docked" : ui.expanded ? "expanded" : "pill";
     return {
       connected: true, phase: phase, label: LABELS[phase] || LABELS.idle, mode: mode,
@@ -53,7 +56,8 @@
       keys: keysFor(s.platform),
       barge: { visible: !!barge.available, on: !!barge.enabled, enabled: true,
         countText: count + (count === 1 ? " interruption today" : " interruptions today") },
-      voices: VOICES, languages: LANGUAGES,
+      voices: voices, languages: LANGUAGES,
+      subText: name && waiting ? name + " \u00b7 +" + waiting + " waiting" : name,
     };
   }
 

@@ -15,7 +15,13 @@
     render();
   }
   function fill(select, items, current) {
-    if (!filled) items.forEach(function (v) { var o = document.createElement("option"); o.value = o.textContent = v; select.appendChild(o); });
+    var have = Array.prototype.map.call(select.options, function (o) { return o.value; });
+    if (have.join("|") !== items.join("|")) { // first fill, or the floor session uses a voice not in the list
+      var keep = select.value;
+      select.replaceChildren();
+      items.forEach(function (v) { var o = document.createElement("option"); o.value = o.textContent = v; select.appendChild(o); });
+      select.value = keep;
+    }
     if (select === document.activeElement) return;
     if (current) select.value = current; else select.selectedIndex = -1; // unknown is not shown as a value
   }
@@ -38,7 +44,7 @@
     document.body.dataset.mode = vm.mode;
     document.body.dataset.phase = vm.phase;
     $("label").textContent = vm.label;
-    $("sub").textContent = vm.connected && snapshot.floor ? (snapshot.floor.label || "") : "";
+    $("sub").textContent = vm.subText;
     document.body.hidden = hidden;
     [["interrupt", vm.interrupt.enabled], ["stop", vm.stop.enabled], ["pause", vm.pause.enabled],
       ["voice", vm.pickersEnabled], ["language", vm.pickersEnabled], ["barge", vm.barge.enabled],
