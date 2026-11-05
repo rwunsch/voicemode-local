@@ -609,3 +609,38 @@ def test_script_has_a_bash_shebang_and_is_executable_and_parses():
     assert INSTALLER.stat().st_mode & stat.S_IXUSR
     assert subprocess.run(["bash", "-n", str(INSTALLER)]).returncode == 0
     assert subprocess.run(["bash", "-n", str(INSTALL_SH)]).returncode == 0
+
+
+# --- found on a real Mac (FELIX-MAC, 2026-11-05, throwaway HOME) ------------------
+
+STUB_COPILOT_EXISTS = r'''#!/bin/bash
+echo "copilot $*" >> "$STUB_LOG"
+case "$1 $2" in
+  "mcp list") echo "voicemode (stdio)";;
+  "mcp add") echo 'Error: Server "voicemode" already exists' >&2; exit 1;;
+esac
+'''
+
+
+def test_a_copilot_entry_that_already_exists_is_not_a_warning(tmp_path):
+    # Fails if a re-run warns "Could not register" because copilot's list output does not
+    # contain the wrapper path (seen on every re-run on a real Mac).
+    b = _box(tmp_path)
+    _write(b.bin / "copilot", STUB_COPILOT_EXISTS)
+    done = b.run("--yes")
+    assert done.returncode == 0
+    assert "Could not register voicemode in GitHub Copilot CLI" not in done.stdout + done.stderr
+    assert "GitHub Copilot CLI already has voicemode" in done.stdout
+
+
+def test_the_whisper_download_states_its_measured_size(tmp_path):
+    # Fails if the size goes back to "not recorded" (measured 560 MB on a real Mac).
+    done = _box(tmp_path).run("--yes")
+    assert "about 560 MB" in done.stdout
+
+
+def test_not_asking_for_the_pill_does_not_claim_it_is_absent(tmp_path):
+    # Fails if a run without --pill says "not installed" when an earlier run installed it.
+    done = _box(tmp_path).run("--yes")
+    assert "Voice pill: not installed" not in done.stdout
+    assert "Voice pill: not requested" in done.stdout

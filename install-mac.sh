@@ -155,7 +155,7 @@ if [ "$ASSUME_YES" = "0" ]; then
         if ask_yes "Download the German voice dm_martin (about 325 MB)? [y/N]"; then WANT_GERMAN=1; fi
     fi
 fi
-[ "$WANT_PILL" = "1" ] && ok "Voice pill: will install" || ok "Voice pill: not installed (later: voicemode-switch pill on)"
+[ "$WANT_PILL" = "1" ] && ok "Voice pill: will install" || ok "Voice pill: not requested this run (turn it on with: voicemode-switch pill on)"
 [ "$WANT_GERMAN" = "1" ] && ok "German voice: will download" || ok "German voice: not downloaded"
 
 # ─── Step 1: Homebrew packages ──────────────────────────────────────────────
@@ -220,7 +220,7 @@ WHISPER_MODEL="$WHISPER_DIR/$WHISPER_FILE"
 if [ -s "$WHISPER_MODEL" ]; then
     ok "Whisper model present ($WHISPER_FILE)"
 else
-    echo "  Downloading the Whisper model $WHISPER_FILE (size not recorded in this repo)..."
+    echo "  Downloading the Whisper model $WHISPER_FILE (about 560 MB)..."
     download "$WHISPER_URL" "$WHISPER_MODEL" || die "Downloading the Whisper model failed (no partial file kept)"
     ok "Whisper model downloaded"
 fi
@@ -230,7 +230,7 @@ mkdir -p "$KOKORO_DIR" "$SCRIPT_DIR/models/piper"
 if [ -s "$KOKORO_DIR/kokoro-v1.0.onnx" ] && [ -s "$KOKORO_DIR/voices-v1.0.bin" ]; then
     ok "Kokoro model and voices present"
 else
-    echo "  Downloading the Kokoro model and voices (about 338 MB together)..."
+    echo "  Downloading the Kokoro model and voices (about 350 MB together)..."
     [ -s "$KOKORO_DIR/kokoro-v1.0.onnx" ] || download "$KOKORO_MODEL_URL" "$KOKORO_DIR/kokoro-v1.0.onnx" \
         || die "Downloading the Kokoro model failed (no partial file kept)"
     [ -s "$KOKORO_DIR/voices-v1.0.bin" ] || download "$KOKORO_VOICES_URL" "$KOKORO_DIR/voices-v1.0.bin" \
@@ -356,8 +356,11 @@ COPILOT_NOTE=""
 if command -v copilot >/dev/null 2>&1; then
     if copilot mcp list 2>/dev/null | grep -q "$MCP_BIN"; then
         ok "GitHub Copilot CLI already has voicemode"
-    elif copilot mcp add voicemode -- "$MCP_BIN"; then
+    elif copilot_out="$(copilot mcp add voicemode -- "$MCP_BIN" 2>&1)"; then
         ok "Registered voicemode in GitHub Copilot CLI"
+    elif printf '%s' "$copilot_out" | grep -qi "already exists"; then
+        # copilot's list output does not always show the command path (seen on a real Mac).
+        ok "GitHub Copilot CLI already has voicemode"
     else
         warn "Could not register voicemode in GitHub Copilot CLI: copilot mcp add voicemode -- \"$MCP_BIN\""
     fi
