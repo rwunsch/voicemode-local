@@ -183,7 +183,7 @@ document.addEventListener('DOMContentLoaded',function(){
     Window win; IntPtr hwnd; CoreWebView2Controller ctl; Dispatcher ui;
     StreamWriter stdin; Process proc; DateTime startedAt;
     JavaScriptSerializer json = new JavaScriptSerializer();
-    double backoff = 1; bool closing, started; int exitCode;
+    double backoff = 1; bool closing, started, hadOutput; int exitCode;
     bool snapshotVisible, dismissed; string mode = "pill", side = "right"; int cssHeight = 46;
     bool hasPos; int posX, posY; bool appbar; uint abMsg;
     DispatcherTimer dragTimer; int dragDx, dragDy; bool moved;
@@ -225,6 +225,9 @@ document.addEventListener('DOMContentLoaded',function(){
         AppDomain.CurrentDomain.ProcessExit += (s, e) => AppBarOff();
         Console.CancelKeyPress += (s, e) => { e.Cancel = true; Post(Shutdown); };
         win.Closed += (s, e) => { if (!closing) Shutdown(); };
+        // `voicemode-switch pill off` sets this: the one stop path that needs no backend.
+        var stop = new EventWaitHandle(false, EventResetMode.AutoReset, @"Local\VoiceModePillStop");
+        Background(() => { stop.WaitOne(); Log("stop requested"); Post(Shutdown); });
         Post(Init);
         Dispatcher.Run();
         return exitCode;
@@ -303,7 +306,16 @@ document.addEventListener('DOMContentLoaded',function(){
         // A second instance exits 1 before printing anything, and so does a failed
         // import: retrying helps neither. Exit 1 after real output is a crash, or the
         // distro going down, and those are what the restart is for.
-        if (code == 1 && lines == 0) { Log("backend refused to start (exit 1); not restarting"); return; }
+        if (code == 1 && lines == 0) {
+            if (!hadOutput) {
+                // Probably a broken venv. A window that never worked must not sit hidden
+                // holding the mutex: exit, so the next `pill on` can start cleanly.
+                Log("backend refused to start (exit 1) and has never run; exiting");
+                exitCode = 1; Shutdown(); return;
+            }
+            Log("backend refused to start (exit 1); not restarting");  // the page goes Disconnected
+            return;
+        }
         if ((DateTime.UtcNow - startedAt).TotalSeconds >= 30) backoff = 1;
         Retry();
     }
@@ -312,11 +324,18 @@ document.addEventListener('DOMContentLoaded',function(){
         Log("restarting backend in " + backoff + " s");
         var t = new DispatcherTimer { Interval = TimeSpan.FromSeconds(backoff) };
         backoff = Math.Min(backoff * 2, 30);
-        t.Tick += (s, e) => { t.Stop(); StartBackend(); };
+        t.Tick += (s, e) => {
+            t.Stop();
+            Background(() => {
+                bool off = !force && !closing && PillEnabled(distro) == 0;
+                Post(() => { if (off) { Log("VOICEMODE_PILL is off; exiting"); Shutdown(); } else StartBackend(); });
+            });
+        };
         t.Start();
     }
 
     void OnLine(string line) {
+        hadOutput = true;
         if (closing || ctl == null) return;
         Dictionary<string, object> m;
         try { m = json.DeserializeObject(line) as Dictionary<string, object>; } catch (ArgumentException) { return; }
@@ -459,7 +478,7 @@ document.addEventListener('DOMContentLoaded',function(){
         AppBarOff();
         try { if (stdin != null) stdin.Close(); } catch (IOException) { }  // EOF ends the backend and lifts its Pause
         try { if (proc != null && !proc.WaitForExit(2000)) proc.Kill(); } catch (Exception) { }
-        if (ctl != null) ctl.Close();
+        try { if (ctl != null) ctl.Close(); } catch (Exception e) { Log("webview close failed: " + e.Message); }
         win.Close();
         ui.InvokeShutdown();
     }

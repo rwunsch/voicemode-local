@@ -132,7 +132,7 @@ def test_ensure_creates_no_whitelist_when_there_is_none(tmp_path):
     assert "VOICEMODE_TOOLS_ENABLED" not in _env_after_ensure(tmp_path, "")
 
 
-def _run_pill(tmp_path: Path, action: str, env_text: str = "", wsl: bool = True):
+def _run_pill(tmp_path: Path, action: str, env_text: str = "", wsl: bool = True, window: str = "running"):
     """Run `pill <action>` against a fake HOME, with the window launcher and pkill stubbed."""
     root, home, bin_dir, scratch = (tmp_path / n for n in ("app", "home", "bin", "scratch"))
     for d in (root, home / ".voicemode", bin_dir, scratch):
@@ -141,8 +141,9 @@ def _run_pill(tmp_path: Path, action: str, env_text: str = "", wsl: bool = True)
     script.write_text(SWITCH.read_text().replace("/tmp/", f"{scratch}/"))
     script.chmod(0o755)
     calls = scratch / "calls.log"
-    for tool in ("powershell.exe", "pkill"):
-        _stub(bin_dir / tool, f'echo "{tool} $*" >> "{calls}"')
+    _stub(bin_dir / "pkill", f'echo "pkill $*" >> "{calls}"')
+    # `window` is what the launcher prints: "running", or the wrapper's exit code.
+    _stub(bin_dir / "powershell.exe", f'echo "powershell.exe $*" >> "{calls}"; printf "{window}\\r\\n"')
     _stub(bin_dir / "pgrep", "exit 1")
     _stub(bin_dir / "wslpath", 'echo "\\\\\\\\wsl.localhost\\\\Ubuntu\\\\app\\\\pill-windows.ps1"')
     env_file = home / ".voicemode/voicemode.env"
@@ -184,7 +185,34 @@ def test_pill_off_clears_the_flag_stops_the_backend_and_keeps_the_control_channe
     assert "VOICEMODE_PILL=false\n" in env and env.count("VOICEMODE_PILL=") == 1
     assert "VOICEMODE_CONTROL_CHANNEL_ENABLED=true\n" in env
     assert "pkill" in calls and "voice_pill" in calls
+    assert "Start-Process" not in calls
+
+
+def test_pill_off_signals_the_window_so_it_stops_without_a_backend(tmp_path):
+    # A window waiting to retry, or with a refused backend, has nothing for pkill to find.
+    _, _, calls = _run_pill(tmp_path / "wsl", "off", "VOICEMODE_PILL=true\n")
+    assert "powershell.exe" in calls and "Local\\VoiceModePillStop" in calls and ".Set()" in calls
+    _, _, calls = _run_pill(tmp_path / "other", "off", "VOICEMODE_PILL=true\n", wsl=False)
     assert "powershell.exe" not in calls
+
+
+def test_pill_on_says_so_when_the_window_does_not_stay_up(tmp_path):
+    done, env, _ = _run_pill(tmp_path, "on", window="1")
+    assert done.returncode != 0
+    assert "did not stay up" in done.stdout and "Voice pill on" not in done.stdout
+    assert "%LOCALAPPDATA%\\voicemode-local\\pill-window.log" in done.stdout  # fail() uses echo -e
+    assert "VOICEMODE_PILL=true\n" in env
+
+
+def test_pill_on_reports_a_window_already_running(tmp_path):
+    # The second instance sees the first one's mutex and exits 0.
+    done, _, _ = _run_pill(tmp_path, "on", window="0")
+    assert done.returncode == 0 and "already running" in done.stdout
+
+
+def test_pill_on_says_when_it_cannot_tell(tmp_path):
+    done, _, _ = _run_pill(tmp_path, "on", window="")
+    assert done.returncode == 0 and "Could not confirm" in done.stdout
 
 
 def test_pill_status_reports_and_changes_nothing(tmp_path):

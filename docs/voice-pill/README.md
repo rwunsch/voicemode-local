@@ -15,7 +15,7 @@
 
 ```bash
 voicemode-switch pill on       # sets the flag and the control channel, opens the window under WSL
-voicemode-switch pill off      # clears the flag and stops the backend; the window then closes
+voicemode-switch pill off      # clears the flag and signals the window to close, with or without a backend
 voicemode-switch pill status
 ```
 
@@ -27,6 +27,10 @@ powershell.exe -ExecutionPolicy Bypass -File \\wsl.localhost\Ubuntu\home\<you>\g
 ```
 
 The window exits at once unless `VOICEMODE_PILL=true`, so the entry is harmless when off.
+
+`pill on` waits up to 15 s and fails with exit 1 if the window exited with an error. It cannot
+detect a failure after those 15 s. "Already running" only means a window holds the lock: that
+window may have no backend. `pill off` then `pill on` starts clean.
 
 Files are in `%LOCALAPPDATA%\voicemode-local`: `webview2\` (two DLLs), `webview2-data\`,
 `ui\` (copied at each start), `pill-position.txt` and `pill-window.log`.
@@ -43,9 +47,14 @@ Files are in `%LOCALAPPDATA%\voicemode-local`: `webview2\` (two DLLs), `webview2
 - **Dragging** polls the cursor while the left button is down, instead of the system move
   loop, because the mouse capture belongs to another process.
 - **Restarts** back off 1, 2, 4, 8, 16, then 30 s, resetting after a 30 s run.
-- **Exit code 1 with no output means no restart.** That is what a second instance does. Exit
-  1 after output is treated as a crash and restarted, on the expectation that `wsl
-  --terminate` may look like that (not measured).
+- **Exit code 1 with no output means no restart.** That is what a second instance does, and
+  what `wsl.exe` returns for a missing venv. If no backend has ever produced output, the
+  window exits and logs why. If one has, it stays up and the page shows Disconnected. Exit 1
+  after output is treated as a crash and restarted, on the expectation that `wsl --terminate`
+  may look like that (not measured).
+- **Stopping** needs no backend: the window waits on a `Local\VoiceModePillStop` event, which
+  `pill off` sets through `powershell.exe`. The flag is also read when a backend exits and
+  before each retry.
 
 ## What was checked
 
@@ -65,12 +74,15 @@ RB = real `voice_pill.py` under a fake HOME with a registered dummy session.
 | Dismiss | Stays hidden while `visible` stays true; returns on false then true (FB) |
 | Disconnected when the backend dies | Shown; returns on restart (FB) |
 | Backoff | 1, 2, 4, 8, 16, 30, 30 s from the log, then recovery (FB) |
-| Exit 1 before output | No restart in 35 s (FB); same with a real lock conflict (RB) |
+| Exit 1 before any output ever (missing venv) | Window exits with code 1, `pill on` reports it with exit 1 (n=2) |
+| Exit 1 before output, after earlier output | Stays up, no restart in 30 s, page text read as "Disconnected" through UI Automation (FB) |
 | Exit 1 after output | Restarted (FB) |
 | Second window | Exits at once |
 | Pause released on window close, and on hard kill | `paused.json` gone in both (RB, n=1 each) |
 | Backend and WebView2 gone after close and hard kill | No processes left (n=7 closes, n=2 hard kills; a third hard kill checked the backend only) |
-| `pill off` closes the window | Yes, end to end (RB, fake HOME, n=2) |
+| `pill off` closes the window | With a backend (n=1), with a refused backend (n=1), during a backoff wait (n=1), all through the event, fake HOME |
+| Flag cleared during a backoff wait, no event | Window exits at the retry, no new backend (FB) |
+| `pill on` with a healthy window, and with one already up | "Voice pill on", and "already running" (n=1 each, fake HOME) |
 | Dock reserves the edge | Work area `0,0,1600,1032` right, `320,0,1920,1032` left |
 | Work area restored | On undock and on hide (n=1 each), on close and on hard kill (n=2 each) |
 
@@ -107,7 +119,7 @@ now shows by colour only. Whether the old or new cost affects stutter was not me
 ## Known limits
 
 - An unhandled Python exception before the first snapshot also exits 1, so it is not retried.
-  It appears in `pill-window.log`, and the window needs restarting.
+  It appears in `pill-window.log`. Run `pill off`, then `pill on`, to restart.
 - A restart attempt boots WSL. After `wsl --shutdown`, a running window starts it again within
   30 s. Use `voicemode-switch pill off` first.
 - Docked, the window takes 320 px of screen width at full height.

@@ -449,12 +449,24 @@ set_env_value() {
 }
 
 # Windows is the only platform whose window this script can open. The window takes
-# its own single-instance lock, so a second `on` is harmless.
+# its own single-instance lock, so a second `on` is harmless. Waits for the window's
+# early failures: a broken venv shows up within seconds, as exit 1.
 start_pill_window() {
     [ -n "${WSL_DISTRO_NAME:-}" ] && command -v powershell.exe >/dev/null 2>&1 || return 0
-    local script; script="$(wslpath -w "$SCRIPT_DIR/pill-windows.ps1")"
-    powershell.exe -NoProfile -Command "Start-Process powershell.exe -WindowStyle Hidden -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File','\"$script\"'" >/dev/null 2>&1 \
-        || warn "Could not open the pill window; run pill-windows.ps1 by hand"
+    local script result; script="$(wslpath -w "$SCRIPT_DIR/pill-windows.ps1")"
+    result="$(powershell.exe -NoProfile -Command "\$p=Start-Process powershell.exe -PassThru -WindowStyle Hidden -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File','\"$script\"'; \$h=\$p.Handle; if (\$p.WaitForExit(15000)) { \$p.ExitCode } else { 'running' }" 2>/dev/null | tr -d '\r' | tail -1)" || result=""
+    case "$result" in
+        running) ;;
+        0) echo "  Pill window already running" ;;
+        "") warn "Could not confirm the pill window started; run pill-windows.ps1 by hand" ;;
+        *) fail "The pill window did not stay up (exit $result). See %LOCALAPPDATA%\\\\voicemode-local\\\\pill-window.log"; return 1 ;;
+    esac
+}
+
+# Stops a window that has no backend for pkill to find.
+signal_pill_window() {
+    [ -n "${WSL_DISTRO_NAME:-}" ] && command -v powershell.exe >/dev/null 2>&1 || return 0
+    powershell.exe -NoProfile -Command "\$e=\$null; if ([Threading.EventWaitHandle]::TryOpenExisting('Local\\VoiceModePillStop',[ref]\$e)) { [void]\$e.Set() }" >/dev/null 2>&1 || true
 }
 
 cmd_pill() {
@@ -462,12 +474,13 @@ cmd_pill() {
         on)
             set_env_value VOICEMODE_PILL true
             set_env_value VOICEMODE_CONTROL_CHANNEL_ENABLED true  # upstream's default is off
-            start_pill_window
+            start_pill_window || return 1
             ok "Voice pill on. Voice sessions already running need /mcp reconnect."
             ;;
         off)
             set_env_value VOICEMODE_PILL false
-            # The window re-reads the flag when its backend exits, and closes.
+            signal_pill_window
+            # Where nothing can be signalled, the window sees the flag when its backend exits.
             pkill -f "$PILL_BACKEND_RE" 2>/dev/null || true
             ok "Voice pill off"
             ;;
