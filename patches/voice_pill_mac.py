@@ -322,7 +322,7 @@ def use_panel():
         def canBecomeKeyWindow(self):
             return False
 
-    class PillFirstClick(objc.Category(BrowserView.WebKitHost)):
+    class WebKitHost(objc.Category(BrowserView.WebKitHost)):  # PyObjC requires this name
         def acceptsFirstMouse_(self, _event):  # the window is never key, so every click is a first
             return True
     BrowserView.WindowHost = PillPanel

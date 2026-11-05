@@ -509,6 +509,8 @@ def test_panel_is_nonactivating_from_birth_and_never_key():
     assert "mask | NONACTIVATING_PANEL" in body
     assert "def canBecomeKeyWindow" in body and "return False" in body
     assert "def acceptsFirstMouse_" in body and "return True" in body
+    # PyObjC refuses a Category whose name differs from its class, and the app then exits at launch
+    assert "class WebKitHost(objc.Category(BrowserView.WebKitHost)):" in body
     assert "BrowserView.WindowHost = PillPanel" in body
 
 
