@@ -243,8 +243,14 @@ def test_setting_from_the_environment_beats_the_file(monkeypatch, tmp_path):
     assert st.setting("VOICEMODE_VOICE_BARGE") == "true"
 
 
+def _age(path, seconds=100):
+    t = time.time_ns() - seconds * 10 ** 9
+    os.utime(path, ns=(t, t))
+
+
 def test_env_file_is_reread_only_after_it_changes(monkeypatch, tmp_path):
     d = _env_file(tmp_path, b"VOICEMODE_PILL=true\n")
+    _age(d / "voicemode.env")  # a file written long ago is cached
     reads = []
     real = st._read_bytes
     monkeypatch.setattr(st, "_read_bytes", lambda p: reads.append(p) or real(p))
@@ -253,10 +259,36 @@ def test_env_file_is_reread_only_after_it_changes(monkeypatch, tmp_path):
     st.voicemode_base()
     assert len(reads) == 1
     (d / "voicemode.env").write_bytes(b"VOICEMODE_PILL=false\n")  # new size
+    _age(d / "voicemode.env")
     assert st.setting("VOICEMODE_PILL") == "false" and len(reads) == 2
     (d / "voicemode.env").write_bytes(b"VOICEMODE_PILL=fals\n\n")  # same size, new mtime
     os.utime(d / "voicemode.env", ns=(1, 1))
     assert st.setting("VOICEMODE_PILL") == "fals" and len(reads) == 3
+
+
+def test_a_same_size_rewrite_within_the_same_second_is_seen(tmp_path):
+    # mtime moves on a coarse clock tick: an unchanged (mtime, size) proves nothing.
+    d = _env_file(tmp_path, b"VOICEMODE_BASE_DIR=/a/one\n")
+    path = d / "voicemode.env"
+    now = time.time_ns()
+    os.utime(path, ns=(now, now))
+    assert st.voicemode_base() == Path("/a/one")
+    path.write_bytes(b"VOICEMODE_BASE_DIR=/a/two\n")  # same size, same file
+    os.utime(path, ns=(now, now))                     # and the same mtime
+    assert st.voicemode_base() == Path("/a/two")
+
+
+def test_a_replaced_file_with_the_same_stamp_is_seen(tmp_path):
+    d = _env_file(tmp_path, b"VOICEMODE_PILL=true\n")
+    path = d / "voicemode.env"
+    _age(path)
+    old = os.stat(path).st_mtime_ns
+    assert st.setting("VOICEMODE_PILL") == "true"
+    tmp = d / "new.env"
+    tmp.write_bytes(b"VOICEMODE_PILL=nope\n")
+    os.utime(tmp, ns=(old, old))
+    os.replace(tmp, path)  # new inode, same mtime and size
+    assert st.setting("VOICEMODE_PILL") == "nope"
 
 
 def test_a_cached_env_cannot_be_changed_by_a_caller(tmp_path):

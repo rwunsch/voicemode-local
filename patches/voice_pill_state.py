@@ -121,7 +121,10 @@ def env_file(home=None) -> Path:
     return old if not path.exists() and old.exists() else path
 
 
-_ENV_CACHE = {}  # path -> ((mtime_ns, size), parsed): re-read only when it changes
+_ENV_CACHE = {}  # path -> (stamp, parsed): re-read only when it changes
+# mtime moves on a coarse clock tick, so a file this fresh may change again without
+# its stamp changing: read it, but do not cache it.
+_ENV_FRESH_NS = 1_000_000_000
 
 
 def read_env_file(home=None) -> dict:
@@ -151,7 +154,8 @@ def _read_env_path(path) -> dict:
 
 
 def _cached_parse(path, info) -> dict:
-    stamp = (info.st_mtime_ns, info.st_size)
+    # The inode catches an atomic replace; ctime any metadata change mtime missed.
+    stamp = (info.st_ino, info.st_mtime_ns, info.st_ctime_ns, info.st_size)
     key = str(path)
     hit = _ENV_CACHE.get(key)
     if hit is not None and hit[0] == stamp:
@@ -161,7 +165,10 @@ def _cached_parse(path, info) -> dict:
     except OSError:
         return {}
     parsed = _parse_env(text)
-    _ENV_CACHE[key] = (stamp, parsed)
+    if time.time_ns() - info.st_mtime_ns > _ENV_FRESH_NS:
+        _ENV_CACHE[key] = (stamp, parsed)
+    else:
+        _ENV_CACHE.pop(key, None)
     return parsed
 
 
