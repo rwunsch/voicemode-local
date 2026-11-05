@@ -56,7 +56,7 @@ def test_shown_needs_snapshot_visible_and_not_dismissed():
 
 def test_geometry_per_mode():
     s = m.WindowState(visible=True)
-    assert m.geometry(s, AREA) == (1440 - 350 - 16, 25 + 800 - 46 - 16, 350, 46)
+    assert m.geometry(s, AREA) == (1440 - 350 - 16, 25 + 800 - 68 - 16, 350, 68)
     s.css_height = 200
     assert m.geometry(s, AREA, pos=(100, 100)) == (100, 100, 350, 200)
     s.mode, s.side = "docked", "right"
@@ -464,3 +464,14 @@ def test_pickers_let_go_after_a_choice_and_when_the_floor_moves():
 def test_session_name_has_its_own_line():
     page = (REPO / "ui/pill/index.html").read_text()
     assert page.index('id="sub"') < page.index('id="label"') < page.index('id="interrupt"')
+
+
+def test_default_height_matches_the_two_line_pill_on_both_platforms():
+    assert m.DEFAULT_H == 68
+    ps1 = (REPO / "pill-windows.ps1").read_text()
+    assert f"DEFAULT_H = {m.DEFAULT_H}" in ps1 and "Scale(46)" not in ps1
+
+
+def test_waiting_count_sits_on_the_name_line():
+    page = (REPO / "ui/pill/index.html").read_text()
+    assert page.index('id="sub"') < page.index('id="waiting"') < page.index('id="label"')

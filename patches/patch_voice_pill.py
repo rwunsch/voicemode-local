@@ -115,7 +115,7 @@ CONVERSE = [
      "\n"
      "def _voice_pill_result(result: str) -> str:\n"
      "    try:\n"
-     "        return result + voice_pill_state.result_note(os.getpid())\n"
+     "        return result + voice_pill_state.result_note(os.getpid(), already=result)\n"
      "    except Exception:\n"
      '        logger.warning("voice pill: could not read the override", exc_info=True)\n'
      "        return result\n"

@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-WIDTH, MARGIN, DEFAULT_H = 350, 16, 46
+WIDTH, MARGIN, DEFAULT_H = 350, 16, 68
 MIN_WIDTH, MAX_WIDTH = 320, 640
 TAB_W, TAB_H, RAIL_W = 22, 64, 76
 BACKOFF_CAP_S = 30

@@ -44,6 +44,7 @@
     document.body.dataset.mode = vm.mode;
     document.body.dataset.phase = vm.phase;
     $("label").textContent = vm.stateText;
+    $("waiting").textContent = vm.waitingText;
     $("sub").textContent = vm.session || "Voice pill";
     var pid = snapshot && snapshot.floor ? snapshot.floor.pid : null;
     if (pid !== floorPid) { // a focused select is not refreshed: let go when the floor moves
@@ -65,7 +66,7 @@
     $("tuck").setAttribute("aria-label", $("tuck").title);
     var rail = vm.mode === "rail";
     $("expand").textContent = rail ? (vm.side === "left" ? "\u203A" : "\u2039") : "\u2304";
-    $("drag").title = vm.session ? vm.session + " \u00b7 " + vm.stateText : vm.stateText;
+    $("drag").title = [vm.session, vm.stateText, vm.waitingText].filter(Boolean).join(" \u00b7 ");
     $("tab").textContent = vm.side === "left" ? "\u203A" : "\u2039";
     fill($("voice"), vm.voices, vm.voice); fill($("language"), vm.languages, vm.language); filled = true;
     $("bargeRow").style.display = vm.barge.visible ? "" : "none";

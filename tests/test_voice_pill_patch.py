@@ -45,6 +45,15 @@ def _patch(script, target):
     return r.stdout
 
 
+@pytest.fixture(scope="module", autouse=True)
+def throwaway_home(tmp_path_factory):
+    """Nothing in this file may reach the real ~/.voicemode, including module-scope setup."""
+    mp = pytest.MonkeyPatch()
+    mp.setenv("HOME", str(tmp_path_factory.mktemp("home")))
+    yield
+    mp.undo()
+
+
 @pytest.fixture(scope="module")
 def work(tmp_path_factory):
     raw = os.environ.get("VM812_SRC")
@@ -221,6 +230,15 @@ def test_enter_returns_stop_message_once(helpers, st):
     assert [s["stopped"] for s in st.live_sessions()] == [True]  # listed, so the pill stays
     assert asyncio.run(helpers["_voice_pill_enter"]("v")) is None
     assert [s["stopped"] for s in st.live_sessions()] == [False]  # a new turn re-engages it
+
+
+def test_stop_message_reaches_the_agent_exactly_once(helpers, st):
+    asyncio.run(helpers["_voice_pill_enter"]("v"))
+    st.request_stop(os.getpid())
+    early = asyncio.run(helpers["_voice_pill_enter"]("v"))  # stopped before the turn began
+    assert helpers["_voice_pill_result"](early).count(STOP_MESSAGE) == 1
+    cut = helpers["_voice_pill_result"]("[control: stop] playback stopped")  # cut mid-turn
+    assert cut.count(STOP_MESSAGE) == 1
 
 
 def test_enter_waits_while_paused_then_continues(helpers, st):

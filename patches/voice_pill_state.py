@@ -236,11 +236,11 @@ def language_note(pid: int, base=None) -> str:
     return f"\n\nThe user selected {language}. Write your next messages in {language}."
 
 
-def result_note(pid: int, base=None) -> str:
+def result_note(pid: int, base=None, already: str = "") -> str:
     """Everything the agent should read after a turn. The stop note covers a turn cut by the
     socket, which only says playback stopped; our rule to keep talking would otherwise win."""
     note = language_note(pid, base)
-    if _read_json(_session_path(pid, base)).get("stopped"):
+    if _read_json(_session_path(pid, base)).get("stopped") and STOPPED_MESSAGE not in already:
         note += "\n\n" + STOPPED_MESSAGE
     return note
 

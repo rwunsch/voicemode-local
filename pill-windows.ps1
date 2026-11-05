@@ -164,7 +164,7 @@ public class VmlPill {
     [DllImport("user32.dll")] static extern bool GetMonitorInfo(IntPtr m, ref MONITORINFO i);
 
     const uint NOACTIVATE = 0x10, NOSIZE = 0x1, NOZORDER = 0x4;
-    const int WIDTH = 350;
+    const int WIDTH = 350, DEFAULT_H = 68;
     const int MIN_WIDTH = 320, MAX_WIDTH = 640;
     const int TAB_W = 22, TAB_H = 64, RAIL_W = 76;
     static readonly IntPtr TOPMOST = new IntPtr(-1);
@@ -183,7 +183,7 @@ document.addEventListener('DOMContentLoaded',function(){
     StreamWriter stdin; Process proc; DateTime startedAt;
     JavaScriptSerializer json = new JavaScriptSerializer();
     double backoff = 1; bool closing, started, hadOutput; int exitCode;
-    bool snapshotVisible, dismissed; string mode = "pill", side = "right"; int cssHeight = 46;
+    bool snapshotVisible, dismissed; string mode = "pill", side = "right"; int cssHeight = DEFAULT_H;
     bool hasPos, hasDock; int posX, posY, dockCy, cssWidth = WIDTH;
     DispatcherTimer slideTimer;
     System.Windows.Forms.NotifyIcon tray; string phase = "";
@@ -217,7 +217,7 @@ document.addEventListener('DOMContentLoaded',function(){
         LoadPosition();
         CoreWebView2Environment.SetLoaderDllFolderPath(loader);
         win = new Window { Title = "Voice pill", WindowStyle = WindowStyle.None, ResizeMode = ResizeMode.NoResize,
-            ShowInTaskbar = false, ShowActivated = false, Topmost = true, Width = WIDTH, Height = 46 };
+            ShowInTaskbar = false, ShowActivated = false, Topmost = true, Width = WIDTH, Height = DEFAULT_H };
         hwnd = new WindowInteropHelper(win).EnsureHandle();  // an HWND without ever showing it
         SetWindowLong(hwnd, -20, GetWindowLong(hwnd, -20) | 0x08000000 | 0x80);  // NOACTIVATE | TOOLWINDOW
         HwndSource.FromHwnd(hwnd).AddHook(WndProc);
@@ -444,7 +444,7 @@ document.addEventListener('DOMContentLoaded',function(){
         int w = Scale(mode == "tab" ? TAB_W : mode == "rail" ? RAIL_W : cssWidth);
         int h = Scale(mode == "tab" ? TAB_H : cssHeight);
         var a = (hasPos ? MonitorAt(posX, posY) : MonitorAt(0, 0)).rcWork;
-        int x = hasPos ? posX : a.right - w - Scale(16), y = hasPos ? posY : a.bottom - Scale(46) - Scale(16);
+        int x = hasPos ? posX : a.right - w - Scale(16), y = hasPos ? posY : a.bottom - Scale(DEFAULT_H) - Scale(16);
         if (edge) {  // floats on the screen edge, at the height it was dragged to, or the middle
             x = side == "left" ? a.left : a.right - w;
             y = (hasDock ? dockCy : (a.top + a.bottom) / 2) - h / 2;
