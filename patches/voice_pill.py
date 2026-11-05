@@ -248,6 +248,10 @@ def _set_override(ctx, floor, **change):
     st.set_override(floor["pid"], cur.get("voice"), cur.get("language"), ctx.base)
 
 
+def _toggle_barge(action, switch):
+    print(f"voice barge {action}: {st.barge_control(action, switch)}", file=sys.stderr, flush=True)
+
+
 def handle_command(msg, ctx=None) -> None:
     """Apply one command. Anything malformed or unknown is ignored."""
     ctx = ctx or Context()
@@ -278,7 +282,7 @@ def handle_command(msg, ctx=None) -> None:
         if ctx.barge_thread is None or not ctx.barge_thread.is_alive():
             # `on` can download a model: never block the snapshot loop on it.
             ctx.barge_thread = threading.Thread(
-                target=st.barge_control, args=("on" if msg["on"] else "off", ctx.switch), daemon=True)
+                target=_toggle_barge, args=("on" if msg["on"] else "off", ctx.switch), daemon=True)
             ctx.barge_thread.start()
     elif cmd == "set_beeps" and isinstance(msg.get("on"), bool):
         st.set_beeps(msg["on"], ctx.base)

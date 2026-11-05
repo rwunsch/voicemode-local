@@ -221,3 +221,17 @@ def test_a_bad_beeps_file_means_no_choice(base):
     Path(base).mkdir(parents=True, exist_ok=True)
     (Path(base) / "beeps.json").write_text('{"on": "yes"}')
     assert st.beeps_choice(base) is None
+
+
+def test_barge_finds_the_switch_when_the_venv_is_not_in_the_repo(monkeypatch):
+    # The Mac pill venv and test venvs live outside the repo; the toggle silently did nothing there.
+    monkeypatch.setattr(sys, "prefix", "/nonexistent/venv")
+    assert st.default_switch() == MODULE.resolve().parent.parent / "voicemode-switch"
+    assert st.default_switch().exists()
+
+
+def test_barge_still_finds_the_switch_next_to_a_repo_venv(monkeypatch, tmp_path):
+    monkeypatch.setattr(st, "__file__", str(tmp_path / "site-packages" / "voice_mode" / "voice_pill_state.py"))
+    monkeypatch.setattr(sys, "prefix", str(tmp_path / ".venv"))
+    (tmp_path / "voicemode-switch").write_text("")
+    assert st.default_switch() == tmp_path / "voicemode-switch"

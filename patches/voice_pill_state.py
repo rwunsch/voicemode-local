@@ -398,14 +398,19 @@ def send_control(path: Path, command: str) -> bool:
     return True
 
 
+def default_switch() -> Path:
+    """Beside this file's folder when run from the repo's patches/; else next to a repo venv."""
+    beside = Path(__file__).resolve().parent.parent / "voicemode-switch"
+    return beside if beside.exists() else Path(sys.prefix).parent / "voicemode-switch"
+
+
 def barge_control(action: str, switch=None) -> str:
     """Run ``voicemode-switch barge <action>``. The action is checked against a
     fixed list, so model output never reaches the command line."""
     action = (action or "").strip().lower()
     if action not in ("on", "off", "status"):
         return "action must be on, off or status"
-    # The venv lives in the repo, next to the script.
-    switch = Path(switch) if switch is not None else Path(sys.prefix).parent / "voicemode-switch"
+    switch = Path(switch) if switch is not None else default_switch()
     if not switch.exists():
         return f"voicemode-switch not found at {switch}"
     try:

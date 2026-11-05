@@ -553,3 +553,14 @@ def test_beeps_follow_the_env_until_chosen(ctx, env, expected):
     ctx.home.mkdir(parents=True, exist_ok=True)
     (ctx.home / "voicemode.env").write_text(env)
     assert vp.gather(ctx)["beeps"] is expected
+
+
+def test_a_failed_barge_toggle_reaches_the_log(ctx, tmp_path, capfd):
+    switch = tmp_path / "voicemode-switch"
+    switch.write_text('#!/bin/sh\necho "no model" >&2\nexit 3\n')
+    switch.chmod(0o755)
+    ctx.switch = switch
+    vp.handle_command({"cmd": "set_barge", "on": True}, ctx)
+    ctx.barge_thread.join(5)
+    out, err = capfd.readouterr()
+    assert "no model" in err and "no model" not in out  # stdout is the protocol
