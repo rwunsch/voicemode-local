@@ -434,6 +434,52 @@ cmd_barge() {
     esac
 }
 
+# --- Voice pill: the small on-screen status window ----------------------------
+# Anchored on the interpreter: an editor or a shell whose command line merely names
+# the file must not match, as `pkill -f` matches the whole line.
+PILL_BACKEND_RE='^[^ ]*python[^ ]* (-m voice_mode\.voice_pill|[^ ]*/voice_pill\.py)( |$)'
+
+env_value() { sed -n "s/^$1=//p" "$HOME/.voicemode/voicemode.env" 2>/dev/null | tail -1; }
+
+set_env_value() {
+    local env_file="$HOME/.voicemode/voicemode.env"
+    mkdir -p "$(dirname "$env_file")"; touch "$env_file"
+    sed -i.bak "/^$1=/d" "$env_file" && rm -f "$env_file.bak"
+    echo "$1=$2" >> "$env_file"
+}
+
+# Windows is the only platform whose window this script can open. The window takes
+# its own single-instance lock, so a second `on` is harmless.
+start_pill_window() {
+    [ -n "${WSL_DISTRO_NAME:-}" ] && command -v powershell.exe >/dev/null 2>&1 || return 0
+    local script; script="$(wslpath -w "$SCRIPT_DIR/pill-windows.ps1")"
+    powershell.exe -NoProfile -Command "Start-Process powershell.exe -WindowStyle Hidden -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File','\"$script\"'" >/dev/null 2>&1 \
+        || warn "Could not open the pill window; run pill-windows.ps1 by hand"
+}
+
+cmd_pill() {
+    case "${1:-status}" in
+        on)
+            set_env_value VOICEMODE_PILL true
+            set_env_value VOICEMODE_CONTROL_CHANNEL_ENABLED true  # upstream's default is off
+            start_pill_window
+            ok "Voice pill on. Voice sessions already running need /mcp reconnect."
+            ;;
+        off)
+            set_env_value VOICEMODE_PILL false
+            # The window re-reads the flag when its backend exits, and closes.
+            pkill -f "$PILL_BACKEND_RE" 2>/dev/null || true
+            ok "Voice pill off"
+            ;;
+        status)
+            if [ "$(env_value VOICEMODE_PILL)" = "true" ]; then echo "Voice pill: enabled"; else echo "Voice pill: disabled"; fi
+            if [ "$(env_value VOICEMODE_CONTROL_CHANNEL_ENABLED)" = "true" ]; then echo "Control channel: enabled"; else echo "Control channel: disabled"; fi
+            if pgrep -f "$PILL_BACKEND_RE" >/dev/null 2>&1; then echo "Backend: running"; else echo "Backend: not running"; fi
+            ;;
+        *) echo "usage: voicemode-switch pill [on|off|status]"; return 2 ;;
+    esac
+}
+
 # Structured health probe of the configured endpoints (exit 0 iff all up).
 cmd_health() {
     local all_up=0
@@ -793,6 +839,7 @@ case "${1:-}" in
     health) cmd_health ;;
     compute) cmd_compute "${2:-}" "${3:-}" ;;
     barge) cmd_barge "${2:-}" ;;
+    pill) cmd_pill "${2:-}" ;;
     queue)
         # Upstream's conch queue (8.8.0 epic VM-1610) replaced our voice_queue.py.
         # `voicemode conch status` shows the floor holder + the FIFO waiter list.
@@ -892,6 +939,7 @@ PY
         echo "  audio-token  Toggle cross-process audio device exclusivity: audio-token [on|off|status]"
         echo "  queue-log Tail the per-session queue event log (debug)"
         echo "  sysaudio  Fold system output into voice input: on|off|status|setup|teardown"
+        echo "  pill      Small on-screen status window: pill [on|off|status]"
         echo ""
         echo "After switching modes, restart Claude Code for changes to take effect."
         ;;

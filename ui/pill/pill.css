@@ -8,12 +8,10 @@ html,body{margin:0;background:transparent;color:var(--t);font:13px system-ui,san
 .txt{min-width:0}.txt b{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:12.5px}
 .m{color:var(--m);font-size:12px}
 .orb{width:26px;height:26px;border-radius:50%;flex:none;background:var(--m);transition:background .2s}
-[data-phase=speaking] .orb{background:var(--a);animation:pulse 1.4s ease-in-out infinite}
-[data-phase=listening] .orb{background:var(--g);animation:pulse 2.2s ease-in-out infinite}
+[data-phase=speaking] .orb{background:var(--a)}
+[data-phase=listening] .orb{background:var(--g)}
 [data-phase=paused] .orb{background:transparent;border:3px solid var(--m)}
 [data-phase=disconnected] .orb{opacity:.35}
-@keyframes pulse{50%{transform:scale(.82);opacity:.75}}
-@media (prefers-reduced-motion:reduce){.orb{animation:none!important}}
 .btn,select{-webkit-app-region:no-drag;border:1px solid var(--line);background:transparent;color:var(--t);border-radius:8px;padding:4px 7px;font:inherit;font-size:12px;cursor:pointer}
 .btn:hover:not(:disabled){background:var(--hover)}
 .btn:disabled,select:disabled{opacity:.4;cursor:default}
@@ -31,3 +29,4 @@ kbd{border:1px solid var(--line);border-radius:4px;padding:0 4px;font:11px ui-mo
 .pic{width:28px;height:28px;padding:0;flex:none;font-size:14px;line-height:1}
 .btn.icon{width:24px;padding:4px 0;flex:none}
 .txt b{font-size:12.5px}.txt .m{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+option{background:var(--bg);color:var(--t)}
