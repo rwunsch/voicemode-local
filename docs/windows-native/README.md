@@ -208,10 +208,21 @@ with no WebView2 runtime, the pill window cannot show. Each of these, and a mach
 ANSI code page is not UTF-8, still needs a real run.
 
 **Uninstall.** `install.ps1 -Mode windows-native -Uninstall` stops the services and removes the
-MCP entry if it points at this checkout's script (another entry is printed and kept).
-`-RemoveData` also deletes the root, but never `%LOCALAPPDATA%\voicemode-local` (the WSL
-pill's), FELIX's folders, or a folder without `active.json` or `runtime`. voicemode.env keeps
-its lines.
+MCP entry only if it is this install's: this checkout's script and this root (an entry without
+`VOICEMODE_NATIVE_ROOT` belongs to the default root). Another install's entry, even one from the
+same checkout, is printed and kept. If `claude mcp remove` fails, the uninstall says so and stops.
+`-RemoveData` then runs `voicemode_native.py remove-data`, which deletes the root. It refuses the
+WSL pill's `%LOCALAPPDATA%\voicemode-local` and FELIX's folders, anything inside them, the
+profile and `%LOCALAPPDATA%` themselves, any folder that holds one of these, and a folder
+without `active.json` or `runtime`. voicemode.env keeps its lines. `native_root()` also refuses a
+root that is the profile, `%LOCALAPPDATA%`, or a folder holding either.
+
+**Two smaller guarantees.** The switch changes voicemode.env under a lock file beside it
+(`voicemode.env.lock`, msvcrt or fcntl), so two switches never lose each other's change; other
+writers of that file (voicemode-switch, upstream's `update_config`) do not take it. And a
+process that cannot be put in its Job Object is killed before its first instruction and the
+start fails with a next step, instead of running unsupervised. A setting counts as on when it
+says `true` in any case, with or without quotes, as `barge_state` reads it.
 
 ## What is installed, measured
 

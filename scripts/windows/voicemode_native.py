@@ -178,12 +178,18 @@ def setting(name, default=None):
     return default if value in (None, "") else value
 
 
+def truthy(value):
+    """A setting is on when it says true, as voice_pill_state.barge_state reads it: spaces and
+    quotes around it dropped, any case."""
+    return (value or "").strip().strip("\"'").strip().lower() == "true"
+
+
 def optional_services():
     """The pill, the push-to-talk listener and the voice barge-in trigger, each only when its
     setting is exactly true.
     Push-to-talk is refused natively until task 7: ptt-listener-windows.ps1 still sends to the WSL
     relay on 127.0.0.1:8765, so it would drive the WSL install, not this one."""
-    enabled = [kind for kind in OPTIONAL if (setting(OPTIONAL_SETTINGS[kind], "") or "").strip() == "true"]
+    enabled = [kind for kind in OPTIONAL if truthy(setting(OPTIONAL_SETTINGS[kind], ""))]
     if WINDOWS and "ptt" in enabled:
         enabled.remove("ptt")
         print("voicemode-local: push-to-talk not started: its Windows listener still sends to the WSL "
@@ -219,15 +225,18 @@ def native_root(allow_outside=None):
     raw = setting("VOICEMODE_NATIVE_ROOT")
     if raw:
         root = Path(os.path.expanduser(os.path.expandvars(raw)))
-    elif WINDOWS:
-        root = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local") / "voicemode-local-native"
     else:
-        root = Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local" / "share") / "voicemode-local-native"
+        root = default_root()
     root = root.resolve()
     for felix in felix_roots():
         if root == felix or felix in root.parents:
             raise VoiceError(f"{root} is inside FELIX's folder {felix}; voicemode-local never writes there.",
                              "Set VOICEMODE_NATIVE_ROOT to a folder of its own.")
+    for folder in profile_folders():
+        if _inside(folder, root):
+            raise VoiceError(f"VOICEMODE_NATIVE_ROOT={root} is your profile or LOCALAPPDATA, or holds "
+                             f"your {folder}; the install folder must be a folder of its own.",
+                             "Choose a folder inside your profile, such as the default.")
     if not allow_outside and not any(_inside(root, folder) for folder in profile_folders()):
         raise VoiceError(f"VOICEMODE_NATIVE_ROOT={root} is outside your profile and LOCALAPPDATA "
                          f"({', '.join(map(str, profile_folders()))}). The runtime runs code from that "
@@ -381,11 +390,22 @@ def atomic_write(path, data):
         temporary.unlink(missing_ok=True)
 
 
+def settings_lock(path):
+    """voicemode.env.lock beside the file: two switches never lose each other's change."""
+    path = Path(path)
+    return exclusive(path.with_name(path.name + ".lock"))
+
+
 def write_setting(path, name, value):
     """Set name=value in a voicemode.env: every assignment of name is rewritten in place
     (``export`` and indentation kept), else one line is appended. Other lines, comments, a
-    BOM and the file's line endings stay; a new file gets CRLF on Windows. Atomic replace."""
-    path = Path(path)
+    BOM and the file's line endings stay; a new file gets CRLF on Windows. Atomic replace,
+    under settings_lock."""
+    with settings_lock(path):
+        _write_setting(Path(path), name, value)
+
+
+def _write_setting(path, name, value):
     try:
         raw = path.read_bytes()
     except FileNotFoundError:
@@ -759,9 +779,11 @@ def spawn(command, job=None, **kwargs):
         try:
             job.assign(process._handle)
         except OSError as error:
-            # Voice still works; only the guarantee that it ends with its owner is lost.
-            print(f"voicemode-local: warning: could not put {Path(command[0]).name} in a Job Object "
-                  f"({error}); it may outlive this launcher.", file=sys.stderr, flush=True)
+            # Outside the job nothing would ever stop it: it never runs a single instruction.
+            raise VoiceError(f"Could not put {Path(command[0]).name} in its Job Object ({error}); "
+                             "it was not started.",
+                             "Start Claude Code from a normal desktop session, then restart the "
+                             "voice connector.") from error
         _resume_threads(process.pid)
     except BaseException:
         process.kill()
@@ -1303,10 +1325,15 @@ def expose_barge_tool(path):
     """As voicemode-switch barge on: a VOICEMODE_TOOLS_ENABLED whitelist would hide the
     voice_barge tool, so add it to one that exists. Never create a whitelist: without one,
     every tool loads."""
-    tools = resolver()._read_env_path(path).get("VOICEMODE_TOOLS_ENABLED")
-    if tools is not None and "voice_barge_tool" not in [t.strip() for t in tools.split(",")]:
-        write_setting(path, "VOICEMODE_TOOLS_ENABLED", ",".join([t for t in tools.split(",") if t.strip()]
-                                                                + ["voice_barge_tool"]))
+    with settings_lock(path):
+        try:
+            text = Path(path).read_bytes().decode("utf-8-sig", errors="replace")
+        except FileNotFoundError:
+            return
+        tools = resolver()._parse_env(text).get("VOICEMODE_TOOLS_ENABLED")
+        if tools is not None and "voice_barge_tool" not in [t.strip() for t in tools.split(",")]:
+            _write_setting(Path(path), "VOICEMODE_TOOLS_ENABLED",
+                           ",".join([t for t in tools.split(",") if t.strip()] + ["voice_barge_tool"]))
 
 
 def env_override(name, value):
@@ -1415,7 +1442,7 @@ def switch_status(root, kind):
         state = resolver().barge_state()
         line = barge_cannot_run() if state is None else ("on" if state else "off")
     else:
-        line = "on" if (resolver().file_first_setting(SWITCHES[kind], "") or "").strip() == "true" else "off"
+        line = "on" if truthy(resolver().file_first_setting(SWITCHES[kind], "")) else "off"
     print(line)
     entry = (read_json(root / "run" / "state.json", {}) or {}).get(kind)
     noun = SWITCH_NOUNS[kind]
@@ -1479,7 +1506,7 @@ STREAMING = "VOICEMODE_STREAMING_ENABLED"
 
 
 def _on(name):
-    return (setting(name, "") or "").strip() == "true"
+    return truthy(setting(name, ""))
 
 
 def voice_mode_settings():
@@ -1579,6 +1606,44 @@ def status(root):
     return 0
 
 
+def protected_folders():
+    """(folder, also_inside): never deleted, nor any folder that holds one; with also_inside,
+    nothing inside it either. The WSL pill's folder and FELIX's are never ours; the profile and
+    LOCALAPPDATA hold everything else."""
+    local = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local")
+    found = [(local / "voicemode-local", True), *((f, True) for f in felix_roots())]
+    found += [(f, False) for f in profile_folders()]
+    return [(Path(os.path.abspath(f)), inside) for f, inside in found]
+
+
+def remove_data(root):
+    """Delete the install folder (install.ps1 -Uninstall -RemoveData), after stop. Refuses a
+    protected folder, one inside a never-ours folder, one that holds a protected folder, and
+    one that does not look like an install (no active.json or runtime folder)."""
+    target = Path(os.path.abspath(root))
+    for folder, also_inside in protected_folders():
+        if _inside(folder, target) or (also_inside and _inside(target, folder)):
+            raise VoiceError(f"Refusing to delete {target}: it is, holds or is inside {folder}.")
+    if not target.exists():
+        print(f"Nothing to delete at {target}.")
+        return 0
+    if not ((target / "active.json").is_file() or (target / RUNTIMES).is_dir()):
+        raise VoiceError(f"Refusing to delete {target}: it is not an install folder "
+                         "(no active.json or runtime folder).")
+    shutil.rmtree(target, ignore_errors=True)
+    if target.exists():
+        raise VoiceError(f"Could not delete all of {target}; a voice connector may still be using it.",
+                         "Close Claude Code, then run the uninstall again.")
+    print(f"Deleted {target}.")
+    return 0
+
+
+def default_root():
+    if WINDOWS:
+        return Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local") / "voicemode-local-native"
+    return Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local" / "share") / "voicemode-local-native"
+
+
 def disk_use(root):
     """Bytes under the root and its runtime, downloads and python folders, each hard-linked
     file counted once per total."""
@@ -1615,7 +1680,8 @@ def info(root):
     name = Path(str(record.get("runtime", ""))).name if isinstance(record, dict) else ""
     python = stable_python(root)
     print(json.dumps({"root": str(root), "runtime": str(root / RUNTIMES / name) if name else None,
-                      "python": str(python) if python else None, "script": str(SCRIPT)}))
+                      "python": str(python) if python else None, "script": str(SCRIPT),
+                      "default_root": str(default_root())}))
     return 0
 
 
@@ -1647,7 +1713,7 @@ def restart_with_runtime_python(root, args):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("command", choices=["setup", "launch", "serve", "status", "stop", "watch",
-                                            "barge", "pill", "info"])
+                                            "barge", "pill", "info", "remove-data"])
     parser.add_argument("action", nargs="?", choices=["on", "off", "status"],
                         help="for barge and pill: on, off or status")
     parser.add_argument("--allow-root-outside-profile", action="store_true",
@@ -1661,6 +1727,8 @@ def main(argv=None):
         root = native_root()
         if args.command == "info":
             return info(root)
+        if args.command == "remove-data":  # never under the runtime it deletes
+            return remove_data(root)
         if WINDOWS and args.command != "setup":
             restarted = restart_with_runtime_python(root, [args.command, *([args.action] if args.action else [])])
             if restarted is not None:

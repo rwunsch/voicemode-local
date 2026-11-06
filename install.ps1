@@ -138,7 +138,7 @@ $McpHelper = @'
 import json, os, shutil, sys, tempfile, time
 action, path = sys.argv[1], sys.argv[2]
 try:
-    with open(path, encoding="utf-8") as f:
+    with open(path, encoding="utf-8-sig") as f:  # a BOM is allowed
         data = json.load(f)
 except FileNotFoundError:
     data = {}
@@ -149,28 +149,34 @@ def save():
         shutil.copy2(path, path + ".bak." + time.strftime("%Y%m%d-%H%M%S"))
     fd, tmp = tempfile.mkstemp(prefix=".claude.json.", dir=os.path.dirname(os.path.abspath(path)))
     with os.fdopen(fd, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2)
+        json.dump(data, f, indent=2, ensure_ascii=False)
     os.replace(tmp, path)
 
 def norm(p):
     return os.path.normcase(os.path.normpath(str(p)))
 
+# state <path> <python> <script> <root> <default root> <1|0: the entry carries the root>
+# ours: this script and this root (an entry without VOICEMODE_NATIVE_ROOT is the default root's);
+# same: ours, and exactly what install would write. Anything else is another install's.
 if action == "state":
-    python, script = sys.argv[3], sys.argv[4]
-    env = {"VOICEMODE_NATIVE_ROOT": sys.argv[5]} if len(sys.argv) > 5 else {}
+    python, script, root, default, with_env = sys.argv[3:8]
+    env = {"VOICEMODE_NATIVE_ROOT": root} if with_env == "1" else {}
     if not isinstance(entry, dict):
         state = "absent"
     else:
         args = [a for a in entry.get("args") or [] if isinstance(a, str)]
-        ours = any(norm(a) == norm(script) for a in args)
+        entry_env = entry.get("env") or {}
+        entry_root = entry_env.get("VOICEMODE_NATIVE_ROOT") or default
+        ours = any(norm(a) == norm(script) for a in args) and norm(entry_root) == norm(root)
         same = (ours and norm(entry.get("command", "")) == norm(python)
-                and [norm(a) for a in args] == [norm(script), "launch"] and (entry.get("env") or {}) == env)
+                and [norm(a) for a in args] == [norm(script), "launch"]
+                and {k: norm(v) for k, v in entry_env.items()} == {k: norm(v) for k, v in env.items()})
         state = "same" if same else "ours" if ours else "other"
     print(state)
-    print(json.dumps(entry))
+    print(json.dumps(entry, ensure_ascii=False))
 elif action == "set":
-    python, script = sys.argv[3], sys.argv[4]
-    env = {"VOICEMODE_NATIVE_ROOT": sys.argv[5]} if len(sys.argv) > 5 else {}
+    python, script, root, with_env = sys.argv[3:7]
+    env = {"VOICEMODE_NATIVE_ROOT": root} if with_env == "1" else {}
     data.setdefault("mcpServers", {})["voicemode"] = {
         "type": "stdio", "command": python, "args": [script, "launch"], "env": env}
     save()
@@ -289,9 +295,9 @@ function Invoke-NativeInstall {
 
     header "windows-native: Claude Code MCP entry"
     $claudeJson = Join-Path $env:USERPROFILE ".claude.json"
-    $rootArg = @()
-    if ($env:VOICEMODE_NATIVE_ROOT) { $rootArg = @($info.root) }
-    $state = Invoke-Helper $python (@("state", $claudeJson, $mcpPython, $script) + $rootArg)
+    $withEnv = "0"
+    if ($env:VOICEMODE_NATIVE_ROOT) { $withEnv = "1" }
+    $state = Invoke-Helper $python @("state", $claudeJson, $mcpPython, $script, $info.root, $info.default_root, $withEnv)
     $kind = [string]($state | Select-Object -First 1)
     $existing = [string]($state | Select-Object -Last 1)
     $mcpLine = "voicemode -> `"$mcpPython`" `"$script`" launch"
@@ -305,15 +311,18 @@ function Invoke-NativeInstall {
         $mcpLine = "unchanged (see above)"
     } else {
         if ($claude) {
-            if ($kind -ne "absent") { & $claude mcp remove --scope user voicemode | Out-Host }
+            if ($kind -ne "absent") {
+                & $claude mcp remove --scope user voicemode | Out-Host
+                if ($LASTEXITCODE -ne 0) { fail "claude mcp remove failed (exit $LASTEXITCODE); the old entry is still there."; return 1 }
+            }
             $addArgs = @("mcp", "add", "--scope", "user", "voicemode")
-            if ($rootArg.Count) { $addArgs += @("-e", "VOICEMODE_NATIVE_ROOT=$($info.root)") }
+            if ($withEnv -eq "1") { $addArgs += @("-e", "VOICEMODE_NATIVE_ROOT=$($info.root)") }
             $addArgs += @("--", $mcpPython, $script, "launch")
             & $claude @addArgs | Out-Host
             if ($LASTEXITCODE -ne 0) { fail "claude mcp add failed (exit $LASTEXITCODE)"; return 1 }
             ok "Registered with: claude $($addArgs -join ' ')"
         } else {
-            Invoke-Helper $python (@("set", $claudeJson, $mcpPython, $script) + $rootArg) | Out-Null
+            Invoke-Helper $python @("set", $claudeJson, $mcpPython, $script, $info.root, $withEnv) | Out-Null
             ok "claude CLI not found; wrote mcpServers.voicemode in $claudeJson (a backup is beside it)"
         }
     }
@@ -348,18 +357,20 @@ function Invoke-NativeUninstall {
     if (-not $info) { fail "Could not find the install folder (voicemode_native.py info)."; return 1 }
 
     $claudeJson = Join-Path $env:USERPROFILE ".claude.json"
-    $state = Invoke-Helper $python @("state", $claudeJson, $python, $script)
+    # Matched by script AND root: another install from this checkout keeps its entry.
+    $state = Invoke-Helper $python @("state", $claudeJson, $python, $script, $info.root, $info.default_root, "0")
     $kind = [string]($state | Select-Object -First 1)
     if ($kind -eq "same" -or $kind -eq "ours") {
         $claude = Get-ClaudeCli
         if ($claude) {
             & $claude mcp remove --scope user voicemode | Out-Host
+            if ($LASTEXITCODE -ne 0) { fail "claude mcp remove failed (exit $LASTEXITCODE); the entry is still there."; return 1 }
         } else {
             Invoke-Helper $python @("remove", $claudeJson) | Out-Null
         }
         ok "Removed the voicemode MCP entry"
     } elseif ($kind -eq "other") {
-        warn "The voicemode MCP entry does not point at $script; left alone:"
+        warn "The voicemode MCP entry is not this install's ($script, $($info.root)); left alone:"
         Write-Host "      $([string]($state | Select-Object -Last 1))"
     } else {
         ok "No voicemode MCP entry"
@@ -370,27 +381,10 @@ function Invoke-NativeUninstall {
         ok "Kept the install folder $($info.root) (re-run with -RemoveData to delete it)"
         return 0
     }
-    $target = [IO.Path]::GetFullPath([string]$info.root).TrimEnd('\')
-    $never = @([IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA "voicemode-local")).TrimEnd('\'))
-    if ($env:USERPROFILE) { $never += [IO.Path]::GetFullPath((Join-Path $env:USERPROFILE ".felix")).TrimEnd('\') }
-    if ($env:FELIX_HOME) { $never += [IO.Path]::GetFullPath($env:FELIX_HOME).TrimEnd('\') }
-    foreach ($n in $never) {
-        if ($target -eq $n -or $target.StartsWith($n + '\', [StringComparison]::OrdinalIgnoreCase)) {
-            fail "Refusing to delete ${target}: it is, or is inside, $n."
-            return 1
-        }
-    }
-    if (-not (Test-Path -LiteralPath $target)) { ok "Nothing to delete at $target"; return 0 }
-    if (-not ((Test-Path -LiteralPath (Join-Path $target "active.json")) -or (Test-Path -LiteralPath (Join-Path $target "runtime")))) {
-        fail "Refusing to delete ${target}: it holds no active.json or runtime folder, so it may not be ours."
-        return 1
-    }
-    Remove-Item -LiteralPath $target -Recurse -Force -ErrorAction SilentlyContinue
-    if (Test-Path -LiteralPath $target) {
-        fail "Could not delete all of $target; a voice connector may still be using it. Close Claude Code and re-run."
-        return 1
-    }
-    ok "Deleted $target"
+    # The checks (never the WSL pill's or FELIX's folders, the profile or LOCALAPPDATA, nor a
+    # folder holding one of them) live in voicemode_native.py remove-data, tested on Linux.
+    & $python $script remove-data | Out-Host
+    if ($LASTEXITCODE -ne 0) { fail "The install folder was not deleted (see above)."; return 1 }
     return 0
 }
 

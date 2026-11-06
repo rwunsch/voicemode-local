@@ -733,7 +733,7 @@ def test_write_setting_keeps_other_lines_comments_and_crlf(vn, tmp_path):
                                  b"export VOICEMODE_PILL=true\r\nOTHER=1")
     vn.write_setting(path, "VOICEMODE_VOICE_BARGE", "false")
     assert path.read_bytes().endswith(b"OTHER=1\r\nVOICEMODE_VOICE_BARGE=false\r\n")
-    assert sorted(p.name for p in path.parent.iterdir()) == ["voicemode.env"]  # no temp file left
+    assert sorted(p.name for p in path.parent.iterdir()) == ["voicemode.env", "voicemode.env.lock"]  # no temp file
 
 
 def test_write_setting_replaces_every_assignment_and_keeps_lf(vn, tmp_path):
@@ -1125,3 +1125,167 @@ def test_native_control_channel_needs_the_pipe_transport_in_the_native_manifest(
     assert "patch_control_transport.py" in patches and "control_transport.py" in copies
     targets = next(s["targets"] for s in steps if s.get("patch") == "patch_control_transport.py")
     assert "control_socket.py" in targets
+
+
+# -- fix round 1 (review of task 8) -------------------------------------------
+
+@pytest.mark.parametrize("which", ["home", "localappdata", "ancestor"])
+def test_native_root_refuses_the_profile_localappdata_and_their_ancestors(vn, home, tmp_path, monkeypatch, which):
+    local = home / "AppData" / "Local"
+    local.mkdir(parents=True)
+    monkeypatch.setenv("LOCALAPPDATA", str(local))
+    root = {"home": home, "localappdata": local, "ancestor": home.parent}[which]
+    monkeypatch.setenv("VOICEMODE_NATIVE_ROOT", str(root))
+    with pytest.raises(vn.VoiceError, match="holds your|is your"):
+        vn.native_root(allow_outside=True)
+    monkeypatch.setenv("VOICEMODE_NATIVE_ROOT", str(local / "voicemode-local-native"))
+    assert vn.native_root() == (local / "voicemode-local-native").resolve()
+
+
+def _root_with_data(path):
+    (path / "runtime").mkdir(parents=True)
+    (path / "active.json").write_text("{}")
+    return path
+
+
+@pytest.fixture
+def protected(home, tmp_path, monkeypatch):
+    local = home / "AppData" / "Local"
+    (local / "voicemode-local").mkdir(parents=True)
+    monkeypatch.setenv("LOCALAPPDATA", str(local))
+    return local
+
+
+def test_remove_data_deletes_an_install_folder(vn, protected, capsys):
+    root = _root_with_data(protected / "voicemode-local-native")
+    assert vn.remove_data(root) == 0
+    assert not root.exists() and (protected / "voicemode-local").is_dir()
+
+
+@pytest.mark.parametrize("target", ["wsl-pill", "inside-wsl-pill", "localappdata", "profile", "felix", "inside-felix"])
+def test_remove_data_never_touches_a_protected_folder_or_one_that_holds_it(vn, home, protected, monkeypatch, target):
+    felix = home / ".felix"
+    (felix / "voice").mkdir(parents=True)
+    path = {"wsl-pill": protected / "voicemode-local",
+            "inside-wsl-pill": protected / "voicemode-local" / "x",
+            "localappdata": protected, "profile": home, "felix": felix, "inside-felix": felix / "voice"}[target]
+    _root_with_data(path)
+    with pytest.raises(vn.VoiceError, match="Refusing"):
+        vn.remove_data(path)
+    assert path.is_dir() and (protected / "voicemode-local").is_dir() and felix.is_dir()
+
+
+def test_remove_data_refuses_a_folder_that_contains_a_protected_one(vn, home, protected, tmp_path, monkeypatch):
+    # An ancestor of LOCALAPPDATA's voicemode-local, given as the root from outside the profile.
+    outer = tmp_path / "outer"
+    inner = outer / "voicemode-local"
+    inner.mkdir(parents=True)
+    _root_with_data(outer)
+    monkeypatch.setenv("LOCALAPPDATA", str(outer))
+    with pytest.raises(vn.VoiceError, match="Refusing"):
+        vn.remove_data(outer)
+    assert inner.is_dir()
+
+
+def test_remove_data_refuses_a_folder_that_is_not_an_install(vn, protected):
+    stranger = protected / "something"
+    stranger.mkdir()
+    with pytest.raises(vn.VoiceError, match="not an install"):
+        vn.remove_data(stranger)
+    assert stranger.is_dir()
+
+
+def test_remove_data_is_not_restarted_under_the_runtime_it_deletes(vn, tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(vn, "WINDOWS", True)
+    monkeypatch.setattr(vn, "native_root", lambda: tmp_path)
+    monkeypatch.setattr(vn, "restart_with_runtime_python", lambda root, args: calls.append(args) or 0)
+    monkeypatch.setattr(vn, "remove_data", lambda root: 0)
+    assert vn.main(["remove-data"]) == 0
+    assert calls == []
+
+
+def test_info_names_the_default_root(vn, home, tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(vn, "WINDOWS", True)
+    monkeypatch.setenv("LOCALAPPDATA", str(home / "L"))
+    vn.info(tmp_path / "root")
+    data = json.loads(capsys.readouterr().out)
+    assert data["default_root"] == str(home / "L" / "voicemode-local-native")
+
+
+_WRITER = r'''
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("vn_writer", sys.argv[1])
+vn = importlib.util.module_from_spec(spec); spec.loader.exec_module(vn)
+from pathlib import Path
+for i in range(int(sys.argv[4])):
+    vn.write_setting(Path(sys.argv[2]), sys.argv[3], str(i))
+'''
+
+
+def test_two_concurrent_writers_keep_both_keys(vn, tmp_path):
+    import subprocess
+    path = tmp_path / ".voicemode" / "voicemode.env"
+    path.parent.mkdir()
+    path.write_text("KEEP=1\n")
+    writer = tmp_path / "writer.py"
+    writer.write_text(_WRITER)
+    procs = [subprocess.Popen([sys.executable, str(writer), str(vn.SCRIPT), str(path), key, "150"])
+             for key in ("VOICEMODE_PILL", "VOICEMODE_VOICE_BARGE")]
+    assert [p.wait(120) for p in procs] == [0, 0]
+    text = path.read_text()
+    assert "KEEP=1\n" in text and "VOICEMODE_PILL=149\n" in text and "VOICEMODE_VOICE_BARGE=149\n" in text
+    assert (path.parent / "voicemode.env.lock").exists()
+
+
+def test_settings_lock_is_held_around_read_modify_write(vn, tmp_path, monkeypatch):
+    held = []
+    real = vn.exclusive
+
+    @vn.contextlib.contextmanager
+    def watched(path):
+        with real(path):
+            held.append(path)
+            yield
+            held.append("released")
+
+    monkeypatch.setattr(vn, "exclusive", watched)
+    path = tmp_path / "voicemode.env"
+    path.write_text("VOICEMODE_TOOLS_ENABLED=converse\n")
+    vn.write_setting(path, "VOICEMODE_PILL", "true")
+    vn.expose_barge_tool(path)
+    assert held == [tmp_path / "voicemode.env.lock", "released"] * 2
+    assert "converse,voice_barge_tool" in path.read_text()
+
+
+class _FakeJob:
+    def assign(self, handle):
+        raise OSError("access denied")
+
+
+class _FakePopen:
+    killed = []
+
+    def __init__(self, command, **kwargs):
+        self.pid, self._handle = 4242, 7
+
+    def kill(self):
+        _FakePopen.killed.append(self.pid)
+
+
+def test_a_failed_job_assignment_kills_the_child_and_raises(vn, monkeypatch):
+    monkeypatch.setattr(vn, "WINDOWS", True)
+    monkeypatch.setattr(vn.subprocess, "Popen", _FakePopen)
+    monkeypatch.setattr(vn, "_resume_threads", lambda pid: (_ for _ in ()).throw(AssertionError("resumed")))
+    _FakePopen.killed.clear()
+    with pytest.raises(vn.VoiceError, match="Job Object"):
+        vn.spawn(["x.exe"], job=_FakeJob())
+    assert _FakePopen.killed == [4242]
+
+
+@pytest.mark.parametrize("value,on", [("true", True), ("TRUE", True), ('"true"', True), (" True ", True),
+                                      ("'true'", True), ("yes", False), ("", False)])
+def test_on_parsing_matches_barge_state(vn, monkeypatch, value, on):
+    monkeypatch.setattr(vn, "setting", lambda name, default=None: value if name == "VOICEMODE_PILL" else "")
+    assert ("pill" in vn.optional_services()) is on
+    assert vn.truthy(value) is on

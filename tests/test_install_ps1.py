@@ -110,28 +110,63 @@ def helper(tmp_path):
     return run
 
 
+PY = r"C:\r\python\cpython-3.12-windows-x86_64-none\python.exe"
+SCRIPT = r"C:\git\vml\scripts\windows\voicemode_native.py"
+DEFAULT = r"C:\Users\me\AppData\Local\voicemode-local-native"
+
+
 def test_helper_set_keeps_other_content_and_state_reads_it(helper, tmp_path):
     claude = tmp_path / ".claude.json"
     claude.write_text(json.dumps({"projects": {"x": 1}, "mcpServers": {"other": {"command": "o"}}}))
-    py, script = r"C:\r\python\cpython-3.12-windows-x86_64-none\python.exe", r"C:\git\vml\scripts\windows\voicemode_native.py"
-    assert helper("state", claude, py, script)[0] == "absent"
-    helper("set", claude, py, script)
+    assert helper("state", claude, PY, SCRIPT, DEFAULT, DEFAULT, "0")[0] == "absent"
+    helper("set", claude, PY, SCRIPT, DEFAULT, "0")
     data = json.loads(claude.read_text())
     assert data["projects"] == {"x": 1} and data["mcpServers"]["other"] == {"command": "o"}
-    assert data["mcpServers"]["voicemode"] == {"type": "stdio", "command": py, "args": [script, "launch"], "env": {}}
-    assert helper("state", claude, py, script)[0] == "same"
-    assert helper("state", claude, r"C:\other\python.exe", script)[0] == "ours"
-    assert helper("state", claude, py, script, r"C:\r")[0] == "ours"      # the root setting differs
-    assert helper("state", claude, py, r"C:\elsewhere\voicemode_native.py")[0] == "other"
+    assert data["mcpServers"]["voicemode"] == {"type": "stdio", "command": PY, "args": [SCRIPT, "launch"], "env": {}}
+    assert helper("state", claude, PY, SCRIPT, DEFAULT, DEFAULT, "0")[0] == "same"
+    assert helper("state", claude, r"C:\other\python.exe", SCRIPT, DEFAULT, DEFAULT, "0")[0] == "ours"
+    assert helper("state", claude, PY, SCRIPT, DEFAULT, DEFAULT, "1")[0] == "ours"   # should carry the root
+    assert helper("state", claude, PY, r"C:\elsewhere\voicemode_native.py", DEFAULT, DEFAULT, "0")[0] == "other"
     assert len(list(tmp_path.glob(".claude.json.bak.*"))) == 1
     helper("remove", claude)
     assert "voicemode" not in json.loads(claude.read_text())["mcpServers"]
 
 
+def test_helper_two_roots_from_one_checkout_are_told_apart(helper, tmp_path):
+    claude = tmp_path / ".claude.json"
+    second = r"C:\Users\me\vml-second"
+    helper("set", claude, PY, SCRIPT, second, "1")
+    entry = json.loads(claude.read_text())["mcpServers"]["voicemode"]
+    assert entry["env"] == {"VOICEMODE_NATIVE_ROOT": second}
+    assert helper("state", claude, PY, SCRIPT, second, DEFAULT, "1")[0] == "same"
+    # The default install's uninstall must leave the second install's entry alone.
+    assert helper("state", claude, PY, SCRIPT, DEFAULT, DEFAULT, "0")[0] == "other"
+    helper("set", claude, PY, SCRIPT, DEFAULT, "0")
+    assert helper("state", claude, PY, SCRIPT, second, DEFAULT, "1")[0] == "other"
+
+
+def test_helper_reads_a_bom_and_keeps_non_ascii(helper, tmp_path):
+    claude = tmp_path / ".claude.json"
+    claude.write_bytes(b"\xef\xbb\xbf" + json.dumps({"projects": {"C:/J\u00fcrgen": 1}}, ensure_ascii=False).encode())
+    helper("set", claude, PY, SCRIPT, DEFAULT, "0")
+    text = claude.read_text(encoding="utf-8")
+    assert "C:/J\u00fcrgen" in text and "\\u00fc" not in text
+
+
 def test_helper_creates_the_file_when_missing(helper, tmp_path):
     claude = tmp_path / ".claude.json"
-    helper("set", claude, "py", "s", r"C:\root")
+    helper("set", claude, "py", "s", r"C:\root", "1")
     assert json.loads(claude.read_text())["mcpServers"]["voicemode"]["env"] == {"VOICEMODE_NATIVE_ROOT": r"C:\root"}
+
+
+def test_uninstall_matches_the_entry_by_root_and_checks_claude_exit_codes():
+    native = _native()
+    body = native[native.index("function Invoke-NativeUninstall"):]
+    assert '@("state", $claudeJson, $python, $script, $info.root, $info.default_root' in body
+    assert "remove-data" in body and "Remove-Item -LiteralPath $target" not in native
+    for chunk in (body, native[native.index("function Invoke-NativeInstall"):native.index("function Invoke-NativeUninstall")]):
+        after = chunk[chunk.index("mcp remove --scope user voicemode"):]
+        assert after.index("$LASTEXITCODE") < 200, "claude mcp remove's exit code is not checked"
 
 
 # -- for real, through powershell.exe ----------------------------------------
