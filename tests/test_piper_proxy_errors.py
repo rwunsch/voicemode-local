@@ -18,7 +18,12 @@ TEST_PORT = 18882
 BASE_URL = f"http://127.0.0.1:{TEST_PORT}"
 
 
+START_TIMEOUT = 5.0
+
+
 def _start_proxy():
+    """Start the proxy in a subprocess and wait for it to accept connections. On any failure,
+    a health check that times out included, the proxy is stopped before the error goes on."""
     proc = subprocess.Popen(
         [
             sys.executable,
@@ -29,15 +34,18 @@ def _start_proxy():
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
-    deadline = time.time() + 5.0
-    while time.time() < deadline:
-        try:
-            urllib.request.urlopen(f"{BASE_URL}/health", timeout=1)
-            return proc
-        except (urllib.error.URLError, ConnectionRefusedError):
-            time.sleep(0.1)
-    proc.terminate()
-    raise RuntimeError(f"piper-proxy did not start within 5 seconds on port {TEST_PORT}")
+    try:
+        deadline = time.time() + START_TIMEOUT
+        while time.time() < deadline:
+            try:
+                urllib.request.urlopen(f"{BASE_URL}/health", timeout=1).close()
+                return proc  # server is ready
+            except OSError:  # URLError, refused, reset, TimeoutError: not up yet
+                time.sleep(0.1)
+        raise RuntimeError(f"piper-proxy did not start within {START_TIMEOUT:g} seconds on port {TEST_PORT}")
+    except BaseException:
+        _stop_proxy(proc)
+        raise
 
 
 def _stop_proxy(proc):
