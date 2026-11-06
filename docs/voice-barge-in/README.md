@@ -48,11 +48,56 @@ Silero alone is not enough on speakers: it correctly calls the assistant's echo 
 |---|---|---|
 | `VOICEMODE_VOICE_BARGE_GATE_DB` | -40 | Raise it (-35) if speech cuts itself off on speakers |
 | `VOICEMODE_VOICE_BARGE_MIN_SPEECH_MS` | 192 | 96 ms gave false triggers from echo at lower gates |
+| `VOICEMODE_VOICE_BARGE_ECHO` | `auto` | macOS only: `auto` uses echo cancellation on the built-in speakers, `on` always, `off` never (see below) |
 | `VOICEMODE_VOICE_BARGE_DEVICE` | `@DEFAULT_SOURCE@` | PulseAudio source. On Windows and macOS a device number, or part of a device name. A name that matches several (one per host API) picks the match on the default input's host API, else the first; the choice is logged once. An unknown name is one error line and a non-zero exit at start |
 
 Each speaking stretch (mic open while the assistant speaks) logs one INFO line when it
 closes, in `/tmp/voice-barge.log` on Linux and WSL: `stretch: 4.2 s, windows 120, max -41.3 dBFS,
 p90 -52.0 dBFS, fired no`. That is the echo level to size the gate against. No audio is saved.
+
+## macOS: echo cancellation on the built-in speakers
+
+Plain capture on a MacBook's built-in speakers hears the assistant at the level of speech
+and cuts it off (2 of 2, FELIX-MAC, reported 2026-11-06). So on macOS the trigger reads the
+default output at the start of every speaking stretch (CoreAudio through ctypes, three
+property reads) and picks the mic for that stretch:
+
+| Output route | How it is detected | Mic |
+|---|---|---|
+| `headphones` | transport not built-in (Bluetooth, USB, HDMI, AirPlay, ...), or built-in with data source `hdpn` | plain capture (sounddevice) |
+| `speakers` | built-in with data source `ispk`, any other, or unreadable | macOS voice processing (AVAudioEngine, echo cancellation, other-audio ducking at its minimum) |
+| `unknown` | CoreAudio did not answer | plain capture |
+
+Voice processing needs `pyobjc-framework-AVFoundation` in the trigger's venv
+(`./install-mac.sh --barge` installs it). Without it the speakers are **refused**: the
+mic stays closed for that stretch and one line is logged per route change,
+`barge: built-in speakers without echo cancellation; use headphones
+(pyobjc-framework-AVFoundation missing)`. If voice processing fails to start, the
+stretch is refused the same way; it never falls back to plain capture on the speakers.
+
+`VOICEMODE_VOICE_BARGE_ECHO` overrides the rule: `auto` (default) as above, `on` always uses
+voice processing (refused without AVFoundation), `off` never does. Voice processing takes
+the system default input and ignores `VOICEMODE_VOICE_BARGE_DEVICE`.
+
+On macOS the stretch line ends with the choice, e.g. `..., fired no, route=speakers,
+capture=voice-processing`, and `python -m voice_mode.voice_barge status` prints a second
+line, `route: speakers, capture: voice-processing` (or `capture: refused`). The first line
+and its meaning are unchanged, and the pill reads only the first.
+
+Not verified yet (no Mac in this repo's test runs; everything above is tested with fakes):
+
+- **Channel 0.** The spike's tap was 48 kHz with 9 channels; it read channel 0 and the echo
+  was gone, but nothing says channel 0 is the processed signal (`VP_CHANNEL`).
+- **Ducking.** Set to the minimum. Robert heard no dip on Kokoro (n=1); `say` did dip.
+  With macOS 13 or older the level cannot be set and macOS's default ducking applies.
+- **A real trigger run with voice processing.** The spike was a separate recorder, not this
+  trigger: silent stretches and a talk-over through it are still to be run, with the
+  resampler (proper low-pass, handles 44.1 kHz) and pyobjc's buffer access as written here.
+- **Start-up cost.** Voice processing is turned on at every stretch start; how long that
+  takes, and whether audio is lost at the start, is unmeasured.
+- **External speakers count as headphones.** USB, HDMI or AirPlay speakers get plain capture.
+
+Steps for a real Mac: `tests/manual/mac_barge_vp_check.md`.
 
 ## Measurements (2026-11-04, one person, WSLg, n=1 per row unless stated)
 
