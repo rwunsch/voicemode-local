@@ -668,3 +668,54 @@ def test_barge_trigger_is_an_optional_service_with_the_pinned_silero(vn, tmp_pat
 def test_barge_starts_only_when_its_setting_is_exactly_true(vn, monkeypatch, value, started):
     monkeypatch.setattr(vn, "setting", lambda name, default=None: value if name == "VOICEMODE_VOICE_BARGE" else "")
     assert ("barge" in vn.optional_services()) is started
+
+
+# -- the pill window, native (task 6) ----------------------------------------
+
+def test_pill_command_starts_the_backend_directly_with_a_data_dir_per_install(vn, tmp_path, monkeypatch):
+    monkeypatch.setattr(vn, "WINDOWS", True)
+    root = tmp_path / "root"
+    runtime = root / "runtime" / "abc"
+    command, marker = vn.optional_command("pill", runtime, root)
+    assert marker == str(vn.REPO / "pill-windows.ps1")
+    assert command[0] == vn.powershell()
+    assert command.index("-STA") < command.index("-File") and command[command.index("-File") + 1] == marker
+
+    def value(flag):
+        return command[command.index(flag) + 1]
+
+    assert value("-BackendExe") == str(vn.venv_program(runtime, "python"))
+    assert value("-BackendArgs") == "-m voice_mode.voice_pill --stdio"
+    assert value("-DataDir") == str(vn.pill_data_dir(root)) == str(root / "pill")
+    text = " ".join(command)
+    assert "-BackendCommand" not in text and "-Distro" not in text and "wsl" not in text.lower()
+
+
+def test_pill_command_root_defaults_to_the_runtimes_install(vn, tmp_path):
+    root = tmp_path / "root"
+    runtime = root / "runtime" / "abc"
+    assert vn.optional_command("pill", runtime) == vn.optional_command("pill", runtime, root)
+
+
+def test_pill_names_are_per_data_dir_and_ignore_case_and_trailing_slash(vn):
+    mutex, stop = vn.pill_names(r"C:\Users\Me\AppData\Local\voicemode-local-native\pill")
+    assert re.fullmatch(r"Local\\VoiceModePillWindow-[0-9a-f]{12}", mutex)
+    assert re.fullmatch(r"Local\\VoiceModePillStop-[0-9a-f]{12}", stop)
+    assert mutex[-12:] == stop[-12:]
+    assert vn.pill_names(r"c:\users\me\appdata\local\voicemode-local-native\pill\\") == (mutex, stop)
+    other = vn.pill_names(r"C:\Users\Me\AppData\Local\other-install\pill")
+    assert other[0] != mutex and other[1] != stop
+    # Never the WSL pill's machine-wide names, which voicemode-switch signals.
+    assert mutex != "Local\\VoiceModePillWindow" and stop != "Local\\VoiceModePillStop"
+
+
+def test_pill_names_hash_is_sha256_of_the_lowercased_utf8_path(vn):
+    import hashlib
+    path = "C:\\Users\\J\u00fcrgen M\u00fcller\\vml\\pill"
+    want = hashlib.sha256(path.lower().encode("utf-8")).hexdigest()[:12]
+    assert vn.pill_names(path) == (f"Local\\VoiceModePillWindow-{want}", f"Local\\VoiceModePillStop-{want}")
+
+
+def test_pill_stop_event_is_the_stop_name_of_the_installs_data_dir(vn, tmp_path):
+    root = tmp_path / "root"
+    assert vn.pill_stop_event(root) == vn.pill_names(root / "pill")[1]

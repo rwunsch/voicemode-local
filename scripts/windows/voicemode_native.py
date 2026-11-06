@@ -877,17 +877,43 @@ def powershell():
     return str(Path(system) / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe")
 
 
-def optional_command(kind, runtime):
-    """The pill window, the push-to-talk listener (native modes: tasks 6 and 7) or the barge
-    trigger, which hears the mic through sounddevice here."""
+def pill_data_dir(root):
+    """The pill window's own folder for this install: log, position, page copy, WebView2."""
+    return Path(root) / "pill"
+
+
+def pill_names(data_dir):
+    """(mutex, stop event) of the native pill window that uses data_dir: one pill per install.
+    pill-windows.ps1 derives the same names (tests compare the two): SHA-256 of the path,
+    trailing slashes dropped, lowercased, as UTF-8; the first 12 hex digits. Pass the absolute
+    path the launcher passes as -DataDir. The WSL pill keeps the fixed names without a suffix."""
+    key = str(data_dir).rstrip("\\/").lower()
+    tag = hashlib.sha256(key.encode("utf-8")).hexdigest()[:12]
+    return f"Local\\VoiceModePillWindow-{tag}", f"Local\\VoiceModePillStop-{tag}"
+
+
+def pill_stop_event(root):
+    """The event that closes this install's pill window: set it, and the window exits."""
+    return pill_names(pill_data_dir(root))[1]
+
+
+def optional_command(kind, runtime, root=None):
+    """The pill window, the push-to-talk listener (native mode: task 7) or the barge trigger,
+    which hears the mic through sounddevice here. root is the install; by default the one
+    that holds runtime."""
     if kind == "barge":
         return ([str(venv_program(runtime, "python")), "-m", "voice_mode.voice_barge", str(runtime / SILERO)],
                 "voice_mode.voice_barge")
     script = REPO / ("pill-windows.ps1" if kind == "pill" else "ptt-listener-windows.ps1")
     command = [powershell(), "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script)]
     if kind == "pill":
+        root = Path(root) if root is not None else Path(runtime).parent.parent
         command[2:2] = ["-STA"]
-        command += ["-BackendCommand", f'"{venv_program(runtime, "python")}" -m voice_mode.voice_pill --stdio']
+        # Native mode: the backend is started directly, no wsl.exe. -BackendArgs is one
+        # Windows command-line tail, quoted as CreateProcess expects.
+        command += ["-BackendExe", str(venv_program(runtime, "python")),
+                    "-BackendArgs", subprocess.list2cmdline(["-m", "voice_mode.voice_pill", "--stdio"]),
+                    "-DataDir", str(pill_data_dir(root))]
     return command, str(script)
 
 
@@ -986,7 +1012,7 @@ def ensure_services(root, runtime, env, optional=None):
                 command, marker = service_command(kind, runtime, port)
             else:
                 port = None
-                command, marker = optional_command(kind, runtime)
+                command, marker = optional_command(kind, runtime, root)
             log = run_dir / f"{kind}.log"
             with log.open("a") as output:
                 process = spawn(command, job=job, env=env, stdin=subprocess.DEVNULL, stdout=output,
