@@ -894,9 +894,10 @@ def barge_control(action: str, switch=None) -> str:
         return error
     extra = {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)} if _on_windows() else {}
     try:
-        # `on` may download the Silero model.
-        done = subprocess.run([*argv, action], capture_output=True, text=True, encoding="utf-8",
-                              errors="replace", timeout=180, **extra)
+        # `on` may download the Silero model. No stdin: the voice server's is the MCP pipe, and on
+        # Windows a child inheriting it blocks at start-up while a thread reads it (2026-11-06).
+        done = subprocess.run([*argv, action], stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                              encoding="utf-8", errors="replace", timeout=180, **extra)
     except (OSError, subprocess.TimeoutExpired) as e:
         return f"voice barge {action} failed: {e}"
     output = re.sub(r"\x1b\[[0-9;]*m", "", (done.stdout + done.stderr)).strip()

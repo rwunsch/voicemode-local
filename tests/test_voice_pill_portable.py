@@ -992,3 +992,22 @@ def test_barge_stop_handlers_skip_missing_signals(monkeypatch):
     t.start()
     t.join(5)
     assert seen == [None]
+
+
+def test_barge_command_never_shares_the_servers_stdin(monkeypatch, tmp_path):
+    """voice-mode's stdin is the MCP pipe, which a thread is blocked reading. On Windows a
+    child that inherits that synchronous pipe blocks on it at start-up until the next MCP
+    message (measured 2026-11-06: voice_barge status from the tool timed out at 180 s, while
+    the same command alone took 0.3 s). The command gets no stdin."""
+    ctl = _script(tmp_path, body='if read -r line; then echo "read: $line"; else echo "no stdin"; fi')
+    monkeypatch.setenv("VOICEMODE_BARGE_CONTROL_COMMAND", str(ctl))
+    seen = {}
+    real = st.subprocess.run
+
+    def run(*args, **kwargs):
+        seen.update(kwargs)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(st.subprocess, "run", run)
+    assert st.barge_control("status") == "no stdin"
+    assert seen["stdin"] is st.subprocess.DEVNULL
