@@ -61,7 +61,10 @@ upstream reads `VOICEMODE_CONTROL_SOCKET` (`config.py:697`).
 ## 3. Window
 
 In `pill-windows.ps1`, a `\\wsl` path or `-Distro` keeps today's WSL path; otherwise run
-native (that case throws today at `:122`, so nothing regresses). Replace `:268` and `:200`
+native (that case throws today at `:122`, so nothing regresses). `-BackendExe` also selects
+native, even when the script sits on a `\\wsl` path: the native launcher run from a WSL
+checkout starts it from there (task 6, 2026-11-06). No WSL start passes `-BackendExe`;
+`-Distro` with `-BackendExe` is refused. Replace `:268` and `:200`
 with an exe/args pair and a direct env read. Find Python through an `active.json` like FELIX's
 `launch.js:40`, never `python3`. A Python launcher, a port of `voicemode-mcp`, starts services,
 pill, listener and voice-mode (FELIX's `connector_options`, `voice.py:694`).

@@ -81,7 +81,8 @@ powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File pill-windows.ps1 ^
 - **One pill per install.** Its files (log, position, page copy, WebView2 DLLs,
   `webview2-data`) go to `-DataDir`, required natively. Its mutex and stop event are
   `Local\VoiceModePillWindow-<12 hex>` and `Local\VoiceModePillStop-<12 hex>`, from SHA-256 of
-  the folder path (trailing slashes dropped, lowercased, UTF-8). `pill_stop_event(root)` in
+  the folder's full long path (`GetFullPath`, 8.3 names expanded, trailing slashes dropped,
+  lowercased, UTF-8), so any spelling of the folder gives the same names. `pill_stop_event(root)` in
   the launcher gives the same stop name; set that event to close the window.
   `pill-windows.ps1 -DataDir <dir> -BackendExe x -PrintNames` prints both names.
 - **WSL unchanged.** WSL mode keeps `%LOCALAPPDATA%\voicemode-local` and the two fixed names,
@@ -168,6 +169,9 @@ command and a process with no window.
   the environment beats true in the file.
 - The real backend (`voice_mode.voice_pill --stdio` in the native runtime) starts, takes its
   lock in a private base dir and is ended by EOF, without a restart.
+
+Fix round 1 (2026-11-06) made the focus test count only starts with a real foreground
+window (at least 3), and added name checks for relative and 8.3 paths.
 
 Not checked natively: a real voice session shown in the native pill, an elevated voice
 server, more than one monitor, and the native switch (task 8).

@@ -161,9 +161,14 @@ VML_MODEL_SOURCE='C:\path\to\<sha256>\<file> folder' VM812_SRC=<pristine 8.12.0>
   said `VOICEMODE_BASE_DIR`; `voice_pill_state.setting`, which the launcher uses to decide
   whether to start the pill, reads `~\.voicemode\voicemode.env` whatever the base dir. The
   window follows the resolver, so the two cannot disagree.
-- **The pill's names hash the path as given.** Python's `str.lower()` and .NET's
-  `ToLowerInvariant()` agree for the paths tested (ASCII, spaces, `ü`); they may differ for
-  rare letters such as Turkish `İ`. Pass the same absolute path to both, as the launcher does.
+- **Any spelling of one folder gives one pill name.** Both sides hash the full long path:
+  `GetFullPath` (absolute, `/` as `\`, `.` and `..` resolved, trailing dots and spaces of the
+  last part dropped), then 8.3 short names expanded through `GetLongPathNameW` for the longest
+  prefix that exists. `GetFullPath` in PowerShell 5.1 expands only some short names, depending
+  on what exists (measured 2026-11-06, 5 paths), so the script expands them itself, as
+  `windows_full_path` does in Python. Then trailing slashes are dropped and the result is
+  lowercased. Python's `str.lower()` and .NET's `ToLowerInvariant()` agree for the paths tested
+  (ASCII, spaces, `ü`); they may differ for rare letters such as Turkish `İ`.
 - **Each install downloads its own WebView2 DLLs** into `<root>\pill\webview2`, once: two
   files, 898,240 bytes (measured 2026-11-06 in the WSL pill's copy of version 1.0.4314.35). The
   spec gives 906,432 kept and 9,818,548 downloaded; not re-measured here.
