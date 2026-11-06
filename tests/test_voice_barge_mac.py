@@ -146,7 +146,7 @@ class Opener:
 
         class Made:
             def __init__(self, *a, **k):
-                self.kind, self.args = kind, a
+                self.kind, self.args, self.kw = kind, a, k
                 outer.made.append(self)
 
             def close(self):
@@ -174,11 +174,11 @@ def test_headphones_open_plain_capture(monkeypatch):
 def test_refusal_opens_no_mic_and_logs_once_per_route_change(monkeypatch, caplog):
     o = Opener(monkeypatch, route="speakers", vp=False)
     with caplog.at_level(logging.INFO, logger="voicemode.voice_barge"):
-        assert o() is None and o() is None and o() is None      # three polls, same route
+        assert all(o().refused for _ in range(3))      # three stretches, same route
         o.route = "headphones"
         assert o().kind == "sounddevice"
         o.route = "speakers"
-        assert o() is None and o() is None
+        assert o().refused and o().refused
     assert o.made and all(m.kind == "sounddevice" for m in o.made)
     refusals = [r for r in caplog.records if r.getMessage() == REFUSAL]
     assert len(refusals) == 2 and all(r.levelname == "WARNING" for r in refusals)
@@ -197,7 +197,7 @@ def test_echo_on_uses_voice_processing_on_headphones(monkeypatch):
 def test_echo_on_without_avfoundation_refuses_with_its_own_reason(monkeypatch, caplog):
     o = Opener(monkeypatch, route="headphones", vp=False)
     with caplog.at_level(logging.INFO, logger="voicemode.voice_barge"):
-        assert o(echo="on") is None and o(echo="on") is None
+        assert o(echo="on").refused and o(echo="on").refused
     lines = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
     assert len(lines) == 1 and "VOICEMODE_VOICE_BARGE_ECHO=on" in lines[0] and "AVFoundation" in lines[0]
 
@@ -209,7 +209,7 @@ def test_voice_processing_that_fails_to_start_refuses_once_and_never_falls_back(
         raise RuntimeError("engine would not start")
     monkeypatch.setattr(vb, "VoiceProcessingCapture", boom)
     with caplog.at_level(logging.INFO, logger="voicemode.voice_barge"):
-        assert o() is None and o() is None
+        assert o().refused and o().refused
     assert o.made == []
     lines = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
     assert len(lines) == 1 and "engine would not start" in lines[0]
@@ -282,7 +282,8 @@ def test_stretch_line_carries_route_and_capture_when_the_capture_has_them(caplog
     with caplog.at_level(logging.INFO, logger="voicemode.voice_barge"):
         _run([True, True, False], lambda: Cap(note="route=speakers, capture=voice-processing"))
     (line,) = [r.getMessage() for r in caplog.records if r.getMessage().startswith("stretch:")]
-    assert line.endswith("fired no, route=speakers, capture=voice-processing")
+    import re
+    assert re.search(r"fired no, first_window \d+ ms, route=speakers, capture=voice-processing$", line), line
 
 
 def test_stretch_line_is_unchanged_without_them(caplog):
@@ -551,8 +552,10 @@ def test_voice_processing_available_imports_avfoundation_once(monkeypatch):
 
 # --- status: a second line on macOS only ------------------------------------------
 
-def _status(monkeypatch, capsys, platform, route="speakers", vp=True, echo=None, state=True):
+def _status(monkeypatch, capsys, platform, route="speakers", vp=True, echo=None, state=True,
+            backend="sounddevice"):
     monkeypatch.setattr(vb, "barge_state", lambda home=None: state)
+    monkeypatch.setattr(vb, "capture_backend", lambda: backend)
     monkeypatch.setattr(vb, "_platform", lambda: platform)
     monkeypatch.setattr(vb, "output_route", lambda platform=None, lib=None: route)
     monkeypatch.setattr(vb, "voice_processing_available", lambda: vp)
@@ -599,4 +602,234 @@ def test_pyobjc_that_wants_the_error_argument_gets_none(av):
         return (True, None)
     fake.node.setVoiceProcessingEnabled_error_ = strict
     vb.VoiceProcessingCapture().close()
-    assert seen == [(True, None)]
+    assert seen[0] == (True, None)
+
+
+
+# --- fix round 1 ------------------------------------------------------------------
+
+def test_status_and_stretch_agree_on_parec_on_a_mac(monkeypatch, capsys):
+    # M2: a Mac with parec labels plain capture "parec" in both places.
+    assert _status(monkeypatch, capsys, "darwin", "headphones", backend="parec") == "on\nroute: headphones, capture: parec\n"
+
+
+@pytest.fixture(autouse=True)
+def vp_state(monkeypatch, tmp_path):
+    """Every test: the recorded voice-processing failure lives in tmp, never ~/.voicemode."""
+    path = tmp_path / "barge_vp_failed.json"
+    monkeypatch.setattr(vb, "_vp_failure_path", lambda: path)
+    vb._VP_FAILED.clear()
+    yield path
+    vb._VP_FAILED.clear()
+
+
+def test_failed_voice_processing_is_remembered_for_the_route_and_not_retried(monkeypatch, vp_state):
+    # M3: no retry at every stretch on the same route; retried after a route change.
+    o = Opener(monkeypatch, route="speakers", vp=True)
+    tries = []
+
+    def boom(*a, **k):
+        tries.append(1)
+        raise RuntimeError("engine would not start")
+    monkeypatch.setattr(vb, "VoiceProcessingCapture", boom)
+    first, second = o(), o()
+    assert len(tries) == 1
+    for cap in (first, second):
+        assert cap.refused
+        assert cap.stretch_note == "route=speakers, capture=refused (echo cancellation failed to start)"
+    o.route = "headphones"
+    o()
+    o.route = "speakers"
+    o()
+    assert len(tries) == 2
+
+
+def test_status_says_when_echo_cancellation_failed_to_start(monkeypatch, capsys, vp_state):
+    # M3: the trigger records the failure in a file; the status process reads it.
+    o = Opener(monkeypatch, route="speakers", vp=True)
+    monkeypatch.setattr(vb, "VoiceProcessingCapture", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("x")))
+    o()
+    assert vp_state.exists()
+    out = _status(monkeypatch, capsys, "darwin", "speakers", True)
+    assert out == "on\nroute: speakers, capture: refused (echo cancellation failed to start)\n"
+    # on another route the old failure does not apply
+    out = _status(monkeypatch, capsys, "darwin", "headphones", True)
+    assert out == "on\nroute: headphones, capture: sounddevice\n"
+
+
+def test_a_started_voice_processing_clears_the_recorded_failure(monkeypatch, vp_state):
+    vb._record_vp_failure("speakers", "old")
+    o = Opener(monkeypatch, route="speakers", vp=True)
+    vb._VP_FAILED.clear()   # a new trigger process: memory empty, file left over
+    assert o().kind == "voice-processing"
+    assert not vp_state.exists()
+
+
+def test_missing_avfoundation_refusal_says_why_on_the_stretch(monkeypatch):
+    o = Opener(monkeypatch, route="speakers", vp=False)
+    cap = o()
+    assert cap.refused
+    assert cap.stretch_note == "route=speakers, capture=refused (pyobjc-framework-AVFoundation missing)"
+
+
+def test_every_refused_stretch_gets_a_stretch_line(caplog):
+    # M3: one warning per route change is not enough to read the stretches by.
+    def opener():
+        return vb.RefusedCapture("route=speakers, capture=refused (echo cancellation failed to start)")
+    with caplog.at_level(logging.INFO, logger="voicemode.voice_barge"):
+        _run([True, True, False, True, False], opener)
+    lines = [r.getMessage() for r in caplog.records if r.getMessage().startswith("stretch:")]
+    assert len(lines) == 2
+    assert all(l.endswith("windows 0, max n/a, p90 n/a, fired no, "
+                          "route=speakers, capture=refused (echo cancellation failed to start)")
+               for l in lines), lines
+
+
+def test_first_window_is_timed_from_before_the_mic_opens(caplog):
+    clock = iter([0.0, 0.0, 0.25, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0])
+
+    class Slow(Cap):
+        def __init__(self):
+            super().__init__(n=2, note="route=speakers, capture=voice-processing")
+            self.first = True
+
+        def read_window(self):
+            if self.first:
+                self.first = False
+                return None   # voice processing still starting
+            return super().read_window()
+    timeline = [True, True, True, False]
+    with caplog.at_level(logging.INFO, logger="voicemode.voice_barge"):
+        vb.run(poll_speaking=lambda: timeline.pop(0) if timeline else None, open_capture=Slow,
+               vad=Vad(), detector=vb.BargeDetector(-35.0, 3), send_barge=lambda: None,
+               sleep=lambda s: None, warmup_windows=0, poll_every_windows=1,
+               stretch_clock=lambda: next(clock))
+    (line,) = [r.getMessage() for r in caplog.records if r.getMessage().startswith("stretch:")]
+    assert ", first_window 250 ms, " in line, line
+
+
+def test_no_window_at_all_says_none(caplog):
+    with caplog.at_level(logging.INFO, logger="voicemode.voice_barge"):
+        _run([True, True, False], lambda: Cap(n=0, note="route=speakers, capture=voice-processing"))
+    (line,) = [r.getMessage() for r in caplog.records if r.getMessage().startswith("stretch:")]
+    assert ", first_window none, route=" in line
+
+
+def test_a_failing_tap_logs_one_traceback_then_a_count_at_close(av, caplog):
+    # M4
+    fake = av()
+    cap = vb.VoiceProcessingCapture()
+    with caplog.at_level(logging.INFO, logger="voicemode.voice_barge"):
+        for _ in range(5):
+            fake.node.tap[3](object(), None)   # not a buffer: every call fails
+        cap.close()
+    tracebacks = [r for r in caplog.records if r.exc_info]
+    assert len(tracebacks) == 1
+    assert any("tap failed 5 times" in r.getMessage() for r in caplog.records)
+
+
+def test_close_turns_voice_processing_off_after_stopping(av):
+    # M5
+    fake = av()
+    vb.VoiceProcessingCapture().close()
+    assert fake.node.vp is False and not fake.engine.running
+
+
+def test_close_survives_voice_processing_off_failing(av):
+    fake = av()
+    cap = vb.VoiceProcessingCapture()
+
+    def boom(*a):
+        raise RuntimeError("no")
+    fake.node.setVoiceProcessingEnabled_error_ = boom
+    cap.close()
+    assert fake.node.removed == [0]
+
+
+@pytest.mark.parametrize("error", [AttributeError, TypeError])
+def test_ducking_that_cannot_be_set_logs_once_and_keeps_voice_processing(av, caplog, error):
+    fake = av()
+
+    def no(config):
+        raise error("struct conversion")
+    fake.node.setVoiceProcessingOtherAudioDuckingConfiguration_ = no
+    vb._DUCKING_LOGGED.clear()
+    with caplog.at_level(logging.INFO, logger="voicemode.voice_barge"):
+        for _ in range(3):
+            vb.VoiceProcessingCapture().close()
+    assert len([r for r in caplog.records if "ducking not settable" in r.getMessage()]) == 1
+    assert fake.engine.stops == 3   # it started every time
+
+
+def test_channel_probe_logs_rms_per_channel_at_close(av, caplog):
+    # VOICEMODE_VOICE_BARGE_VP_CHANNEL_PROBE=1: settle VP_CHANNEL on a real Mac.
+    fake = av(channels=3)
+    cap = vb.VoiceProcessingCapture(probe=True)
+    chans = np.vstack([np.full(4800, 0.001, np.float32), np.full(4800, 0.1, np.float32),
+                       np.full(4800, 1.0, np.float32)])
+    fake.deliver(chans)
+    with caplog.at_level(logging.INFO, logger="voicemode.voice_barge"):
+        cap.close()
+    (line,) = [r.getMessage() for r in caplog.records if r.getMessage().startswith("vp channel probe:")]
+    assert "4800 frames" in line and "0 -60.0 dBFS" in line and "1 -20.0 dBFS" in line and "2 0.0 dBFS" in line
+
+
+def test_no_probe_line_by_default(av, caplog):
+    fake = av()
+    cap = vb.VoiceProcessingCapture()
+    fake.deliver(nine_channels(np.zeros(4800, np.float32)))
+    with caplog.at_level(logging.INFO, logger="voicemode.voice_barge"):
+        cap.close()
+    assert not [r for r in caplog.records if "probe" in r.getMessage()]
+
+
+def test_open_capture_passes_the_probe_setting(monkeypatch):
+    o = Opener(monkeypatch, route="speakers", vp=True)
+    cap = vb.open_capture("sounddevice", "", platform="darwin", echo="auto", route=lambda: "speakers",
+                          vp_available=lambda: True, vp_probe=True)
+    assert cap.kind == "voice-processing"
+    made = o.made[-1]
+    assert made.kw == {"probe": True}
+
+
+# --- voicemode-switch barge status on a Mac (M1) ----------------------------------
+
+SWITCH = MODULE.parent.parent / "voicemode-switch"
+
+
+def _switch_status(tmp_path, uname):
+    import os
+    import subprocess
+    root, home, bin_dir, scratch = (tmp_path / n for n in ("app", "home", "bin", "scratch"))
+    for d in (root / ".venv/bin", home / ".voicemode", bin_dir, scratch):
+        d.mkdir(parents=True, exist_ok=True)
+    script = root / "voicemode-switch"
+    script.write_text(SWITCH.read_text().replace("/tmp/", f"{scratch}/"))
+    script.chmod(0o755)
+    py_log = scratch / "python.log"
+    py = root / ".venv/bin/python"
+    py.write_text("#!/bin/bash\n"
+                  f'echo "$@" >> "{py_log}"\n'
+                  'if [ "$*" = "-m voice_mode.voice_barge status" ]; then\n'
+                  '  echo on; echo "route: speakers, capture: voice-processing"; fi\n')
+    py.chmod(0o755)
+    (bin_dir / "uname").write_text(f"#!/bin/bash\necho {uname}\n")
+    (bin_dir / "uname").chmod(0o755)
+    (home / ".voicemode/voicemode.env").write_text("VOICEMODE_VOICE_BARGE=true\n")
+    env = {**os.environ, "HOME": str(home), "PATH": f"{bin_dir}:{os.environ['PATH']}"}
+    done = subprocess.run([str(script), "barge", "status"], env=env, capture_output=True,
+                          text=True, timeout=30)
+    return done, (py_log.read_text() if py_log.exists() else "")
+
+
+def test_switch_barge_status_on_a_mac_shows_the_route_line(tmp_path):
+    done, calls = _switch_status(tmp_path, "Darwin")
+    assert done.returncode == 0, done.stderr
+    assert "route: speakers, capture: voice-processing" in done.stdout
+    assert done.stdout.count("route:") == 1 and "\non\n" not in "\n" + done.stdout   # only line 2
+
+
+def test_switch_barge_status_elsewhere_has_no_route_line(tmp_path):
+    done, calls = _switch_status(tmp_path, "Linux")
+    assert done.returncode == 0, done.stderr
+    assert "route:" not in done.stdout and "voice_barge status" not in calls

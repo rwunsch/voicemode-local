@@ -443,6 +443,11 @@ cmd_barge() {
             else
                 echo "Trigger: not running"
             fi
+            # macOS: the output route and the mic it gets (echo cancellation on the speakers).
+            # The module prints it as its second line; the first (on/off) is shown above.
+            if [ "$(uname -s)" = "Darwin" ]; then
+                "$VENV_PY" -m voice_mode.voice_barge status 2>/dev/null | sed -n '2,$p'
+            fi
             ;;
         *) echo "usage: voicemode-switch barge [on|off|status]"; return 2 ;;
     esac

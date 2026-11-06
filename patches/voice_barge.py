@@ -457,25 +457,41 @@ class _QueuedWindows:
         return raw.astype(np.float32) / 32768.0
 
 
+_DUCKING_LOGGED: set = set()
+
+
 class VoiceProcessingCapture(_QueuedWindows):
     """macOS: the default mic through AVAudioEngine with voice processing (echo
     cancellation) on and other-audio ducking at its minimum. Same contract as
     SoundDeviceCapture. Ignores VOICEMODE_VOICE_BARGE_DEVICE: voice processing takes
-    the system's default input."""
+    the system's default input.
 
-    def __init__(self):
+    ``probe`` (VOICEMODE_VOICE_BARGE_VP_CHANNEL_PROBE=1) logs every tap channel's level
+    at close, to settle which channel is the processed one (VP_CHANNEL)."""
+
+    def __init__(self, probe: bool = False):
         import AVFoundation
         self._init_queue()
+        self._tapped = False
+        self._tap_failures = 0
+        self._probe = probe
+        self._probe_sumsq = None
+        self._probe_frames = 0
+        self._channels = 1
         self._engine = AVFoundation.AVAudioEngine.alloc().init()
         self._input = self._engine.inputNode()
-        self._tapped = False
         try:
             if not _ok(_call_with_error(self._input.setVoiceProcessingEnabled_error_, True)):
                 raise RuntimeError("macOS refused to turn voice processing on")
             try:
                 self._input.setVoiceProcessingOtherAudioDuckingConfiguration_(VP_DUCKING_MINIMUM)
-            except AttributeError:   # before macOS 14: default ducking, see the docs
-                logger.info("voice processing: other-audio ducking not settable here (macOS < 14)")
+            except (AttributeError, TypeError) as e:
+                # AttributeError: before macOS 14. TypeError: pyobjc would not convert the
+                # struct. Either way macOS's default ducking applies; voice processing stays on.
+                if not _DUCKING_LOGGED:
+                    _DUCKING_LOGGED.add(True)
+                    logger.info("voice processing: other-audio ducking not settable (%s: %s); "
+                                "default ducking applies", type(e).__name__, e)
             fmt = self._input.outputFormatForBus_(0)
             self._channels = int(fmt.channelCount())
             self._resampler = _Resampler(float(fmt.sampleRate()))
@@ -491,18 +507,55 @@ class VoiceProcessingCapture(_QueuedWindows):
     def _on_buffer(self, buffer, when):
         try:
             mono = _channel_samples(buffer, VP_CHANNEL if self._channels > VP_CHANNEL else 0)
+            if self._probe:
+                self._probe_add(buffer)
             out = self._resampler.process(mono)
             self._queue.put((np.clip(out, -1.0, 1.0) * 32767).astype(np.int16))
         except Exception:  # noqa: BLE001 - never raise into CoreAudio's thread
-            logger.exception("voice processing tap failed")
+            self._tap_failures += 1
+            if self._tap_failures == 1:
+                logger.exception("voice processing tap failed (further failures are counted, "
+                                 "reported at close)")
+
+    def _probe_add(self, buffer) -> None:
+        sums = np.array([float(np.sum(np.square(_channel_samples(buffer, c).astype(np.float64))))
+                         for c in range(self._channels)])
+        self._probe_sumsq = sums if self._probe_sumsq is None else self._probe_sumsq + sums
+        self._probe_frames += int(buffer.frameLength())
 
     def close(self) -> None:
         try:
             self._engine.stop()
         finally:
+            try:  # best effort: hand the audio unit back without echo processing
+                _call_with_error(self._input.setVoiceProcessingEnabled_error_, False)
+            except Exception:  # noqa: BLE001
+                pass
             if self._tapped:
                 self._tapped = False
                 self._input.removeTapOnBus_(0)
+            if self._tap_failures:
+                logger.warning("voice processing tap failed %d times in this capture", self._tap_failures)
+            if self._probe and self._probe_frames:
+                levels = 10 * np.log10(self._probe_sumsq / self._probe_frames + 1e-18)
+                logger.info("vp channel probe: %d frames, rms per channel: %s", self._probe_frames,
+                            ", ".join(f"{c} {db:.1f} dBFS" for c, db in enumerate(levels)))
+
+
+class RefusedCapture:
+    """No mic for this stretch (macOS speakers without echo cancellation). Carries the
+    reason for the stretch line; run() waits the stretch out."""
+
+    refused = True
+
+    def __init__(self, note: str):
+        self.stretch_note = note
+
+    def read_window(self):
+        return None
+
+    def close(self) -> None:
+        pass
 
 
 class _RefusalLog:
@@ -538,37 +591,94 @@ def _plain_capture(backend: str, device: str):
     return SoundDeviceCapture(device)
 
 
+VP_FAILED_NOTE = "refused (echo cancellation failed to start)"
+NO_AVFOUNDATION_NOTE = "refused (pyobjc-framework-AVFoundation missing)"
+_VP_FAILED: dict = {}   # route -> reason, for the current route only
+
+
+def _vp_failure_path() -> Path:
+    return voicemode_base() / "barge_vp_failed.json"
+
+
+def _record_vp_failure(route: str, reason: str) -> None:
+    """Remember for this process and tell `status` (another process) through a file."""
+    import json
+    _VP_FAILED.clear()
+    _VP_FAILED[route] = reason
+    try:
+        path = _vp_failure_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = Path(f"{path}.tmp")
+        tmp.write_text(json.dumps({"route": route, "reason": reason, "at": time.time()}))
+        os.replace(tmp, path)
+    except OSError as e:
+        logger.debug("could not record the voice-processing failure: %s", e)
+
+
+def _clear_vp_failure() -> None:
+    _VP_FAILED.clear()
+    try:
+        _vp_failure_path().unlink()
+    except OSError:
+        pass
+
+
+def _vp_failed_on(route: str) -> bool:
+    """Did the trigger record that voice processing failed to start on this route?"""
+    import json
+    try:
+        return json.loads(_vp_failure_path().read_text()).get("route") == route
+    except (OSError, ValueError, AttributeError):
+        return False
+
+
+def _label(choice: str, backend) -> str:
+    """The capture name used in both the stretch line and status."""
+    return (backend or "sounddevice") if choice == "sounddevice" else choice
+
+
 def mac_capture_choice(echo: str):
-    """(route, capture name) as this stretch would choose them; for status."""
+    """(route, capture label) as the trigger's next stretch would choose them; for status."""
     route = output_route()
-    return route, choose_capture(route, echo, voice_processing_available())
+    choice = choose_capture(route, echo, voice_processing_available())
+    if choice == "voice-processing" and _vp_failed_on(route):
+        return route, VP_FAILED_NOTE
+    if choice == "refused":
+        return route, "refused"
+    return route, _label(choice, capture_backend())
 
 
 def open_capture(backend: str, device: str, platform=None, echo: str = "auto",
-                 route=None, vp_available=None):
+                 route=None, vp_available=None, vp_probe: bool = False):
     """The mic for one stretch of speech, by the backend capture_backend() chose.
 
     On macOS the output route decides (choose_capture): plain capture, voice
-    processing, or None, meaning refused: no mic this stretch. The capture then
-    carries ``stretch_note`` for the stretch line. Elsewhere: as before."""
+    processing, or a RefusedCapture: no mic this stretch. The capture carries
+    ``stretch_note`` for the stretch line. Elsewhere: as before."""
     if (platform or _platform()) != "darwin":
         return _plain_capture(backend, device)
     where = (route or output_route)()
+    if where not in _VP_FAILED:
+        _VP_FAILED.clear()   # route changed: voice processing gets another try
     _REFUSALS.seen(where)
     choice = choose_capture(where, echo, (vp_available or voice_processing_available)())
     if choice == "refused":
         _REFUSALS.refuse(REFUSE_ECHO_ON if echo == "on" and where != "speakers" else REFUSE_NO_AVFOUNDATION)
-        return None
+        return RefusedCapture(f"route={where}, capture={NO_AVFOUNDATION_NOTE}")
     if choice == "voice-processing":
+        if where in _VP_FAILED:
+            return RefusedCapture(f"route={where}, capture={VP_FAILED_NOTE}")
         try:
-            capture = VoiceProcessingCapture()
+            capture = VoiceProcessingCapture(probe=vp_probe)
         except Exception as e:  # noqa: BLE001 - never fall back to plain capture on the speakers
+            _record_vp_failure(where, str(e))
             _REFUSALS.refuse(f"barge: echo cancellation did not start ({e}); not opening the mic")
-            return None
+            return RefusedCapture(f"route={where}, capture={VP_FAILED_NOTE}")
+        if _VP_FAILED or _vp_failure_path().exists():
+            _clear_vp_failure()
     else:
         capture = _plain_capture(backend, device)
-        choice = backend  # plain capture is parec where a Mac has it, else sounddevice
-    capture.stretch_note = f"route={where}, capture={choice}"
+    capture.stretch_note = f"route={where}, capture={_label(choice, backend)}"
     return capture
 
 
@@ -687,25 +797,32 @@ def run(poll_speaking, open_capture, vad, detector, send_barge, sleep=time.sleep
 
         detector.reset()
         vad.reset()
+        asked_at = stretch_clock()
         capture = open_capture()
-        if capture is None:  # refused (macOS speakers without echo cancellation): wait this one out
+        if capture is None or getattr(capture, "refused", False):
+            # refused (macOS speakers without echo cancellation): wait this one out
             while True:
                 speaking = poll_speaking()
-                if speaking is None:
-                    return
-                if not speaking:
+                if speaking is None or not speaking:
                     break
                 sleep(idle_poll_s)
+            if capture is not None:
+                logger.info("%s", StretchStats().line(stretch_clock() - asked_at, False, capture.stretch_note))
+            if speaking is None:
+                return
             continue
         fired = False
         count = 0
         recent = deque(maxlen=preroll_windows)
         stats = StretchStats()
         opened_at = stretch_clock()
+        first_window_at = None
         try:
             while True:
                 window = capture.read_window()
                 count += 1
+                if window is not None and first_window_at is None:
+                    first_window_at = stretch_clock()
                 if count % poll_every_windows == 0:
                     speaking = poll_speaking()
                     if speaking is None:
@@ -733,8 +850,12 @@ def run(poll_speaking, open_capture, vad, detector, send_barge, sleep=time.sleep
                     break
         finally:
             try:
-                logger.info("%s", stats.line(stretch_clock() - opened_at, fired,
-                                             getattr(capture, "stretch_note", None)))
+                note = getattr(capture, "stretch_note", None)
+                if note:  # macOS: how long until the mic (voice processing) gave audio
+                    first = ("none" if first_window_at is None
+                             else f"{round((first_window_at - asked_at) * 1000)} ms")
+                    note = f"first_window {first}, {note}"
+                logger.info("%s", stats.line(stretch_clock() - opened_at, fired, note))
             finally:
                 capture.close()
 
@@ -818,7 +939,9 @@ def main() -> int:
             return 1
 
     echo = echo_mode(settings.get(ECHO_SETTING))
+    vp_probe = settings.get("VOICEMODE_VOICE_BARGE_VP_CHANNEL_PROBE", "").strip().strip('"').lower() in ("1", "true")
     if _platform() == "darwin":
+        _clear_vp_failure()  # a failure recorded by an earlier trigger no longer holds
         logger.info("macOS: %s=%s, echo cancellation (AVFoundation) %s, route now %s",
                     ECHO_SETTING, echo, "available" if voice_processing_available() else "missing",
                     output_route())
@@ -831,7 +954,7 @@ def main() -> int:
                 gate_db, need, device, backend, path)
     run(
         poll_speaking=lambda: None if stop.is_set() else is_speaking(path),
-        open_capture=lambda: open_capture(backend, device, echo=echo),
+        open_capture=lambda: open_capture(backend, device, echo=echo, vp_probe=vp_probe),
         vad=SileroVad(model),
         detector=BargeDetector(gate_db, need),
         send_barge=lambda: send_barge_in(path),
