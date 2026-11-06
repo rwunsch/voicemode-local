@@ -37,6 +37,7 @@ import subprocess
 import shutil
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -821,6 +822,63 @@ def barge_command(switch=None):
     if not switch.exists():
         return None, f"voicemode-switch not found at {switch}"
     return [str(switch), "barge"], None
+
+
+BARGE_PYTHON_SETTING = "VOICEMODE_BARGE_PYTHON"
+BARGE_PROBE_TIMEOUT = 10.0
+_BARGE_PROBE: dict = {"result": None, "thread": None, "started": False}
+_BARGE_PROBE_LOCK = threading.Lock()
+
+
+def _python_setting_came_from_a_file() -> bool:
+    """Same reasoning as barge_command: a model can write voicemode.env, so an
+    interpreter named there is never trusted."""
+    return any(BARGE_PYTHON_SETTING in _read_env_path(f) for f in _env_files_upstream_loads())
+
+
+def barge_interpreter() -> str | None:
+    """The python that runs the barge trigger: VOICEMODE_BARGE_PYTHON from the environment
+    only (refused when a voicemode.env holds it), else the venv beside voicemode-switch."""
+    raw = (os.environ.get(BARGE_PYTHON_SETTING) or "").strip()
+    if raw and not _python_setting_came_from_a_file():
+        return raw if Path(raw).exists() else None
+    venv = default_switch().parent / ".venv"
+    exe = venv / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    return str(exe) if exe.exists() else None
+
+
+def _probe_barge() -> None:
+    result = False
+    try:
+        py = barge_interpreter()
+        if py:
+            out = subprocess.run([py, "-m", "voice_mode.voice_barge", "status"],
+                                 capture_output=True, text=True, timeout=BARGE_PROBE_TIMEOUT)
+            line = (out.stdout or "").strip().splitlines()
+            result = bool(line) and not line[0].startswith("cannot run")
+    except Exception:  # noqa: BLE001 - any failure means we cannot say the mic is reachable
+        result = False
+    _BARGE_PROBE["result"] = result
+
+
+def _barge_probe_reset() -> None:
+    with _BARGE_PROBE_LOCK:
+        _BARGE_PROBE.update(result=None, thread=None, started=False)
+
+
+def barge_available() -> bool:
+    """Can the interpreter that runs the trigger hear the mic? In-process capture_backend()
+    first; otherwise ask the trigger's python once, in a thread, and cache the answer for
+    the process lifetime. Unknown-yet counts as unavailable."""
+    if capture_backend() is not None:
+        return True
+    with _BARGE_PROBE_LOCK:
+        if not _BARGE_PROBE["started"]:
+            _BARGE_PROBE["started"] = True
+            t = threading.Thread(target=_probe_barge, daemon=True)
+            _BARGE_PROBE["thread"] = t
+            t.start()
+    return _BARGE_PROBE["result"] is True
 
 
 def barge_control(action: str, switch=None) -> str:

@@ -397,12 +397,18 @@ stop_voice_barge() {
     rm -f "$pidfile"
 }
 
+# sha256 of a file: sha256sum, else shasum -a 256 (older macOS has only the latter)
+sha256_of() {
+    if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | cut -d' ' -f1
+    else shasum -a 256 "$1" | cut -d' ' -f1; fi
+}
+
 fetch_silero_model() {
-    [ -f "$SILERO_MODEL" ] && [ "$(sha256sum "$SILERO_MODEL" | cut -d' ' -f1)" = "$SILERO_SHA256" ] && return 0
+    [ -f "$SILERO_MODEL" ] && [ "$(sha256_of "$SILERO_MODEL")" = "$SILERO_SHA256" ] && return 0
     mkdir -p "$(dirname "$SILERO_MODEL")"
     local tmp="$SILERO_MODEL.download"
     curl -fsSL --max-time 120 -o "$tmp" "$SILERO_URL" || { rm -f "$tmp"; fail "Could not download the Silero model"; return 1; }
-    if [ "$(sha256sum "$tmp" | cut -d' ' -f1)" != "$SILERO_SHA256" ]; then
+    if [ "$(sha256_of "$tmp")" != "$SILERO_SHA256" ]; then
         rm -f "$tmp"; fail "Silero model failed its checksum; not installed"; return 1
     fi
     mv -f "$tmp" "$SILERO_MODEL"

@@ -223,7 +223,7 @@ def _remember_floor(ctx, conch):
 def gather(ctx) -> dict:
     sessions = st.live_sessions(ctx.base)
     conch = read_conch(ctx.home)
-    barge = {"enabled": _barge_enabled(ctx.home), "available": shutil.which("parec") is not None,
+    barge = {"enabled": _barge_enabled(ctx.home), "available": st.barge_available(),
              "count": st.interruptions_since(_midnight(), ctx.base)}
     return build_snapshot(
         st._status(ctx.sock), sessions, conch, paused=st.is_paused(ctx.base),

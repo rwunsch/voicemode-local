@@ -339,10 +339,12 @@ def test_save_ui_round_trips_into_snapshot(ctx):
 
 # -- barge ------------------------------------------------------------------
 
-def test_barge_available_follows_parec(ctx, monkeypatch):
-    monkeypatch.setattr(shutil, "which", lambda n: None)
+def test_barge_available_follows_capture_backend(ctx, monkeypatch):
+    st._barge_probe_reset()
+    monkeypatch.setattr(st, "capture_backend", lambda: None)
+    monkeypatch.setattr(st, "barge_interpreter", lambda: None)
     assert vp.gather(ctx)["barge"]["available"] is False
-    monkeypatch.setattr(shutil, "which", lambda n: "/usr/bin/parec")
+    monkeypatch.setattr(st, "capture_backend", lambda: "parec")
     assert vp.gather(ctx)["barge"]["available"] is True
 
 

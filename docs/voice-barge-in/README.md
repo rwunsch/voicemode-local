@@ -18,8 +18,11 @@ For a program that needs the state without a shell (FELIX reads it at voice star
 `python -m voice_mode.voice_barge status` prints one line, `on`, `off` or
 `cannot run: <reason>`, and exits 0. It reads `VOICEMODE_VOICE_BARGE` from
 `~/.voicemode/voicemode.env` (upstream's home, whatever `VOICEMODE_BASE_DIR` says), and
-from the environment when the file does not set it. Today it says `cannot run` wherever
-`parec` is missing, which includes native Windows and macOS.
+from the environment when the file does not set it. It says `cannot run` only where the
+interpreter has no mic reader: `parec` (Linux/WSL) or `sounddevice` (Windows and macOS).
+The pill shows its "Interrupt by voice" switch when the in-process check passes, else when
+the trigger's own python (`VOICEMODE_BARGE_PYTHON`, environment only, else `.venv` beside
+`voicemode-switch`) answers `on` or `off` to this command; it asks once per backend run.
 
 ## How it works
 
@@ -64,5 +67,8 @@ Silero alone is not enough on speakers: it correctly calls the assistant's echo 
 - **Heavy load** was present in the headset and soft runs. Transcription slowed (see
   `VOICEMODE_STT_TIMEOUT_LOCAL`). Its effect on cut timing has not been measured.
 - **Buffered and `turns[]` players only.** With `VOICEMODE_STREAMING_ENABLED=true` the
-  trigger stays inert. Linux/WSL only: it needs `parec`.
+  trigger stays inert. Needs a mic reader: `parec` on
+  Linux/WSL, `sounddevice` on Windows and macOS. Status: macOS capture was validated by
+  FELIX-MAC (9 runs, one machine); macOS echo has NOT been measured; the Windows gate has
+  not been measured yet (reported or untested, not validated here).
 - A 1 s pause ends the turn, as in any listen.
