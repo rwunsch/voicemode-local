@@ -12,6 +12,11 @@ voicemode-switch barge status
 From inside Claude Code, Copilot or any MCP client, use the `voice_barge` tool with `on`,
 `off` or `status`. `ensure` adds it to `VOICEMODE_TOOLS_ENABLED` if you have a whitelist.
 
+`barge on` also sets `VOICEMODE_CONTROL_CHANNEL_ENABLED=true`: the trigger's `barge_in`
+travels over the control channel, and with it off (upstream's default) barge-in is inert.
+Validated on native Windows, 2026-11-06: 0 cuts without the channel, 2 of 2 with it. `barge off`
+leaves the channel on, because the pill and push-to-talk use it. `barge status` shows its state.
+
 Voice-mode processes started before the patch ignore it, so run `/mcp` to reconnect.
 
 For a program that needs the state without a shell (FELIX reads it at voice start):
@@ -43,7 +48,11 @@ Silero alone is not enough on speakers: it correctly calls the assistant's echo 
 |---|---|---|
 | `VOICEMODE_VOICE_BARGE_GATE_DB` | -40 | Raise it (-35) if speech cuts itself off on speakers |
 | `VOICEMODE_VOICE_BARGE_MIN_SPEECH_MS` | 192 | 96 ms gave false triggers from echo at lower gates |
-| `VOICEMODE_VOICE_BARGE_DEVICE` | `@DEFAULT_SOURCE@` | PulseAudio source |
+| `VOICEMODE_VOICE_BARGE_DEVICE` | `@DEFAULT_SOURCE@` | PulseAudio source. On Windows and macOS a device number, or part of a device name. A name that matches several (one per host API) picks the match on the default input's host API, else the first; the choice is logged once. An unknown name is one error line and a non-zero exit at start |
+
+Each speaking stretch (mic open while the assistant speaks) logs one INFO line when it
+closes, in `/tmp/voice-barge.log` on Linux and WSL: `stretch: 4.2 s, windows 120, max -41.3 dBFS,
+p90 -52.0 dBFS, fired no`. That is the echo level to size the gate against. No audio is saved.
 
 ## Measurements (2026-11-04, one person, WSLg, n=1 per row unless stated)
 
@@ -66,9 +75,24 @@ Silero alone is not enough on speakers: it correctly calls the assistant's echo 
   was missed under load, and sits at or below the gate.
 - **Heavy load** was present in the headset and soft runs. Transcription slowed (see
   `VOICEMODE_STT_TIMEOUT_LOCAL`). Its effect on cut timing has not been measured.
-- **Buffered and `turns[]` players only.** With `VOICEMODE_STREAMING_ENABLED=true` the
-  trigger stays inert. Needs a mic reader: `parec` on
-  Linux/WSL, `sounddevice` on Windows and macOS. Status: macOS capture was validated by
-  FELIX-MAC (9 runs, one machine); macOS echo has NOT been measured; the Windows gate has
-  not been measured yet (reported or untested, not validated here).
+- **Streaming.** An earlier version of this page said the trigger stays inert with
+  `VOICEMODE_STREAMING_ENABLED=true`. That is contradicted: on macOS with the setting unset
+  (default true) barge cut playback 3 times (FELIX-MAC, reported 2026-11-06, not validated
+  here: 2 self-cuts on speakers, 1 talk-over on a Bluetooth headset). WSL with streaming has
+  not been re-tested, so treat the old claim as unproven there rather than as fact.
+- **Needs the control channel** (see above); native Windows and macOS need it set explicitly.
+- **Speakers need an echo-cancelled mic; headsets work.** Results by setup, 2026-11-06:
+
+  | Setup | Result | Status |
+  |---|---|---|
+  | Windows, Jabra headset | 2 of 2 cuts at -17 / -20 dBFS | validated, n=2 |
+  | Windows, laptop speakers + Intel mic array | 0 of 2 self-cuts; 1 of 1 talk-over at -35.4 dBFS | validated, n=2 and n=1 |
+  | Windows, laptop speakers + Aukey (no driver processing) | 3 of 3 self-cuts at -13.8 / -31.9 / -33.0 dBFS | validated, n=3 |
+  | Mac, built-in speakers | 2 of 2 self-cuts | reported (FELIX-MAC), n=2 |
+  | Mac, Bluetooth headset | 0 of 2 self-cuts; 1 of 1 talk-over at -18.1 dBFS | reported (FELIX-MAC), n=3 |
+
+  A mic with no echo cancellation (the Aukey) hears the speakers at the level of speech, so
+  no gate separates them. Use headphones, or a mic whose driver cancels echo.
+- Needs a mic reader: `parec` on Linux/WSL, `sounddevice` on Windows and macOS. macOS capture
+  was validated by FELIX-MAC (9 runs, one machine). The WSL gate numbers above are from one person.
 - A 1 s pause ends the turn, as in any listen.
