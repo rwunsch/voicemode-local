@@ -200,6 +200,19 @@ def setting(name: str, default=None, home=None):
     return _env_view(home).get(name, default)
 
 
+FALLBACK_VOICE = "am_puck"
+
+
+def default_voice(home=None) -> str:
+    """The voice a session gets with no choice: first of VOICEMODE_VOICES, else
+    VOICEMODE_TTS_VOICE, else am_puck."""
+    for name in ("VOICEMODE_VOICES", "VOICEMODE_TTS_VOICE"):
+        for item in (setting(name, "", home) or "").split(","):
+            if item.strip():
+                return item.strip()
+    return FALLBACK_VOICE
+
+
 def file_first_setting(name: str, default=None, home=None):
     """For a setting the pill itself changes by writing voicemode.env: the file wins when
     it has the key, and the environment is only the default."""

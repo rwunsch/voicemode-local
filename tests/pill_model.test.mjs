@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import model from "../ui/pill/model.js";
-const { viewModel, VOICES, LANGUAGES, nextHidden } = model;
+const { viewModel, VOICES, GERMAN_VOICES, LANGUAGES, nextHidden } = model;
 
 const snap = (o = {}) => ({
   visible: true, phase: "speaking", floor: { pid: 1, label: "a" },
@@ -93,7 +93,7 @@ test("dot and visibility come from ui and snapshot", () => {
 });
 
 test("pickers expose constant lists and current value", () => {
-  assert.ok(VOICES.includes("dm_martin") && VOICES.includes("p_de_thorsten") && VOICES.includes("af_sky"));
+  assert.ok(VOICES.includes("af_sky") && !VOICES.includes("dm_martin") && !VOICES.includes("p_de_thorsten"));
   assert.deepEqual(LANGUAGES, ["English", "German"]);
   assert.equal(viewModel(snap(), 0, 0).voice, "af_sky");
 });
@@ -115,10 +115,30 @@ test("pickers enabled only with a floor", () => {
   assert.equal(viewModel(snap({ floor: null, voice: null }), 0, 0).pickersEnabled, false);
 });
 
-test("unknown voice and language stay null", () => {
+test("unknown voice stays null; the language falls back to English", () => {
   const vm = viewModel(snap({ voice: null, language: null }), 0, 0);
   assert.equal(vm.voice, null);
-  assert.equal(vm.language, null);
+  assert.equal(vm.language, "English");
+});
+
+test("language is derived from a German voice when the snapshot has none", () => {
+  assert.equal(viewModel(snap({ voice: "dm_martin", language: null }), 0, 0).language, "German");
+  assert.equal(viewModel(snap({ voice: "p_de_eva", language: null }), 0, 0).language, "German");
+  assert.equal(viewModel(snap({ voice: "am_puck", language: null }), 0, 0).language, "English");
+  assert.equal(viewModel(snap({ voice: "dm_martin", language: "English" }), 0, 0).language, "English");
+});
+
+test("the voice list follows the language", () => {
+  const en = viewModel(snap({ voice: "af_sky", language: "English" }), 0, 0).voices;
+  assert.deepEqual(en, VOICES);
+  assert.ok(!en.some((v) => v.startsWith("dm_") || v.startsWith("p_de_")));
+  const de = viewModel(snap({ voice: "dm_martin", language: "German" }), 0, 0).voices;
+  assert.deepEqual(de, ["dm_martin", "p_de_thorsten", "p_de_eva"]);
+  assert.deepEqual(GERMAN_VOICES, de);
+  // a current voice outside the list is still shown
+  assert.deepEqual(viewModel(snap({ voice: "af_sky", language: "German" }), 0, 0).voices, [...de, "af_sky"]);
+  // empty with no floor and no voice: still the English list, never an empty select
+  assert.deepEqual(viewModel(snap({ floor: null, voice: null, language: null }), 0, 0).voices, VOICES);
 });
 
 test("minimize and dismiss stay enabled when connected too", () => {

@@ -146,8 +146,24 @@ def _floor(sessions, conch, last_floor):
     return None, False
 
 
+GERMAN_PREFIXES = ("dm_", "p_de_")   # the German voices: Kokoro dm_martin, Piper p_de_*
+GERMAN_VOICE = "dm_martin"
+
+
+def voice_language(voice) -> str:
+    return "German" if isinstance(voice, str) and voice.startswith(GERMAN_PREFIXES) else "English"
+
+
+def _floor_voice(floor, is_holder, sessions, conch, overrides):
+    ov = overrides.get(floor["pid"], {})
+    own = next((s for s in sessions if s["pid"] == floor["pid"]), {})
+    held = (conch.get("holder") or {}).get("voice") if is_holder else None
+    return ov.get("voice") or own.get("voice") or held
+
+
 def build_snapshot(status, sessions, conch, *, paused=False, ptt=False, dismissed=None,
-                   last_floor=None, overrides=None, barge=None, ui=None, platform=None, beeps=False) -> dict:
+                   last_floor=None, overrides=None, barge=None, ui=None, platform=None, beeps=False,
+                   default_voice=st.FALLBACK_VOICE) -> dict:
     overrides = overrides or {}
     floor, is_holder = _floor(sessions, conch, last_floor)
     new = session_keys(sessions) - (dismissed or frozenset())
@@ -177,11 +193,10 @@ def build_snapshot(status, sessions, conch, *, paused=False, ptt=False, dismisse
         rows.append({"pid": pid, "label": s.get("label"), "state": state, "position": pos})
     voice = language = None
     if floor:
-        ov = overrides.get(floor["pid"], {})
-        own = next((s for s in sessions if s["pid"] == floor["pid"]), {})
-        held_voice = (conch.get("holder") or {}).get("voice") if is_holder else None
-        voice = ov.get("voice") or own.get("voice") or held_voice
-        language = ov.get("language")
+        voice = _floor_voice(floor, is_holder, sessions, conch, overrides)
+        language = overrides.get(floor["pid"], {}).get("language")
+    voice = voice or default_voice          # nobody has chosen: the configured default
+    language = language or voice_language(voice)
     return {"visible": visible, "phase": phase, "floor": floor, "sessions": rows,
             "voice": voice, "language": language,
             "barge": barge or {"enabled": False, "available": False, "count": 0},
@@ -230,7 +245,8 @@ def gather(ctx) -> dict:
         ptt=st.ptt_recent(base=ctx.base), dismissed=ctx.dismissed,
         last_floor=_remember_floor(ctx, conch),
         overrides={s["pid"]: st.get_override(s["pid"], ctx.base) for s in sessions},
-        barge=barge, ui=st.load_ui(ctx.base), beeps=_beeps_on(ctx))
+        barge=barge, ui=st.load_ui(ctx.base), beeps=_beeps_on(ctx),
+        default_voice=st.default_voice(ctx.home))
 
 
 # -- commands ----------------------------------------------------------------
@@ -281,10 +297,20 @@ def handle_command(msg, ctx=None) -> None:
         st.set_beeps(msg["on"], ctx.base)
     elif cmd in ("set_voice", "set_language"):
         key = "voice" if cmd == "set_voice" else "language"
-        floor, _ = _floor(st.live_sessions(ctx.base), read_conch(ctx.home),
-                          st._read_json(ctx.base / "last_floor.json"))
+        sessions, conch = st.live_sessions(ctx.base), read_conch(ctx.home)
+        floor, is_holder = _floor(sessions, conch, st._read_json(ctx.base / "last_floor.json"))
         if floor and isinstance(msg.get(key), str):
-            _set_override(ctx, floor, **{key: msg[key]})
+            change = {key: msg[key]}
+            if key == "language" and msg[key] in ("English", "German"):
+                # A voice speaks only its own language: move the voice with the language.
+                cur = _floor_voice(floor, is_holder, sessions, conch,
+                                   {floor["pid"]: st.get_override(floor["pid"], ctx.base)}) \
+                    or st.default_voice(ctx.home)
+                if voice_language(cur) != msg[key]:
+                    default = st.default_voice(ctx.home)
+                    change["voice"] = (GERMAN_VOICE if msg[key] == "German" else
+                                       default if voice_language(default) == "English" else st.FALLBACK_VOICE)
+            _set_override(ctx, floor, **change)
     elif cmd == "save_ui" and isinstance(msg.get("ui"), dict):
         st.save_ui(msg["ui"], ctx.base)
 

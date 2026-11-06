@@ -187,7 +187,51 @@ def test_voice_and_language_come_from_floor_override():
     assert (s["voice"], s["language"]) == ("bm_george", "German")
     s = snap(sessions=[sess(10, voice="af_heart")],
              conch={"holder": {"pid": 10, "label": "a", "voice": None}, "waiters": []})
-    assert (s["voice"], s["language"]) == ("af_heart", None)
+    assert (s["voice"], s["language"]) == ("af_heart", "English")  # derived from the voice
+
+
+def test_language_is_derived_from_the_voice_when_no_override():
+    for voice, lang in (("dm_martin", "German"), ("p_de_thorsten", "German"), ("p_de_eva", "German"),
+                        ("am_puck", "English"), ("bf_emma", "English"), ("weird", "English")):
+        s = snap(sessions=[sess(10, voice=voice)],
+                 conch={"holder": {"pid": 10, "label": "a", "voice": None}, "waiters": []})
+        assert s["language"] == lang, voice
+
+
+def test_override_language_beats_the_derived_one():
+    s = snap(sessions=[sess(10, voice="af_heart")],
+             conch={"holder": {"pid": 10, "label": "a", "voice": None}, "waiters": []},
+             overrides={10: {"language": "German"}})
+    assert s["language"] == "German"
+
+
+def test_no_floor_shows_the_default_voice_and_english():
+    s = snap(default_voice="am_puck")
+    assert (s["floor"], s["voice"], s["language"]) == (None, "am_puck", "English")
+    s = snap(default_voice="dm_martin")
+    assert (s["voice"], s["language"]) == ("dm_martin", "German")
+
+
+def test_floor_without_a_voice_falls_back_to_the_default_voice():
+    s = snap(sessions=[sess(10, voice=None)], last_floor={"pid": 10, "label": "a"}, default_voice="am_puck")
+    assert s["voice"] == "am_puck"
+
+
+def test_default_voice_reads_first_of_voices_then_tts_voice_then_am_puck(tmp_path, monkeypatch):
+    for k in ("VOICEMODE_VOICES", "VOICEMODE_TTS_VOICE"):
+        monkeypatch.delenv(k, raising=False)
+    assert st.default_voice(tmp_path) == "am_puck"
+    (tmp_path / "voicemode.env").write_text("VOICEMODE_TTS_VOICE=bf_emma\n")
+    assert st.default_voice(tmp_path) == "bf_emma"
+    (tmp_path / "voicemode.env").write_text("VOICEMODE_TTS_VOICE=bf_emma\nVOICEMODE_VOICES=am_adam, af_sky\n")
+    assert st.default_voice(tmp_path) == "am_adam"
+
+
+def test_gather_without_sessions_shows_the_configured_default(ctx):
+    ctx.home.mkdir(parents=True, exist_ok=True)
+    (ctx.home / "voicemode.env").write_text("VOICEMODE_VOICES=bm_george,af_sky\n")
+    s = vp.gather(ctx)
+    assert (s["voice"], s["language"]) == ("bm_george", "English")
 
 
 def test_snapshot_shape_and_json_serialisable():
@@ -324,12 +368,47 @@ def test_set_voice_and_language_apply_to_floor_only(ctx, child):
     two_sessions(ctx, child)
     vp.handle_command({"cmd": "set_voice", "voice": "bm_george"}, ctx)
     vp.handle_command({"cmd": "set_language", "language": "German"}, ctx)
-    assert st.get_override(child.pid, ctx.base) == {"voice": "bm_george", "language": "German"}
+    # German never keeps an English voice: the voice moves with the language
+    assert st.get_override(child.pid, ctx.base) == {"voice": "dm_martin", "language": "German"}
     assert st.get_override(os.getpid(), ctx.base) == {}
     s = vp.gather(ctx)
-    assert (s["voice"], s["language"]) == ("bm_george", "German")
+    assert (s["voice"], s["language"]) == ("dm_martin", "German")
     vp.handle_command({"cmd": "set_language", "language": ""}, ctx)
-    assert st.get_override(child.pid, ctx.base) == {"voice": "bm_george"}
+    assert st.get_override(child.pid, ctx.base) == {"voice": "dm_martin"}
+
+
+def test_set_language_keeps_a_voice_that_already_fits(ctx, child):
+    two_sessions(ctx, child)
+    vp.handle_command({"cmd": "set_voice", "voice": "p_de_eva"}, ctx)
+    vp.handle_command({"cmd": "set_language", "language": "German"}, ctx)
+    assert st.get_override(child.pid, ctx.base) == {"voice": "p_de_eva", "language": "German"}
+
+
+def test_set_language_english_sets_the_configured_default_voice(ctx, child, monkeypatch):
+    monkeypatch.delenv("VOICEMODE_VOICES", raising=False)
+    monkeypatch.delenv("VOICEMODE_TTS_VOICE", raising=False)
+    ctx.home.mkdir(parents=True, exist_ok=True)
+    (ctx.home / "voicemode.env").write_text("VOICEMODE_VOICES=bm_george,af_sky\n")
+    two_sessions(ctx, child)
+    vp.handle_command({"cmd": "set_voice", "voice": "dm_martin"}, ctx)
+    vp.handle_command({"cmd": "set_language", "language": "English"}, ctx)
+    assert st.get_override(child.pid, ctx.base) == {"voice": "bm_george", "language": "English"}
+
+
+def test_set_language_english_without_configuration_uses_am_puck(ctx, child, monkeypatch):
+    monkeypatch.delenv("VOICEMODE_VOICES", raising=False)
+    monkeypatch.delenv("VOICEMODE_TTS_VOICE", raising=False)
+    two_sessions(ctx, child)
+    vp.handle_command({"cmd": "set_voice", "voice": "p_de_thorsten"}, ctx)
+    vp.handle_command({"cmd": "set_language", "language": "English"}, ctx)
+    assert st.get_override(child.pid, ctx.base) == {"voice": "am_puck", "language": "English"}
+
+
+def test_set_language_english_keeps_an_english_voice(ctx, child):
+    two_sessions(ctx, child)
+    vp.handle_command({"cmd": "set_voice", "voice": "bf_emma"}, ctx)
+    vp.handle_command({"cmd": "set_language", "language": "English"}, ctx)
+    assert st.get_override(child.pid, ctx.base) == {"voice": "bf_emma", "language": "English"}
 
 
 def test_save_ui_round_trips_into_snapshot(ctx):

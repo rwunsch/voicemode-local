@@ -4,9 +4,10 @@
   var STALE_MS = 3000, MAX_ROWS = 10;
   var VOICES = ["af_sky", "af_bella", "af_heart", "af_jessica", "af_nicole", "af_nova", "af_sarah", "af_alloy",
     "am_adam", "am_echo", "am_eric", "am_michael", "am_liam", "am_puck", "am_fenrir",
-    "bf_alice", "bf_emma", "bf_lily", "bm_daniel", "bm_george", "bm_lewis",
-    "dm_martin", "p_de_thorsten"];
+    "bf_alice", "bf_emma", "bf_lily", "bm_daniel", "bm_george", "bm_lewis"];
+  var GERMAN_VOICES = ["dm_martin", "p_de_thorsten", "p_de_eva"];
   var LANGUAGES = ["English", "German"];
+  function languageOf(voice) { return voice && (voice.indexOf("dm_") === 0 || voice.indexOf("p_de_") === 0) ? "German" : "English"; }
   var PAUSE = "\u23F8\uFE0E", RESUME = "\u25B6\uFE0E";
   var LABELS = { speaking: "Speaking", listening: "Listening", working: "Between turns",
     idle: "Not in a voice turn", paused: "Paused", stopped: "Stopped", disconnected: "Disconnected" };
@@ -46,7 +47,9 @@
     }).map(function (x) { return x.r; });
     var waiting = (s.sessions || []).filter(function (r) { return r.state === "waiting"; }).length;
     var name = s.floor ? (s.floor.label || "") : "";
-    var voices = s.voice && VOICES.indexOf(s.voice) < 0 ? VOICES.concat([s.voice]) : VOICES;
+    var language = s.language || languageOf(s.voice);
+    var base = language === "German" ? GERMAN_VOICES : VOICES;
+    var voices = s.voice && base.indexOf(s.voice) < 0 ? base.concat([s.voice]) : base;
     var mode = ui.minimized ? "dot" : ui.docked ? (ui.tucked ? "tab" : ui.dockOpen ? "docked" : "rail") : ui.expanded ? "expanded" : "pill";
     return {
       connected: true, phase: phase, label: LABELS[phase] || LABELS.idle, mode: mode,
@@ -61,7 +64,7 @@
         return { name: r.label || "session " + r.pid, text: text, state: r.state };
       }),
       queueMore: rows.length > MAX_ROWS ? "+" + (rows.length - MAX_ROWS) + " more queued" : "",
-      voice: s.voice || null, language: s.language || null,
+      voice: s.voice || null, language: language,
       keys: keysFor(s.platform),
       barge: { visible: !!barge.available, on: !!barge.enabled, enabled: true,
         countText: count + (count === 1 ? " interruption today" : " interruptions today") },
@@ -80,7 +83,7 @@
     return !(snapshotVisible === true && (wasStale || prevVisible === false));
   }
 
-  var api = { nextHidden: nextHidden, viewModel: viewModel, VOICES: VOICES, LANGUAGES: LANGUAGES, STALE_MS: STALE_MS };
+  var api = { nextHidden: nextHidden, viewModel: viewModel, VOICES: VOICES, GERMAN_VOICES: GERMAN_VOICES, LANGUAGES: LANGUAGES, STALE_MS: STALE_MS };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   if (typeof window !== "undefined") window.PillModel = api;
 })();
