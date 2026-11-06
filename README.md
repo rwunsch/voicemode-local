@@ -67,7 +67,7 @@ The goal is for this list to get **shorter** over time.
 | **macOS (Apple Silicon)** | Partially tested | Native mode, no Docker: whisper.cpp (Metal) + Kokoro ONNX + Piper. Installer `./install-mac.sh` (not yet run on a Mac) or manual steps — see [macOS (native, no Docker)](#macos-native-no-docker); `install.sh` is apt-based and hands over to it on a Mac. Verified on macOS 26 / M2 Pro: services, TTS→STT round trip, MCP handshake. Live mic/speaker conversation verified 2026-10-19. Push-to-talk on Control-Option-Space verified 2026-10-20 (see below) |
 | **NixOS** | Untested | Docker works. System packages need a Nix derivation instead of `apt install` |
 | **Windows + WSL2 (Windows Claude Code)** | Tested | Windows Claude Code's MCP entry invokes `voice-mode` inside WSL via `wsl.exe`; audio routes through WSLg. Set up via `install.ps1`. Same containers + proxies are shared with WSL Claude Code. |
-| **Windows (native)** | In progress | Install scripts (`install.ps1`, `voicemode-services.ps1`) exist but voice-mode 8.6.1 has open Windows-side bugs (recording loop hangs, etc.). See [docs/windows-issues.md](docs/windows-issues.md). The wsl.exe bridge above is the recommended path until those land upstream. |
+| **Windows (native)** | In progress | `install.ps1 -Mode windows-native`: no WSL, no Docker, no admin. Install, services, the pill and interrupt by voice are tested on Windows; a full spoken conversation is not yet. See [docs/windows-native](docs/windows-native/README.md). The wsl.exe bridge above is the recommended path until then. |
 
 **Tested on:** Ubuntu 22.04 LTS under WSL2 (kernel 6.6.x), Windows 11 24H2.
 
@@ -191,9 +191,28 @@ cd C:\path\to\voicemode-local
 The installer offers three modes:
 - **wsl-mcp** (recommended) — voice-mode runs in WSL, invoked from Windows via `wsl.exe`. Audio via WSLg. No Windows venv needed.
 - **wsl-shared** — voice-mode runs natively on Windows, talks to WSL's whisper/piper proxies via localhost forwarding.
-- **windows-native** — everything on Windows, no WSL dependency.
+- **windows-native** — everything on Windows, no WSL dependency. See the next section.
 
-`wsl-shared` and `windows-native` currently hit voice-mode 8.6.1's Windows-side bugs (recording loop hang, etc.). Use `wsl-mcp` until those are fixed upstream — see [docs/windows-issues.md](docs/windows-issues.md) for the full list and patches.
+`wsl-shared` currently hits voice-mode's Windows-side bugs (recording loop hang, etc.). See [docs/windows-issues.md](docs/windows-issues.md) for the full list and patches. The two WSL modes need PowerShell 7 and Docker Desktop.
+
+### Windows (native, no WSL, no Docker)
+
+Needs Python 3.10 or newer and uv, both installed for your user only; no admin rights. Clone the repo to a Windows folder (not a `\\wsl` path), then:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File C:\git\voicemode-local-native\install.ps1 -Mode windows-native
+```
+
+It works in Windows PowerShell 5.1 and in PowerShell 7. It installs a private runtime into `%LOCALAPPDATA%\voicemode-local-native` (about 1 GB) and registers the `voicemode` MCP server for Claude Code. If uv is missing, it prints the command that installs it; `-InstallUv` runs that command for you. `-Pill` and `-Barge` switch the voice pill and interrupt by voice on; both are off by default. An existing `voicemode` entry is left alone unless you pass `-Force`.
+
+Switch the pill and interrupt by voice at any time, with no restart:
+
+```powershell
+& <python> C:\git\voicemode-local-native\scripts\windows\voicemode_native.py pill on    # off, status
+& <python> C:\git\voicemode-local-native\scripts\windows\voicemode_native.py barge on   # off, status
+```
+
+The installer's summary prints the exact `<python>`. The `voice_barge` tool and the pill's own switch use the same command. To remove it: `install.ps1 -Mode windows-native -Uninstall`, plus `-RemoveData` to delete the install folder. Details, measurements and what is not tested yet: [docs/windows-native](docs/windows-native/README.md). A full spoken conversation on native Windows is still unproven.
 
 ### macOS (native, no Docker)
 
@@ -434,7 +453,7 @@ VoiceMode Local can run three ways:
 |----------|-----------------|--------|
 | **WSL-only** | Everything (Claude Code, voice-mode, proxies, audio) inside WSL2. | Primary, fully supported. Install with `./install.sh` in WSL. |
 | **Cross-OS bridge** | Claude Code on **Windows**, but its MCP command is `wsl.exe … voicemode-mcp` — it runs the **WSL** voice-mode binary, sharing the WSL install, proxies, and queue. Audio via WSLg. | Supported and recommended for Windows users today. |
-| **Windows-native** | Everything on Windows, no WSL. | Work in progress — blocked by a sounddevice recording-loop hang (see `docs/windows-issues.md`). Use the bridge until resolved. |
+| **Windows-native** | Everything on Windows, no WSL, no Docker: `install.ps1 -Mode windows-native` (see [docs/windows-native](docs/windows-native/README.md)). | In progress: installs, starts and switches on Windows; a full spoken conversation is not proven yet. Use the bridge until it is. |
 
 The cross-OS bridge means a "Windows voice session" is really the WSL binary, so
 it automatically uses the same `voicemode.env`, the same proxies (auto-started by

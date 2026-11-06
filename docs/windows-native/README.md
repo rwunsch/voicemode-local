@@ -1,6 +1,7 @@
 # Native Windows runtime, speech services and launcher
 
-> **TL;DR:** `scripts/windows/voicemode_native.py` installs a private runtime under
+> **TL;DR:** `install.ps1 -Mode windows-native` sets it up and registers the MCP server.
+> `scripts/windows/voicemode_native.py` installs a private runtime under
 > `%LOCALAPPDATA%\voicemode-local-native`, starts loopback-only speech services on private
 > ports, and is the MCP command on native Windows (no WSL, no Docker). Tested on
 > Windows from install to stop, with no audio. A real spoken conversation is
@@ -8,7 +9,7 @@
 
 | Field        | Value |
 |--------------|-------|
-| Status       | In progress (tasks 4 and 6 of the native Windows plan done) |
+| Status       | In progress (tasks 4, 6 and 8 of the native Windows plan done) |
 | Created      | 2026-11-05 |
 | Last Updated | 2026-11-06 |
 | Project      | voicemode-local, branch feature/windows-native |
@@ -81,8 +82,8 @@ where it came from.
   PowerShell's `-File` binds a value that starts with `-` correctly (checked 2026-11-06,
   n=3 strings, one with quotes and a non-ASCII letter). Details in `docs/voice-pill/README.md`,
   section "Windows native".
-- **Tests.** `tests/test_voicemode_native.py` has 37 Linux tests, and `tests/test_conftest_release_check.py` 3 more. `tests/test_voicemode_native_windows.py`
-  has 4 Windows tests, run by `tests/run_windows_transport_tests.sh`. `tests/conftest.py`
+- **Tests.** `tests/test_voicemode_native.py` has the launcher's and the switch's Linux tests, `tests/test_install_ps1.py` install.ps1's, and `tests/test_conftest_release_check.py` 3 more. `tests/test_voicemode_native_windows.py`
+  has 8 Windows tests (4 added for the switch and install.ps1), run by `tests/run_windows_transport_tests.sh`. `tests/conftest.py`
   turns a skip caused by a missing `VM812_SRC` into a failure under `VOICEMODE_RELEASE_CHECK=1`,
   and prints a loud warning otherwise.
 
@@ -92,6 +93,125 @@ The pill's native tests are `tests/test_pill_windows_native.py` (Linux: static c
 the name derivation compared with PowerShell's through `powershell.exe`) and
 `tests/test_pill_windows_native_windows.py` (Windows, 9 tests). MCP registration and `install.ps1` belong to
 task 8.
+
+## Install, switch, uninstall (task 8)
+
+**Install.** From a Windows folder, not a `\\wsl` path:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File C:\git\voicemode-local-native\install.ps1 -Mode windows-native
+```
+
+It runs in Windows PowerShell 5.1 and in PowerShell 7, needs no admin rights and no Docker,
+and never touches WSL. It finds a Python 3.10 or newer (`py -3`, then `python`) and uv
+(`VOICEMODE_UV`, then PATH, then `%USERPROFILE%\.local\bin`). If uv is missing it prints
+the command that installs it for your user and stops; `-InstallUv` runs that command. Then it
+runs `voicemode_native.py setup` and registers the MCP server:
+`claude mcp add --scope user voicemode -- <python> <script> launch` when the claude CLI is
+found, else it writes `mcpServers.voicemode` into `~\.claude.json`, keeping everything else
+in the file and leaving a backup beside it. With `-Root`, the entry also carries
+`VOICEMODE_NATIVE_ROOT`. An existing `voicemode` entry that differs is printed and left
+alone; `-Force` replaces it. `-Pill` and `-Barge` switch those on after setup; both are off
+by default. The summary prints the root, the runtime, the disk use from `status`, the MCP
+entry, and the switch and uninstall commands.
+
+`<python>` in the MCP entry is uv's minor-version link to its own Python under the root,
+`<root>\python\cpython-3.12-windows-x86_64-none\python.exe`. uv moves that link to each new
+patch release, so the path outlives runtime rebuilds. A runtime's own venv Python does not:
+each rebuild gets a new folder. That Python has no psutil, so `main()` restarts itself under
+the runtime's Python, the path the tests have always taken. If the link is missing, the
+Python install.ps1 found is used, and the summary says so.
+
+A `\\wsl` checkout is refused unless `-AllowWslCheckout` is given: the MCP command would run
+the launcher from there, so voice would work only while WSL runs.
+
+install.ps1 now starts with a UTF-8 BOM. Without one, Windows PowerShell 5.1 reads the file
+in the machine's ANSI code page; the file read as cp1252 fails to parse with 7 errors,
+because the bytes of an em dash include a curly quote that ends a string (measured
+2026-11-06 by decoding it as cp1252 and parsing it; this machine's ANSI code page is 65001,
+so it cannot show the failure directly). The two WSL modes still need PowerShell 7 and now
+say so themselves, instead of `#requires`. Their code is byte for byte what it was, and a
+test checks that.
+
+**Switch.** No restart:
+
+```powershell
+& <python> <repo>\scripts\windows\voicemode_native.py barge on|off|status
+& <python> <repo>\scripts\windows\voicemode_native.py pill on|off|status
+```
+
+`on` and `off` write `VOICEMODE_VOICE_BARGE` or `VOICEMODE_PILL` to
+`%USERPROFILE%\.voicemode\voicemode.env`. Other lines, comments, a BOM and the line endings
+stay; the file is replaced atomically and created if missing. While a voice connector runs,
+`on` starts the trigger or the pill window into the install's services Job Object, one per
+install, recorded in `run\state.json` under the service lock, as `ensure_services` does.
+`off` closes the pill through its stop event, then kills what is left after 5 s; the trigger
+is killed. Without a running connector, the setting takes effect with the next one.
+`barge on` refuses, and exits 1, when the Silero model is missing from the runtime. Like
+`voicemode-switch barge on`, it adds `voice_barge_tool` to a `VOICEMODE_TOOLS_ENABLED` list
+that already exists, and never creates one.
+
+`status` prints one line, then whether the process runs. For barge the first line is exactly
+what `python -m voice_mode.voice_barge status` prints: `on`, `off` or `cannot run: <reason>`.
+For the pill it is `on` or `off`. The second line is `trigger: running (process N)`,
+`window: not running` and so on. Both read voicemode.env first, as the switch writes it.
+
+The environment wins over voicemode.env when the launcher decides what to start. If the
+environment holds a different value, the switch says so. Under a connector only what the
+launcher's own environment held counts (`VOICEMODE_NATIVE_ENV_SETTINGS`): voice-mode copies
+voicemode.env's old values into its environment when it starts, and those are no override.
+
+The launcher passes `VOICEMODE_BARGE_CONTROL_COMMAND=["<runtime python>", "<script>", "barge"]`
+to voice-mode and to the pill backend, so the `voice_barge` tool and the pill's toggle run
+the native switch. It also passes `VOICEMODE_BARGE_PYTHON` (the runtime's Python) and
+`VOICEMODE_NATIVE_ROOT`. A process voice-mode starts sits in the connector's Job Object; the
+connector's job now allows breakaway on request, and `spawn` asks for it, so what the switch
+starts lands in the services' job and outlives that connector.
+
+voice-mode 8.12 loads only `converse` and `service` unless a tool setting says otherwise, so
+the `voice_barge` tool did not exist natively. The launcher now passes
+`VOICEMODE_TOOLS_ENABLED=converse,service,voice_barge_tool` when no tool setting is in the
+environment or voicemode.env. A list you set yourself is left alone.
+
+**Control channel and streaming.** When the pill, barge or push-to-talk is on (environment
+first, then voicemode.env), the launcher passes `VOICEMODE_CONTROL_CHANNEL_ENABLED=true` to
+voice-mode. Without it the trigger never sees that the assistant is speaking and never fires:
+the controller's spoken test on 2026-11-06 got 0 cuts without it and 2 of 2 with it set by
+hand. Natively the channel is the named pipe from `patch_control_transport.py`; a test fails
+if the native manifest loses that patch. With barge on, the launcher also passes
+`VOICEMODE_STREAMING_ENABLED=false`, because the trigger is inert while playback streams
+(`docs/voice-barge-in/README.md`). Either value you set yourself, in the environment or in
+voicemode.env, is kept. The switch writes voicemode.env, so the next connector picks these up.
+A connector that was already running without the channel cannot be interrupted until it is
+reconnected (`/mcp`); `barge on` and `pill on` say so.
+
+**Measured on Windows, 2026-11-06** (`tests/test_voicemode_native_windows.py`, one run, temp
+root and profile): `barge on` then `off` with a `serve` running, 2 cycles: the trigger started,
+was in the services Job Object (`IsProcessInJob`), was alive 4 s later, and was gone after
+`off`; `status` matched `python -m voice_mode.voice_barge status`. `pill on` then `off`, 2
+cycles: the window and its backend started, the window stayed hidden (no voice session, as
+designed), and `off` closed it through the stop event (`stop requested` in its log), with
+nothing left. The barge command read from the pill backend's own environment ran and answered
+(n=2). The `voice_barge` tool, called over MCP stdio from a `launch`, started the trigger into
+the services' job and stopped it (n=1). install.ps1 under Windows PowerShell 5.1.26100 with a
+fake claude CLI and a temp profile: install with `-Pill -Barge`, the registered command
+answered `initialize` and started tts, stt, barge and pill; a second run kept the entry; a
+different entry was kept without `-Force` and replaced with it; `-Uninstall`, then
+`-Uninstall -RemoveData` (n=1 each). `status` reported 1,078,627,505 bytes for the root, with
+uv's Python at 62,939,825 bytes counted once. The 125,879,649 in the table below was summed
+with `rglob`, which also walks uv's `cpython-3.12-windows-x86_64-none` link to the same
+folder, so it likely counts that Python twice (not re-measured otherwise).
+
+Not tested here: a clean machine. With no Python, install.ps1 stops and names python.org;
+with no uv, it prints the installer command (`-InstallUv` runs it, which was not run here);
+with no WebView2 runtime, the pill window cannot show. Each of these, and a machine whose
+ANSI code page is not UTF-8, still needs a real run.
+
+**Uninstall.** `install.ps1 -Mode windows-native -Uninstall` stops the services and removes the
+MCP entry if it points at this checkout's script (another entry is printed and kept).
+`-RemoveData` also deletes the root, but never `%LOCALAPPDATA%\voicemode-local` (the WSL
+pill's), FELIX's folders, or a folder without `active.json` or `runtime`. voicemode.env keeps
+its lines.
 
 ## What is installed, measured
 
