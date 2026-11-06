@@ -930,6 +930,8 @@ def test_runtime_environment_passes_the_native_barge_command(vn, tmp_path, monke
 
 
 def test_launcher_env_reaches_voice_mode_and_the_pill_backend(vn, home, tmp_path, monkeypatch):
+    for name in vn.TOOL_SETTINGS:  # another test in this process may have loaded a voicemode.env
+        monkeypatch.delenv(name, raising=False)
     root = tmp_path / "root"
     world = FakeWorld(vn, monkeypatch, root)
     runtime = _fake_runtime(vn, root)
@@ -948,6 +950,7 @@ def test_launcher_env_reaches_voice_mode_and_the_pill_backend(vn, home, tmp_path
     for kind in ("voice-mode", "pill"):
         command = json.loads(envs[kind]["VOICEMODE_BARGE_CONTROL_COMMAND"])
         assert command[1:] == [str(vn.SCRIPT), "barge"]
+    assert envs["voice-mode"]["VOICEMODE_TOOLS_ENABLED"] == "converse,service,voice_barge_tool"
 
 
 def test_the_barge_command_is_accepted_by_voice_pill_state(vn, tmp_path, monkeypatch):
@@ -999,3 +1002,126 @@ def test_info_names_a_python_that_survives_runtime_rebuilds(vn, tmp_path, monkey
     (link / "python.exe").unlink()
     vn.info(root)
     assert json.loads(capsys.readouterr().out)["python"] is None
+
+
+def test_barge_on_adds_its_tool_to_an_existing_whitelist_only(vn, home, tmp_path, monkeypatch):
+    s = Switch(vn, home, tmp_path, monkeypatch, lease=False)
+    vn.switch(s.root, "barge", "on")
+    assert "VOICEMODE_TOOLS_ENABLED" not in s.env_file()          # never creates one
+    _env_file(home, "VOICEMODE_TOOLS_ENABLED=converse,service\n")
+    vn.switch(s.root, "barge", "on")
+    assert "VOICEMODE_TOOLS_ENABLED=converse,service,voice_barge_tool\n" in s.env_file()
+    vn.switch(s.root, "barge", "on")
+    assert s.env_file().count("voice_barge_tool") == 1
+
+
+def test_voice_mode_gets_the_barge_tool_unless_the_user_chose_tools(vn, home, monkeypatch):
+    for name in vn.TOOL_SETTINGS:
+        monkeypatch.delenv(name, raising=False)
+    assert vn.tool_selection() == {"VOICEMODE_TOOLS_ENABLED": "converse,service,voice_barge_tool"}
+    monkeypatch.setenv("VOICEMODE_TOOLS_DISABLED", "statistics")
+    assert vn.tool_selection() == {}
+    monkeypatch.delenv("VOICEMODE_TOOLS_DISABLED")
+    _env_file(home, "VOICEMODE_TOOLS_ENABLED=converse\n")
+    assert vn.tool_selection() == {}
+
+
+def test_upstream_default_tools_are_what_tool_selection_extends():
+    """DEFAULT_TOOLS is upstream 8.12's default plus voice_barge_tool: check against its source."""
+    import os
+    src = os.environ.get("VM812_SRC")
+    init = Path(src).parent / "pkg" / "voice_mode" / "tools" / "__init__.py" if src else None
+    if not init or not init.is_file():
+        pytest.skip("needs VM812_SRC beside a pkg/voice_mode tree")
+    assert 'default_tools = {"converse", "service"}' in init.read_text(encoding="utf-8")
+
+
+# -- controller additions: control channel and streaming (2026-11-06) ----------
+
+def _clear(monkeypatch, *names):
+    for name in names:
+        monkeypatch.delenv(name, raising=False)
+
+
+SPEECH_SETTINGS = ("VOICEMODE_CONTROL_CHANNEL_ENABLED", "VOICEMODE_STREAMING_ENABLED")
+
+
+@pytest.mark.parametrize("enabled", ["VOICEMODE_PILL", "VOICEMODE_VOICE_BARGE", "VOICEMODE_PTT_ENABLED"])
+def test_control_channel_is_on_when_an_optional_service_is(vn, home, monkeypatch, enabled):
+    _clear(monkeypatch, *SPEECH_SETTINGS, "VOICEMODE_PTT_ENABLED")
+    assert "VOICEMODE_CONTROL_CHANNEL_ENABLED" not in vn.voice_mode_settings()
+    monkeypatch.setenv(enabled, "true")
+    assert vn.voice_mode_settings()["VOICEMODE_CONTROL_CHANNEL_ENABLED"] == "true"
+
+
+def test_control_channel_follows_the_file_the_switch_writes(vn, home, monkeypatch):
+    _clear(monkeypatch, *SPEECH_SETTINGS)
+    _env_file(home, "VOICEMODE_PILL=true\n")
+    assert vn.voice_mode_settings()["VOICEMODE_CONTROL_CHANNEL_ENABLED"] == "true"
+
+
+@pytest.mark.parametrize("where", ["env", "file"])
+def test_an_explicit_control_channel_or_streaming_value_is_kept(vn, home, monkeypatch, where):
+    _clear(monkeypatch, *SPEECH_SETTINGS)
+    monkeypatch.setenv("VOICEMODE_VOICE_BARGE", "true")
+    if where == "env":
+        monkeypatch.setenv("VOICEMODE_CONTROL_CHANNEL_ENABLED", "false")
+        monkeypatch.setenv("VOICEMODE_STREAMING_ENABLED", "true")
+    else:
+        _env_file(home, "VOICEMODE_CONTROL_CHANNEL_ENABLED=false\nVOICEMODE_STREAMING_ENABLED=true\n")
+    assert vn.voice_mode_settings() == {}
+
+
+def test_barge_turns_streaming_off_unless_the_user_set_it(vn, home, monkeypatch):
+    _clear(monkeypatch, *SPEECH_SETTINGS)
+    monkeypatch.setenv("VOICEMODE_PILL", "true")
+    assert "VOICEMODE_STREAMING_ENABLED" not in vn.voice_mode_settings()   # the pill alone: streaming stays
+    monkeypatch.setenv("VOICEMODE_VOICE_BARGE", "true")
+    assert vn.voice_mode_settings()["VOICEMODE_STREAMING_ENABLED"] == "false"
+
+
+def test_voice_mode_gets_the_control_channel_and_streaming_settings(vn, home, tmp_path, monkeypatch):
+    _clear(monkeypatch, *SPEECH_SETTINGS, "VOICEMODE_PILL", "VOICEMODE_PTT_ENABLED")
+    monkeypatch.setenv("VOICEMODE_VOICE_BARGE", "true")
+    root = tmp_path / "root"
+    world = FakeWorld(vn, monkeypatch, root)
+    runtime = _fake_runtime(vn, root)
+    envs = {}
+    plain = world.spawn
+
+    def spawn(command, job=None, **kwargs):
+        envs[world.kind_of(command)] = kwargs["env"]
+        return plain(command, job=job, **kwargs)
+
+    monkeypatch.setattr(vn, "spawn", spawn)
+    monkeypatch.setattr(vn, "configured_runtime", lambda root, expected: (runtime, True))
+    monkeypatch.setattr(vn, "check_models", lambda runtime: None)
+    monkeypatch.setattr(vn, "optional_services", lambda: [])
+    assert vn.launch(root) == 0
+    assert envs["voice-mode"]["VOICEMODE_CONTROL_CHANNEL_ENABLED"] == "true"
+    assert envs["voice-mode"]["VOICEMODE_STREAMING_ENABLED"] == "false"
+
+
+def test_switch_on_says_when_a_running_connector_has_no_control_channel(vn, home, tmp_path, monkeypatch, capsys):
+    s = Switch(vn, home, tmp_path, monkeypatch)
+    lease = s.root / "run" / "clients" / str(vn.os.getpid())
+    lease.write_text(json.dumps({"runtime": str(s.runtime), "control_channel": False}))
+    vn.switch(s.root, "barge", "on")
+    assert "reconnect" in capsys.readouterr().out
+    vn.switch(s.root, "barge", "off")
+    lease.write_text(json.dumps({"runtime": str(s.runtime), "control_channel": True}))
+    capsys.readouterr()
+    vn.switch(s.root, "barge", "on")
+    assert "reconnect" not in capsys.readouterr().out
+
+
+def test_native_control_channel_needs_the_pipe_transport_in_the_native_manifest(vn):
+    """FELIX point 5: the launcher may turn the channel on natively, and Windows has no
+    AF_UNIX, so the native manifest must carry the named-pipe transport."""
+    assert "VOICEMODE_CONTROL_CHANNEL_ENABLED" in (vn.SCRIPT.read_text(encoding="utf-8"))
+    steps = json.loads((REPO / "patches" / "manifest.windows.json").read_text(encoding="utf-8"))["steps"]
+    patches = {s.get("patch") for s in steps}
+    copies = {s.get("copy") for s in steps}
+    assert "patch_control_transport.py" in patches and "control_transport.py" in copies
+    targets = next(s["targets"] for s in steps if s.get("patch") == "patch_control_transport.py")
+    assert "control_socket.py" in targets

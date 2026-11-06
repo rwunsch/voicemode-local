@@ -1299,6 +1299,16 @@ def can_inspect():
     return not WINDOWS or importlib.util.find_spec("psutil") is not None
 
 
+def expose_barge_tool(path):
+    """As voicemode-switch barge on: a VOICEMODE_TOOLS_ENABLED whitelist would hide the
+    voice_barge tool, so add it to one that exists. Never create a whitelist: without one,
+    every tool loads."""
+    tools = resolver()._read_env_path(path).get("VOICEMODE_TOOLS_ENABLED")
+    if tools is not None and "voice_barge_tool" not in [t.strip() for t in tools.split(",")]:
+        write_setting(path, "VOICEMODE_TOOLS_ENABLED", ",".join([t for t in tools.split(",") if t.strip()]
+                                                                + ["voice_barge_tool"]))
+
+
 def env_override(name, value):
     """The environment's value of name when it differs from value and the environment wins.
     Under a connector, only settings the launcher's own environment held count."""
@@ -1348,6 +1358,8 @@ def switch(root, kind, action):
                              setup_step())
     path = resolver().env_file()
     write_setting(path, name, value)
+    if on and kind == "barge":
+        expose_barge_tool(path)
     print(f"{SWITCH_TITLES[kind]} is {action}: {name}={value} in {path}.")
     current = env_override(name, value)
     if current is not None:
@@ -1387,6 +1399,11 @@ def switch(root, kind, action):
         env[name] = "true"  # the window checks it, and a stale false from voice-mode must not stop it
         process = start_service(kind, root, runtime, env, state, services_job(root))
         print(f"The {noun} started (process {process.pid}).")
+        records = [read_json(run_dir / "clients" / str(pid), {}) for pid in leases]
+        if any(isinstance(r, dict) and r.get("control_channel") is False for r in records):
+            print("A voice connector started before this has no control channel, so it cannot show who "
+                  "is speaking or be interrupted by voice: reconnect it (/mcp in Claude Code). New "
+                  "connectors get the channel.")
     return 0
 
 
@@ -1442,6 +1459,44 @@ def forwarded_signals(get_child, stopping):
             signal.signal(signum, handler)
 
 
+TOOL_SETTINGS = ("VOICEMODE_TOOLS_ENABLED", "VOICEMODE_TOOLS_DISABLED", "VOICEMODE_TOOLS")
+# Upstream 8.12's default when none of TOOL_SETTINGS is set (tools/__init__.py), plus ours.
+DEFAULT_TOOLS = "converse,service,voice_barge_tool"
+
+
+def tool_selection():
+    """Upstream loads only converse and service unless a tool setting says otherwise, which
+    would hide the voice_barge tool (and voice_stop). With no setting in the environment or
+    voicemode.env, voice-mode gets that default plus voice_barge_tool; any setting the user
+    made is left alone."""
+    if any(setting(name) is not None for name in TOOL_SETTINGS):
+        return {}
+    return {"VOICEMODE_TOOLS_ENABLED": DEFAULT_TOOLS}
+
+
+CONTROL_CHANNEL = "VOICEMODE_CONTROL_CHANNEL_ENABLED"
+STREAMING = "VOICEMODE_STREAMING_ENABLED"
+
+
+def _on(name):
+    return (setting(name, "") or "").strip() == "true"
+
+
+def voice_mode_settings():
+    """What voice-mode needs for the optional services, unless the user set it (environment
+    or voicemode.env): the control channel whenever the pill, barge or push-to-talk is on
+    (without it the trigger never sees `speaking`: 0 cuts, then 2 of 2 with it, controller's
+    spoken test 2026-11-06), and buffered playback with barge (the trigger is inert while
+    playback streams, docs/voice-barge-in/README.md). Natively the channel is the named pipe
+    of patch_control_transport.py, which manifest.windows.json applies."""
+    extra = {}
+    if any(_on(OPTIONAL_SETTINGS[kind]) for kind in OPTIONAL) and setting(CONTROL_CHANNEL) is None:
+        extra[CONTROL_CHANNEL] = "true"
+    if _on(OPTIONAL_SETTINGS["barge"]) and setting(STREAMING) is None:
+        extra[STREAMING] = "false"
+    return extra
+
+
 def launch(root):
     """The MCP command: services, then the optional pill and listener, then voice-mode on stdio."""
     data, expected = manifest()
@@ -1459,10 +1514,14 @@ def launch(root):
             # Upstream loads every .voicemode/voicemode.env walking up from its working folder;
             # from a WSL checkout that was the WSL setup's file. The label still gets the folder.
             env["VOICEMODE_CLIENT_FOLDER"] = os.getcwd()
+            env.update(tool_selection())
+            env.update(voice_mode_settings())
             child = spawn([str(venv_program(runtime, "voice-mode"))], job=connector_job(), env=env,
                           cwd=str(runtime), **connector_options())
             # If this launcher dies, its voice-mode keeps the lease alive until it ends too.
-            atomic_json(root / "run" / "clients" / str(os.getpid()), {"child": child.pid, "runtime": str(runtime)})
+            atomic_json(root / "run" / "clients" / str(os.getpid()),
+                        {"child": child.pid, "runtime": str(runtime),
+                         "control_channel": (env.get(CONTROL_CHANNEL) or "").strip().lower() == "true"})
             while True:
                 try:
                     return child.wait(timeout=1)
