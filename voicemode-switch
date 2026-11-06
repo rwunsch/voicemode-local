@@ -419,6 +419,9 @@ cmd_barge() {
         on)
             fetch_silero_model || return 1
             set_voice_barge true
+            # The trigger's barge_in travels over the control channel (upstream default: off).
+            # `barge off` leaves it on: the pill and push-to-talk use it too.
+            set_env_value VOICEMODE_CONTROL_CHANNEL_ENABLED true
             stop_voice_barge
             cmd_ensure --quiet
             ok "Voice barge-in on. New voice sessions need /mcp reconnect to pick up the patch."
@@ -430,6 +433,11 @@ cmd_barge() {
             ;;
         status)
             if voice_barge_enabled; then echo "Voice barge-in: enabled"; else echo "Voice barge-in: disabled"; fi
+            if [ "$(env_value VOICEMODE_CONTROL_CHANNEL_ENABLED)" = "true" ]; then
+                echo "Control channel: enabled"
+            else
+                echo "Control channel: disabled (barge-in cannot cut playback without it)"
+            fi
             if [ -f /tmp/voice-barge.pid ] && kill -0 "$(cat /tmp/voice-barge.pid)" 2>/dev/null; then
                 echo "Trigger: running (PID $(cat /tmp/voice-barge.pid), log /tmp/voice-barge.log)"
             else
