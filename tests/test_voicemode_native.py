@@ -31,7 +31,7 @@ def home(tmp_path, monkeypatch):
     (h / ".voicemode").mkdir(parents=True)
     monkeypatch.setenv("HOME", str(h))
     monkeypatch.setenv("USERPROFILE", str(h))
-    for key in ("VOICEMODE_PILL", "VOICEMODE_PTT_ENABLED", "VOICEMODE_NATIVE_ROOT",
+    for key in ("VOICEMODE_PILL", "VOICEMODE_PTT_ENABLED", "VOICEMODE_VOICE_BARGE", "VOICEMODE_NATIVE_ROOT",
                 "VOICEMODE_NATIVE_TTS_PORT", "VOICEMODE_NATIVE_STT_PORT", "VOICEMODE_BASE_DIR",
                 "FELIX_HOME", "FELIX_VOICE_ROOT"):
         monkeypatch.delenv(key, raising=False)
@@ -247,6 +247,7 @@ class FakeWorld:
         text = " ".join(map(str, command))
         for kind, needle in (("tts", "kokoro-onnx-server"), ("stt", "whisper-server"),
                              ("pill", "pill-windows.ps1"), ("ptt", "ptt-listener-windows.ps1"),
+                             ("barge", "voice_mode.voice_barge"),
                              ("voice-mode", "voice-mode")):
             if needle in text:
                 return kind
@@ -282,7 +283,7 @@ def _non_events(events):
     return [e for e in events if e not in ("lease", "NO-LEASE")]
 
 
-@pytest.mark.parametrize("enabled", [[], ["pill"], ["pill", "ptt"]])
+@pytest.mark.parametrize("enabled", [[], ["pill"], ["pill", "ptt"], ["barge"]])
 def test_start_order(vn, home, tmp_path, monkeypatch, enabled):
     root = tmp_path / "root"
     world = FakeWorld(vn, monkeypatch, root)
@@ -646,3 +647,24 @@ def test_voice_mode_starts_in_the_runtime_folder_not_the_clients(vn, home, tmp_p
     assert vn.launch(root) == 0
     assert Path(seen["cwd"]) == runtime
     assert seen["env"]["VOICEMODE_CLIENT_FOLDER"] == str(client)
+
+
+def test_barge_trigger_is_an_optional_service_with_the_pinned_silero(vn, tmp_path, monkeypatch):
+    runtime = tmp_path / "runtime" / "abc"
+    command, marker = vn.optional_command("barge", runtime)
+    assert command[1:3] == ["-m", "voice_mode.voice_barge"]
+    assert Path(command[3]) == runtime / "models" / "silero" / "silero_vad.onnx"
+    assert marker == "voice_mode.voice_barge"
+    deps = json.loads((vn.HERE / "dependencies.json").read_text(encoding="utf-8"))
+    silero = [m for m in deps["models"] if m["path"] == "models/silero/silero_vad.onnx"]
+    assert silero == [{"path": "models/silero/silero_vad.onnx",
+                       "url": "https://raw.githubusercontent.com/snakers4/silero-vad/"
+                              "bfdc0193023f121ea5b3cc7b176dbed570a68a59/src/silero_vad/data/silero_vad.onnx",
+                       "size": 2327524,
+                       "sha256": "1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d8788e3"}]
+
+
+@pytest.mark.parametrize("value,started", [("true", True), ("false", False), ("", False), ("yes", False)])
+def test_barge_starts_only_when_its_setting_is_exactly_true(vn, monkeypatch, value, started):
+    monkeypatch.setattr(vn, "setting", lambda name, default=None: value if name == "VOICEMODE_VOICE_BARGE" else "")
+    assert ("barge" in vn.optional_services()) is started

@@ -49,7 +49,9 @@ where it came from.
   `whisper-proxy.py` already had one (commit 951d46e), and a test now pins its default.
   Natively, STT is whisper-server itself, so the proxy is not used.
 - **Launcher** (`launch`, the MCP command). It writes the lease, starts the watchdog, then the
-  TTS and STT services, then the pill (`VOICEMODE_PILL=true`). Push-to-talk is refused natively, with
+  TTS and STT services, then the pill (`VOICEMODE_PILL=true`) and the voice barge-in trigger
+  (`VOICEMODE_VOICE_BARGE=true`; `python -m voice_mode.voice_barge <silero>`, hearing the mic through
+  sounddevice). Each is one per install, under the same lease and watchdog. Push-to-talk is refused natively, with
   one line of explanation on stderr, until task 7: `ptt-listener-windows.ps1` still sends to
   the WSL relay on 127.0.0.1:8765, so it would drive the WSL install. It waits until TTS and STT answer and checks that the process
   answering is the one it started. Then it runs voice-mode with stdin, stdout and stderr passed
@@ -91,6 +93,7 @@ Measured 2026-11-05 on this machine (Windows 11, x64), n=4 installs; sizes from 
 | `kokoro-v1.0.onnx` | 325,532,387 | same, in `downloads\` | size and SHA-256 checked by setup |
 | `voices-v1.0.bin` | 28,214,398 | same | as above |
 | `ggml-base.bin` (Whisper base) | 147,951,465 | same | as above |
+| `silero_vad.onnx` (barge-in, added 2026-11-06) | 2,327,524 | same | as above; size and SHA-256 also checked against the WSL copy. Not in the totals below, which predate it |
 | `whisper-bin-x64.zip` (whisper.cpp b5454) | 8,928,640 | zip kept in `downloads\`; unpacked `services\whisper` 17,687,552 | as above; folder summed |
 | Model links in the runtime | 0 | 0 extra | hard links, `st_nlink >= 2` asserted |
 | Python 3.12, uv-managed, in `<root>\python` | not measured | 125,879,649 | folder summed |

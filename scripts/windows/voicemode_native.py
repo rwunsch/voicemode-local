@@ -81,8 +81,10 @@ PORTS = {"tts": list(range(28880, 28900)), "stt": list(range(22022, 22042))}
 RESERVED = frozenset({8880, 8881, 8882, 2022, 9000} | set(range(18880, 18900)) | set(range(12022, 12042)))
 PORT_SETTINGS = {"tts": "VOICEMODE_NATIVE_TTS_PORT", "stt": "VOICEMODE_NATIVE_STT_PORT"}
 SPEECH = ("tts", "stt")
-OPTIONAL = ("pill", "ptt")
-OPTIONAL_SETTINGS = {"pill": "VOICEMODE_PILL", "ptt": "VOICEMODE_PTT_ENABLED"}
+OPTIONAL = ("pill", "ptt", "barge")
+OPTIONAL_SETTINGS = {"pill": "VOICEMODE_PILL", "ptt": "VOICEMODE_PTT_ENABLED",
+                     "barge": "VOICEMODE_VOICE_BARGE"}
+SILERO = "models/silero/silero_vad.onnx"
 LAUNCH_MARKERS = ("voicemode_native.py launch", "voicemode_native.py serve")
 
 LAYOUT = 1
@@ -161,7 +163,8 @@ def setting(name, default=None):
 
 
 def optional_services():
-    """The pill and the push-to-talk listener, each only when its setting is exactly true.
+    """The pill, the push-to-talk listener and the voice barge-in trigger, each only when its
+    setting is exactly true.
     Push-to-talk is refused natively until task 7: ptt-listener-windows.ps1 still sends to the WSL
     relay on 127.0.0.1:8765, so it would drive the WSL install, not this one."""
     enabled = [kind for kind in OPTIONAL if (setting(OPTIONAL_SETTINGS[kind], "") or "").strip() == "true"]
@@ -875,7 +878,11 @@ def powershell():
 
 
 def optional_command(kind, runtime):
-    """The pill window or the push-to-talk listener. Their native modes are tasks 6 and 7."""
+    """The pill window, the push-to-talk listener (native modes: tasks 6 and 7) or the barge
+    trigger, which hears the mic through sounddevice here."""
+    if kind == "barge":
+        return ([str(venv_program(runtime, "python")), "-m", "voice_mode.voice_barge", str(runtime / SILERO)],
+                "voice_mode.voice_barge")
     script = REPO / ("pill-windows.ps1" if kind == "pill" else "ptt-listener-windows.ps1")
     command = [powershell(), "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script)]
     if kind == "pill":
