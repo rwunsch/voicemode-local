@@ -91,9 +91,12 @@ property reads) and picks the mic for that stretch:
 
 | Output route | How it is detected | Mic |
 |---|---|---|
-| `headphones` | transport not built-in (Bluetooth, USB, HDMI, AirPlay, ...), or built-in with data source `hdpn` | plain capture (sounddevice) |
-| `speakers` | built-in with data source `ispk`, any other, or unreadable | macOS voice processing (AVAudioEngine, echo cancellation, other-audio ducking at its minimum) |
-| `unknown` | CoreAudio did not answer | plain capture |
+| `headphones` | built-in with data source `hdpn`, or not built-in (Bluetooth, USB, ...) and the output device also has input streams: a headset | plain capture (sounddevice) |
+| `speakers` | built-in with data source `ispk`, any other, or unreadable; or not built-in with no input streams: USB, Bluetooth or display speakers, HDMI, AirPlay, and headphones without a mic | macOS voice processing (AVAudioEngine, echo cancellation, other-audio ducking at its minimum) |
+| `unknown` | CoreAudio did not answer, including an external device whose streams cannot be read | plain capture |
+
+Input streams are read with `kAudioDevicePropertyStreams` in the input scope of the default
+output device (one more property read, only for a device that is not built-in).
 
 Voice processing needs `pyobjc-framework-AVFoundation` in the trigger's venv
 (`./install-mac.sh --barge` installs it). Without it the speakers are **refused**: the
@@ -140,7 +143,11 @@ Not verified yet (no Mac in this repo's test runs; everything above is tested wi
   `deaf` field says how much was left. Whether starting voice processing while the server
   is about to open its own recording disturbs that recording (it already overlapped by up
   to 100 ms before) is untested.
-- **External speakers count as headphones.** USB, HDMI or AirPlay speakers get plain capture.
+- **The headset rule.** That a Bluetooth or USB headset reports its mic as input streams on
+  the same CoreAudio device as its output, and that external speakers, HDMI and AirPlay
+  report none, is from the CoreAudio model, not from a device here (tested with fakes only).
+  Before 2026-11-07 every external output counted as headphones, so external speakers got
+  plain capture and could cut themselves off.
 
 Steps for a real Mac: `tests/manual/mac_barge_vp_check.md`.
 

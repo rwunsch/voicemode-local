@@ -262,6 +262,8 @@ _TRANSPORT = _fourcc("tran")                    # kAudioDevicePropertyTransportT
 _DATA_SOURCE = _fourcc("ssrc")                  # kAudioDevicePropertyDataSource
 _SCOPE_GLOBAL = _fourcc("glob")
 _SCOPE_OUTPUT = _fourcc("outp")
+_SCOPE_INPUT = _fourcc("inpt")
+_STREAMS = _fourcc("stm#")                      # kAudioDevicePropertyStreams
 _ELEMENT_MAIN = 0
 _BUILT_IN = _fourcc("bltn")                     # kAudioDeviceTransportTypeBuiltIn
 _HEADPHONE_JACK = _fourcc("hdpn")
@@ -283,6 +285,10 @@ def _coreaudio():
                            ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint32),
                            ctypes.POINTER(ctypes.c_uint32)]
             fn.restype = ctypes.c_int32
+            size_fn = lib.AudioObjectGetPropertyDataSize
+            size_fn.argtypes = [ctypes.c_uint32, ctypes.POINTER(_PropertyAddress), ctypes.c_uint32,
+                                ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint32)]
+            size_fn.restype = ctypes.c_int32
         except (OSError, AttributeError):
             lib = None
         _COREAUDIO["lib"] = lib
@@ -299,13 +305,26 @@ def _property_u32(lib, obj: int, selector: int, scope: int):
     return None if status != 0 else int(out.value)
 
 
+def _input_stream_count(lib, device: int):
+    """How many input streams the device has, or None when CoreAudio says no."""
+    address = _PropertyAddress(_STREAMS, _SCOPE_INPUT, _ELEMENT_MAIN)
+    size = ctypes.c_uint32(0)
+    status = lib.AudioObjectGetPropertyDataSize(device, ctypes.pointer(address), 0, None,
+                                                ctypes.pointer(size))
+    return None if status != 0 else int(size.value) // 4   # one AudioStreamID each
+
+
 def output_route(platform=None, lib=None) -> str:
     """Where the default output plays: "headphones", "speakers" or "unknown".
 
     Built-in device: 'hdpn' (headphone jack) is headphones; 'ispk', any other or an
     unreadable data source is speakers. Any other transport (Bluetooth, USB, HDMI,
-    AirPlay, ...) counts as headphones. Off macOS, or when CoreAudio does not answer:
-    unknown. Three property reads, no subprocess."""
+    AirPlay, ...): headphones if the output device also has input streams (a headset),
+    speakers if it has none (external speakers, a display, AirPlay, or headphones without
+    a mic, which then get echo cancellation they do not need). Off macOS, or when CoreAudio
+    does not answer: unknown. Three property reads, no subprocess.
+    UNVERIFIED on hardware: that a Bluetooth or USB headset reports its mic as input
+    streams on the same device as its output (tests use fakes)."""
     if (platform or _platform()) != "darwin":
         return "unknown"
     lib = lib if lib is not None else _coreaudio()
@@ -319,7 +338,10 @@ def output_route(platform=None, lib=None) -> str:
         if transport is None:
             return "unknown"
         if transport != _BUILT_IN:
-            return "headphones"
+            inputs = _input_stream_count(lib, device)
+            if inputs is None:
+                return "unknown"
+            return "headphones" if inputs > 0 else "speakers"
         source = _property_u32(lib, device, _DATA_SOURCE, _SCOPE_OUTPUT)
     except Exception:  # noqa: BLE001 - a route we cannot read is unknown, never a crash
         return "unknown"

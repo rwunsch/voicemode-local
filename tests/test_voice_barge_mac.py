@@ -33,8 +33,9 @@ class FakeCoreAudio:
 
     DEVICE = 73
 
-    def __init__(self, transport=None, source=None, default=DEVICE, fail=()):
+    def __init__(self, transport=None, source=None, default=DEVICE, fail=(), inputs=None):
         self.values = {(1, cc("dOut")): default}
+        self.inputs = inputs     # input streams on the output device; None: unreadable
         if transport is not None:
             self.values[(self.DEVICE, cc("tran"))] = cc(transport)
         if source is not None:
@@ -52,16 +53,43 @@ class FakeCoreAudio:
         out.contents.value = self.values[(obj, a.mSelector)]
         return 0
 
+    def AudioObjectGetPropertyDataSize(self, obj, addr, qsize, qdata, size):
+        obj = obj.value if hasattr(obj, "value") else obj
+        a = addr.contents
+        self.calls.append((obj, a.mSelector, a.mScope, a.mElement))
+        if a.mSelector in self.fail or obj != self.DEVICE or self.inputs is None:
+            return cc("who?")
+        size.contents.value = 4 * self.inputs   # one AudioStreamID per stream
+        return 0
 
-@pytest.mark.parametrize("transport,source,route", [
-    ("blue", None, "headphones"),        # Bluetooth (FELIX-MAC: Jabra reports 'blue', no data source)
-    ("usb ", None, "headphones"),
-    ("bltn", "hdpn", "headphones"),      # built-in, headphone jack
-    ("bltn", "ispk", "speakers"),        # built-in speakers
-    ("bltn", None, "speakers"),          # built-in, data source unreadable
+
+@pytest.mark.parametrize("transport,source,inputs,route", [
+    ("blue", None, 1, "headphones"),     # Bluetooth headset (FELIX-MAC: Jabra reports 'blue', no data source)
+    ("blue", None, 0, "speakers"),       # Bluetooth speaker, or headphones without a mic
+    ("usb ", None, 2, "headphones"),     # USB headset
+    ("usb ", None, 0, "speakers"),       # USB speakers
+    ("hdmi", None, 0, "speakers"),       # a display's speakers
+    ("airp", None, 0, "speakers"),       # AirPlay
+    ("blue", None, None, "unknown"),     # streams unreadable
+    ("bltn", "hdpn", None, "headphones"),  # built-in, headphone jack
+    ("bltn", "ispk", None, "speakers"),    # built-in speakers
+    ("bltn", None, None, "speakers"),      # built-in, data source unreadable
 ])
-def test_route_mapping(transport, source, route):
-    assert vb.output_route(platform="darwin", lib=FakeCoreAudio(transport, source)) == route
+def test_route_mapping(transport, source, inputs, route):
+    lib = FakeCoreAudio(transport, source, inputs=inputs)
+    assert vb.output_route(platform="darwin", lib=lib) == route
+
+
+def test_external_output_asks_for_input_streams_on_the_output_device():
+    lib = FakeCoreAudio("usb ", inputs=0)
+    vb.output_route(platform="darwin", lib=lib)
+    assert lib.calls[-1] == (FakeCoreAudio.DEVICE, cc("stm#"), cc("inpt"), 0)
+
+
+def test_built_in_output_never_asks_for_streams():
+    lib = FakeCoreAudio("bltn", "ispk", inputs=1)
+    vb.output_route(platform="darwin", lib=lib)
+    assert all(call[1] != cc("stm#") for call in lib.calls)
 
 
 def test_unreadable_transport_is_unknown():

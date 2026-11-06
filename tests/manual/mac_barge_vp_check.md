@@ -41,6 +41,9 @@ Expected: `on`, then `route: speakers, capture: voice-processing`.
 
 Repeat with (a) wired headphones in the jack, if you have them, and (b) the Jabra
 Bluetooth headset as output. Expected for both: `route: headphones, capture: sounddevice`.
+If you have an output with no mic (external USB or Bluetooth speakers, a display over HDMI,
+AirPlay), select it too. Expected: `route: speakers, capture: voice-processing`. Report the
+device and what `status` said: the headset/speaker rule is untested on real devices.
 Report the three outputs. A `route: unknown` anywhere is a finding: say which output.
 
 With the built-in speakers again, `voicemode-switch barge status` should end with the
