@@ -777,64 +777,173 @@ def _hand_off(capture, held, poll_listen_started, preroll_sink, poll_every_windo
     preroll_sink(samples, last_read - len(samples) / SAMPLE_RATE)
 
 
-def run(poll_speaking, open_capture, vad, detector, send_barge, sleep=time.sleep,
-        warmup_windows=WARMUP_WINDOWS, poll_every_windows=POLL_EVERY_WINDOWS,
+MIC_PHASES = ("warm", "speaking")
+WARM_SETTING = "VOICEMODE_VOICE_BARGE_WARM"
+WARM_POLL_EVERY_WINDOWS = 1  # while warm, see `speaking` within one window (32 ms)
+
+
+def warm_enabled(raw) -> bool:
+    """VOICEMODE_VOICE_BARGE_WARM: on unless 0, false, off or no."""
+    value = (raw or "").strip().strip('"').strip("'").lower()
+    return value not in ("0", "false", "off", "no")
+
+
+class PhaseTracker:
+    """What the mic should do now, from the server's status: "idle", "warm" or "speaking".
+
+    Measured before this existed: the mic opened only once `speaking` showed, and it then
+    took 160 ms (Windows, MME) to 800-900 ms (macOS, reported) to give audio, plus the
+    192 ms warmup, so the first second of every reply could not be interrupted.
+
+    "warm": a converse audio operation is running (its control socket answers only then,
+    and only after the conch is taken), the server has neither spoken nor listened yet in
+    it, and it reports ``listening`` (patch_voice_pill), so there is a signal to let go.
+    That is the TTS generation time, which covers the mic's start-up. After the first
+    stretch of speech, or once the server listens, the mic stays closed until the
+    operation ends: nothing is kept open between replies or while idle."""
+
+    def __init__(self, status, warm: bool = True):
+        self._status = status
+        self._warm = warm
+        self._spent = False
+
+    def __call__(self) -> str:
+        s = self._status()
+        if not s:
+            self._spent = False   # no converse running: the next one may warm again
+            return "idle"
+        if s.get("speaking"):
+            self._spent = True
+            return "speaking"
+        if s.get("listening"):
+            self._spent = True
+            return "idle"
+        if (not self._warm or self._spent or "listening" not in s
+                or s.get("state") == "stopped"):
+            return "idle"
+        return "warm"
+
+
+class _Stretch:
+    """One stretch of speech within an open capture: timing and levels for its log line."""
+
+    def __init__(self, asked_at: float, warm_s):
+        self.asked_at = asked_at
+        self.warm_s = warm_s          # how long the mic had been open already; None: cold
+        self.first_window_at = None
+        self.heard_at = None          # the first window that reached the detector
+        self.stats = StretchStats()
+
+    def timing(self) -> str:
+        def ms(t):
+            return "none" if t is None else f"{round((t - self.asked_at) * 1000)} ms"
+        warm = "cold" if self.warm_s is None else f"warm {round(self.warm_s * 1000)} ms"
+        return f"first_window {ms(self.first_window_at)}, deaf {ms(self.heard_at)}, {warm}"
+
+
+def _log_stretch(stretch: _Stretch, seconds: float, fired: bool, note) -> None:
+    timing = stretch.timing()
+    logger.info("%s", stretch.stats.line(seconds, fired, f"{timing}, {note}" if note else timing))
+
+
+def _wait_out_refused(capture, phase, poll_phase, is_paused, sleep, idle_poll_s, stretch_clock):
+    """No mic this time (macOS speakers without echo cancellation): wait until the mic
+    would close, with one stretch line per stretch of speech. None: shut down."""
+    note = getattr(capture, "stretch_note", None) if capture is not None else None
+    began = None
+    while True:
+        if phase == "speaking" and began is None:
+            began = stretch_clock()
+        if phase != "speaking" and began is not None:
+            if note:
+                logger.info("%s", StretchStats().line(stretch_clock() - began, False, note))
+            began = None
+        if phase is None:
+            return None
+        if phase not in MIC_PHASES:
+            return True
+        sleep(idle_poll_s)
+        phase = poll_phase()
+        if phase is not None and is_paused():
+            phase = "idle"
+
+
+def run(poll_speaking=None, open_capture=None, vad=None, detector=None, send_barge=None,
+        sleep=time.sleep, warmup_windows=WARMUP_WINDOWS, poll_every_windows=POLL_EVERY_WINDOWS,
         idle_poll_s=IDLE_POLL_S, poll_listen_started=None, preroll_sink=None,
         clock=time.time, preroll_windows=PREROLL_WINDOWS,
-        is_paused=lambda: False, on_fire=None, stretch_clock=time.monotonic) -> None:
-    """Main loop. ``poll_speaking`` returns True, False, or None to shut down.
+        is_paused=lambda: False, on_fire=None, stretch_clock=time.monotonic,
+        poll_phase=None, warm_poll_every_windows=WARM_POLL_EVERY_WINDOWS) -> None:
+    """Main loop. ``poll_phase`` returns "idle", "warm", "speaking", or None to shut
+    down (see PhaseTracker); ``poll_speaking`` (True, False or None) is the older form,
+    with no warm phase.
 
-    While ``is_paused()`` the mic stays closed (and an open one is closed at the
-    next poll). ``on_fire()`` is called once per barge-in sent.
+    The mic is open while warm or speaking. Windows read while warm are thrown away:
+    they only let the mic start up and spend the warmup before the reply plays. While
+    ``is_paused()`` the mic stays closed (an open one closes at the next poll).
+    ``on_fire()`` is called once per barge-in sent.
     """
+    if poll_phase is None:
+        def poll_phase():
+            speaking = poll_speaking()
+            return None if speaking is None else ("speaking" if speaking else "idle")
+
     while True:
-        speaking = poll_speaking()
-        if speaking is None:
+        phase = poll_phase()
+        if phase is None:
             return
-        if not speaking or is_paused():
+        if phase not in MIC_PHASES or is_paused():
             sleep(idle_poll_s)
             continue
 
-        detector.reset()
-        vad.reset()
-        asked_at = stretch_clock()
+        opened_at = stretch_clock()
         capture = open_capture()
         if capture is None or getattr(capture, "refused", False):
-            # refused (macOS speakers without echo cancellation): wait this one out
-            while True:
-                speaking = poll_speaking()
-                if speaking is None or not speaking:
-                    break
-                sleep(idle_poll_s)
-            if capture is not None:
-                logger.info("%s", StretchStats().line(stretch_clock() - asked_at, False, capture.stretch_note))
-            if speaking is None:
+            if _wait_out_refused(capture, phase, poll_phase, is_paused, sleep, idle_poll_s,
+                                 stretch_clock) is None:
                 return
             continue
+
+        stretch = None
         fired = False
         count = 0
         recent = deque(maxlen=preroll_windows)
-        stats = StretchStats()
-        opened_at = stretch_clock()
-        first_window_at = None
+        if phase == "speaking":
+            detector.reset()
+            vad.reset()
+            stretch = _Stretch(opened_at, None)
         try:
             while True:
                 window = capture.read_window()
                 count += 1
-                if window is not None and first_window_at is None:
-                    first_window_at = stretch_clock()
-                if count % poll_every_windows == 0:
-                    speaking = poll_speaking()
-                    if speaking is None:
+                every = poll_every_windows if stretch is not None else warm_poll_every_windows
+                if count % every == 0:
+                    phase = poll_phase()
+                    if phase is None:
                         return
-                    if not speaking or is_paused():
+                    if is_paused():
+                        phase = "idle"
+                    if phase != "speaking" and stretch is not None:
+                        break   # the stretch ended: close; PhaseTracker keeps it closed
+                    if phase not in MIC_PHASES:
                         break
-                if window is None or count <= warmup_windows:
+                    if phase == "speaking" and stretch is None:
+                        detector.reset()
+                        vad.reset()
+                        now = stretch_clock()
+                        stretch = _Stretch(now, now - opened_at)
+                if stretch is None or window is None:
                     continue
+                if stretch.first_window_at is None:
+                    stretch.first_window_at = stretch_clock()
+                if count <= warmup_windows:
+                    continue
+                if stretch.heard_at is None:
+                    stretch.heard_at = stretch_clock()
                 recent.append(window)
                 prob = vad.prob(window)
                 db = window_db(window)
-                stats.add(db)
+                stretch.stats.add(db)
                 if detector.feed(prob, db):
                     send_barge()
                     if on_fire is not None:
@@ -850,21 +959,18 @@ def run(poll_speaking, open_capture, vad, detector, send_barge, sleep=time.sleep
                     break
         finally:
             try:
-                note = getattr(capture, "stretch_note", None)
-                if note:  # macOS: how long until the mic (voice processing) gave audio
-                    first = ("none" if first_window_at is None
-                             else f"{round((first_window_at - asked_at) * 1000)} ms")
-                    note = f"first_window {first}, {note}"
-                logger.info("%s", stats.line(stretch_clock() - opened_at, fired, note))
+                if stretch is not None:
+                    _log_stretch(stretch, stretch_clock() - stretch.asked_at, fired,
+                                 getattr(capture, "stretch_note", None))
             finally:
                 capture.close()
 
         # Don't reopen the mic for the utterance that is being cut.
         while fired:
-            speaking = poll_speaking()
-            if speaking is None:
+            phase = poll_phase()
+            if phase is None:
                 return
-            if not speaking:
+            if phase != "speaking":
                 break
             sleep(idle_poll_s)
 
@@ -907,6 +1013,17 @@ def status_line() -> str:
     return f"{first}\nroute: {route}, capture: {capture}"
 
 
+def _preload_backend(backend) -> None:
+    """Import sounddevice now: a cold import took 1063 ms on Windows (n=1, 2026-11-07),
+    which the first reply's mic would otherwise wait for. Failure is left to the capture."""
+    if backend != "sounddevice":
+        return
+    try:
+        import sounddevice  # noqa: F401
+    except Exception:  # noqa: BLE001 - OSError without PortAudio; the capture reports it
+        pass
+
+
 def main() -> int:
     if sys.argv[1:2] == ["status"]:
         print(status_line())
@@ -946,14 +1063,18 @@ def main() -> int:
                     ECHO_SETTING, echo, "available" if voice_processing_available() else "missing",
                     output_route())
 
+    warm = warm_enabled(settings.get(WARM_SETTING))
+    _preload_backend(backend)
+
     stop = threading.Event()
     install_stop_handlers(stop)
 
     path = control_socket_path()
-    logger.info("started: gate=%.1f dBFS need=%d windows device=%s mic=%s socket=%s",
-                gate_db, need, device, backend, path)
+    logger.info("started: gate=%.1f dBFS need=%d windows device=%s mic=%s warm=%s socket=%s",
+                gate_db, need, device, backend, "on" if warm else "off", path)
+    phase = PhaseTracker(lambda: _status(path), warm=warm)
     run(
-        poll_speaking=lambda: None if stop.is_set() else is_speaking(path),
+        poll_phase=lambda: None if stop.is_set() else phase(),
         open_capture=lambda: open_capture(backend, device, echo=echo, vp_probe=vp_probe),
         vad=SileroVad(model),
         detector=BargeDetector(gate_db, need),

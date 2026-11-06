@@ -80,7 +80,7 @@ grep -E "stretch:|barge-in sent|barge: |voice processing|macOS:" /tmp/voice-barg
 ```
 
 Every `stretch:` line for steps 3 and 4. Each should end with
-`first_window <ms>, route=…, capture=…`: `route=speakers, capture=voice-processing` for
+`first_window <ms>, deaf <ms>, warm <ms>` (or `cold`) `, route=…, capture=…`: `route=speakers, capture=voice-processing` for
 step 3, `route=headphones, capture=sounddevice` for step 4. For the silent runs, the `max`
 and `p90` are the echo left after voice processing; compare them with the gate
 (-40 dBFS by default).
@@ -88,10 +88,15 @@ and `p90` are the echo left after voice processing; compare them with the gate
 Check on each voice-processing stretch line:
 
 - **Window count.** `windows` should be about 31 per second of the stretch (32 ms
-  windows), a little less for the 6 warm-up windows. About a quarter of that means the
+  windows), 6 fewer on a `cold` stretch (the warm-up windows). About a quarter of that means the
   tap read bytes as samples (pyobjc's `as_buffer` counted bytes): report it as a finding.
-- **`first_window`.** The time from asking for the mic to its first audio: voice
-  processing's start-up cost. Compare it with the headphone stretch's `first_window`.
+- **`deaf` and `warm`.** The mic now opens while the reply is generated. `deaf` is how
+  long into the reply the detector heard nothing; before this change it was about 1 s
+  (`first_window` 801-923 ms, n=6, plus the 192 ms warm-up). Report every `deaf` and `warm`
+  value, for both captures. A `cold` stretch's `first_window` is still the start-up cost.
+- **Talk over the first second.** On the speakers, start talking as soon as the reply
+  starts: it should cut within about 0.3 s (192 ms of speech plus `deaf`). Report n and
+  how many cut. Also say whether the recording after the cut kept your first words.
 
 Also report:
 

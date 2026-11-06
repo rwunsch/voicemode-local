@@ -35,8 +35,12 @@ the trigger's own python (`VOICEMODE_BARGE_PYTHON`, environment only, else `.ven
    channel's status reply, and a `barge_in` command that acts only while TTS plays.
    Plain `skip_forward` with nothing playing would end the next turn; `barge_in`
    checks under the state lock, so a late detection cannot.
-2. `voice_barge.py` is one process per machine. It opens the mic only while `speaking`
-   is true, and fires when Silero and a volume gate agree for 192 ms.
+2. `voice_barge.py` is one process per machine. It opens the mic when a voice turn's
+   audio starts (the control socket answers, which is only after the conch is taken) and
+   closes it when the first reply stops playing, when the server starts listening, or when
+   the turn ends; then it stays closed until the next turn. Windows read before the reply
+   plays are thrown away: they only let the mic start up while the reply is generated. It
+   fires when Silero and a volume gate agree for 192 ms, and only while `speaking`.
 3. On a voice cut, `converse` skips the pause and chime. The trigger hands over the last
    3 s of mic audio up to the moment recording starts, trimmed by timestamp, and
    `converse` prepends it. The file (`~/.voicemode/barge_preroll.bin`) is mode 0600 and
@@ -49,11 +53,34 @@ Silero alone is not enough on speakers: it correctly calls the assistant's echo 
 | `VOICEMODE_VOICE_BARGE_GATE_DB` | -40 | Raise it (-35) if speech cuts itself off on speakers |
 | `VOICEMODE_VOICE_BARGE_MIN_SPEECH_MS` | 192 | 96 ms gave false triggers from echo at lower gates |
 | `VOICEMODE_VOICE_BARGE_ECHO` | `auto` | macOS only: `auto` uses echo cancellation on the built-in speakers, `on` always, `off` never (see below) |
+| `VOICEMODE_VOICE_BARGE_WARM` | on | `off` opens the mic only once the reply plays (the old behaviour): the first 0.2-1 s of each reply cannot be interrupted. On needs a server that reports `listening` (patch_voice_pill); without it the trigger behaves as `off` |
 | `VOICEMODE_VOICE_BARGE_DEVICE` | `@DEFAULT_SOURCE@` | PulseAudio source. On Windows and macOS a device number, or part of a device name. A name that matches several (one per host API) picks the match on the default input's host API, else the first; the choice is logged once. An unknown name is one error line and a non-zero exit at start |
 
 Each speaking stretch (mic open while the assistant speaks) logs one INFO line when it
 closes, in `/tmp/voice-barge.log` on Linux and WSL: `stretch: 4.2 s, windows 120, max -41.3 dBFS,
-p90 -52.0 dBFS, fired no`. That is the echo level to size the gate against. No audio is saved.
+p90 -52.0 dBFS, fired no, first_window 0 ms, deaf 31 ms, warm 1180 ms`. The levels are the echo
+to size the gate against. No audio is saved. The timings run from the moment the trigger saw
+`speaking`: `first_window` to the mic's first audio, `deaf` to the first window the detector
+heard (after the 192 ms warmup), and `warm N ms` says the mic had already been open that long
+(`cold`: it was opened for this stretch, as with `VOICEMODE_VOICE_BARGE_WARM=off`).
+
+### Mic start-up: why the mic opens before the reply plays
+
+Before 2026-11-07 the mic opened only when `speaking` showed, so each reply began deaf for
+the poll (up to 50 ms), the mic's start-up and the warmup (192 ms):
+
+| Where | Before (cold) | After (warm) |
+|---|---|---|
+| macOS, reported, plain and voice processing | `first_window` 801-923 ms (n=6), so deaf about 1 s | not measured yet: read `deaf` in the stretch line |
+| Windows laptop, Jabra headset, MME, real mic, fake server, 1 s generation (2026-11-07) | deaf median 612 ms, 332-2003 (n=8) | deaf median 58 ms, 3-628 (n=8) |
+| Fakes only, 1 s generation, mic start-up 0 / 164 / 850 ms (n=5 each) | deaf median 240 / 408 / 1088 ms | 28 / 30 / 79 ms |
+| Fakes only, 0.3 s generation, mic start-up 850 ms (n=5) | 1083 ms | 784 ms: generation shorter than start-up only partly hides it |
+
+The Windows maxima (2003 and 628 ms) are the first stretch of the process, which paid for
+a cold `import sounddevice` (1063 ms measured alone, n=1); the trigger now imports it at
+start. On Windows alone, opening the stream took about 50 ms and its first audio about
+164 ms (median, n=10). Generation time is the margin: the warm mic helps only as far as
+generating the reply takes longer than the mic's start-up plus the warmup.
 
 ## macOS: echo cancellation on the built-in speakers
 
@@ -83,9 +110,9 @@ restarts. Every refused stretch still logs its stretch line, ending
 voice processing (refused without AVFoundation), `off` never does. Voice processing takes
 the system default input and ignores `VOICEMODE_VOICE_BARGE_DEVICE`.
 
-On macOS the stretch line ends with the choice and the mic's start-up time, e.g.
-`..., fired no, first_window 180 ms, route=speakers, capture=voice-processing`
-(`first_window` runs from asking for the mic to its first audio). `python -m
+On macOS the stretch line ends with the choice after the timings, e.g.
+`..., fired no, first_window 0 ms, deaf 12 ms, warm 1400 ms, route=speakers, capture=voice-processing`.
+With a cold stretch, `first_window` is the mic's start-up time. `python -m
 voice_mode.voice_barge status` prints a second line, `route: speakers, capture:
 voice-processing` (or `capture: refused`, or `capture: refused (echo cancellation failed to
 start)` when the running trigger recorded that in `~/.voicemode/barge_vp_failed.json`), and
@@ -108,8 +135,11 @@ Not verified yet (no Mac in this repo's test runs; everything above is tested wi
 - **A real trigger run with voice processing.** The spike was a separate recorder, not this
   trigger: silent stretches and a talk-over through it are still to be run, with the
   resampler (proper low-pass, handles 44.1 kHz) and pyobjc's buffer access as written here.
-- **Start-up cost.** Voice processing is turned on at every stretch start; how long that
-  takes, and whether audio is lost at the start, is unmeasured.
+- **Start-up cost.** Reported at 801-923 ms (n=6) for both captures. The mic now opens
+  while the reply is generated, so that time is hidden when generation is longer; the
+  `deaf` field says how much was left. Whether starting voice processing while the server
+  is about to open its own recording disturbs that recording (it already overlapped by up
+  to 100 ms before) is untested.
 - **External speakers count as headphones.** USB, HDMI or AirPlay speakers get plain capture.
 
 Steps for a real Mac: `tests/manual/mac_barge_vp_check.md`.

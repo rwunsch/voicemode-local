@@ -283,14 +283,14 @@ def test_stretch_line_carries_route_and_capture_when_the_capture_has_them(caplog
         _run([True, True, False], lambda: Cap(note="route=speakers, capture=voice-processing"))
     (line,) = [r.getMessage() for r in caplog.records if r.getMessage().startswith("stretch:")]
     import re
-    assert re.search(r"fired no, first_window \d+ ms, route=speakers, capture=voice-processing$", line), line
+    assert re.search(r"fired no, first_window \d+ ms, deaf \d+ ms, cold, route=speakers, capture=voice-processing$", line), line
 
 
-def test_stretch_line_is_unchanged_without_them(caplog):
+def test_stretch_line_without_them_ends_with_the_timing(caplog):
     with caplog.at_level(logging.INFO, logger="voicemode.voice_barge"):
         _run([True, True, False], lambda: Cap())
     (line,) = [r.getMessage() for r in caplog.records if r.getMessage().startswith("stretch:")]
-    assert line.endswith("fired no")
+    assert "fired no, first_window " in line and line.endswith(", cold")
 
 
 # --- VoiceProcessingCapture against a fake AVFoundation --------------------------
@@ -686,7 +686,7 @@ def test_every_refused_stretch_gets_a_stretch_line(caplog):
 
 
 def test_first_window_is_timed_from_before_the_mic_opens(caplog):
-    clock = iter([0.0, 0.0, 0.25, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0])
+    clock = iter([0.0, 0.25, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0])
 
     class Slow(Cap):
         def __init__(self):
@@ -705,14 +705,14 @@ def test_first_window_is_timed_from_before_the_mic_opens(caplog):
                sleep=lambda s: None, warmup_windows=0, poll_every_windows=1,
                stretch_clock=lambda: next(clock))
     (line,) = [r.getMessage() for r in caplog.records if r.getMessage().startswith("stretch:")]
-    assert ", first_window 250 ms, " in line, line
+    assert ", first_window 250 ms, deaf 400 ms, cold, " in line, line
 
 
 def test_no_window_at_all_says_none(caplog):
     with caplog.at_level(logging.INFO, logger="voicemode.voice_barge"):
         _run([True, True, False], lambda: Cap(n=0, note="route=speakers, capture=voice-processing"))
     (line,) = [r.getMessage() for r in caplog.records if r.getMessage().startswith("stretch:")]
-    assert ", first_window none, route=" in line
+    assert ", first_window none, deaf none, cold, route=" in line
 
 
 def test_a_failing_tap_logs_one_traceback_then_a_count_at_close(av, caplog):
