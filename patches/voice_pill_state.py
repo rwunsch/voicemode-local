@@ -517,13 +517,24 @@ BARGE_OFF_NOTE = ("Interrupt by voice is off. Tell the user once, in a few words
                   "voice pill.")
 
 
+def capture_backend() -> str | None:
+    """How voice barge-in can hear the mic: "parec" (PulseAudio/PipeWire, Linux and WSL),
+    else "sounddevice" (PortAudio, Windows and macOS), else None. Found, not imported:
+    loading PortAudio here would cost every caller."""
+    if shutil.which("parec") is not None:
+        return "parec"
+    if importlib.util.find_spec("sounddevice") is not None:
+        return "sounddevice"
+    return None
+
+
 def barge_state(home=None) -> bool | None:
-    """Whether interrupt by voice is on, or None where it cannot run (no parec).
+    """Whether interrupt by voice is on, or None where it cannot run (no mic reader).
 
     voicemode.env wins when it sets VOICEMODE_VOICE_BARGE: the switch writes it while the
     server runs, and the server's environment is from start-up. Without the key, the
     environment decides: FELIX passes the setting there and writes no file."""
-    if shutil.which("parec") is None:
+    if capture_backend() is None:
         return None
     settings = read_env_file(home)
     value = settings.get("VOICEMODE_VOICE_BARGE")

@@ -19,7 +19,8 @@ speakers can fall below the gate; see docs/voice-barge-in/README.md.
 Limit: only the buffered and turns[] players report ``speaking``, so with
 VOICEMODE_STREAMING_ENABLED=true this stays inert.
 
-Enable with ``voicemode-switch barge on``. Linux/WSL only for now (needs parec).
+Enable with ``voicemode-switch barge on``. The mic comes through parec on Linux and WSL,
+through sounddevice (PortAudio) on Windows and macOS.
 Installed into voice_mode/voice_barge.py by patches/apply.sh.
 """
 import logging
@@ -40,12 +41,12 @@ import numpy as np
 try:
     from voice_mode.voice_pill_state import (  # noqa: F401  (re-exported for callers)
         _exchange, _retrying, _status, barge_control, control_socket_path, is_paused,
-        barge_state, read_env_file, record_interruption, voicemode_base)
+        barge_state, capture_backend, read_env_file, record_interruption, voicemode_base)
 except ImportError:  # run straight from the repo, not the installed package
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from voice_pill_state import (  # noqa: F401
         _exchange, _retrying, _status, barge_control, control_socket_path, is_paused,
-        barge_state, read_env_file, record_interruption, voicemode_base)
+        barge_state, capture_backend, read_env_file, record_interruption, voicemode_base)
 
 logger = logging.getLogger("voicemode.voice_barge")
 
@@ -152,6 +153,54 @@ class ParecCapture:
             self._proc.kill()
             self._proc.wait()
         self._proc.stdout.close()
+
+
+class SoundDeviceCapture:
+    """The mic, via sounddevice (PortAudio), only for as long as this object is open.
+    Same contract as ParecCapture: 512-sample float windows, None after 200 ms of nothing."""
+
+    def __init__(self, device: str):
+        import queue
+        import sounddevice as sd
+        self._queue = queue.Queue()
+        self._buf = np.zeros(0, dtype=np.int16)
+        setting = (device or "").strip()
+        if setting in ("", "@DEFAULT_SOURCE@"):
+            chosen = None
+        elif setting.isdigit():
+            chosen = int(setting)
+        else:
+            chosen = setting
+        self._stream = sd.InputStream(samplerate=SAMPLE_RATE, channels=1, dtype="int16",
+                                      blocksize=WINDOW_SAMPLES, device=chosen,
+                                      callback=self._on_block)
+        self._stream.start()
+
+    def _on_block(self, block, frames, time_info, status):
+        self._queue.put(np.array(block[:, 0], dtype=np.int16))
+
+    def read_window(self):
+        import queue
+        while len(self._buf) < WINDOW_SAMPLES:
+            try:
+                self._buf = np.concatenate([self._buf, self._queue.get(timeout=0.2)])
+            except queue.Empty:
+                return None
+        raw, self._buf = self._buf[:WINDOW_SAMPLES], self._buf[WINDOW_SAMPLES:]
+        return raw.astype(np.float32) / 32768.0
+
+    def close(self) -> None:
+        try:
+            self._stream.stop()
+        finally:
+            self._stream.close()
+
+
+def open_capture(backend: str, device: str):
+    """The mic for one stretch of speech, by the backend capture_backend() chose."""
+    if backend == "parec":
+        return ParecCapture(device)
+    return SoundDeviceCapture(device)
 
 
 def is_speaking(path: Path) -> bool:
@@ -316,7 +365,8 @@ def install_stop_handlers(stop: threading.Event) -> None:
             pass
 
 
-CANNOT_RUN = "cannot run: voice barge-in needs PulseAudio or PipeWire (parec), which this machine lacks"
+CANNOT_RUN = ("cannot run: voice barge-in needs a mic reader, parec (PulseAudio or PipeWire) "
+              "or the sounddevice package, and this machine has neither")
 
 
 def status_line() -> str:
@@ -333,8 +383,9 @@ def main() -> int:
         return 0
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
     settings = trigger_settings()
-    if shutil.which("parec") is None:
-        logger.error("parec not found; voice barge-in needs PulseAudio or PipeWire tools")
+    backend = capture_backend()
+    if backend is None:
+        logger.error(CANNOT_RUN)
         return 1
     if len(sys.argv) < 2:
         logger.error("usage: python -m voice_mode.voice_barge <silero_vad.onnx> | status")
@@ -353,10 +404,11 @@ def main() -> int:
     install_stop_handlers(stop)
 
     path = control_socket_path()
-    logger.info("started: gate=%.1f dBFS need=%d windows device=%s socket=%s", gate_db, need, device, path)
+    logger.info("started: gate=%.1f dBFS need=%d windows device=%s mic=%s socket=%s",
+                gate_db, need, device, backend, path)
     run(
         poll_speaking=lambda: None if stop.is_set() else is_speaking(path),
-        open_capture=lambda: ParecCapture(device),
+        open_capture=lambda: open_capture(backend, device),
         vad=SileroVad(model),
         detector=BargeDetector(gate_db, need),
         send_barge=lambda: send_barge_in(path),

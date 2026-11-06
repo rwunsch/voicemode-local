@@ -266,7 +266,7 @@ def test_no_barge_note_for_an_unregistered_session(base, monkeypatch):
     assert st.result_note(os.getpid(), base=base) == ""
 
 
-def test_barge_state_reads_the_last_setting_and_needs_parec(tmp_path, monkeypatch):
+def test_barge_state_reads_the_last_setting_and_needs_a_mic_reader(tmp_path, monkeypatch):
     monkeypatch.delenv("VOICEMODE_VOICE_BARGE", raising=False)
     (tmp_path / "voicemode.env").write_text(
         "VOICEMODE_VOICE_BARGE=false\n# VOICEMODE_VOICE_BARGE=false\nVOICEMODE_VOICE_BARGE=true\n")
@@ -275,7 +275,8 @@ def test_barge_state_reads_the_last_setting_and_needs_parec(tmp_path, monkeypatc
     (tmp_path / "voicemode.env").write_text("")
     assert st.barge_state(home=tmp_path) is False
     monkeypatch.setattr(st.shutil, "which", lambda name: None)
-    assert st.barge_state(home=tmp_path) is None
+    monkeypatch.setattr(st.importlib.util, "find_spec", lambda name: None)
+    assert st.barge_state(home=tmp_path) is None  # neither parec nor sounddevice
 
 
 def test_barge_state_falls_back_to_the_environment_when_the_file_lacks_the_key(tmp_path, monkeypatch):

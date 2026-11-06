@@ -1,6 +1,7 @@
 """Behaviour of the voice barge-in trigger, with the mic, Silero and socket faked."""
 import importlib.util
 import sys
+import time
 from pathlib import Path
 
 import numpy as np
@@ -367,3 +368,97 @@ class TestStatusCommand:
     def test_status_never_starts_the_trigger(self, monkeypatch, capsys):
         monkeypatch.setattr(voice_barge, "run", lambda *a, **k: pytest.fail("trigger started"))
         self._run(monkeypatch, capsys, True)
+
+
+class FakeSoundDevice:
+    """Stands in for the sounddevice module: no PortAudio, no mic."""
+
+    def __init__(self):
+        self.streams = []
+
+    def InputStream(self, **kwargs):
+        stream = FakeInputStream(kwargs)
+        self.streams.append(stream)
+        return stream
+
+
+class FakeInputStream:
+    def __init__(self, kwargs):
+        self.kwargs, self.started, self.closed = kwargs, False, False
+
+    def start(self):
+        self.started = True
+
+    def stop(self):
+        self.started = False
+
+    def close(self):
+        self.closed = True
+
+    def deliver(self, samples):
+        block = np.asarray(samples, dtype=np.int16).reshape(-1, 1)
+        self.kwargs["callback"](block, len(block), None, None)
+
+
+class TestSoundDeviceCapture:
+    """Windows and macOS have no parec: the mic comes through sounddevice (PortAudio)."""
+
+    @pytest.fixture
+    def sd(self, monkeypatch):
+        fake = FakeSoundDevice()
+        monkeypatch.setitem(sys.modules, "sounddevice", fake)
+        return fake
+
+    def test_opens_16k_mono_int16_in_silero_windows(self, sd):
+        cap = voice_barge.SoundDeviceCapture("@DEFAULT_SOURCE@")
+        kw = sd.streams[0].kwargs
+        assert (kw["samplerate"], kw["channels"], kw["dtype"]) == (16000, 1, "int16")
+        assert kw["blocksize"] == voice_barge.WINDOW_SAMPLES
+        assert kw["device"] is None and sd.streams[0].started
+        cap.close()
+
+    @pytest.mark.parametrize("setting,device", [("", None), ("3", 3), ("USB MIC", "USB MIC")])
+    def test_device_setting(self, sd, setting, device):
+        voice_barge.SoundDeviceCapture(setting).close()
+        assert sd.streams[0].kwargs["device"] == device
+
+    def test_window_is_scaled_floats_across_uneven_blocks(self, sd):
+        cap = voice_barge.SoundDeviceCapture("")
+        n = voice_barge.WINDOW_SAMPLES
+        sd.streams[0].deliver([16384] * 300)
+        sd.streams[0].deliver([16384] * 300)
+        w = cap.read_window()
+        assert w.dtype == np.float32 and len(w) == n and np.allclose(w, 0.5)
+        sd.streams[0].deliver([0] * (2 * n))
+        assert len(cap.read_window()) == n  # 88 left over + the next block
+        cap.close()
+
+    def test_no_audio_for_200_ms_is_none(self, sd):
+        cap = voice_barge.SoundDeviceCapture("")
+        t = time.monotonic()
+        assert cap.read_window() is None
+        assert 0.15 < time.monotonic() - t < 1.0
+        cap.close()
+
+    def test_close_stops_and_closes_the_stream(self, sd):
+        voice_barge.SoundDeviceCapture("").close()
+        assert not sd.streams[0].started and sd.streams[0].closed
+
+
+class TestBackendChoice:
+    def test_parec_first_then_sounddevice_then_none(self, monkeypatch):
+        st = voice_barge  # re-exports capture_backend from voice_pill_state
+        mod = sys.modules[st.capture_backend.__module__]
+        monkeypatch.setattr(mod.shutil, "which", lambda name: "/usr/bin/parec")
+        assert st.capture_backend() == "parec"
+        monkeypatch.setattr(mod.shutil, "which", lambda name: None)
+        monkeypatch.setattr(mod.importlib.util, "find_spec", lambda name: object() if name == "sounddevice" else None)
+        assert st.capture_backend() == "sounddevice"
+        monkeypatch.setattr(mod.importlib.util, "find_spec", lambda name: None)
+        assert st.capture_backend() is None
+
+    def test_open_capture_follows_the_backend(self, monkeypatch):
+        monkeypatch.setitem(sys.modules, "sounddevice", FakeSoundDevice())
+        cap = voice_barge.open_capture("sounddevice", "")
+        assert isinstance(cap, voice_barge.SoundDeviceCapture)
+        cap.close()
