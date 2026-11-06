@@ -74,22 +74,37 @@ mic stays closed for that stretch and one line is logged per route change,
 `barge: built-in speakers without echo cancellation; use headphones
 (pyobjc-framework-AVFoundation missing)`. If voice processing fails to start, the
 stretch is refused the same way; it never falls back to plain capture on the speakers.
+That failure is remembered for the route: no retry until the route changes or the trigger
+restarts. Every refused stretch still logs its stretch line, ending
+`capture=refused (pyobjc-framework-AVFoundation missing)` or
+`capture=refused (echo cancellation failed to start)`.
 
 `VOICEMODE_VOICE_BARGE_ECHO` overrides the rule: `auto` (default) as above, `on` always uses
 voice processing (refused without AVFoundation), `off` never does. Voice processing takes
 the system default input and ignores `VOICEMODE_VOICE_BARGE_DEVICE`.
 
-On macOS the stretch line ends with the choice, e.g. `..., fired no, route=speakers,
-capture=voice-processing`, and `python -m voice_mode.voice_barge status` prints a second
-line, `route: speakers, capture: voice-processing` (or `capture: refused`). The first line
-and its meaning are unchanged, and the pill reads only the first.
+On macOS the stretch line ends with the choice and the mic's start-up time, e.g.
+`..., fired no, first_window 180 ms, route=speakers, capture=voice-processing`
+(`first_window` runs from asking for the mic to its first audio). `python -m
+voice_mode.voice_barge status` prints a second line, `route: speakers, capture:
+voice-processing` (or `capture: refused`, or `capture: refused (echo cancellation failed to
+start)` when the running trigger recorded that in `~/.voicemode/barge_vp_failed.json`), and
+`voicemode-switch barge status` (so the `voice_barge` tool) shows that line too. The first
+line and its meaning are unchanged, and the pill reads only the first.
+
+Closing a voice-processing stretch stops the engine, turns voice processing off again
+(best effort) and removes the tap. A tap that keeps failing logs one traceback, then a count
+at close. `VOICEMODE_VOICE_BARGE_VP_CHANNEL_PROBE=1` logs every tap channel's level at the
+end of each voice-processing stretch (`vp channel probe: ...`), to settle which channel is
+the processed one.
 
 Not verified yet (no Mac in this repo's test runs; everything above is tested with fakes):
 
 - **Channel 0.** The spike's tap was 48 kHz with 9 channels; it read channel 0 and the echo
   was gone, but nothing says channel 0 is the processed signal (`VP_CHANNEL`).
 - **Ducking.** Set to the minimum. Robert heard no dip on Kokoro (n=1); `say` did dip.
-  With macOS 13 or older the level cannot be set and macOS's default ducking applies.
+  With macOS 13 or older, or if pyobjc will not convert the setting, the level cannot be
+  set (logged once, `ducking not settable`) and macOS's default ducking applies.
 - **A real trigger run with voice processing.** The spike was a separate recorder, not this
   trigger: silent stretches and a talk-over through it are still to be run, with the
   resampler (proper low-pass, handles 44.1 kHz) and pyobjc's buffer access as written here.
