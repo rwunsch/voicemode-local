@@ -11,7 +11,7 @@
 # Safe to re-run: whatever is already present is skipped. If a step fails, fix
 # the cause and run it again; it continues where it stopped.
 #
-# Usage: ./install-mac.sh [--yes] [--pill] [--german] [--help]
+# Usage: ./install-mac.sh [--yes] [--pill] [--barge] [--german] [--help]
 
 set -euo pipefail
 
@@ -43,13 +43,15 @@ KOKORO_VOICES_URL="https://github.com/thewh1teagle/kokoro-onnx/releases/download
 
 usage() {
     cat <<'EOF'
-Usage: ./install-mac.sh [--yes] [--pill] [--german] [--help]
+Usage: ./install-mac.sh [--yes] [--pill] [--barge] [--german] [--help]
 
 Native macOS setup for voicemode-local (Apple silicon, Homebrew, no Docker).
 
   --yes      Unattended: ask nothing, take every default.
              (Defaults: no voice pill, no German voice.)
   --pill     Install the voice pill (off by default; a failure only warns).
+  --barge    Turn on interrupt by voice (voicemode-switch barge on). Works with
+             headphones; the built-in speakers make it interrupt itself.
   --german   Also download the German voice dm_martin (about 325 MB).
   --help     Show this text.
 
@@ -60,10 +62,12 @@ EOF
 ASSUME_YES=0
 WANT_PILL=0
 WANT_GERMAN=0
+WANT_BARGE=0
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --yes|-y)  ASSUME_YES=1 ;;
         --pill)    WANT_PILL=1 ;;
+        --barge)   WANT_BARGE=1 ;;
         --german)  WANT_GERMAN=1 ;;
         --help|-h) usage; exit 0 ;;
         *) echo "Unknown option: $1" >&2; usage >&2; exit 2 ;;
@@ -376,6 +380,18 @@ if [ "$WANT_PILL" = "1" ]; then
     else
         PILL_FAILED=1
         warn "The voice pill did not start (the voice itself is unaffected). Try again later with: voicemode-switch pill on"
+    fi
+fi
+
+# ─── Step 10: Interrupt by voice (only on request) ──────────────────────────
+if [ "$WANT_BARGE" = "1" ]; then
+    header "Step 10: Interrupt by voice"
+    # A barge problem must never fail voice: warn and carry on.
+    if "$SCRIPT_DIR/voicemode-switch" barge on; then
+        ok "Interrupt by voice on"
+        echo "  Interrupt by voice works with headphones; on the built-in speakers it interrupts itself until echo cancellation lands."
+    else
+        warn "Interrupt by voice did not start (the voice itself is unaffected). Try again later with: voicemode-switch barge on"
     fi
 fi
 

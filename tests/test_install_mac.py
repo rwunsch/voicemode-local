@@ -136,6 +136,7 @@ exit 0
 STUB_SWITCH = r'''#!/bin/bash
 echo "switch $*" >> "$STUB_LOG"
 [ "${STUB_FAIL:-}" = pill ] && [ "$1 $2" = "pill on" ] && { echo "pill exploded" >&2; exit 1; }
+[ "${STUB_FAIL:-}" = barge ] && [ "$1 $2" = "barge on" ] && { echo "barge exploded" >&2; exit 1; }
 [ "${STUB_FAIL:-}" = localonly ] && [ "$1" = localonly ] && { echo "localonly failed" >&2; exit 1; }
 [ "${STUB_FAIL:-}" = health ] && [ "$1" = health ] && exit 1
 exit 0
@@ -644,3 +645,40 @@ def test_not_asking_for_the_pill_does_not_claim_it_is_absent(tmp_path):
     done = _box(tmp_path).run("--yes")
     assert "Voice pill: not installed" not in done.stdout
     assert "Voice pill: not requested" in done.stdout
+
+
+# --- --barge: interrupt by voice, only on request --------------------------------
+
+BARGE_LINE = ("Interrupt by voice works with headphones; on the built-in speakers it "
+              "interrupts itself until echo cancellation lands.")
+
+
+def test_barge_is_not_turned_on_by_default_or_with_yes(tmp_path):
+    # Fails if barge becomes default-on, or --yes implies it.
+    b = _box(tmp_path)
+    done = b.run("--yes")
+    assert done.returncode == 0
+    assert not b.calls("switch barge") and BARGE_LINE not in done.stdout
+
+
+def test_barge_flag_turns_it_on_after_install_and_prints_the_headphones_line(tmp_path):
+    # Fails if --barge is ignored, runs before the services exist, or the warning is missing.
+    b = _box(tmp_path)
+    done = b.run("--barge", "--yes")
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert b.calls("switch barge on")
+    assert BARGE_LINE in done.stdout
+    assert b.calls().index(b.calls("switch barge on")[0]) > b.calls().index(b.calls("switch localonly")[0])
+
+
+def test_a_failing_barge_warns_and_the_install_still_succeeds(tmp_path):
+    # Fails if a barge failure is made fatal.
+    b = _box(tmp_path)
+    done = b.run("--barge", "--yes", fail="barge")
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert "barge" in (done.stdout + done.stderr).lower()
+    assert BARGE_LINE not in done.stdout
+
+
+def test_help_lists_barge(tmp_path):
+    assert "--barge" in _box(tmp_path).run("--help").stdout
