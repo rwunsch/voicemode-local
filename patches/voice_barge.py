@@ -16,8 +16,9 @@ calls that speech. Measured 2026-11-04 on laptop speakers at full volume, the
 echo peaked near -38 dBFS against about -18 for normal speech. Soft speech on
 speakers can fall below the gate; see docs/voice-barge-in/README.md.
 
-Limit: only the buffered and turns[] players report ``speaking``, so with
-VOICEMODE_STREAMING_ENABLED=true this stays inert.
+Streaming: an earlier note here said barge stays inert with
+VOICEMODE_STREAMING_ENABLED=true. FELIX-MAC reported otherwise (cut playback with
+streaming at its default); see docs/voice-barge-in/README.md.
 
 Enable with ``voicemode-switch barge on``. The mic comes through parec on Linux and WSL,
 through sounddevice (PortAudio) on Windows and macOS.
@@ -155,6 +156,46 @@ class ParecCapture:
         self._proc.stdout.close()
 
 
+class UnknownDevice(Exception):
+    """VOICEMODE_VOICE_BARGE_DEVICE names no input device."""
+
+
+_LOGGED_DEVICES: set = set()
+
+
+def resolve_input_device(sd, name: str) -> int:
+    """The device index for a mic name.
+
+    PortAudio lists one physical mic once per host API (MME, DirectSound, WASAPI,
+    WDM-KS) and rejects a name that matches several. Take the match on the default
+    input's host API, else the first match. Logs the choice once per device.
+    """
+    wanted = name.lower()
+    matches = [i for i, d in enumerate(sd.query_devices())
+               if d.get("max_input_channels", 0) > 0 and wanted in d["name"].lower()]
+    if not matches:
+        raise UnknownDevice(f"no input device matches {name!r}")
+    chosen = matches[0]
+    if len(matches) > 1:
+        try:
+            default_in = sd.default.device[0]
+            default_api = sd.query_devices(default_in)["hostapi"] if default_in is not None and default_in >= 0 else None
+        except Exception:
+            default_api = None
+        if default_api is not None:
+            chosen = next((i for i in matches if sd.query_devices(i)["hostapi"] == default_api), chosen)
+    if chosen not in _LOGGED_DEVICES:
+        _LOGGED_DEVICES.add(chosen)
+        info = sd.query_devices(chosen)
+        try:
+            api = sd.query_hostapis(info["hostapi"])["name"]
+        except Exception:
+            api = "?"
+        logger.info("mic device: index %d, %s, host API %s (%d matched %r)",
+                    chosen, info["name"], api, len(matches), name)
+    return chosen
+
+
 class SoundDeviceCapture:
     """The mic, via sounddevice (PortAudio), only for as long as this object is open.
     Same contract as ParecCapture: 512-sample float windows, None after 200 ms of nothing."""
@@ -170,7 +211,7 @@ class SoundDeviceCapture:
         elif setting.isdigit():
             chosen = int(setting)
         else:
-            chosen = setting
+            chosen = resolve_input_device(sd, setting)
         self._stream = sd.InputStream(samplerate=SAMPLE_RATE, channels=1, dtype="int16",
                                       blocksize=WINDOW_SAMPLES, device=chosen,
                                       callback=self._on_block)
@@ -201,6 +242,25 @@ def open_capture(backend: str, device: str):
     if backend == "parec":
         return ParecCapture(device)
     return SoundDeviceCapture(device)
+
+
+class StretchStats:
+    """Levels of one speaking stretch, kept as a list of floats: no audio, no per-window log."""
+
+    def __init__(self):
+        self.dbs: list = []
+
+    def add(self, db: float) -> None:
+        self.dbs.append(db)
+
+    def line(self, seconds: float, fired: bool) -> str:
+        if self.dbs:
+            peak = f"{max(self.dbs):.1f} dBFS"
+            p90 = f"{float(np.percentile(self.dbs, 90)):.1f} dBFS"
+        else:
+            peak = p90 = "n/a"
+        return (f"stretch: {seconds:.1f} s, windows {len(self.dbs)}, max {peak}, "
+                f"p90 {p90}, fired {'yes' if fired else 'no'}")
 
 
 def is_speaking(path: Path) -> bool:
@@ -283,7 +343,7 @@ def run(poll_speaking, open_capture, vad, detector, send_barge, sleep=time.sleep
         warmup_windows=WARMUP_WINDOWS, poll_every_windows=POLL_EVERY_WINDOWS,
         idle_poll_s=IDLE_POLL_S, poll_listen_started=None, preroll_sink=None,
         clock=time.time, preroll_windows=PREROLL_WINDOWS,
-        is_paused=lambda: False, on_fire=None) -> None:
+        is_paused=lambda: False, on_fire=None, stretch_clock=time.monotonic) -> None:
     """Main loop. ``poll_speaking`` returns True, False, or None to shut down.
 
     While ``is_paused()`` the mic stays closed (and an open one is closed at the
@@ -303,6 +363,8 @@ def run(poll_speaking, open_capture, vad, detector, send_barge, sleep=time.sleep
         fired = False
         count = 0
         recent = deque(maxlen=preroll_windows)
+        stats = StretchStats()
+        opened_at = stretch_clock()
         try:
             while True:
                 window = capture.read_window()
@@ -318,6 +380,7 @@ def run(poll_speaking, open_capture, vad, detector, send_barge, sleep=time.sleep
                 recent.append(window)
                 prob = vad.prob(window)
                 db = window_db(window)
+                stats.add(db)
                 if detector.feed(prob, db):
                     send_barge()
                     if on_fire is not None:
@@ -332,7 +395,10 @@ def run(poll_speaking, open_capture, vad, detector, send_barge, sleep=time.sleep
                                   poll_every_windows, clock)
                     break
         finally:
-            capture.close()
+            try:
+                logger.info("%s", stats.line(stretch_clock() - opened_at, fired))
+            finally:
+                capture.close()
 
         # Don't reopen the mic for the utterance that is being cut.
         while fired:
@@ -399,6 +465,14 @@ def main() -> int:
     min_ms = float(settings.get("VOICEMODE_VOICE_BARGE_MIN_SPEECH_MS", DEFAULT_MIN_SPEECH_MS))
     device = settings.get("VOICEMODE_VOICE_BARGE_DEVICE", "@DEFAULT_SOURCE@")
     need = max(1, round(min_ms / (WINDOW_S * 1000)))
+    if backend == "sounddevice" and device.strip() not in ("", "@DEFAULT_SOURCE@") and not device.strip().isdigit():
+        try:
+            import sounddevice as sd
+            resolve_input_device(sd, device.strip())
+        except UnknownDevice as e:
+            logger.error("%s; set VOICEMODE_VOICE_BARGE_DEVICE to part of an input device's name, "
+                         "or a device number", e)
+            return 1
 
     stop = threading.Event()
     install_stop_handlers(stop)

@@ -373,8 +373,20 @@ class TestStatusCommand:
 class FakeSoundDevice:
     """Stands in for the sounddevice module: no PortAudio, no mic."""
 
-    def __init__(self):
+    def __init__(self, devices=None, hostapis=("MME", "Windows WASAPI"), default_input=None):
         self.streams = []
+        self._devices = devices if devices is not None else [
+            {"name": "USB MIC", "max_input_channels": 1, "hostapi": 0}]
+        self._hostapis = [{"name": n} for n in hostapis]
+        self.default = type("Default", (), {"device": (default_input if default_input is not None else -1, -1)})()
+
+    def query_devices(self, device=None, kind=None):
+        if device is None:
+            return list(self._devices)
+        return self._devices[device]
+
+    def query_hostapis(self, index=None):
+        return self._hostapis if index is None else self._hostapis[index]
 
     def InputStream(self, **kwargs):
         stream = FakeInputStream(kwargs)
@@ -417,7 +429,7 @@ class TestSoundDeviceCapture:
         assert kw["device"] is None and sd.streams[0].started
         cap.close()
 
-    @pytest.mark.parametrize("setting,device", [("", None), ("3", 3), ("USB MIC", "USB MIC")])
+    @pytest.mark.parametrize("setting,device", [("", None), ("3", 3), ("USB MIC", 0), ("usb", 0)])
     def test_device_setting(self, sd, setting, device):
         voice_barge.SoundDeviceCapture(setting).close()
         assert sd.streams[0].kwargs["device"] == device
@@ -462,3 +474,102 @@ class TestBackendChoice:
         cap = voice_barge.open_capture("sounddevice", "")
         assert isinstance(cap, voice_barge.SoundDeviceCapture)
         cap.close()
+
+
+AUKEY = lambda api: {"name": "Aukey Microphone", "max_input_channels": 1, "hostapi": api}
+
+
+class TestDeviceByName:
+    """One physical mic shows up once per host API; PortAudio rejects an ambiguous name."""
+
+    def _sd(self, monkeypatch, default_input, devices=None):
+        devices = devices or [AUKEY(0), AUKEY(1), AUKEY(2), AUKEY(3),
+                              {"name": "Speakers", "max_input_channels": 0, "hostapi": 2}]
+        fake = FakeSoundDevice(devices, ("MME", "Windows DirectSound", "Windows WASAPI", "Windows WDM-KS"),
+                               default_input)
+        monkeypatch.setitem(sys.modules, "sounddevice", fake)
+        voice_barge._LOGGED_DEVICES.clear()
+        return fake
+
+    def test_several_matches_pick_the_one_on_the_default_inputs_host_api(self, monkeypatch):
+        sd = self._sd(monkeypatch, default_input=2)
+        voice_barge.SoundDeviceCapture("Aukey").close()
+        assert sd.streams[0].kwargs["device"] == 2
+
+    def test_several_matches_without_a_usable_default_pick_the_first(self, monkeypatch):
+        sd = self._sd(monkeypatch, default_input=None)
+        voice_barge.SoundDeviceCapture("Aukey").close()
+        assert sd.streams[0].kwargs["device"] == 0
+
+    def test_default_on_an_api_with_no_match_picks_the_first(self, monkeypatch):
+        devices = [AUKEY(1), AUKEY(3), {"name": "Other", "max_input_channels": 2, "hostapi": 0}]
+        sd = self._sd(monkeypatch, default_input=2, devices=devices)
+        voice_barge.SoundDeviceCapture("Aukey").close()
+        assert sd.streams[0].kwargs["device"] == 0
+
+    def test_output_only_devices_are_not_matches(self, monkeypatch):
+        sd = self._sd(monkeypatch, default_input=None)
+        with pytest.raises(voice_barge.UnknownDevice):
+            voice_barge.SoundDeviceCapture("Speakers")
+
+    def test_the_chosen_device_is_logged_once(self, monkeypatch, caplog):
+        self._sd(monkeypatch, default_input=2)
+        with caplog.at_level("INFO", logger="voicemode.voice_barge"):
+            for _ in range(3):
+                voice_barge.SoundDeviceCapture("Aukey").close()
+        lines = [r.getMessage() for r in caplog.records if "mic device" in r.getMessage()]
+        assert len(lines) == 1
+        assert "2" in lines[0] and "Aukey Microphone" in lines[0] and "Windows WASAPI" in lines[0]
+
+    def test_unknown_name_is_one_clear_error_and_nonzero_exit_at_start(self, monkeypatch, tmp_path, caplog):
+        self._sd(monkeypatch, default_input=2)
+        model = tmp_path / "m.onnx"
+        model.write_bytes(b"x")
+        monkeypatch.setattr(sys, "argv", ["voice_barge", str(model)])
+        monkeypatch.setattr(voice_barge, "capture_backend", lambda: "sounddevice")
+        monkeypatch.setattr(voice_barge, "trigger_settings", lambda: {"VOICEMODE_VOICE_BARGE_DEVICE": "Nonesuch"})
+        monkeypatch.setattr(voice_barge, "SileroVad", lambda p: pytest.fail("must fail before loading the model"))
+        with caplog.at_level("INFO", logger="voicemode.voice_barge"):
+            assert voice_barge.main() != 0
+        errors = [r for r in caplog.records if r.levelname == "ERROR"]
+        assert len(errors) == 1 and "Nonesuch" in errors[0].getMessage()
+
+
+class TestStretchLog:
+    """One INFO line per speaking stretch: the echo measurement."""
+
+    def _lines(self, h, caplog):
+        with caplog.at_level("INFO", logger="voicemode.voice_barge"):
+            h.run()
+        return [r.getMessage() for r in caplog.records if r.getMessage().startswith("stretch:")]
+
+    def test_a_quiet_stretch_reports_windows_max_p90_and_no_fire(self, caplog):
+        dbs = [-60.0] * 9 + [-50.0]
+        h = Harness([True] * 11 + [False], [(NOT_SPEECH, d) for d in dbs])
+        (line,) = self._lines(h, caplog)
+        import re
+        m = re.fullmatch(r"stretch: (\d+\.\d) s, windows 10, max -50\.0 dBFS, p90 -59\.0 dBFS, fired no", line)
+        assert m, line
+
+    def test_a_fired_stretch_says_yes(self, caplog):
+        h = Harness([True] * 10, [(SPEECH, LOUD)] * 10)
+        (line,) = self._lines(h, caplog)
+        assert line.endswith("fired yes") and "max -20.0 dBFS" in line
+
+    def test_warmup_windows_are_not_counted(self, caplog):
+        h = Harness([True] * 7 + [False], [(NOT_SPEECH, -10.0)] * 3 + [(NOT_SPEECH, -60.0)] * 4, warmup=3)
+        (line,) = self._lines(h, caplog)
+        assert "windows 3" in line and "max -60.0 dBFS" in line
+
+    def test_one_line_per_stretch_and_nothing_per_window(self, caplog):
+        h = Harness([True, True, False, True, True, False], [(NOT_SPEECH, -60.0)] * 20)
+        h.opened_frames = None
+        with caplog.at_level("INFO", logger="voicemode.voice_barge"):
+            h.run()
+        assert len([r for r in caplog.records if r.getMessage().startswith("stretch:")]) == len(h.opened)
+        assert len(caplog.records) <= len(h.opened)
+
+    def test_a_stretch_with_no_windows_still_reports(self, caplog):
+        h = Harness([True, False], [])
+        (line,) = self._lines(h, caplog)
+        assert "windows 0" in line and "fired no" in line
