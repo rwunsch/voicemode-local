@@ -178,22 +178,115 @@ def pills(tmp_path, home):
             pill.kill()
 
 
-def test_shows_without_taking_focus_when_started_hidden_three_times(pills):
-    for n in range(3):
+class ForegroundHelper:
+    """A small window of this test's own, made the foreground window when Windows reports
+    none (a locked or idle session). Windows lets a process take the foreground when there
+    is no foreground window. No clicks, no keystrokes. The pill is then started by the
+    foreground process, which Windows would let it take the foreground from: a harder test.
+    The window lives on its own thread with a message loop: a window that pumps nothing
+    blocks every program that broadcasts a message to all windows."""
+
+    def __init__(self):
+        import threading
+
+        user32.CreateWindowExW.argtypes = [wintypes.DWORD, wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.DWORD,
+                                           ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+                                           wintypes.HWND, wintypes.HMENU, wintypes.HINSTANCE, wintypes.LPVOID]
+        user32.CreateWindowExW.restype = wintypes.HWND
+        user32.SetForegroundWindow.argtypes = [wintypes.HWND]
+        user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
+        user32.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+        user32.GetMessageW.argtypes = [ctypes.POINTER(wintypes.MSG), wintypes.HWND, wintypes.UINT, wintypes.UINT]
+        user32.DispatchMessageW.argtypes = [ctypes.POINTER(wintypes.MSG)]
+        user32.DestroyWindow.argtypes = [wintypes.HWND]
+        self.hwnd = None
+        ready = threading.Event()
+
+        def run():
+            # WS_POPUP | WS_VISIBLE, a 40 px square at the top left.
+            self.hwnd = user32.CreateWindowExW(0, "STATIC", "vml focus helper", 0x80000000 | 0x10000000,
+                                               0, 0, 40, 40, None, None, None, None)
+            if self.hwnd:
+                user32.ShowWindow(self.hwnd, 5)  # SW_SHOW
+                user32.SetForegroundWindow(self.hwnd)
+            ready.set()
+            msg = wintypes.MSG()
+            while self.hwnd and user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
+                if msg.message == 0x0400:  # WM_USER: close, from close()
+                    user32.DestroyWindow(self.hwnd)
+                    break
+                user32.TranslateMessage(ctypes.byref(msg))
+                user32.DispatchMessageW(ctypes.byref(msg))
+
+        self.thread = threading.Thread(target=run, daemon=True)
+        self.thread.start()
+        ready.wait(10)
+
+    def close(self):
+        if self.hwnd:
+            user32.PostMessageW(self.hwnd, 0x0400, 0, 0)
+            self.thread.join(10)
+            self.hwnd = None
+
+
+def window_owner(hwnd):
+    """(pid, image file name, title) of a window."""
+    owner = wintypes.DWORD()
+    user32.GetWindowThreadProcessId(hwnd, ctypes.byref(owner))
+    title = ctypes.create_unicode_buffer(128)
+    user32.GetWindowTextW(hwnd, title, 128)
+    image = ""
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    handle = kernel32.OpenProcess(0x1000, False, owner.value)  # PROCESS_QUERY_LIMITED_INFORMATION
+    if handle:
+        buf, size = ctypes.create_unicode_buffer(1024), wintypes.DWORD(1024)
+        if kernel32.QueryFullProcessImageNameW(handle, 0, buf, ctypes.byref(size)):
+            image = Path(buf.value).name
+        kernel32.CloseHandle(handle)
+    return owner.value, image, title.value
+
+
+def test_shows_without_taking_focus_when_started_hidden(pills):
+    """At least 3 measured starts: a start counts only when a real window had the
+    foreground before it. With none, the helper window is made foreground first; if even
+    that fails, the start is not measured. A start where the foreground moved to some
+    other program (the user at work) is not measured either; a move to the pill, its
+    WebView2 or its backend fails."""
+    measured, attempts = 0, 0
+    while measured < 3 and attempts < 8:
+        n, attempts = attempts, attempts + 1
+        helper = None
         before = user32.GetForegroundWindow()
-        t0 = time.monotonic()
-        pill = pills(f"focus{n}").start()
-        hwnd = wait_visible(pill)
-        shown = time.monotonic() - t0
-        time.sleep(1.0)  # past the first page layout and the backend's first snapshots
-        after = user32.GetForegroundWindow()
-        print(f"\nstart {n}: visible after {shown:.1f} s; pill {hwnd}, foreground {before} -> {after}")
-        assert after != hwnd, f"start {n}: the pill took the foreground"
-        assert after == before, f"start {n}: foreground changed from {before} to {after}"
-        assert pill.stop() == 0, pill.log()
-        # Shutdown closes the backend's stdin: the fake records the EOF.
-        assert any("stdin EOF" in line for line in pill.runs()), pill.log()
-        assert windows_of(pill.process.pid) == []
+        if not before:
+            helper = ForegroundHelper()
+            time.sleep(0.3)
+            before = user32.GetForegroundWindow()
+        try:
+            t0 = time.monotonic()
+            pill = pills(f"focus{n}").start()
+            hwnd = wait_visible(pill)
+            shown = time.monotonic() - t0
+            time.sleep(1.0)  # past the first page layout and the backend's first snapshots
+            after = user32.GetForegroundWindow()
+            print(f"\nstart {n}: visible after {shown:.1f} s; pill {hwnd}, foreground {before} -> {after}"
+                  f"{' (helper)' if helper else ''}{'' if before else ' NOT MEASURED'}")
+            assert after != hwnd, f"start {n}: the pill took the foreground"
+            if before and after != before:
+                pid, image, title = window_owner(after)
+                print(f"start {n}: foreground moved to pid {pid} {image} {title!r}")
+                ours = pid == pill.process.pid or image.lower() in ("msedgewebview2.exe", Path(sys.executable).name.lower())
+                assert not ours, f"start {n}: the foreground moved to the pill's own process tree: {image}"
+            elif before:
+                measured += 1
+            assert pill.stop() == 0, pill.log()
+            # Shutdown closes the backend's stdin: the fake records the EOF.
+            assert any("stdin EOF" in line for line in pill.runs()), pill.log()
+            assert windows_of(pill.process.pid) == []
+        finally:
+            if helper:
+                helper.close()
+    assert measured >= 3, f"only {measured} of {attempts} starts had a foreground window to keep"
 
 
 def test_files_land_in_the_data_dir_and_not_in_the_wsl_folder(pills, tmp_path):
@@ -294,3 +387,44 @@ def test_the_real_backend_runs_and_ends_on_eof(pills, tmp_path):
     assert "backend exited" not in pill.log(), pill.log()
     assert pill.stop() == 0
     assert "backend exited" not in pill.log()  # closing: ended by EOF, no restart
+
+
+# -- names: every spelling of one folder gives one name ------------------------
+
+def print_names(data_dir, cwd):
+    out = subprocess.run([vn.powershell(), "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+                          str(REPO / "pill-windows.ps1"), "-BackendExe", "C:\\none\\python.exe",
+                          "-DataDir", str(data_dir), "-PrintNames"],
+                         capture_output=True, cwd=cwd, timeout=60, **vn.background_options())
+    assert out.returncode == 0, out
+    return tuple(line.strip() for line in out.stdout.decode("ascii").splitlines() if line.strip())
+
+
+def test_a_relative_data_dir_names_agree(tmp_path, monkeypatch):
+    (tmp_path / "rel").mkdir()
+    monkeypatch.chdir(tmp_path)
+    names = print_names("rel\\pill", tmp_path)
+    assert names == vn.pill_names("rel\\pill") == vn.pill_names(tmp_path / "rel" / "pill")
+
+
+def _short(path):
+    kernel32.GetShortPathNameW.argtypes = [wintypes.LPCWSTR, wintypes.LPWSTR, wintypes.DWORD]
+    buf = ctypes.create_unicode_buffer(1024)
+    n = kernel32.GetShortPathNameW(str(path), buf, 1024)
+    return buf.value if n else None
+
+
+def test_an_8dot3_short_name_gives_the_long_names_name(tmp_path):
+    long_dir = tmp_path / "A Long Folder Name For VML"
+    long_dir.mkdir()
+    short = _short(long_dir)
+    if not short or Path(short).name.lower() == long_dir.name.lower():
+        pytest.skip("8.3 short names are disabled on this volume")
+    want = vn.pill_names(long_dir / "pill")
+    # The folder that holds the data dir exists; pill itself need not, as on a first start.
+    for spelling in (short + "\\pill", short + "\\pill\\"):
+        assert vn.pill_names(spelling) == want, spelling
+        assert print_names(spelling, tmp_path) == want, spelling
+    (long_dir / "pill").mkdir()
+    assert vn.pill_names(short + "\\pill") == want
+    assert print_names(short + "\\pill", tmp_path) == want

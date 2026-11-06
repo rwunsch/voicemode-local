@@ -50,6 +50,7 @@ import contextlib
 import hashlib
 import importlib.util
 import json
+import ntpath
 import os
 from pathlib import Path
 import platform
@@ -882,12 +883,53 @@ def pill_data_dir(root):
     return Path(root) / "pill"
 
 
+def _long_path(full):
+    """full with its 8.3 short names expanded: the longest prefix that exists goes through
+    GetLongPathNameW, the rest is kept as written. pill-windows.ps1's Get-LongPath does the same
+    after GetFullPath, which on its own expands only some short names (measured 2026-11-06)."""
+    import ctypes
+    from ctypes import wintypes
+
+    get = ctypes.windll.kernel32.GetLongPathNameW
+    get.argtypes = [wintypes.LPCWSTR, wintypes.LPWSTR, wintypes.DWORD]
+    get.restype = wintypes.DWORD
+    head, rest = full, []
+    while True:
+        buf = ctypes.create_unicode_buffer(32768)
+        if get(head, buf, len(buf)):
+            return ntpath.join(buf.value, *reversed(rest)) if rest else buf.value
+        parent, name = ntpath.split(head)
+        if not name or parent == head:
+            return full
+        rest.append(name)
+        head = parent
+
+
+def windows_full_path(path):
+    """The full path pill-windows.ps1 names its pill after: absolute against the current
+    folder, / as \\, . and .. resolved, trailing dots and spaces of the last part dropped (as
+    GetFullPath), and on Windows 8.3 short names expanded (_long_path). Off Windows (the
+    Linux tests) a relative path cannot be resolved the same way and is only normalised."""
+    text = str(path)
+    if os.name == "nt":
+        full = ntpath.abspath(text)
+        return _long_path(full) if "~" in full else full
+    full = ntpath.normpath(text)
+    head, name = ntpath.split(full)
+    if name and name not in (".", ".."):
+        stripped = name.rstrip(". ")
+        if stripped:
+            full = ntpath.join(head, stripped)
+    return full
+
+
 def pill_names(data_dir):
     """(mutex, stop event) of the native pill window that uses data_dir: one pill per install.
-    pill-windows.ps1 derives the same names (tests compare the two): SHA-256 of the path,
-    trailing slashes dropped, lowercased, as UTF-8; the first 12 hex digits. Pass the absolute
-    path the launcher passes as -DataDir. The WSL pill keeps the fixed names without a suffix."""
-    key = str(data_dir).rstrip("\\/").lower()
+    pill-windows.ps1 derives the same names (tests compare the two): SHA-256 of the full path
+    (windows_full_path, i.e. GetFullPath), trailing slashes dropped, lowercased, as UTF-8; the
+    first 12 hex digits. So any spelling of one folder gives one name. The WSL pill keeps the
+    fixed names without a suffix."""
+    key = windows_full_path(data_dir).rstrip("\\/").lower()
     tag = hashlib.sha256(key.encode("utf-8")).hexdigest()[:12]
     return f"Local\\VoiceModePillWindow-{tag}", f"Local\\VoiceModePillStop-{tag}"
 

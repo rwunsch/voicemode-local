@@ -17,7 +17,8 @@
     and a PowerShell delegate has no runspace there. An idle wrapper runs no timers.
 
     First run downloads Microsoft.Web.WebView2 from nuget.org, checks the pinned
-    SHA-256, and unpacks two DLLs into %LOCALAPPDATA%\voicemode-local\webview2.
+    SHA-256, and unpacks two DLLs into <data folder>\webview2: -DataDir natively,
+    %LOCALAPPDATA%\voicemode-local in WSL mode.
     Nothing is installed machine-wide. The WebView2 Runtime must already exist.
 
 .PARAMETER Distro
@@ -74,14 +75,53 @@ $ScriptDir = Split-Path -Parent $ScriptPath
 $OnWsl = $ScriptDir -match '^\\\\wsl(?:\.localhost|\$)\\'
 # Native: no WSL. Today's WSL starts never pass -BackendExe, so they stay WSL.
 $Native = [bool]$BackendExe -or (-not $Distro -and -not $OnWsl)
-if ($Native -and $Distro) { Write-Error "pass -Distro (WSL) or -BackendExe (native), not both"; exit 1 }
-if ($Native -and -not $DataDir) { Write-Error "native mode needs -DataDir"; exit 1 }
 
 # Local on purpose: writing to \\wsl.localhost would boot a terminated distro.
-if ($DataDir) { $Local = [IO.Path]::GetFullPath($DataDir) } else { $Local = Join-Path $env:LOCALAPPDATA "voicemode-local" }
+# A folder's 8.3 short names expanded: the longest prefix that exists goes through
+# GetLongPathNameW, the rest stays as written. GetFullPath alone expands only some of them,
+# depending on what exists. voicemode_native.windows_full_path does the same.
+function Get-LongPath {
+    param([string]$Full)
+    $Full = $Full.TrimEnd('\', '/')
+    if ($Full -notmatch '~') { return $Full }
+    Add-Type -Namespace VmlPath -Name Native -MemberDefinition '[DllImport("kernel32.dll", CharSet = CharSet.Unicode)] public static extern uint GetLongPathNameW(string s, System.Text.StringBuilder b, uint n);'
+    $head = $Full; $rest = @()
+    while ($true) {
+        $buf = New-Object Text.StringBuilder 32768
+        if ([VmlPath.Native]::GetLongPathNameW($head, $buf, 32768) -gt 0) {
+            $out = $buf.ToString()
+            foreach ($r in $rest) { $out = [IO.Path]::Combine($out, $r) }
+            return $out
+        }
+        $parent = [IO.Path]::GetDirectoryName($head); $name = [IO.Path]::GetFileName($head)
+        if (-not $name -or -not $parent -or $parent -eq $head) { return $Full }
+        $rest = @($name) + $rest; $head = $parent
+    }
+}
+if ($DataDir) { $Local = Get-LongPath ([IO.Path]::GetFullPath($DataDir)) } else { $Local = Join-Path $env:LOCALAPPDATA "voicemode-local" }
+$LogFile = [IO.Path]::Combine($Local, "pill-window.log")  # Join-Path fails on a missing drive
+function Log {
+    param([string]$Text)
+    $line = "{0}  {1}" -f (Get-Date -Format "HH:mm:ss.fff"), $Text
+    Write-Host "  $line"
+    try { $line | Out-File -Append -FilePath $LogFile -Encoding utf8 } catch { }
+}
+# A refused start goes to stderr, and to the log when -DataDir names a folder. Without
+# -DataDir it would be the WSL pill's log, which is not this start's.
+function Refuse {
+    param([string]$Text)
+    if ($DataDir) {
+        try { [void](New-Item -ItemType Directory -Force -Path $Local) } catch { }
+        Log "FATAL: $Text"
+    }
+    [Console]::Error.WriteLine($Text)
+    exit 1
+}
+if ($Native -and $Distro) { Refuse "pass -Distro (WSL) or -BackendExe (native), not both" }
+if ($Native -and -not $DataDir) { Refuse "native mode needs -DataDir" }
 if ($Native) {
     # One pill per install: the names carry a hash of the folder. voicemode_native.pill_names
-    # computes the same: SHA-256 of the path, trailing slashes dropped, lowercased, UTF-8.
+    # computes the same: SHA-256 of the full long path, trailing slashes dropped, lowercased, UTF-8.
     $sha = [Security.Cryptography.SHA256]::Create()
     $bytes = $sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($Local.TrimEnd('\', '/').ToLowerInvariant()))
     $tag = -join ($bytes[0..5] | ForEach-Object { $_.ToString("x2") })
@@ -95,13 +135,6 @@ if ($Native) {
 if ($PrintNames) { Write-Output $MutexName; Write-Output $StopName; exit 0 }
 
 [void](New-Item -ItemType Directory -Force -Path $Local)
-$LogFile = Join-Path $Local "pill-window.log"
-function Log {
-    param([string]$Text)
-    $line = "{0}  {1}" -f (Get-Date -Format "HH:mm:ss.fff"), $Text
-    Write-Host "  $line"
-    try { $line | Out-File -Append -FilePath $LogFile -Encoding utf8 } catch { }
-}
 
 if ($InstallAutostart -or $RemoveAutostart) {
     if (-not $StartupDir) { $StartupDir = [Environment]::GetFolderPath("Startup") }

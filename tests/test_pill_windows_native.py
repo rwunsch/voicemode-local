@@ -90,6 +90,13 @@ def test_mutex_uses_the_mode_name():
     "C:\\Users\\Me\\AppData\\Local\\voicemode-local-native\\pill",
     "C:\\Users\\J\u00fcrgen M\u00fcller\\Local\\vml native\\pill",
     "D:\\Tools\\VML\\pill\\",
+    # Other spellings of one folder: GetFullPath normalises them, so pill_names must too.
+    "C:/Users/me/vml/pill",
+    "C:\\Users\\me\\vml\\..\\vml\\pill",
+    "C:\\Users\\me\\.\\vml\\pill",
+    "C:\\Users\\me\\vml\\pill. ",
+    "C:\\Users\\me\\vml\\pill...",
+    "\\\\server\\share\\a\\..\\pill",
 ])
 def test_powershell_and_python_derive_the_same_names(path):
     script = subprocess.run(["wslpath", "-w", str(PS1)], capture_output=True, text=True, check=True).stdout.strip()
@@ -111,3 +118,43 @@ def test_wsl_mode_prints_todays_names():
     assert out.returncode == 0, out.stderr.decode("utf-8", "replace")
     lines = [line.strip() for line in out.stdout.decode("ascii").splitlines() if line.strip()]
     assert lines == ["Local\\VoiceModePillWindow", "Local\\VoiceModePillStop"]
+
+
+@pytest.mark.parametrize("spelling", [
+    "C:/Users/me/vml/pill",
+    "C:\\Users\\me\\vml\\..\\vml\\pill",
+    "C:\\Users\\me\\.\\vml\\pill",
+    "C:\\Users\\me\\vml\\pill\\",
+    "C:\\Users\\me\\vml\\pill. ",
+    "c:\\USERS\\ME\\VML\\PILL",
+])
+def test_every_spelling_of_one_folder_gives_one_name(spelling):
+    vn = _native()
+    assert vn.pill_names(spelling) == vn.pill_names("C:\\Users\\me\\vml\\pill")
+
+
+def _run_ps1(*args):
+    script = subprocess.run(["wslpath", "-w", str(PS1)], capture_output=True, text=True, check=True).stdout.strip()
+    return subprocess.run(["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script, *args],
+                          capture_output=True, timeout=60)
+
+
+needs_powershell = pytest.mark.skipif(shutil.which("powershell.exe") is None or shutil.which("wslpath") is None,
+                                      reason="needs powershell.exe (WSL)")
+
+
+@needs_powershell
+def test_a_refused_start_reaches_the_log_when_a_folder_is_known(tmp_path):
+    data = tmp_path / "pill"
+    win = subprocess.run(["wslpath", "-w", str(data)], capture_output=True, text=True, check=True).stdout.strip()
+    out = _run_ps1("-Distro", "Ubuntu", "-BackendExe", "C:\\none\\python.exe", "-DataDir", win)
+    assert out.returncode == 1, out
+    assert b"not both" in out.stderr
+    assert "not both" in (data / "pill-window.log").read_text(encoding="utf-8-sig")
+
+
+@needs_powershell
+def test_native_without_a_data_dir_is_refused_on_stderr():
+    # No folder is known, so there is no log to write to.
+    out = _run_ps1("-BackendExe", "C:\\none\\python.exe", "-Force")
+    assert out.returncode == 1 and b"needs -DataDir" in out.stderr, out
