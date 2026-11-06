@@ -18,9 +18,10 @@ Commands
   status  what is installed and running; starts nothing
   stop    stop this install's services
   watch   internal: stops the services once no connector is left, then exits
-  barge on|off|status, pill on|off|status
-          the native switch: writes VOICEMODE_VOICE_BARGE / VOICEMODE_PILL to voicemode.env
-          and, while a connector runs, starts or stops the trigger or the pill window at once
+  barge on|off|status, pill on|off|status, ptt on|off|status
+          the native switch: writes VOICEMODE_VOICE_BARGE / VOICEMODE_PILL /
+          VOICEMODE_PTT_ENABLED to voicemode.env and, while a connector runs, starts or stops
+          the trigger, the pill window or the push-to-talk listener at once
   info    internal: one JSON line for install.ps1 (root, runtime, a stable Python for the
           MCP entry); starts nothing
 
@@ -93,9 +94,9 @@ OPTIONAL_SETTINGS = {"pill": "VOICEMODE_PILL", "ptt": "VOICEMODE_PTT_ENABLED",
                      "barge": "VOICEMODE_VOICE_BARGE"}
 SILERO = "models/silero/silero_vad.onnx"
 # The native switch: the setting each command writes, and the word for its process.
-SWITCHES = {"barge": "VOICEMODE_VOICE_BARGE", "pill": "VOICEMODE_PILL"}
-SWITCH_NOUNS = {"barge": "trigger", "pill": "window"}
-SWITCH_TITLES = {"barge": "Interrupt by voice", "pill": "The voice pill"}
+SWITCHES = {"barge": "VOICEMODE_VOICE_BARGE", "pill": "VOICEMODE_PILL", "ptt": "VOICEMODE_PTT_ENABLED"}
+SWITCH_NOUNS = {"barge": "trigger", "pill": "window", "ptt": "listener"}
+SWITCH_TITLES = {"barge": "Interrupt by voice", "pill": "The voice pill", "ptt": "Push-to-talk"}
 # Which switch settings the launcher's own environment held: voice-mode copies voicemode.env
 # into its environment at start, so under a connector only these are real overrides.
 ENV_SETTINGS = "VOICEMODE_NATIVE_ENV_SETTINGS"
@@ -186,16 +187,9 @@ def truthy(value):
 
 def optional_services():
     """The pill, the push-to-talk listener and the voice barge-in trigger, each only when its
-    setting is exactly true.
-    Push-to-talk is refused natively until task 7: ptt-listener-windows.ps1 still sends to the WSL
-    relay on 127.0.0.1:8765, so it would drive the WSL install, not this one."""
-    enabled = [kind for kind in OPTIONAL if truthy(setting(OPTIONAL_SETTINGS[kind], ""))]
-    if WINDOWS and "ptt" in enabled:
-        enabled.remove("ptt")
-        print("voicemode-local: push-to-talk not started: its Windows listener still sends to the WSL "
-              "relay on 127.0.0.1:8765 and would drive the WSL install (native mode is task 7).",
-              file=sys.stderr, flush=True)
-    return enabled
+    setting is exactly true. The listener runs in native mode (optional_command): its sender
+    writes to this install's control pipe, never to the WSL relay."""
+    return [kind for kind in OPTIONAL if truthy(setting(OPTIONAL_SETTINGS[kind], ""))]
 
 
 def felix_roots():
@@ -1032,17 +1026,29 @@ def pill_stop_event(root):
     return pill_names(pill_data_dir(root))[1]
 
 
+def ptt_log(root):
+    return Path(root) / "run" / "ptt-listener.log"
+
+
 def optional_command(kind, runtime, root=None):
-    """The pill window, the push-to-talk listener (native mode: task 7) or the barge trigger,
-    which hears the mic through sounddevice here. root is the install; by default the one
-    that holds runtime."""
+    """The pill window, the push-to-talk listener or the barge trigger, which hears the mic
+    through sounddevice here. root is the install; by default the one that holds runtime.
+    The listener runs in native mode: -SenderExe, the runtime's Python running
+    voice_mode.ptt_control_client --stdin, which maps each action, names the control pipe from
+    the environment voice-mode also gets (runtime_environment), checks its owner and server,
+    and writes the command; never the WSL relay. The pipe name is derived on every send,
+    never cached."""
     if kind == "barge":
         return ([str(venv_program(runtime, "python")), "-m", "voice_mode.voice_barge", str(runtime / SILERO)],
                 "voice_mode.voice_barge")
     script = REPO / ("pill-windows.ps1" if kind == "pill" else "ptt-listener-windows.ps1")
     command = [powershell(), "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script)]
+    root = Path(root) if root is not None else Path(runtime).parent.parent
+    if kind == "ptt":
+        command += ["-SenderExe", str(venv_program(runtime, "python")),
+                    "-SenderArgs", subprocess.list2cmdline(["-m", "voice_mode.ptt_control_client", "--stdin"]),
+                    "-LogPath", str(ptt_log(root))]
     if kind == "pill":
-        root = Path(root) if root is not None else Path(runtime).parent.parent
         command[2:2] = ["-STA"]
         # Native mode: the backend is started directly, no wsl.exe. -BackendArgs is one
         # Windows command-line tail, quoted as CreateProcess expects.
@@ -1350,7 +1356,7 @@ def env_override(name, value):
 
 def stop_optional(root, kind, entry):
     """The pill through its stop event first (the window closes and ends its backend), then
-    kill_tree of what is still there; the trigger by kill_tree."""
+    kill_tree of what is still there; the trigger and the push-to-talk listener by kill_tree."""
     if kind == "pill" and WINDOWS and set_pill_stop_event(root):
         deadline = time.monotonic() + STOP_WAIT
         while owned(entry) and time.monotonic() < deadline:
@@ -1373,7 +1379,7 @@ def _serving_runtime(root, state, run_dir, leases):
 
 
 def switch(root, kind, action):
-    """barge|pill on|off|status. See the module docstring."""
+    """barge|pill|ptt on|off|status. See the module docstring."""
     if action == "status":
         return switch_status(root, kind)
     name, on = SWITCHES[kind], action == "on"
@@ -1437,7 +1443,8 @@ def switch(root, kind, action):
 def switch_status(root, kind):
     """Line 1: the same contract as `python -m voice_mode.voice_barge status` (on, off,
     cannot run: <reason>) for barge, on or off for the pill; voicemode.env first, as the
-    switch writes it. Line 2: whether the trigger or window is running."""
+    switch writes it; on or off for push-to-talk too. Line 2: whether the trigger, window or
+    listener is running."""
     if kind == "barge":
         state = resolver().barge_state()
         line = barge_cannot_run() if state is None else ("on" if state else "off")
@@ -1713,14 +1720,14 @@ def restart_with_runtime_python(root, args):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("command", choices=["setup", "launch", "serve", "status", "stop", "watch",
-                                            "barge", "pill", "info", "remove-data"])
+                                            "barge", "pill", "ptt", "info", "remove-data"])
     parser.add_argument("action", nargs="?", choices=["on", "off", "status"],
-                        help="for barge and pill: on, off or status")
+                        help="for barge, pill and ptt: on, off or status")
     parser.add_argument("--allow-root-outside-profile", action="store_true",
                         help="accept a VOICEMODE_NATIVE_ROOT outside the profile and LOCALAPPDATA")
     args = parser.parse_args(argv)
     if (args.command in SWITCHES) != (args.action is not None):
-        parser.error("on, off or status goes with barge and pill only, and they need one")
+        parser.error("on, off or status goes with barge, pill and ptt only, and they need one")
     global ALLOW_OUTSIDE
     ALLOW_OUTSIDE = args.allow_root_outside_profile
     try:

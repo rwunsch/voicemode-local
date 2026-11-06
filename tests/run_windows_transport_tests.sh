@@ -10,6 +10,9 @@
 #                                            (minutes), downloads unless VML_MODEL_SOURCE
 #   tests/test_pill_windows_native_windows.py the pill window's native mode, started
 #                                            hidden; shows a window for a few seconds
+#   tests/test_ptt_listener_windows_native_windows.py  the push-to-talk listener's native
+#                                            mode against a fake control server on a real
+#                                            pipe; no keys are pressed or synthesised
 #
 # Copies the modules they load and the test files into a fresh folder under the
 # Windows temp dir (same patches/ + tests/ layout as the repo), runs pytest there
@@ -40,7 +43,7 @@ cp "$REPO/scripts/windows/voicemode_native.py" "$REPO/scripts/windows/dependenci
    "$REPO/scripts/windows/requirements.lock" "$DIR/scripts/windows/"
 cp "$REPO/kokoro-onnx-server.py" "$DIR/"
 # The pill window and its page, for its native mode; install.ps1 for its native mode.
-cp "$REPO/pill-windows.ps1" "$REPO/install.ps1" "$DIR/"
+cp "$REPO/pill-windows.ps1" "$REPO/install.ps1" "$REPO/ptt-listener-windows.ps1" "$DIR/"
 mkdir -p "$DIR/ui"
 cp -r "$REPO/ui/pill" "$DIR/ui/"
 cp "$REPO/tests/pill_fake_backend.py" "$DIR/tests/"
@@ -64,7 +67,8 @@ if [ -n "${VM812_SRC:-}" ]; then
 fi
 TESTS_WIN=""
 for t in test_control_transport_windows.py test_voice_pill_windows.py test_apply_windows.py \
-         test_voicemode_native_windows.py test_pill_windows_native_windows.py; do
+         test_voicemode_native_windows.py test_pill_windows_native_windows.py \
+         test_ptt_listener_windows_native_windows.py; do
     cp "$REPO/tests/$t" "$DIR/tests/"
     TESTS_WIN="$TESTS_WIN '$(wslpath -w "$DIR/tests/$t")'"
 done
