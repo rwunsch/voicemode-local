@@ -131,7 +131,12 @@ the processed one.
 Not verified yet (no Mac in this repo's test runs; everything above is tested with fakes):
 
 - **Channel 0.** The spike's tap was 48 kHz with 9 channels; it read channel 0 and the echo
-  was gone, but nothing says channel 0 is the processed signal (`VP_CHANNEL`).
+  was gone, but nothing says channel 0 is the processed signal (`VP_CHANNEL`). A macOS run
+  with `VOICEMODE_VOICE_BARGE_VP_CHANNEL_PROBE=1` (reported, not run here) measured all 9
+  tap channels at the same level, -51.2 dBFS: they look like copies of one signal, not a
+  processed channel beside raw mics. So channel 0 is echo-cancelled whichever channel is
+  "the" processed one, and `VP_CHANNEL = 0` stands. Equal levels are not proof of identical
+  samples; a per-channel correlation would settle it if it ever matters.
 - **Ducking.** Set to the minimum. Robert heard no dip on Kokoro (n=1); `say` did dip.
   With macOS 13 or older, or if pyobjc will not convert the setting, the level cannot be
   set (logged once, `ducking not settable`) and macOS's default ducking applies.
