@@ -772,3 +772,56 @@ def test_avfoundation_install_pins_every_pyobjc_piece_to_one_release(tmp_path):
     for pkg in ("pyobjc-core", "pyobjc-framework-AVFoundation", "pyobjc-framework-CoreAudio",
                 "pyobjc-framework-CoreMedia", "pyobjc-framework-Cocoa", "pyobjc-framework-Quartz"):
         assert f"{pkg}==12.2.1" in call.split(), (pkg, call)
+
+
+# --- a re-run leaves the voice mode alone ---------------------------------------
+
+def _env_with_mode(b, mode="hybrid", voices="am_puck"):
+    f = b.home / ".voicemode/voicemode.env"
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text("# >>> voicemode-switch managed (do not edit inside this block) >>>\n"
+                 f"# mode: {mode}\nVOICEMODE_STT_BASE_URLS=http://x/v1\nVOICEMODE_TTS_BASE_URLS=http://y/v1\n"
+                 f"VOICEMODE_VOICES={voices}\n# <<< voicemode-switch managed <<<\n")
+    return f
+
+
+def test_first_install_applies_localonly(tmp_path):
+    # Fails if the mode is no longer applied when voicemode.env has no routing keys yet.
+    b = _box(tmp_path)
+    assert b.run("--yes").returncode == 0
+    assert b.calls("switch localonly")
+
+
+def test_rerun_keeps_the_users_voice_mode_and_says_so(tmp_path):
+    # Fails if a re-run calls the mode switch again (it rewrote voicemode.env and the voice).
+    b = _box(tmp_path)
+    _env_with_mode(b, "hybrid")
+    done = b.run("--yes")
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert not b.calls("switch localonly") and not b.calls("switch hybrid")
+    assert "kept your voice mode (hybrid)" in done.stdout
+
+
+def test_explicit_mode_flag_applies_that_mode_even_on_a_rerun(tmp_path):
+    # Fails if --mode is ignored once routing keys exist.
+    b = _box(tmp_path)
+    _env_with_mode(b, "hybrid")
+    done = b.run("--yes", "--mode", "piper")
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert b.calls("switch piper") and not b.calls("switch localonly")
+
+
+def test_mode_flag_on_a_first_install_replaces_localonly(tmp_path):
+    b = _box(tmp_path)
+    assert b.run("--yes", "--mode=local").returncode == 0
+    assert b.calls("switch local") == ["switch local"] and not b.calls("switch localonly")
+
+
+def test_unknown_mode_is_an_error_and_changes_nothing(tmp_path):
+    b = _box(tmp_path)
+    done = b.run("--yes", "--mode", "bogus")
+    assert done.returncode == 2 and not b.calls()
+
+
+def test_help_lists_mode(tmp_path):
+    assert "--mode" in _box(tmp_path).run("--help").stdout

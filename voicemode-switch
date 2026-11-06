@@ -119,7 +119,26 @@ END = "# <<< voicemode-switch managed <<<"
 txt = ""
 if os.path.exists(envfile):
     txt = open(envfile).read()
-    txt = re.sub(re.escape(BEGIN) + r".*?" + re.escape(END) + r"\n?", "", txt, flags=re.S)
+
+MODE_VOICES = {"af_sky", "nova", "p_de_thorsten"}   # what the switch itself writes per mode
+OPENAI_VOICES = {"alloy", "ash", "ballad", "coral", "echo", "fable", "nova", "onyx", "sage", "shimmer", "verse"}
+pat = re.compile(re.escape(BEGIN) + r".*?" + re.escape(END) + r"\n?", re.S)
+old = pat.search(txt)
+old_block = old.group(0) if old else ""
+outside = pat.sub("", txt)
+
+def value_in(text):
+    found = re.findall(r"^VOICEMODE_VOICES=(.*)$", text, flags=re.M)
+    return found[-1].strip() if found else ""
+
+# A mode switch changes routing, not the voice: a voice the user has set stays. A voice that is
+# just the default an earlier switch wrote follows the new mode (OpenAI rejects af_sky).
+user_voice = value_in(outside)
+kept = user_voice or (value_in(old_block) if value_in(old_block) not in MODE_VOICES else "")
+if kept:
+    voices = None if user_voice else kept
+    if mode == "openai" and kept.split(",")[0] not in OPENAI_VOICES:
+        print(f"  Note: kept your voice {kept}; cloud-only mode needs an OpenAI voice (e.g. nova)")
 
 block = [BEGIN, f"# mode: {mode}"]
 if stt:
@@ -129,12 +148,19 @@ if tts:
 if voices:
     block.append(f"VOICEMODE_VOICES={voices}")
 block.append(END)
+block_text = "\n".join(block) + "\n"
 
-body = txt.rstrip("\n")
-out = (body + "\n\n" if body else "") + "\n".join(block) + "\n"
-open(envfile, "w").write(out)
+if old:
+    out = txt[:old.start()] + block_text + txt[old.end():]   # in place: nothing else moves
+else:
+    body = txt.rstrip("\n")
+    out = (body + "\n\n" if body else "") + block_text
+if out == txt and os.path.exists(envfile):
+    print(f"  {envfile} already set (mode: {mode})")
+else:
+    open(envfile, "w").write(out)
+    print(f"  Updated {envfile} (mode: {mode})")
 os.chmod(envfile, 0o600)
-print(f"  Updated {envfile} (mode: {mode})")
 PYEOF
     strip_claude_json_routing
 }
@@ -153,6 +179,7 @@ vm = data.get("mcpServers", {}).get("voicemode")
 if not vm:
     raise SystemExit(0)
 env = vm.get("env", {})
+before = json.dumps(env, sort_keys=True)
 for k in ("VOICEMODE_STT_BASE_URLS", "VOICEMODE_TTS_BASE_URLS", "VOICEMODE_VOICES",
           "STT_BASE_URL", "TTS_BASE_URL", "TTS_VOICE"):
     env.pop(k, None)
@@ -162,6 +189,8 @@ if "WSLENV" in env:
         env["WSLENV"] = ":".join(keep)
     else:
         env.pop("WSLENV", None)
+if json.dumps(env, sort_keys=True) == before:
+    raise SystemExit(0)     # nothing to clean: leave the file and the screen alone
 vm["env"] = env
 json.dump(data, open(p, "w"), indent=2)
 print("  Cleaned routing vars from ~/.claude.json (now sourced from voicemode.env)")
@@ -463,8 +492,17 @@ env_value() { sed -n "s/^$1=//p" "$HOME/.voicemode/voicemode.env" 2>/dev/null | 
 set_env_value() {
     local env_file="$HOME/.voicemode/voicemode.env"
     mkdir -p "$(dirname "$env_file")"; touch "$env_file"
-    sed -i.bak "/^$1=/d" "$env_file" && rm -f "$env_file.bak"
-    echo "$1=$2" >> "$env_file"
+    # Replace the key where it is (comments and order stay); a new key goes at the end.
+    local tmp; tmp="$(mktemp "$env_file.XXXXXX")" || return 1
+    KEY="$1" VAL="$2" awk '
+        BEGIN { k = ENVIRON["KEY"]; v = ENVIRON["VAL"]; done = 0 }
+        index($0, k "=") == 1 { if (!done) { print k "=" v; done = 1 }; next }
+        { print }
+        END { if (!done) print k "=" v }' "$env_file" > "$tmp" \
+        && cat "$tmp" > "$env_file"
+    local rc=$?
+    rm -f "$tmp"
+    return $rc
 }
 
 # macOS: pywebview lives in its own venv, so the main venv gains no dependency.

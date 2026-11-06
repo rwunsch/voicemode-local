@@ -227,7 +227,9 @@ def test_default_voice_reads_first_of_voices_then_tts_voice_then_am_puck(tmp_pat
     assert st.default_voice(tmp_path) == "am_adam"
 
 
-def test_gather_without_sessions_shows_the_configured_default(ctx):
+def test_gather_without_sessions_shows_the_configured_default(ctx, monkeypatch):
+    for k in ("VOICEMODE_VOICES", "VOICEMODE_TTS_VOICE"):
+        monkeypatch.delenv(k, raising=False)
     ctx.home.mkdir(parents=True, exist_ok=True)
     (ctx.home / "voicemode.env").write_text("VOICEMODE_VOICES=bm_george,af_sky\n")
     s = vp.gather(ctx)

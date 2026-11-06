@@ -49,7 +49,7 @@ KOKORO_VOICES_URL="https://github.com/thewh1teagle/kokoro-onnx/releases/download
 
 usage() {
     cat <<'EOF'
-Usage: ./install-mac.sh [--yes] [--pill] [--barge] [--german] [--help]
+Usage: ./install-mac.sh [--yes] [--pill] [--barge] [--german] [--mode MODE] [--help]
 
 Native macOS setup for voicemode-local (Apple silicon, Homebrew, no Docker).
 
@@ -60,6 +60,8 @@ Native macOS setup for voicemode-local (Apple silicon, Homebrew, no Docker).
              built-in speakers it uses macOS echo cancellation (installs
              pyobjc-framework-AVFoundation into the venv); headphones need none.
   --german   Also download the German voice dm_martin (about 325 MB).
+  --mode M   Set the voice mode (local, localonly, piper, hybrid, openai). Without it a
+             first install uses localonly and a re-run keeps the mode you have.
   --help     Show this text.
 
 Safe to re-run: what is already installed or downloaded is skipped.
@@ -70,17 +72,26 @@ ASSUME_YES=0
 WANT_PILL=0
 WANT_GERMAN=0
 WANT_BARGE=0
+MODE=""
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --yes|-y)  ASSUME_YES=1 ;;
         --pill)    WANT_PILL=1 ;;
         --barge)   WANT_BARGE=1 ;;
         --german)  WANT_GERMAN=1 ;;
+        --mode)    [ "$#" -ge 2 ] || { echo "--mode needs a value" >&2; usage >&2; exit 2; }
+                   MODE="$2"; shift ;;
+        --mode=*)  MODE="${1#--mode=}" ;;
         --help|-h) usage; exit 0 ;;
         *) echo "Unknown option: $1" >&2; usage >&2; exit 2 ;;
     esac
     shift
 done
+
+case "$MODE" in
+    ""|local|localonly|piper|hybrid|openai) ;;
+    *) echo "Unknown mode: $MODE (local, localonly, piper, hybrid, openai)" >&2; usage >&2; exit 2 ;;
+esac
 
 CURRENT_PART=""
 cleanup_partial() {
@@ -307,7 +318,14 @@ case ":$PATH:" in
     *) NEED_PATH=1; warn "~/.local/bin is not on your PATH (see the list at the end)" ;;
 esac
 
-"$SCRIPT_DIR/voicemode-switch" localonly || die "voicemode-switch localonly failed"
+# The mode is the user's after the first install: a re-run neither rewrites voicemode.env nor
+# resets the voice. First install = no routing keys yet; --mode MODE always applies MODE.
+ENV_FILE="$HOME/.voicemode/voicemode.env"
+if [ -z "$MODE" ] && grep -Eq '^VOICEMODE_(STT|TTS)_BASE_URLS=' "$ENV_FILE" 2>/dev/null; then
+    ok "Already set up, kept your voice mode ($(sed -n 's/^# mode: //p' "$ENV_FILE" | tail -1 | grep . || echo custom)); change it with ./install-mac.sh --mode M"
+else
+    "$SCRIPT_DIR/voicemode-switch" "${MODE:-localonly}" || die "voicemode-switch ${MODE:-localonly} failed"
+fi
 if ! "$SCRIPT_DIR/voicemode-switch" ensure; then
     warn "voicemode-switch ensure reported a problem; the MCP launcher retries it on every session start."
 fi
