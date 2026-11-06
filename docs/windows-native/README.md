@@ -8,9 +8,9 @@
 
 | Field        | Value |
 |--------------|-------|
-| Status       | In progress (task 4 of the native Windows plan) |
+| Status       | In progress (tasks 4 and 6 of the native Windows plan done) |
 | Created      | 2026-11-05 |
-| Last Updated | 2026-11-05 |
+| Last Updated | 2026-11-06 |
 | Project      | voicemode-local, branch feature/windows-native |
 
 ## Why
@@ -72,14 +72,25 @@ where it came from.
   taken the port, nothing restarts the service until the next connector starts. A connector
   that is already running keeps the URL it was given. The pill and the listener are never
   restarted.
+- **The pill window, native (task 6).** `optional_command("pill")` starts `pill-windows.ps1`
+  with `-BackendExe <runtime python> -BackendArgs "-m voice_mode.voice_pill --stdio"
+  -DataDir <root>\pill`. The window runs the backend directly, without WSL, keeps its files
+  in `<root>\pill`, and uses a mutex and stop event named after a hash of that folder: one
+  pill per install. `pill_stop_event(root)` returns the stop event's name, for the native
+  switch (task 8) to set. `-BackendArgs` is one Windows command line (`subprocess.list2cmdline`):
+  PowerShell's `-File` binds a value that starts with `-` correctly (checked 2026-11-06,
+  n=3 strings, one with quotes and a non-ASCII letter). Details in `docs/voice-pill/README.md`,
+  section "Windows native".
 - **Tests.** `tests/test_voicemode_native.py` has 37 Linux tests, and `tests/test_conftest_release_check.py` 3 more. `tests/test_voicemode_native_windows.py`
   has 4 Windows tests, run by `tests/run_windows_transport_tests.sh`. `tests/conftest.py`
   turns a skip caused by a missing `VM812_SRC` into a failure under `VOICEMODE_RELEASE_CHECK=1`,
   and prints a loud warning otherwise.
 
-Not done here: native modes of `pill-windows.ps1` (task 6; it still throws without
-`-Distro`) and `ptt-listener-windows.ps1` (task 7; it still sends to the WSL relay).
-The launcher starts the pill only when enabled, and push-to-talk not at all yet. MCP registration and `install.ps1` belong to
+Not done here: the native mode of `ptt-listener-windows.ps1` (task 7; it still sends to the
+WSL relay). The launcher starts the pill only when enabled, and push-to-talk not at all yet.
+The pill's native tests are `tests/test_pill_windows_native.py` (Linux: static checks, and
+the name derivation compared with PowerShell's through `powershell.exe`) and
+`tests/test_pill_windows_native_windows.py` (Windows, 9 tests). MCP registration and `install.ps1` belong to
 task 8.
 
 ## What is installed, measured
@@ -146,6 +157,16 @@ VML_MODEL_SOURCE='C:\path\to\<sha256>\<file> folder' VM812_SRC=<pristine 8.12.0>
   aea841ffd and changed only to keep CRLF. WSL and Mac keep ffmpeg and `manifest.json`;
   `tests/test_native_manifest.py` checks that their output is byte-identical to d30ec68.
   The Windows test strips every ffmpeg/ffprobe folder from PATH.
+- **The pill reads `voicemode.env` from the home folder, not the base dir.** The task brief
+  said `VOICEMODE_BASE_DIR`; `voice_pill_state.setting`, which the launcher uses to decide
+  whether to start the pill, reads `~\.voicemode\voicemode.env` whatever the base dir. The
+  window follows the resolver, so the two cannot disagree.
+- **The pill's names hash the path as given.** Python's `str.lower()` and .NET's
+  `ToLowerInvariant()` agree for the paths tested (ASCII, spaces, `ü`); they may differ for
+  rare letters such as Turkish `İ`. Pass the same absolute path to both, as the launcher does.
+- **Each install downloads its own WebView2 DLLs** into `<root>\pill\webview2`, once: two
+  files, 898,240 bytes (measured 2026-11-06 in the WSL pill's copy of version 1.0.4314.35). The
+  spec gives 906,432 kept and 9,818,548 downloaded; not re-measured here.
 - The root path must stay short: the espeak data path has a 160-byte limit, and Windows a
   260-character one. Setup checks both.
 - The settings resolver reads `~/.voicemode/voicemode.env`, the user's own. The tests point

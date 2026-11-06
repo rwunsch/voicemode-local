@@ -7,7 +7,7 @@
 
 | Field | Value |
 |---|---|
-| Status | Released, off by default. WSL backend only; native Windows is next. Open checks are listed below |
+| Status | Released, off by default. WSL backend; a native Windows mode (no WSL) since 2026-11-06, started by the native launcher. Open checks are listed below |
 | Last updated | 2026-11-05 |
 | Measured on | Windows build 26200, PowerShell 5.1, WebView2 Runtime 156, one 1920x1080 monitor at 100% scale |
 
@@ -55,6 +55,39 @@ Files are in `%LOCALAPPDATA%\voicemode-local`: `webview2\` (two DLLs), `webview2
 - **Stopping** needs no backend: the window waits on a `Local\VoiceModePillStop` event, which
   `pill off` sets through `powershell.exe`. The flag is also read when a backend exits and
   before each retry.
+
+## Windows native (no WSL)
+
+The native launcher (`scripts/windows/voicemode_native.py`, see `docs/windows-native/README.md`)
+starts the same window in native mode when `VOICEMODE_PILL=true`:
+
+```
+powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File pill-windows.ps1 ^
+  -BackendExe <runtime>\.venv\Scripts\python.exe -BackendArgs "-m voice_mode.voice_pill --stdio" ^
+  -DataDir <native root>\pill
+```
+
+- **When.** Native mode is chosen when `-BackendExe` is given, or when there is no `-Distro`
+  and the script is not on a `\\wsl` path. Every WSL start today passes neither, so it stays
+  WSL. Passing both `-Distro` and `-BackendExe` is refused.
+- **Backend.** Started directly: `-BackendExe` with `-BackendArgs`, one Windows command line.
+  No `wsl.exe`, no `python3` lookup. Its working folder is `-DataDir`, so no project
+  `.voicemode.env` near the caller is read. Same JSON lines on stdin and stdout, same EOF
+  shutdown, same restart rules as WSL.
+- **On or off.** `VOICEMODE_PILL` from the window's environment first, then
+  `%USERPROFILE%\.voicemode\voicemode.env`, read in the window's own process as UTF-8 (BOM and
+  CRLF fine; the last line wins). That is the order and file of `voice_pill_state.setting`,
+  which the launcher uses too. `VOICEMODE_BASE_DIR` does not move that file, as on WSL.
+- **One pill per install.** Its files (log, position, page copy, WebView2 DLLs,
+  `webview2-data`) go to `-DataDir`, required natively. Its mutex and stop event are
+  `Local\VoiceModePillWindow-<12 hex>` and `Local\VoiceModePillStop-<12 hex>`, from SHA-256 of
+  the folder path (trailing slashes dropped, lowercased, UTF-8). `pill_stop_event(root)` in
+  the launcher gives the same stop name; set that event to close the window.
+  `pill-windows.ps1 -DataDir <dir> -BackendExe x -PrintNames` prints both names.
+- **WSL unchanged.** WSL mode keeps `%LOCALAPPDATA%\voicemode-local` and the two fixed names,
+  which `voicemode-switch pill off` relies on.
+- **Hidden start.** The launcher starts the window with `CREATE_NO_WINDOW`. It still shows,
+  and it does not take focus (measured, below).
 
 ## What was checked
 
@@ -114,6 +147,30 @@ now shows by colour only. Whether the old or new cost affects stutter was not me
 - `pill off` leaves `~/.voicemode/pill/beeps.json` in place, and it still decides beeps: delete it to go back to `VOICEMODE_AUDIO_FEEDBACK`. It also leaves `VOICEMODE_CONTROL_CHANNEL_ENABLED=true`, which push-to-talk uses too.
 - If every voice turn hangs while Paused and no window is visible, run `voicemode-switch pill off`: it ends the backend, which releases the Pause.
 - To pick up a later pill build, rebuild the venv from pristine voice-mode: the patch skips files it has already marked.
+
+## Checked natively (2026-11-06)
+
+`tests/test_pill_windows_native_windows.py`, run by `tests/run_windows_transport_tests.sh`,
+on this laptop: 9 tests, all passed in each of 3 runs. Each start uses the launcher's own
+command and a process with no window.
+
+- The window shows in 2.6 to 3.9 s (n=6 timed starts). The pill never became the foreground
+  window. In one run (n=3) the foreground was a real window, the same before and after; in
+  another (n=3) Windows reported no foreground window before or after, so that run only shows
+  the pill did not take it.
+- Its files land in `-DataDir`; nothing new appears in `%LOCALAPPDATA%\voicemode-local`.
+- A second start on the same folder exits 0. A start on another folder runs alongside, and
+  each stops only by its own stop event.
+- The stop event closes it with exit 0, and the backend sees stdin EOF.
+- A backend that exits 3 after output is restarted. One that exits 1 before any output ends
+  the window with exit 1.
+- `VOICEMODE_PILL`: false in the file exits; true in a CRLF file with a BOM runs; false in
+  the environment beats true in the file.
+- The real backend (`voice_mode.voice_pill --stdio` in the native runtime) starts, takes its
+  lock in a private base dir and is ended by EOF, without a restart.
+
+Not checked natively: a real voice session shown in the native pill, an elevated voice
+server, more than one monitor, and the native switch (task 8).
 
 ## Not tested
 
