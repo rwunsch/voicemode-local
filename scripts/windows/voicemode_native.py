@@ -18,6 +18,11 @@ Commands
   status  what is installed and running; starts nothing
   stop    stop this install's services
   watch   internal: stops the services once no connector is left, then exits
+  barge on|off|status, pill on|off|status
+          the native switch: writes VOICEMODE_VOICE_BARGE / VOICEMODE_PILL to voicemode.env
+          and, while a connector runs, starts or stops the trigger or the pill window at once
+  info    internal: one JSON line for install.ps1 (root, runtime, a stable Python for the
+          MCP entry); starts nothing
 
 <root> is VOICEMODE_NATIVE_ROOT, else %LOCALAPPDATA%\\voicemode-local-native (not the
 WSL pill's %LOCALAPPDATA%\\voicemode-local), never inside FELIX's folders, and inside the
@@ -54,6 +59,7 @@ import ntpath
 import os
 from pathlib import Path
 import platform
+import re
 import shutil
 import signal
 import socket
@@ -86,6 +92,15 @@ OPTIONAL = ("pill", "ptt", "barge")
 OPTIONAL_SETTINGS = {"pill": "VOICEMODE_PILL", "ptt": "VOICEMODE_PTT_ENABLED",
                      "barge": "VOICEMODE_VOICE_BARGE"}
 SILERO = "models/silero/silero_vad.onnx"
+# The native switch: the setting each command writes, and the word for its process.
+SWITCHES = {"barge": "VOICEMODE_VOICE_BARGE", "pill": "VOICEMODE_PILL"}
+SWITCH_NOUNS = {"barge": "trigger", "pill": "window"}
+SWITCH_TITLES = {"barge": "Interrupt by voice", "pill": "The voice pill"}
+# Which switch settings the launcher's own environment held: voice-mode copies voicemode.env
+# into its environment at start, so under a connector only these are real overrides.
+ENV_SETTINGS = "VOICEMODE_NATIVE_ENV_SETTINGS"
+BARGE_COMMAND_SETTING = "VOICEMODE_BARGE_CONTROL_COMMAND"
+STOP_WAIT = 5  # seconds a pill window gets to close on its stop event
 LAUNCH_MARKERS = ("voicemode_native.py launch", "voicemode_native.py serve")
 
 LAYOUT = 1
@@ -344,13 +359,16 @@ def package_index_reachable():
 
 
 def atomic_json(path, value):
+    atomic_write(path, (json.dumps(value) + "\n").encode("utf-8"))
+
+
+def atomic_write(path, data):
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, name = tempfile.mkstemp(prefix=".record-", dir=path.parent)
     temporary = Path(name)
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as output:
-            json.dump(value, output)
-            output.write("\n")
+        with os.fdopen(fd, "wb") as output:
+            output.write(data)
         for attempt in range(20):  # a reader's open handle blocks a replace on Windows
             try:
                 temporary.replace(path)
@@ -363,6 +381,39 @@ def atomic_json(path, value):
         temporary.unlink(missing_ok=True)
 
 
+def write_setting(path, name, value):
+    """Set name=value in a voicemode.env: every assignment of name is rewritten in place
+    (``export`` and indentation kept), else one line is appended. Other lines, comments, a
+    BOM and the file's line endings stay; a new file gets CRLF on Windows. Atomic replace."""
+    path = Path(path)
+    try:
+        raw = path.read_bytes()
+    except FileNotFoundError:
+        raw = b""
+    bom = raw.startswith(b"\xef\xbb\xbf")
+    text = raw[3 if bom else 0:].decode("utf-8", errors="surrogateescape")
+    newline = "\r\n" if "\r\n" in text else "\n" if "\n" in text else "\r\n" if WINDOWS else "\n"
+    out, found = [], False
+    for line in re.findall(r"[^\r\n]*(?:\r\n|\n|\r)|[^\r\n]+$", text):
+        body = line.rstrip("\r\n")
+        stripped = body.strip()
+        key = stripped.split("=", 1)[0].strip() if "=" in stripped and not stripped.startswith("#") else ""
+        export = key.startswith("export ")
+        if export:
+            key = key[len("export "):].strip()
+        if key == name:
+            indent = body[:len(body) - len(body.lstrip())]
+            out.append(f"{indent}{'export ' if export else ''}{name}={value}{line[len(body):]}")
+            found = True
+        else:
+            out.append(line)
+    if not found:
+        if out and not out[-1].endswith(("\n", "\r")):
+            out[-1] += newline
+        out.append(f"{name}={value}{newline}")
+    atomic_write(path, (b"\xef\xbb\xbf" if bom else b"") + "".join(out).encode("utf-8", errors="surrogateescape"))
+
+
 def read_json(path, default=None):
     try:
         return json.loads(path.read_text(encoding="utf-8"))
@@ -371,7 +422,9 @@ def read_json(path, default=None):
 
 
 def runtime_environment(runtime, ports=None):
-    """The user's environment, minus proxies, pointed at this install's own services."""
+    """The user's environment, minus proxies, pointed at this install's own services, with
+    the native switch as the barge control command (the voice_barge tool and the pill's
+    toggle run it)."""
     ports = ports or {kind: PORTS[kind][0] for kind in SPEECH}
     env = {key: value for key, value in os.environ.items()
            if key.lower() not in PROXY_VARIABLES and key.lower() != "no_proxy"
@@ -391,6 +444,13 @@ def runtime_environment(runtime, ports=None):
         no_proxy=LOCAL_HOSTS,
     )
     env["PATH"] = os.pathsep.join([str(venv_program(runtime, "python").parent), env.get("PATH", "")])
+    python = str(venv_program(runtime, "python"))  # has psutil: no restart needed
+    flag = ["--allow-root-outside-profile"] if ALLOW_OUTSIDE else []
+    env[BARGE_COMMAND_SETTING] = json.dumps([python, str(SCRIPT), *flag, "barge"])
+    env["VOICEMODE_BARGE_PYTHON"] = python
+    env["VOICEMODE_NATIVE_ROOT"] = str(Path(runtime).parent.parent)
+    if ENV_SETTINGS not in env:
+        env[ENV_SETTINGS] = ",".join(name for name in SWITCHES.values() if name in os.environ)
     return env
 
 
@@ -591,10 +651,12 @@ class Job:
     processes in it outlive all but the last of them. With silent_breakaway only the
     processes assigned to it are in it, not what they start: for a parent whose child
     starts processes that must live in jobs of their own (a process already in a job can
-    only join one nested inside it).
+    only join one nested inside it). With breakaway, a child leaves the job only when it is
+    created with CREATE_BREAKAWAY_FROM_JOB, as spawn() asks for: a connector's voice-mode runs
+    the native switch, and what that starts belongs in the services' job, not the connector's.
     """
 
-    def __init__(self, name=None, silent_breakaway=False):
+    def __init__(self, name=None, silent_breakaway=False, breakaway=False):
         import ctypes
         from ctypes import wintypes
 
@@ -623,7 +685,8 @@ class Job:
             raise ctypes.WinError(ctypes.get_last_error())
         info = Extended()
         # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, plus BREAKAWAY_OK | SILENT_BREAKAWAY_OK when asked.
-        info.BasicLimitInformation.LimitFlags = 0x2000 | (0x1800 if silent_breakaway else 0)
+        info.BasicLimitInformation.LimitFlags = (0x2000 | (0x1800 if silent_breakaway else 0)
+                                                 | (0x800 if breakaway else 0))
         if not k.SetInformationJobObject(self.handle, 9, ctypes.byref(info), ctypes.sizeof(info)):
             error = ctypes.get_last_error()
             self.close()
@@ -677,13 +740,21 @@ def _resume_threads(pid):
         raise RuntimeError(f"could not resume process {pid}")
 
 
+CREATE_BREAKAWAY_FROM_JOB = 0x01000000
+
+
 def spawn(command, job=None, **kwargs):
     """Popen; on Windows with a job, created suspended and put in the job before its first
-    instruction, so nothing it starts can escape the job."""
+    instruction, so nothing it starts can escape the job. It is first asked to leave the job
+    this process is in (a process in an unrelated job cannot join ours); where that job
+    forbids it, the child stays in it too, and joining ours works only if it is ours."""
     if not (WINDOWS and job is not None):
         return subprocess.Popen(command, **kwargs)
-    kwargs["creationflags"] = kwargs.get("creationflags", 0) | 0x4  # CREATE_SUSPENDED
-    process = subprocess.Popen(command, **kwargs)
+    flags = kwargs.pop("creationflags", 0) | 0x4  # CREATE_SUSPENDED
+    try:
+        process = subprocess.Popen(command, creationflags=flags | CREATE_BREAKAWAY_FROM_JOB, **kwargs)
+    except PermissionError:  # this process's job does not allow breakaway
+        process = subprocess.Popen(command, creationflags=flags, **kwargs)
     try:
         try:
             job.assign(process._handle)
@@ -716,7 +787,7 @@ def connector_job():
     if not WINDOWS:
         return None
     if None not in _jobs:
-        _jobs[None] = Job()
+        _jobs[None] = Job(breakaway=True)
     return _jobs[None]
 
 
@@ -1048,25 +1119,7 @@ def ensure_services(root, runtime, env, optional=None):
             if owned(state.get(kind)):
                 continue
             state.pop(kind, None)
-            if kind in SPEECH:
-                # A service still loading has not bound its port yet: never pick it twice.
-                port = choose_port(kind, {e.get("port") for e in state.values() if isinstance(e, dict)})
-                command, marker = service_command(kind, runtime, port)
-            else:
-                port = None
-                command, marker = optional_command(kind, runtime, root)
-            log = run_dir / f"{kind}.log"
-            with log.open("a") as output:
-                process = spawn(command, job=job, env=env, stdin=subprocess.DEVNULL, stdout=output,
-                                stderr=output, **background_options())
-            state[kind] = {"pid": process.pid, "port": port, "marker": marker, "log": str(log),
-                           "command": [str(c) for c in command], "runtime": str(runtime)}
-            started[kind] = process
-            try:
-                atomic_json(run_dir / "state.json", state)
-            except BaseException:
-                process.kill()
-                raise
+            started[kind] = start_service(kind, root, runtime, env, state, job)
     deadline = time.monotonic() + START_TIMEOUT
     for kind in SPEECH:
         entry = state[kind]
@@ -1093,6 +1146,31 @@ def ensure_services(root, runtime, env, optional=None):
                                      f"See {entry['log']}.") from error
                 time.sleep(0.5)
     return {kind: state[kind]["port"] for kind in SPEECH}
+
+
+def start_service(kind, root, runtime, env, state, job):
+    """Start one service into the install's job and record it in run\\state.json. The caller
+    holds the service lock and has checked that none of this kind is running."""
+    run_dir = root / "run"
+    if kind in SPEECH:
+        # A service still loading has not bound its port yet: never pick it twice.
+        port = choose_port(kind, {e.get("port") for e in state.values() if isinstance(e, dict)})
+        command, marker = service_command(kind, runtime, port)
+    else:
+        port = None
+        command, marker = optional_command(kind, runtime, root)
+    log = run_dir / f"{kind}.log"
+    with log.open("a") as output:
+        process = spawn(command, job=job, env=env, stdin=subprocess.DEVNULL, stdout=output,
+                        stderr=output, **background_options())
+    state[kind] = {"pid": process.pid, "port": port, "marker": marker, "log": str(log),
+                   "command": [str(c) for c in command], "runtime": str(runtime)}
+    try:
+        atomic_json(run_dir / "state.json", state)
+    except BaseException:
+        process.kill()
+        raise
+    return process
 
 
 def start_watchdog(root):
@@ -1181,6 +1259,163 @@ def stop(root):
     print(f"Stopped voicemode-local's native services: {', '.join(running) or 'none were running'}.")
     if others:
         print(f"{len(others)} voice connector(s) still running will have no speech until they restart.")
+
+
+# -- the native switch ---------------------------------------------------------
+
+def silero_present(runtime):
+    """The barge trigger's model, at its pinned size, in the runtime (setup links it)."""
+    path = runtime / SILERO
+    try:
+        data = json.loads((runtime / "dependencies.json").read_text(encoding="utf-8"))
+        size = next((m["size"] for m in data["models"] if m["path"] == SILERO), None)
+    except (OSError, ValueError, KeyError):
+        size = None
+    return path.is_file() and (size is None or path.stat().st_size == size)
+
+
+def set_pill_stop_event(root):
+    """Set the install's pill stop event; False when no window has it open."""
+    import ctypes
+    from ctypes import wintypes
+
+    k = ctypes.WinDLL("kernel32", use_last_error=True)
+    k.OpenEventW.restype = wintypes.HANDLE
+    k.OpenEventW.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.LPCWSTR)
+    k.SetEvent.argtypes = (wintypes.HANDLE,)
+    k.CloseHandle.argtypes = (wintypes.HANDLE,)
+    event = k.OpenEventW(0x2, False, pill_stop_event(root))  # EVENT_MODIFY_STATE
+    if not event:
+        return False
+    try:
+        return bool(k.SetEvent(event))
+    finally:
+        k.CloseHandle(event)
+
+
+def can_inspect():
+    """Whether this Python can read other processes (on Windows that needs psutil, which only
+    the runtime has; main() has already restarted under it when there is one)."""
+    return not WINDOWS or importlib.util.find_spec("psutil") is not None
+
+
+def env_override(name, value):
+    """The environment's value of name when it differs from value and the environment wins.
+    Under a connector, only settings the launcher's own environment held count."""
+    listed = os.environ.get(ENV_SETTINGS)
+    if listed is not None and name not in listed.split(","):
+        return None
+    current = os.environ.get(name)
+    if current is None or current.strip() == value:
+        return None
+    return current
+
+
+def stop_optional(root, kind, entry):
+    """The pill through its stop event first (the window closes and ends its backend), then
+    kill_tree of what is still there; the trigger by kill_tree."""
+    if kind == "pill" and WINDOWS and set_pill_stop_event(root):
+        deadline = time.monotonic() + STOP_WAIT
+        while owned(entry) and time.monotonic() < deadline:
+            time.sleep(0.1)
+    if owned(entry):
+        kill_tree(entry["pid"])
+
+
+def _serving_runtime(root, state, run_dir, leases):
+    """The runtime the running connectors use: the speech services', else a lease's."""
+    for kind in SPEECH:
+        entry = state.get(kind)
+        if owned(entry) and entry.get("runtime"):
+            return Path(entry["runtime"])
+    for pid in leases:
+        record = read_json(run_dir / "clients" / str(pid), {})
+        if isinstance(record, dict) and record.get("runtime"):
+            return Path(record["runtime"])
+    return None
+
+
+def switch(root, kind, action):
+    """barge|pill on|off|status. See the module docstring."""
+    if action == "status":
+        return switch_status(root, kind)
+    name, on = SWITCHES[kind], action == "on"
+    value = "true" if on else "false"
+    if on and kind == "barge":
+        runtime, _ = configured_runtime(root, manifest()[1])
+        if not silero_present(runtime):
+            raise VoiceError(f"The Silero model that interrupt by voice needs is missing from {runtime}.",
+                             setup_step())
+    path = resolver().env_file()
+    write_setting(path, name, value)
+    print(f"{SWITCH_TITLES[kind]} is {action}: {name}={value} in {path}.")
+    current = env_override(name, value)
+    if current is not None:
+        print(f"Note: {name}={current} is set in the environment, which wins over voicemode.env: "
+              f"a voice connector started with it still treats this as {current}. Remove it there "
+              "to make this stick.")
+    if not can_inspect():
+        print("Nothing is running here to change: voicemode-local is not set up natively.")
+        return 0
+    run_dir = root / "run"
+    noun = SWITCH_NOUNS[kind]
+    with service_lock(run_dir):
+        state = read_json(run_dir / "state.json", {}) or {}
+        entry = state.get(kind)
+        if not on:
+            if owned(entry):
+                stop_optional(root, kind, entry)
+                print(f"Stopped the {noun} (process {entry['pid']}).")
+            if kind in state:
+                state.pop(kind)
+                atomic_json(run_dir / "state.json", state)
+            return 0
+        if owned(entry):
+            print(f"The {noun} is already running (process {entry['pid']}).")
+            return 0
+        leases = live_leases(run_dir)
+        runtime = _serving_runtime(root, state, run_dir, leases) if leases else None
+        if runtime is None:
+            print(f"No voice connector is running: the {noun} starts with the next voice connector.")
+            return 0
+        if kind == "barge" and not silero_present(runtime):
+            raise VoiceError(f"The Silero model that interrupt by voice needs is missing from {runtime}.",
+                             setup_step())
+        state.pop(kind, None)
+        ports = {k: state[k]["port"] for k in SPEECH if owned(state.get(k))}
+        env = runtime_environment(runtime, ports if len(ports) == len(SPEECH) else None)
+        env[name] = "true"  # the window checks it, and a stale false from voice-mode must not stop it
+        process = start_service(kind, root, runtime, env, state, services_job(root))
+        print(f"The {noun} started (process {process.pid}).")
+    return 0
+
+
+def switch_status(root, kind):
+    """Line 1: the same contract as `python -m voice_mode.voice_barge status` (on, off,
+    cannot run: <reason>) for barge, on or off for the pill; voicemode.env first, as the
+    switch writes it. Line 2: whether the trigger or window is running."""
+    if kind == "barge":
+        state = resolver().barge_state()
+        line = barge_cannot_run() if state is None else ("on" if state else "off")
+    else:
+        line = "on" if (resolver().file_first_setting(SWITCHES[kind], "") or "").strip() == "true" else "off"
+    print(line)
+    entry = (read_json(root / "run" / "state.json", {}) or {}).get(kind)
+    noun = SWITCH_NOUNS[kind]
+    running = can_inspect() and owned(entry)
+    print(f"{noun}: running (process {entry['pid']})" if running else f"{noun}: not running")
+    return 0
+
+
+def barge_cannot_run():
+    """voice_barge.CANNOT_RUN, read from its source: importing it would load numpy."""
+    import ast
+
+    tree = ast.parse((PATCHES / "voice_barge.py").read_text(encoding="utf-8"))
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and getattr(node.targets[0], "id", "") == "CANNOT_RUN":
+            return ast.literal_eval(node.value)
+    raise RuntimeError("patches/voice_barge.py has no CANNOT_RUN")
 
 
 class Stopped(Exception):
@@ -1276,14 +1511,59 @@ def status(root):
     else:
         print("Not running; the services start with the voice connector.")
     print(f"Installed at {runtime}.")
+    use = disk_use(root)
+    print(f"Disk: {use['root']:,} bytes in {root} (runtime {use['runtime']:,}, downloads "
+          f"{use['downloads']:,}, Python {use['python']:,}; a hard-linked file counted once).")
     if not current:
         print("The runtime is out of date: run setup.")
         return 1
     return 0
 
 
-def restart_with_runtime_python(root, command):
-    """Reading other processes needs psutil, which the runtime has. None means carry on here."""
+def disk_use(root):
+    """Bytes under the root and its runtime, downloads and python folders, each hard-linked
+    file counted once per total."""
+    totals = {}
+    for key, folder in (("root", root), ("runtime", root / RUNTIMES), ("downloads", root / "downloads"),
+                        ("python", root / "python")):
+        seen, total = set(), 0
+        for base, _, files in os.walk(folder):
+            for name in files:
+                try:
+                    info = os.stat(os.path.join(base, name))
+                except OSError:
+                    continue
+                if (info.st_dev, info.st_ino) not in seen:
+                    seen.add((info.st_dev, info.st_ino))
+                    total += info.st_size
+        totals[key] = total
+    return totals
+
+
+def stable_python(root):
+    """uv's minor-version link to its managed Python under the root
+    (python\\cpython-3.12-windows-x86_64-none): uv moves it to each new patch release, so its
+    path outlives runtime rebuilds, which a runtime's venv Python does not. None if absent."""
+    data = json.loads(DEPENDENCIES.read_text(encoding="utf-8"))
+    name = f"cpython-{data['python']}-windows-x86_64-none" if WINDOWS else f"cpython-{data['python']}"
+    path = root / "python" / name / ("python.exe" if WINDOWS else "bin/python3")
+    return path if path.is_file() else None
+
+
+def info(root):
+    """One JSON line for install.ps1."""
+    record = read_json(root / "active.json")
+    name = Path(str(record.get("runtime", ""))).name if isinstance(record, dict) else ""
+    python = stable_python(root)
+    print(json.dumps({"root": str(root), "runtime": str(root / RUNTIMES / name) if name else None,
+                      "python": str(python) if python else None, "script": str(SCRIPT)}))
+    return 0
+
+
+def restart_with_runtime_python(root, args):
+    """Reading other processes needs psutil, which the runtime has. None means carry on here.
+    args: the command and its action, as given."""
+    command = args[0]
     try:
         import psutil  # noqa: F401
         return None
@@ -1300,23 +1580,30 @@ def restart_with_runtime_python(root, command):
     # Only the inner launcher is in this job: its services and voice-mode go in jobs of their own.
     job = Job(silent_breakaway=True)
     flag = ["--allow-root-outside-profile"] if ALLOW_OUTSIDE else []
-    child = spawn([str(python), str(SCRIPT), command, *flag], job=job,
+    child = spawn([str(python), str(SCRIPT), *flag, *args], job=job,
                   env=dict(os.environ, VOICEMODE_NATIVE_ROOT=str(root)), **connector_options())
     return child.wait()
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("command", choices=["setup", "launch", "serve", "status", "stop", "watch"])
+    parser.add_argument("command", choices=["setup", "launch", "serve", "status", "stop", "watch",
+                                            "barge", "pill", "info"])
+    parser.add_argument("action", nargs="?", choices=["on", "off", "status"],
+                        help="for barge and pill: on, off or status")
     parser.add_argument("--allow-root-outside-profile", action="store_true",
                         help="accept a VOICEMODE_NATIVE_ROOT outside the profile and LOCALAPPDATA")
     args = parser.parse_args(argv)
+    if (args.command in SWITCHES) != (args.action is not None):
+        parser.error("on, off or status goes with barge and pill only, and they need one")
     global ALLOW_OUTSIDE
     ALLOW_OUTSIDE = args.allow_root_outside_profile
     try:
         root = native_root()
+        if args.command == "info":
+            return info(root)
         if WINDOWS and args.command != "setup":
-            restarted = restart_with_runtime_python(root, args.command)
+            restarted = restart_with_runtime_python(root, [args.command, *([args.action] if args.action else [])])
             if restarted is not None:
                 return restarted
         if args.command == "setup":
@@ -1328,6 +1615,8 @@ def main(argv=None):
         if args.command == "watch":
             watch(root)
             return 0
+        if args.command in SWITCHES:
+            return switch(root, args.command, args.action)
         return {"launch": launch, "serve": serve, "status": status}[args.command](root)
     except OffNetwork as error:
         print(f"voicemode-local: {error}", file=sys.stderr)

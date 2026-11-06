@@ -719,3 +719,283 @@ def test_pill_names_hash_is_sha256_of_the_lowercased_utf8_path(vn):
 def test_pill_stop_event_is_the_stop_name_of_the_installs_data_dir(vn, tmp_path):
     root = tmp_path / "root"
     assert vn.pill_stop_event(root) == vn.pill_names(root / "pill")[1]
+
+
+# -- the native switch (task 8) ------------------------------------------------
+
+def test_write_setting_keeps_other_lines_comments_and_crlf(vn, tmp_path):
+    path = tmp_path / ".voicemode" / "voicemode.env"
+    path.parent.mkdir()
+    path.write_bytes(b"\xef\xbb\xbf# mine\r\nVOICEMODE_VOICES=af_sky\r\n# VOICEMODE_PILL=true\r\n"
+                     b"export VOICEMODE_PILL=false\r\nOTHER=1")
+    vn.write_setting(path, "VOICEMODE_PILL", "true")
+    assert path.read_bytes() == (b"\xef\xbb\xbf# mine\r\nVOICEMODE_VOICES=af_sky\r\n# VOICEMODE_PILL=true\r\n"
+                                 b"export VOICEMODE_PILL=true\r\nOTHER=1")
+    vn.write_setting(path, "VOICEMODE_VOICE_BARGE", "false")
+    assert path.read_bytes().endswith(b"OTHER=1\r\nVOICEMODE_VOICE_BARGE=false\r\n")
+    assert sorted(p.name for p in path.parent.iterdir()) == ["voicemode.env"]  # no temp file left
+
+
+def test_write_setting_replaces_every_assignment_and_keeps_lf(vn, tmp_path):
+    path = tmp_path / "voicemode.env"
+    path.write_text("A=1\nVOICEMODE_PILL=true\nB=2\n VOICEMODE_PILL = \"true\"\n", encoding="utf-8")
+    vn.write_setting(path, "VOICEMODE_PILL", "false")
+    assert path.read_text(encoding="utf-8") == "A=1\nVOICEMODE_PILL=false\nB=2\n VOICEMODE_PILL=false\n"
+
+
+def test_write_setting_creates_the_folder_and_file(vn, tmp_path, monkeypatch):
+    monkeypatch.setattr(vn, "WINDOWS", True)
+    path = tmp_path / "new" / ".voicemode" / "voicemode.env"
+    vn.write_setting(path, "VOICEMODE_PILL", "true")
+    assert path.read_bytes() == b"VOICEMODE_PILL=true\r\n"
+
+
+class Switch:
+    """FakeWorld plus a configured runtime with the Silero model, and the stop event faked."""
+
+    def __init__(self, vn, home, tmp_path, monkeypatch, lease=True):
+        self.vn, self.home = vn, home
+        self.root = tmp_path / "root"
+        self.world = FakeWorld(vn, monkeypatch, self.root)
+        self.runtime = _fake_runtime(vn, self.root)
+        silero = self.runtime / vn.SILERO
+        silero.parent.mkdir(parents=True)
+        silero.write_bytes(b"x")
+        self.events = self.world.events
+        monkeypatch.setattr(vn, "configured_runtime", lambda root, expected: (self.runtime, True))
+        monkeypatch.setattr(vn, "silero_present", lambda runtime: (runtime / vn.SILERO).is_file())
+        monkeypatch.setattr(vn, "set_pill_stop_event", lambda root: self.events.append("stop-event") or True)
+        monkeypatch.setattr(vn, "STOP_WAIT", 0)
+        monkeypatch.setattr(vn, "can_inspect", lambda: True)
+        monkeypatch.delenv("VOICEMODE_NATIVE_ENV_SETTINGS", raising=False)
+        monkeypatch.setattr(vn.resolver(), "capture_backend", lambda: "sounddevice")
+        if lease:
+            # A running connector: its launcher's command line is this process's (FakeWorld).
+            (self.root / "run" / "clients").mkdir(parents=True)
+            (self.root / "run" / "clients" / str(vn.os.getpid())).write_text(
+                json.dumps({"runtime": str(self.runtime)}))
+
+    def env_file(self):
+        return (self.home / ".voicemode" / "voicemode.env").read_text(encoding="utf-8")
+
+    def state(self):
+        return json.loads((self.root / "run" / "state.json").read_text())
+
+
+@pytest.mark.parametrize("kind,name", [("barge", "VOICEMODE_VOICE_BARGE"), ("pill", "VOICEMODE_PILL")])
+def test_switch_on_writes_the_setting_and_starts_the_service_for_a_running_connector(
+        vn, home, tmp_path, monkeypatch, capsys, kind, name):
+    s = Switch(vn, home, tmp_path, monkeypatch)
+    assert vn.switch(s.root, kind, "on") == 0
+    assert f"{name}=true" in s.env_file()
+    assert [e for e in s.events if e.startswith("spawn:")] == [f"spawn:{kind}"]
+    entry = s.state()[kind]
+    assert vn.owned(entry) and entry["runtime"] == str(s.runtime)
+    out = capsys.readouterr().out
+    assert f"started (process {entry['pid']})" in out
+    s.events.clear()
+    assert vn.switch(s.root, kind, "on") == 0                # one per install
+    assert not [e for e in s.events if e.startswith("spawn:")]
+    assert "already running" in capsys.readouterr().out
+
+
+def test_switch_starts_into_the_services_job_like_ensure_services(vn, home, tmp_path, monkeypatch):
+    s = Switch(vn, home, tmp_path, monkeypatch)
+    jobs, envs = [], []
+    plain = s.world.spawn
+
+    def spawn(command, job=None, **kwargs):
+        jobs.append(job)
+        envs.append(kwargs["env"])
+        return plain(command, job=job, **kwargs)
+
+    monkeypatch.setattr(vn, "spawn", spawn)
+    monkeypatch.setattr(vn, "services_job", lambda root: ("job", root))
+    vn.switch(s.root, "pill", "on")
+    assert jobs == [("job", s.root)]
+    assert envs[0]["VOICEMODE_PILL"] == "true"   # the window checks it; a stale false must not stop it
+    assert json.loads(envs[0]["VOICEMODE_BARGE_CONTROL_COMMAND"])[-1] == "barge"
+
+
+@pytest.mark.parametrize("kind", ["barge", "pill"])
+def test_switch_on_without_a_connector_only_writes_the_setting(vn, home, tmp_path, monkeypatch, capsys, kind):
+    s = Switch(vn, home, tmp_path, monkeypatch, lease=False)
+    assert vn.switch(s.root, kind, "on") == 0
+    assert not [e for e in s.events if e.startswith("spawn:")]
+    assert "with the next voice connector" in capsys.readouterr().out
+
+
+def test_barge_off_kills_the_trigger(vn, home, tmp_path, monkeypatch):
+    s = Switch(vn, home, tmp_path, monkeypatch)
+    vn.switch(s.root, "barge", "on")
+    s.events.clear()
+    assert vn.switch(s.root, "barge", "off") == 0
+    assert "VOICEMODE_VOICE_BARGE=false" in s.env_file()
+    assert s.events == ["kill:barge"]
+    assert "barge" not in s.state()
+
+
+def test_pill_off_sets_the_stop_event_first_then_kills_what_is_left(vn, home, tmp_path, monkeypatch):
+    s = Switch(vn, home, tmp_path, monkeypatch)
+    vn.switch(s.root, "pill", "on")
+    pid = s.state()["pill"]["pid"]
+    s.events.clear()
+    assert vn.switch(s.root, "pill", "off") == 0
+    assert s.events == ["stop-event", "kill:pill"]          # still there after the wait
+    assert "pill" not in s.state()
+    # A window that closes on the event is not killed.
+    vn.switch(s.root, "pill", "on")
+    s.events.clear()
+    pid = s.state()["pill"]["pid"]
+    monkeypatch.setattr(vn, "set_pill_stop_event", lambda root: s.world.commands.pop(pid) and True)
+    vn.switch(s.root, "pill", "off")
+    assert s.events == []
+
+
+def test_barge_on_refuses_without_the_silero_model(vn, home, tmp_path, monkeypatch, capsys):
+    s = Switch(vn, home, tmp_path, monkeypatch)
+    (s.runtime / vn.SILERO).unlink()
+    with pytest.raises(vn.VoiceError, match="Silero model"):
+        vn.switch(s.root, "barge", "on")          # main() prints it and exits 1
+    assert not (home / ".voicemode" / "voicemode.env").exists()
+    assert not [e for e in s.events if e.startswith("spawn:")]
+
+
+def _barge_cannot_run():
+    import ast
+    tree = ast.parse((REPO / "patches" / "voice_barge.py").read_text(encoding="utf-8"))
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and getattr(node.targets[0], "id", "") == "CANNOT_RUN":
+            return ast.literal_eval(node.value)
+    raise AssertionError("CANNOT_RUN not found")
+
+
+def test_barge_status_is_voice_barges_one_line_contract_then_the_trigger(vn, home, tmp_path, monkeypatch, capsys):
+    s = Switch(vn, home, tmp_path, monkeypatch)
+    assert vn.switch(s.root, "barge", "status") == 0
+    assert capsys.readouterr().out.splitlines() == ["off", "trigger: not running"]
+    vn.switch(s.root, "barge", "on")
+    capsys.readouterr()
+    vn.switch(s.root, "barge", "status")
+    pid = s.state()["barge"]["pid"]
+    assert capsys.readouterr().out.splitlines() == ["on", f"trigger: running (process {pid})"]
+    monkeypatch.setattr(vn.resolver(), "capture_backend", lambda: None)
+    vn.switch(s.root, "barge", "status")
+    line = capsys.readouterr().out.splitlines()[0]
+    assert line == _barge_cannot_run() and line.startswith("cannot run: ")
+
+
+def test_pill_status_is_on_or_off_then_the_window(vn, home, tmp_path, monkeypatch, capsys):
+    s = Switch(vn, home, tmp_path, monkeypatch)
+    vn.switch(s.root, "pill", "status")
+    assert capsys.readouterr().out.splitlines() == ["off", "window: not running"]
+    vn.switch(s.root, "pill", "on")
+    capsys.readouterr()
+    vn.switch(s.root, "pill", "status")
+    pid = s.state()["pill"]["pid"]
+    assert capsys.readouterr().out.splitlines() == ["on", f"window: running (process {pid})"]
+
+
+def test_switch_says_when_the_environment_overrides_the_file(vn, home, tmp_path, monkeypatch, capsys):
+    s = Switch(vn, home, tmp_path, monkeypatch, lease=False)
+    monkeypatch.setenv("VOICEMODE_PILL", "false")
+    vn.switch(s.root, "pill", "on")
+    out = capsys.readouterr().out
+    assert "VOICEMODE_PILL=false" in out and "environment" in out
+    # Under a connector, only what the connector's own environment held counts: voice-mode
+    # copies voicemode.env's old values into its environment, which is no override.
+    monkeypatch.setenv("VOICEMODE_NATIVE_ENV_SETTINGS", "")
+    vn.switch(s.root, "pill", "on")
+    assert "environment" not in capsys.readouterr().out
+    monkeypatch.setenv("VOICEMODE_NATIVE_ENV_SETTINGS", "VOICEMODE_PILL")
+    vn.switch(s.root, "pill", "on")
+    assert "VOICEMODE_PILL=false" in capsys.readouterr().out
+
+
+def test_runtime_environment_passes_the_native_barge_command(vn, tmp_path, monkeypatch):
+    monkeypatch.setattr(vn, "WINDOWS", True)
+    monkeypatch.setenv("VOICEMODE_PILL", "true")
+    monkeypatch.delenv("VOICEMODE_NATIVE_ENV_SETTINGS", raising=False)
+    root = tmp_path / "root"
+    runtime = root / "runtime" / "abc"
+    env = vn.runtime_environment(runtime)
+    python = str(vn.venv_program(runtime, "python"))
+    assert json.loads(env["VOICEMODE_BARGE_CONTROL_COMMAND"]) == [python, str(vn.SCRIPT), "barge"]
+    assert env["VOICEMODE_BARGE_PYTHON"] == python
+    assert env["VOICEMODE_NATIVE_ROOT"] == str(root)
+    assert env["VOICEMODE_NATIVE_ENV_SETTINGS"] == "VOICEMODE_PILL"
+    monkeypatch.setattr(vn, "ALLOW_OUTSIDE", True)
+    assert json.loads(vn.runtime_environment(runtime)["VOICEMODE_BARGE_CONTROL_COMMAND"]) == [
+        python, str(vn.SCRIPT), "--allow-root-outside-profile", "barge"]
+
+
+def test_launcher_env_reaches_voice_mode_and_the_pill_backend(vn, home, tmp_path, monkeypatch):
+    root = tmp_path / "root"
+    world = FakeWorld(vn, monkeypatch, root)
+    runtime = _fake_runtime(vn, root)
+    envs = {}
+    plain = world.spawn
+
+    def spawn(command, job=None, **kwargs):
+        envs[world.kind_of(command)] = kwargs["env"]
+        return plain(command, job=job, **kwargs)
+
+    monkeypatch.setattr(vn, "spawn", spawn)
+    monkeypatch.setattr(vn, "configured_runtime", lambda root, expected: (runtime, True))
+    monkeypatch.setattr(vn, "check_models", lambda runtime: None)
+    monkeypatch.setattr(vn, "optional_services", lambda: ["pill"])
+    assert vn.launch(root) == 0
+    for kind in ("voice-mode", "pill"):
+        command = json.loads(envs[kind]["VOICEMODE_BARGE_CONTROL_COMMAND"])
+        assert command[1:] == [str(vn.SCRIPT), "barge"]
+
+
+def test_the_barge_command_is_accepted_by_voice_pill_state(vn, tmp_path, monkeypatch):
+    st = _load(REPO / "patches" / "voice_pill_state.py", "vps_switch_test")
+    python = tmp_path / "python"
+    python.write_text("")
+    monkeypatch.setenv("VOICEMODE_BARGE_CONTROL_COMMAND", json.dumps([str(python), str(vn.SCRIPT), "barge"]))
+    assert st.barge_command() == ([str(python), str(vn.SCRIPT), "barge"], None)
+
+
+def test_main_parses_the_switch_and_restarts_with_its_action(vn, home, tmp_path, monkeypatch):
+    seen = []
+    monkeypatch.setattr(vn, "WINDOWS", True)
+    monkeypatch.setattr(vn, "native_root", lambda: tmp_path)
+    monkeypatch.setattr(vn, "restart_with_runtime_python", lambda root, args: seen.append(args) or 0)
+    assert vn.main(["barge", "on"]) == 0
+    assert vn.main(["pill", "status"]) == 0
+    assert seen == [["barge", "on"], ["pill", "status"]]
+    with pytest.raises(SystemExit):
+        vn.main(["barge", "maybe"])
+    with pytest.raises(SystemExit):
+        vn.main(["barge"])
+
+
+def test_status_reports_disk_use_counting_hard_links_once(vn, tmp_path):
+    root = tmp_path / "root"
+    (root / "downloads" / "x").mkdir(parents=True)
+    (root / "runtime" / "abc").mkdir(parents=True)
+    (root / "downloads" / "x" / "m").write_bytes(b"1" * 100)
+    import os
+    os.link(root / "downloads" / "x" / "m", root / "runtime" / "abc" / "m")
+    (root / "runtime" / "abc" / "f").write_bytes(b"2" * 10)
+    use = vn.disk_use(root)
+    assert use["root"] == 110 and use["downloads"] == 100 and use["runtime"] == 110
+
+
+def test_info_names_a_python_that_survives_runtime_rebuilds(vn, tmp_path, monkeypatch, capsys):
+    root = tmp_path / "root"
+    monkeypatch.setattr(vn, "WINDOWS", True)
+    link = root / "python" / "cpython-3.12-windows-x86_64-none"
+    (link / "").mkdir(parents=True)
+    (link / "python.exe").write_text("")
+    (root / "active.json").write_text(json.dumps({"runtime": "abc-1", "manifest": "m"}))
+    assert vn.info(root) == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data["root"] == str(root) and data["script"] == str(vn.SCRIPT)
+    assert data["python"] == str(link / "python.exe")
+    assert data["runtime"] == str(root / "runtime" / "abc-1")
+    (link / "python.exe").unlink()
+    vn.info(root)
+    assert json.loads(capsys.readouterr().out)["python"] is None
