@@ -68,6 +68,10 @@ case "$1 $2" in
       case "$a" in
         voice-mode==*) echo "${a#voice-mode==}" > "$venv/.stub_vm_version" ;;
         kokoro-onnx) touch "$venv/.stub_pkgs" ;;
+        pyobjc-framework-AVFoundation==*)
+          [ "${STUB_FAIL:-}" = uv-avf ] && { echo "error: stub avf failed" >&2; exit 1; }
+          echo "${a#pyobjc-framework-AVFoundation==}" > "$venv/.stub_avf"
+          head -c 3145728 /dev/zero > "$venv/.stub_avf_bytes" ;;
       esac
     done
     ;;
@@ -80,6 +84,8 @@ echo "python $*" >> "$STUB_LOG"
 here="$(cd "$(dirname "$0")/.." && pwd)"
 if [ "$1" = "-c" ]; then
   case "$2" in
+    *pyobjc-core*) cat "$here/.stub_pyobjc_core" 2>/dev/null; [ -f "$here/.stub_pyobjc_core" ]; exit $? ;;
+    *AVFoundation*) [ -f "$here/.stub_avf" ]; exit $? ;;
     *importlib.metadata*) cat "$here/.stub_vm_version" 2>/dev/null; [ -f "$here/.stub_vm_version" ]; exit $? ;;
     *find_spec*) [ -f "$here/.stub_pkgs" ]; exit $? ;;
     *mcpServers*|*permissions*) shift; exec python3 -c "$@" ;;
@@ -649,8 +655,8 @@ def test_not_asking_for_the_pill_does_not_claim_it_is_absent(tmp_path):
 
 # --- --barge: interrupt by voice, only on request --------------------------------
 
-BARGE_LINE = ("Interrupt by voice works with headphones; on the built-in speakers it "
-              "interrupts itself until echo cancellation lands.")
+BARGE_LINE = ("Interrupt by voice: on the built-in speakers it listens through macOS echo "
+              "cancellation; with headphones it listens to the mic as it is.")
 
 
 def test_barge_is_not_turned_on_by_default_or_with_yes(tmp_path):
@@ -682,3 +688,74 @@ def test_a_failing_barge_warns_and_the_install_still_succeeds(tmp_path):
 
 def test_help_lists_barge(tmp_path):
     assert "--barge" in _box(tmp_path).run("--help").stdout
+
+
+# --- --barge: pyobjc-framework-AVFoundation for echo cancellation on the speakers ---
+
+AVF = "pyobjc-framework-AVFoundation=="
+
+
+def _installer_pin():
+    m = re.search(r'^PYOBJC_AVFOUNDATION_VERSION="([0-9.]+)"$', INSTALLER.read_text(), re.M)
+    assert m, "install-mac.sh must pin PYOBJC_AVFOUNDATION_VERSION"
+    return m.group(1)
+
+
+def _avf_installs(b):
+    return [c for c in b.calls("uv pip install") if AVF in c]
+
+
+def test_avfoundation_is_not_installed_without_barge(tmp_path):
+    # Fails if the echo-cancellation package is installed for everyone.
+    b = _box(tmp_path)
+    assert b.run("--yes").returncode == 0
+    assert not _avf_installs(b)
+
+
+def test_barge_installs_the_pinned_avfoundation_into_the_venv_before_turning_barge_on(tmp_path):
+    # Fails if --barge stops installing it, unpins it, installs it elsewhere, or after `barge on`.
+    b = _box(tmp_path)
+    done = b.run("--barge", "--yes")
+    assert done.returncode == 0, done.stdout + done.stderr
+    (call,) = _avf_installs(b)
+    assert f"{AVF}{_installer_pin()}" in call
+    assert f"--python {b.repo}/.venv/bin/python" in call
+    assert b.calls().index(call) < b.calls().index(b.calls("switch barge on")[0])
+
+
+def test_avfoundation_matches_the_pyobjc_already_in_the_venv(tmp_path):
+    # pynput pulls pyobjc-core; a framework wrapper from another release is a mismatch.
+    b = _box(tmp_path)
+    assert b.run("--yes").returncode == 0
+    (b.repo / ".venv/.stub_pyobjc_core").write_text("13.0\n")
+    assert b.run("--barge", "--yes").returncode == 0
+    (call,) = _avf_installs(b)
+    assert f"{AVF}13.0" in call
+
+
+def test_barge_prints_the_measured_size_avfoundation_added(tmp_path):
+    # Fails if the size line goes, or prints a constant instead of a measurement.
+    done = _box(tmp_path).run("--barge", "--yes")
+    m = re.search(r"pyobjc-framework-AVFoundation \S+ added ([0-9.]+) MB to the venv \(measured\)", done.stdout)
+    assert m, done.stdout
+    assert 2.5 < float(m.group(1)) < 4.0   # the stub writes 3 MB
+
+
+def test_avfoundation_already_present_is_skipped(tmp_path):
+    b = _box(tmp_path)
+    assert b.run("--barge", "--yes").returncode == 0
+    assert b.run("--barge", "--yes").returncode == 0
+    assert len(_avf_installs(b)) == 1
+
+
+def test_a_failed_avfoundation_install_warns_turns_barge_on_and_says_speakers_are_refused(tmp_path):
+    # Fails if the failure becomes fatal, skips barge for headphone users, or hides the consequence.
+    b = _box(tmp_path)
+    done = b.run("--barge", "--yes", fail="uv-avf")
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert b.calls("switch barge on")
+    assert "use headphones" in done.stdout and BARGE_LINE not in done.stdout
+
+
+def test_help_says_speakers_use_echo_cancellation(tmp_path):
+    assert "echo cancellation" in _box(tmp_path).run("--help").stdout

@@ -32,6 +32,12 @@ header() { echo -e "\n${BOLD}=== $1 ===${NC}"; }
 # upstream version. Same pin as install.sh. Bump deliberately and re-verify the anchors.
 VOICE_MODE_VERSION="8.12.0"
 
+# --barge only: macOS echo cancellation for interrupt by voice on the built-in speakers
+# (AVAudioEngine voice processing, patches/voice_barge.py). Pinned; when the venv already
+# has pyobjc-core (pynput brings it), that release is used instead, so every pyobjc piece
+# comes from one release. This script pins by version, not by hash.
+PYOBJC_AVFOUNDATION_VERSION="12.2.2"
+
 HOMEBREW_INSTALL_CMD='/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"'
 
 # Sources: whisper URL from README.md (macOS section); Kokoro URLs are the
@@ -50,8 +56,9 @@ Native macOS setup for voicemode-local (Apple silicon, Homebrew, no Docker).
   --yes      Unattended: ask nothing, take every default.
              (Defaults: no voice pill, no German voice.)
   --pill     Install the voice pill (off by default; a failure only warns).
-  --barge    Turn on interrupt by voice (voicemode-switch barge on). Works with
-             headphones; the built-in speakers make it interrupt itself.
+  --barge    Turn on interrupt by voice (voicemode-switch barge on). On the
+             built-in speakers it uses macOS echo cancellation (installs
+             pyobjc-framework-AVFoundation into the venv); headphones need none.
   --german   Also download the German voice dm_martin (about 325 MB).
   --help     Show this text.
 
@@ -387,9 +394,30 @@ fi
 if [ "$WANT_BARGE" = "1" ]; then
     header "Step 10: Interrupt by voice"
     # A barge problem must never fail voice: warn and carry on.
+    AVF_OK=0
+    if "$VENV_DIR/bin/python" -c "import importlib.util as u, sys; sys.exit(u.find_spec('AVFoundation') is None)" 2>/dev/null; then
+        ok "pyobjc-framework-AVFoundation already installed (echo cancellation on the speakers)"
+        AVF_OK=1
+    else
+        avf_version="$("$VENV_DIR/bin/python" -c "import importlib.metadata as m; print(m.version('pyobjc-core'))" 2>/dev/null || true)"
+        [ -n "$avf_version" ] || avf_version="$PYOBJC_AVFOUNDATION_VERSION"
+        size_before="$(du -sk "$VENV_DIR" | awk '{print $1}')"
+        if uv pip install --python "$VENV_DIR/bin/python" "pyobjc-framework-AVFoundation==$avf_version"; then
+            size_after="$(du -sk "$VENV_DIR" | awk '{print $1}')"
+            added_mb="$(awk -v k="$((size_after - size_before))" 'BEGIN { printf "%.1f", k / 1024 }')"
+            ok "pyobjc-framework-AVFoundation $avf_version added $added_mb MB to the venv (measured)"
+            AVF_OK=1
+        else
+            warn "pyobjc-framework-AVFoundation $avf_version did not install: on the built-in speakers interrupt by voice stays off; use headphones."
+        fi
+    fi
     if "$SCRIPT_DIR/voicemode-switch" barge on; then
         ok "Interrupt by voice on"
-        echo "  Interrupt by voice works with headphones; on the built-in speakers it interrupts itself until echo cancellation lands."
+        if [ "$AVF_OK" = "1" ]; then
+            echo "  Interrupt by voice: on the built-in speakers it listens through macOS echo cancellation; with headphones it listens to the mic as it is."
+        else
+            echo "  Interrupt by voice works with headphones only until pyobjc-framework-AVFoundation installs (run ./install-mac.sh --barge again); use headphones."
+        fi
     else
         warn "Interrupt by voice did not start (the voice itself is unaffected). Try again later with: voicemode-switch barge on"
     fi
