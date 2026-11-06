@@ -51,6 +51,40 @@ ok()   { echo -e "  ${GREEN}✓${NC} $1"; }
 fail() { echo -e "  ${RED}✗${NC} $1"; }
 warn() { echo -e "  ${YELLOW}!${NC} $1"; }
 
+# --- voicemode.env writes: one writer at a time ------------------------------------
+# Every write to ~/.voicemode/voicemode.env holds flock(2) on voicemode.env.lock beside it,
+# the lock the native switch takes (scripts/windows/voicemode_native.py settings_lock), so
+# this switch, the native one and the pill cannot lose each other's change. macOS has no
+# flock binary, so python's fcntl takes the lock on fd 8, which this shell holds open: an
+# flock belongs to the open file, so it outlives the python and ends when fd 8 is closed.
+_ENV_LOCK_PY='import fcntl, sys, time
+deadline = time.monotonic() + float(sys.argv[1])
+while True:
+    try:
+        fcntl.flock(8, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        break
+    except BlockingIOError:
+        if time.monotonic() >= deadline:
+            sys.exit(3)
+        time.sleep(0.05)'
+
+with_env_lock() {
+    if [ -n "${_VM_ENV_LOCKED:-}" ]; then "$@"; return; fi   # already held by this shell
+    local lock="$HOME/.voicemode/voicemode.env.lock" wait_s="${VOICEMODE_ENV_LOCK_TIMEOUT:-10}" rc=0
+    mkdir -p "$HOME/.voicemode"
+    exec 8>>"$lock"
+    if ! "$VENV_PY" -c "$_ENV_LOCK_PY" "$wait_s"; then
+        exec 8>&-
+        fail "voicemode.env not changed: another writer held $lock for ${wait_s} s"
+        return 1
+    fi
+    _VM_ENV_LOCKED=1
+    "$@" || rc=$?
+    _VM_ENV_LOCKED=
+    exec 8>&-
+    return $rc
+}
+
 docker_compose_cmd() {
     # Build the docker compose command honoring two config axes:
     #   PIPER_ENABLED  -> include the piper profile
@@ -106,7 +140,7 @@ update_env() {
     # variables override this file, so the routing vars must NOT also be set in
     # ~/.claude.json's env block (we keep only secrets like OPENAI_API_KEY there).
     local stt_urls="$1" tts_urls="$2" voices="$3" mode="${4:-custom}"
-    python3 - "$stt_urls" "$tts_urls" "$voices" "$mode" << 'PYEOF'
+    with_env_lock python3 - "$stt_urls" "$tts_urls" "$voices" "$mode" << 'PYEOF'
 import os, re, sys
 
 stt, tts, voices, mode = sys.argv[1:5]
@@ -403,7 +437,8 @@ voice_barge_enabled() {
 
 # A tool whitelist would hide the voice_barge MCP tool. Never create a whitelist:
 # without one, every tool already loads.
-expose_barge_tool() {
+expose_barge_tool() { with_env_lock _expose_barge_tool; }
+_expose_barge_tool() {
     local env_file="$HOME/.voicemode/voicemode.env"
     [ -f "$env_file" ] || return 0
     grep -q '^VOICEMODE_TOOLS_ENABLED=' "$env_file" || return 0
@@ -411,7 +446,8 @@ expose_barge_tool() {
     sed -i.bak 's/^\(VOICEMODE_TOOLS_ENABLED=.*\)$/\1,voice_barge_tool/' "$env_file" && rm -f "$env_file.bak"
 }
 
-set_voice_barge() {
+set_voice_barge() { with_env_lock _set_voice_barge "$@"; }
+_set_voice_barge() {
     local env_file="$HOME/.voicemode/voicemode.env"
     mkdir -p "$(dirname "$env_file")"; touch "$env_file"
     sed -i.bak '/^VOICEMODE_VOICE_BARGE=/d' "$env_file" && rm -f "$env_file.bak"
@@ -489,7 +525,8 @@ PILL_BACKEND_RE='^[^ ]*python[^ ]* (-m voice_mode\.voice_pill|[^ ]*/voice_pill\.
 
 env_value() { sed -n "s/^$1=//p" "$HOME/.voicemode/voicemode.env" 2>/dev/null | tail -1; }
 
-set_env_value() {
+set_env_value() { with_env_lock _set_env_value "$@"; }
+_set_env_value() {
     local env_file="$HOME/.voicemode/voicemode.env"
     mkdir -p "$(dirname "$env_file")"; touch "$env_file"
     # Replace the key where it is (comments and order stay); a new key goes at the end.
@@ -938,6 +975,9 @@ _vm_cli() {
     printf '%s' "$VM"
 }
 
+# Sourced (the tests): the functions above are defined, nothing below runs.
+[ "${BASH_SOURCE[0]}" = "$0" ] || return 0
+
 case "${1:-}" in
     local)     cmd_local ;;
     localonly) cmd_localonly ;;
@@ -982,7 +1022,7 @@ case "${1:-}" in
         case "${2:-status}" in
             on|off)
                 val=$([ "${2}" = "on" ] && echo true || echo false)
-                "$PYBIN" - "$ENVF" "$val" <<'PY'
+                with_env_lock "$PYBIN" - "$ENVF" "$val" <<'PY'
 import sys, re, pathlib
 f=pathlib.Path(sys.argv[1]); val=sys.argv[2]
 txt=f.read_text() if f.exists() else ""

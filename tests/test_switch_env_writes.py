@@ -23,8 +23,7 @@ def envfile(home: Path) -> Path:
 
 
 def set_env_value(home: Path, key: str, value: str) -> None:
-    src = SWITCH.read_text().split("set_env_value() {", 1)[1].split("\n}\n", 1)[0]
-    script = "set_env_value() {" + src + "\n}\n" + f'set_env_value "{key}" "{value}"\n'
+    script = f'source "{SWITCH}"\nset_env_value "{key}" "{value}"\n'
     subprocess.run(["bash", "-c", script], env={**os.environ, "HOME": str(home)}, check=True, timeout=30)
 
 
@@ -138,3 +137,128 @@ def test_claude_json_with_routing_keys_is_cleaned_and_says_so(tmp_path):
     assert "Cleaned routing vars" in done.stdout
     env = json.loads(cj.read_text())["mcpServers"]["voicemode"]["env"]
     assert env == {"OPENAI_API_KEY": "k"}
+
+
+# -- the settings lock shared with the native switch and the pill ---------------
+#
+# voicemode_native.settings_lock takes flock(2) on voicemode.env.lock. Each shell writer
+# must take the same lock, or a read-modify-write by one loses the other's change.
+
+import sys
+import time
+
+NATIVE = SWITCH.parent / "scripts" / "windows" / "voicemode_native.py"
+
+# Holds the native switch's own lock, then does a slow read-modify-write under it.
+HOLDER = r'''
+import importlib.util, sys, time
+from pathlib import Path
+spec = importlib.util.spec_from_file_location("vn_lock_holder", sys.argv[1])
+vn = importlib.util.module_from_spec(spec); spec.loader.exec_module(vn)
+env, ready, hold = Path(sys.argv[2]), Path(sys.argv[3]), float(sys.argv[4])
+with vn.settings_lock(env):
+    text = env.read_text() if env.exists() else ""
+    ready.write_text("locked")
+    time.sleep(hold)
+    env.write_text(text + "HELD_BY_NATIVE=1\n")
+'''
+
+
+def sourced(home: Path, body: str, extra_env=None) -> subprocess.CompletedProcess:
+    """Run shell code with voicemode-switch's functions defined and nothing dispatched."""
+    env = {**os.environ, "HOME": str(home), **(extra_env or {})}
+    return subprocess.run(["bash", "-c", f'source "{SWITCH}"\n{body}'], env=env,
+                          capture_output=True, text=True, timeout=60)
+
+
+def hold_native_lock(home: Path, hold: float):
+    envfile(home).parent.mkdir(exist_ok=True)
+    ready = home / "ready"
+    proc = subprocess.Popen([sys.executable, "-c", HOLDER, str(NATIVE), str(envfile(home)),
+                             str(ready), str(hold)])
+    deadline = time.monotonic() + 20
+    while not ready.exists():
+        assert proc.poll() is None, "lock holder died"
+        assert time.monotonic() < deadline, "lock holder never took the lock"
+        time.sleep(0.02)
+    return proc
+
+
+WRITERS = {
+    "set_env_value": ('set_env_value SHELL_KEY 1', "SHELL_KEY=1"),
+    "set_voice_barge": ("set_voice_barge true", "VOICEMODE_VOICE_BARGE=true"),
+    "update_env": ('update_env "http://127.0.0.1:2022/v1" "http://127.0.0.1:8880/v1" af_sky localonly'
+                   ' >/dev/null', "# mode: localonly"),
+    "expose_barge_tool": ("expose_barge_tool", "VOICEMODE_TOOLS_ENABLED=converse,voice_barge_tool"),
+}
+
+
+def test_sourcing_the_switch_defines_its_functions_and_runs_nothing(tmp_path):
+    r = sourced(tmp_path, "type set_env_value >/dev/null && echo defined")
+    assert r.returncode == 0 and r.stdout.strip() == "defined", r.stderr
+    assert not (tmp_path / ".voicemode").exists()
+
+
+import pytest  # noqa: E402
+
+
+@pytest.mark.parametrize("name", sorted(WRITERS))
+def test_a_shell_write_waits_for_the_native_switch_and_keeps_its_change(tmp_path, name):
+    call, expect = WRITERS[name]
+    envfile(tmp_path).parent.mkdir()
+    envfile(tmp_path).write_text("VOICEMODE_TOOLS_ENABLED=converse\n")
+    holder = hold_native_lock(tmp_path, 1.0)
+    try:
+        r = sourced(tmp_path, call)
+    finally:
+        assert holder.wait(timeout=20) == 0
+    assert r.returncode == 0, r.stderr
+    text = envfile(tmp_path).read_text()
+    assert "HELD_BY_NATIVE=1" in text, f"{name} lost the native switch's write:\n{text}"
+    assert expect in text, text
+
+
+def test_audio_token_waits_for_the_native_switch(tmp_path):
+    envfile(tmp_path).parent.mkdir()
+    envfile(tmp_path).write_text("A=1\n")
+    holder = hold_native_lock(tmp_path, 1.0)
+    try:
+        r = run(tmp_path, "audio-token", "on")
+    finally:
+        assert holder.wait(timeout=20) == 0
+    assert r.returncode == 0, r.stderr
+    text = envfile(tmp_path).read_text()
+    assert "HELD_BY_NATIVE=1" in text and "VOICEMODE_AUDIO_TOKEN_ENABLED=true" in text, text
+
+
+def test_two_shell_writers_at_once_lose_nothing(tmp_path):
+    envfile(tmp_path).parent.mkdir()
+    envfile(tmp_path).write_text("")
+    loop = 'for i in $(seq 1 15); do set_env_value {p}_$i $i; done'
+    env = {**os.environ, "HOME": str(tmp_path)}
+    procs = [subprocess.Popen(["bash", "-c", f'source "{SWITCH}"\n' + loop.format(p=p)], env=env)
+             for p in ("LEFT", "RIGHT")]
+    assert [p.wait(timeout=120) for p in procs] == [0, 0]
+    text = envfile(tmp_path).read_text()
+    missing = [f"{p}_{i}" for p in ("LEFT", "RIGHT") for i in range(1, 16) if f"{p}_{i}={i}" not in text]
+    assert missing == [], text
+
+
+def test_a_lock_held_too_long_fails_the_write_and_leaves_the_file(tmp_path):
+    envfile(tmp_path).parent.mkdir()
+    envfile(tmp_path).write_text("A=1\n")
+    holder = hold_native_lock(tmp_path, 3.0)
+    try:
+        r = sourced(tmp_path, "set_env_value SHELL_KEY 1", {"VOICEMODE_ENV_LOCK_TIMEOUT": "0.5"})
+    finally:
+        holder.wait(timeout=20)
+    assert r.returncode != 0
+    assert "voicemode.env.lock" in r.stdout + r.stderr
+    assert "SHELL_KEY" not in envfile(tmp_path).read_text()
+
+
+def test_the_lock_is_released_after_each_write(tmp_path):
+    r = sourced(tmp_path, "set_env_value A 1 && set_voice_barge true && set_env_value B 2")
+    assert r.returncode == 0, r.stderr
+    holder = hold_native_lock(tmp_path, 0.1)   # would hang if the shell still held it
+    assert holder.wait(timeout=20) == 0
