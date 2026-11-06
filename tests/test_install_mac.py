@@ -759,3 +759,16 @@ def test_a_failed_avfoundation_install_warns_turns_barge_on_and_says_speakers_ar
 
 def test_help_says_speakers_use_echo_cancellation(tmp_path):
     assert "echo cancellation" in _box(tmp_path).run("--help").stdout
+
+
+def test_avfoundation_install_pins_every_pyobjc_piece_to_one_release(tmp_path):
+    # Fix round 1, I1: pinning AVFoundation alone lets uv move pyobjc-core (or CoreAudio,
+    # CoreMedia) to a newer release under pynput's Quartz and Cocoa.
+    b = _box(tmp_path)
+    assert b.run("--yes").returncode == 0
+    (b.repo / ".venv/.stub_pyobjc_core").write_text("12.2.1\n")
+    assert b.run("--barge", "--yes").returncode == 0
+    (call,) = _avf_installs(b)
+    for pkg in ("pyobjc-core", "pyobjc-framework-AVFoundation", "pyobjc-framework-CoreAudio",
+                "pyobjc-framework-CoreMedia", "pyobjc-framework-Cocoa", "pyobjc-framework-Quartz"):
+        assert f"{pkg}==12.2.1" in call.split(), (pkg, call)

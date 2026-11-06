@@ -402,7 +402,12 @@ if [ "$WANT_BARGE" = "1" ]; then
         avf_version="$("$VENV_DIR/bin/python" -c "import importlib.metadata as m; print(m.version('pyobjc-core'))" 2>/dev/null || true)"
         [ -n "$avf_version" ] || avf_version="$PYOBJC_AVFOUNDATION_VERSION"
         size_before="$(du -sk "$VENV_DIR" | awk '{print $1}')"
-        if uv pip install --python "$VENV_DIR/bin/python" "pyobjc-framework-AVFoundation==$avf_version"; then
+        # Every pyobjc piece AVFoundation pulls in, pinned to the one release, so uv cannot
+        # move pyobjc-core (or Cocoa, Quartz) away from what pynput is running on.
+        if uv pip install --python "$VENV_DIR/bin/python" \
+            "pyobjc-core==$avf_version" "pyobjc-framework-AVFoundation==$avf_version" \
+            "pyobjc-framework-CoreAudio==$avf_version" "pyobjc-framework-CoreMedia==$avf_version" \
+            "pyobjc-framework-Cocoa==$avf_version" "pyobjc-framework-Quartz==$avf_version"; then
             size_after="$(du -sk "$VENV_DIR" | awk '{print $1}')"
             added_mb="$(awk -v k="$((size_after - size_before))" 'BEGIN { printf "%.1f", k / 1024 }')"
             ok "pyobjc-framework-AVFoundation $avf_version added $added_mb MB to the venv (measured)"
