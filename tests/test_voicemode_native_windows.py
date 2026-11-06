@@ -244,10 +244,10 @@ INITIALIZE = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize", "par
     "clientInfo": {"name": "vml-native-test", "version": "0"}}}) + "\n"
 
 
-def _start_launch(install):
+def _start_launch(install, stderr=subprocess.DEVNULL):
     """`launch` under this Python, which lacks psutil: it restarts under the runtime's Python."""
     proc = subprocess.Popen([sys.executable, str(SCRIPT), "launch"], env=install["env"],
-                            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=stderr,
                             text=True, encoding="utf-8")
     proc.stdin.write(INITIALIZE)
     proc.stdin.flush()
@@ -282,3 +282,369 @@ def test_killed_launcher_leaves_no_process(install):
     left = _wait_none_left(install["base"], 45)
     print(f"[kill] {len(before)} of our processes before, {len(left)} after")
     assert not left, left
+
+
+# -- the native switch and install.ps1 (task 8) --------------------------------
+# Every switch test runs against a `serve` (a live lease) or a `launch` in this module's temp
+# root and profile. Robert's %USERPROFILE%\.voicemode\voicemode.env and .claude.json are
+# never touched: HOME and USERPROFILE point into the temp folder, and the claude CLI is a fake.
+
+import ctypes
+import contextlib
+import hashlib
+import re
+from ctypes import wintypes
+
+if sys.platform == "win32":
+    _k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    _k32.OpenProcess.restype = wintypes.HANDLE
+    _k32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+    _k32.OpenJobObjectW.restype = wintypes.HANDLE
+    _k32.OpenJobObjectW.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.LPCWSTR)
+    _k32.IsProcessInJob.argtypes = (wintypes.HANDLE, wintypes.HANDLE, ctypes.POINTER(wintypes.BOOL))
+    _k32.GetExitCodeProcess.argtypes = (wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD))
+    _k32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    _u32 = ctypes.WinDLL("user32", use_last_error=True)
+    _ENUM = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+    _u32.EnumWindows.argtypes = (_ENUM, wintypes.LPARAM)
+    _u32.GetWindowThreadProcessId.argtypes = (wintypes.HWND, ctypes.POINTER(wintypes.DWORD))
+    _u32.GetWindowTextW.argtypes = (wintypes.HWND, wintypes.LPWSTR, ctypes.c_int)
+    _u32.IsWindowVisible.argtypes = (wintypes.HWND,)
+
+
+def _alive(pid):
+    handle = _k32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not handle:
+        return False
+    try:
+        code = wintypes.DWORD()
+        return bool(_k32.GetExitCodeProcess(handle, ctypes.byref(code))) and code.value == 259  # STILL_ACTIVE
+    finally:
+        _k32.CloseHandle(handle)
+
+
+def _in_services_job(root, pid):
+    name = "Local\\voicemode-local-services-" + hashlib.sha256(str(Path(root).resolve()).lower().encode()).hexdigest()[:16]
+    job = _k32.OpenJobObjectW(0x4, False, name)  # JOB_OBJECT_QUERY
+    assert job, f"no job named {name}"
+    process = _k32.OpenProcess(0x1000, False, pid)
+    try:
+        inside = wintypes.BOOL()
+        assert _k32.IsProcessInJob(process, job, ctypes.byref(inside))
+        return bool(inside.value)
+    finally:
+        _k32.CloseHandle(process)
+        _k32.CloseHandle(job)
+
+
+def _visible_pill(pid):
+    found = []
+
+    def each(hwnd, _):
+        owner = wintypes.DWORD()
+        _u32.GetWindowThreadProcessId(hwnd, ctypes.byref(owner))
+        if owner.value == pid and _u32.IsWindowVisible(hwnd):
+            buf = ctypes.create_unicode_buffer(64)
+            _u32.GetWindowTextW(hwnd, buf, 64)
+            if buf.value == "Voice pill":
+                found.append(hwnd)
+        return True
+
+    _u32.EnumWindows(_ENUM(each), 0)
+    return found
+
+
+def _wait(predicate, seconds, what):
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        if predicate():
+            return
+        time.sleep(0.3)
+    raise AssertionError(f"timed out after {seconds} s waiting for {what}")
+
+
+def _switch(install, *args, env=None, python=None):
+    """The native switch as a user runs it: this Python (no psutil), so main() restarts it under the runtime's."""
+    done = subprocess.run([str(python or sys.executable), str(SCRIPT), *args], env=env or install["env"],
+                          capture_output=True, text=True, encoding="utf-8", timeout=180)
+    print(f"[switch {' '.join(args)}] exit {done.returncode}: {done.stdout.strip()!r} {done.stderr.strip()[-300:]!r}")
+    return done
+
+
+def _state(install):
+    return json.loads((install["root"] / "run" / "state.json").read_text(encoding="utf-8"))
+
+
+@contextlib.contextmanager
+def _serving(install):
+    proc = subprocess.Popen([str(install["python"]), str(SCRIPT), "serve"], env=install["env"],
+                            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+    try:
+        assert _read_line(proc.stdout, 180), "serve printed no ports"
+        yield proc
+        proc.stdin.close()
+        assert proc.wait(60) == 0
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+    left = _wait_none_left(install["base"], 30)
+    assert not left, left
+
+
+def test_barge_switch_starts_and_stops_the_trigger_in_the_services_job(install):
+    with _serving(install):
+        for cycle in range(2):
+            done = _switch(install, "barge", "on")
+            assert done.returncode == 0 and "started (process" in done.stdout, done.stdout + done.stderr
+            pid = _state(install)["barge"]["pid"]
+            time.sleep(4)  # it loads Silero, then waits for speech it never hears
+            log = (install["root"] / "run" / "barge.log").read_text(encoding="utf-8", errors="replace")
+            assert _alive(pid), log[-2000:]
+            assert _in_services_job(install["root"], pid)
+            status = _switch(install, "barge", "status")
+            assert status.stdout.splitlines() == ["on", f"trigger: running (process {pid})"]
+            # The same first line as voice_barge's own status, from the runtime.
+            own = subprocess.run([str(install["python"]), "-m", "voice_mode.voice_barge", "status"],
+                                 env=install["env"], capture_output=True, text=True, timeout=60)
+            assert own.stdout.splitlines() == ["on"], own.stdout + own.stderr
+            done = _switch(install, "barge", "off")
+            assert done.returncode == 0 and f"Stopped the trigger (process {pid})" in done.stdout
+            assert not _alive(pid) and "barge" not in _state(install)
+            assert _switch(install, "barge", "status").stdout.splitlines() == ["off", "trigger: not running"]
+            print(f"[barge] cycle {cycle + 1}: trigger {pid} started in the services job, then stopped")
+    env_file = install["home"] / ".voicemode" / "voicemode.env"
+    assert "VOICEMODE_VOICE_BARGE=false" in env_file.read_text(encoding="utf-8")
+
+
+def _seed_webview2(root):
+    version = re.search(r'\$WebView2Version = "([^"]+)"', (REPO / "pill-windows.ps1").read_text()).group(1)
+    seed = Path(os.environ["LOCALAPPDATA"]) / "voicemode-local" / "webview2" / version
+    target = root / "pill" / "webview2" / version
+    if (seed / "WebView2Loader.dll").exists() and not target.exists():
+        shutil.copytree(seed, target)  # read only from the WSL pill's folder
+
+
+PILL_BACKEND_ENV = r'''
+import json, subprocess, sys, psutil
+pill = psutil.Process(int(sys.argv[1]))
+backend = [p for p in pill.children(recursive=True) if "voice_mode.voice_pill" in " ".join(p.cmdline())]
+env = backend[0].environ()
+command = json.loads(env["VOICEMODE_BARGE_CONTROL_COMMAND"])
+done = subprocess.run([*command, "status"], env=env, capture_output=True, text=True, timeout=120)
+print(json.dumps({"command": command, "rc": done.returncode, "out": done.stdout, "err": done.stderr[-500:]}))
+'''
+
+
+def test_pill_switch_closes_the_window_through_its_stop_event(install):
+    _seed_webview2(install["root"])
+    with _serving(install):
+        for cycle in range(2):
+            done = _switch(install, "pill", "on")
+            assert done.returncode == 0 and "started (process" in done.stdout, done.stdout + done.stderr
+            # The test's environment says VOICEMODE_PILL=false: the switch says so, and starts it anyway.
+            assert "Note: VOICEMODE_PILL=false" in done.stdout
+            pid = _state(install)["pill"]["pid"]
+            assert _in_services_job(install["root"], pid)
+            # The window stays hidden while no voice session exists (serve has none): wait for
+            # the backend it starts instead.
+            window_log = install["root"] / "pill" / "pill-window.log"
+            try:
+                _wait(lambda: window_log.exists() and window_log.read_text(encoding="utf-8", errors="replace")
+                      .count("backend started") == cycle + 1, 90, "the pill backend")
+            except AssertionError:
+                for log in (install["root"] / "pill" / "pill-window.log", install["root"] / "run" / "pill.log"):
+                    if log.exists():
+                        print(f"--- {log}\n" + log.read_text(encoding="utf-8", errors="replace")[-3000:])
+                print(f"[pill] alive: {_alive(pid)}; ours: {_ours(install['base'])}")
+                raise
+            assert not _visible_pill(pid)  # no session, no window
+            _wait(lambda: subprocess.run([str(install["python"]), "-c", PILL_BACKEND_ENV, str(pid)],
+                                         capture_output=True).returncode == 0, 30, "the backend's environment")
+            probe = subprocess.run([str(install["python"]), "-c", PILL_BACKEND_ENV, str(pid)],
+                                   capture_output=True, text=True, timeout=180)
+            result = json.loads(probe.stdout.strip().splitlines()[-1])
+            print(f"[pill] the barge command from the backend's environment: {result}")
+            assert result["command"][1:] == [str(SCRIPT), "barge"]
+            assert result["rc"] == 0 and result["out"].splitlines()[1] == "trigger: not running", result
+            assert result["out"].splitlines()[0] in ("on", "off")
+            assert _switch(install, "pill", "status").stdout.splitlines() == ["on", f"window: running (process {pid})"]
+            done = _switch(install, "pill", "off")
+            assert done.returncode == 0 and f"Stopped the window (process {pid})" in done.stdout
+            assert not _alive(pid) and "pill" not in _state(install)
+            log = (install["root"] / "pill" / "pill-window.log").read_text(encoding="utf-8", errors="replace")
+            assert log.count("stop requested") == cycle + 1, log[-2000:]  # closed by the event, not killed
+            _wait(lambda: not [c for c in _ours(install["base"]).values() if "voice_pill" in c or "pill-windows" in c],
+                  20, "the pill's processes to end")
+            print(f"[pill] cycle {cycle + 1}: window {pid} and its backend started, then closed by its stop event")
+
+
+def _call(proc, request_id, name, arguments):
+    proc.stdin.write(json.dumps({"jsonrpc": "2.0", "id": request_id, "method": "tools/call",
+                                 "params": {"name": name, "arguments": arguments}}) + "\n")
+    proc.stdin.flush()
+    deadline = time.monotonic() + 180
+    while time.monotonic() < deadline:
+        line = _read_line(proc.stdout, max(1, deadline - time.monotonic()))
+        assert line, f"no answer to tools/call {name}"
+        message = json.loads(line)
+        if message.get("id") == request_id:
+            return "".join(c.get("text", "") for c in message["result"]["content"])
+    raise AssertionError(f"no answer to tools/call {name}")
+
+
+def test_voice_barge_tool_drives_the_native_switch(install):
+    proc = _start_launch(install)
+    try:
+        proc.stdin.write(json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}) + "\n")
+        proc.stdin.flush()
+        text = _call(proc, 2, "voice_barge", {"action": "on"})
+        print(f"[tool] voice_barge on: {text!r}")
+        assert "started (process" in text
+        pid = _state(install)["barge"]["pid"]
+        time.sleep(3)
+        # Started by voice-mode, which sits in its connector's job: it must land in the services' job.
+        assert _alive(pid) and _in_services_job(install["root"], pid)
+        assert _call(proc, 3, "voice_barge", {"action": "status"}).splitlines() == [
+            "on", f"trigger: running (process {pid})"]
+        text = _call(proc, 4, "voice_barge", {"action": "off"})
+        assert f"Stopped the trigger (process {pid})" in text and not _alive(pid)
+        proc.stdin.close()
+        assert proc.wait(60) == 0
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+    left = _wait_none_left(install["base"], 30)
+    assert not left, left
+
+
+FAKE_CLAUDE = r'''
+import json, os, sys
+args = sys.argv[1:]
+with open(os.environ["VML_FAKE_CLAUDE_LOG"], "a", encoding="utf-8") as log:
+    log.write(json.dumps(args) + "\n")
+path = os.path.join(os.environ["USERPROFILE"], ".claude.json")
+try:
+    data = json.load(open(path, encoding="utf-8"))
+except FileNotFoundError:
+    data = {}
+servers = data.setdefault("mcpServers", {})
+if args[:2] == ["mcp", "add"]:
+    rest = args[2:]
+    env, name = {}, None
+    while rest and rest[0] != "--":
+        item = rest.pop(0)
+        if item == "--scope":
+            rest.pop(0)
+        elif item == "-e":
+            key, value = rest.pop(0).split("=", 1)
+            env[key] = value
+        else:
+            name = item
+    command = rest[1:]
+    servers[name] = {"type": "stdio", "command": command[0], "args": command[1:], "env": env}
+elif args[:2] == ["mcp", "remove"]:
+    servers.pop(args[-1], None)
+json.dump(data, open(path, "w", encoding="utf-8"), indent=2)
+'''
+
+
+def _install_ps1(install, profile, *args):
+    done = subprocess.run(["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+                           str(REPO / "install.ps1"), "-Mode", "windows-native", *args],
+                          env=profile["env"], capture_output=True, text=True, encoding="utf-8",
+                          errors="replace", timeout=900)
+    print(f"\n[install.ps1 {' '.join(args)}] exit {done.returncode}\n{done.stdout[-3000:]}\n{done.stderr[-1500:]}")
+    return done
+
+
+def _calls(profile):
+    path = profile["log"]
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()] if path.exists() else []
+
+
+def test_install_ps1_native_end_to_end_under_windows_powershell(install):
+    """Last in this module: it ends with -Uninstall -RemoveData, which deletes the root."""
+    base, root = install["base"], install["root"]
+    home, bin_dir = base / "p", base / "bin"
+    (home / ".voicemode").mkdir(parents=True)
+    bin_dir.mkdir()
+    (bin_dir / "fake_claude.py").write_text(FAKE_CLAUDE, encoding="utf-8")
+    (bin_dir / "claude.cmd").write_text(f'@echo off\r\n"{sys.executable}" "%~dp0fake_claude.py" %*\r\n')
+    claude_json = home / ".claude.json"
+    claude_json.write_text(json.dumps({"projects": {"C:/x": {"a": 1}}, "mcpServers": {"other": {"command": "o"}}}))
+    env = dict(install["env"], HOME=str(home), USERPROFILE=str(home), VML_FAKE_CLAUDE_LOG=str(base / "claude.log"))
+    # VOICEMODE_UV stays: uv's folder here also holds ffmpeg, so it is off PATH (see install()).
+    # The fake first, and no folder holding the real claude CLI.
+    env["PATH"] = os.pathsep.join([str(bin_dir), *(f for f in env["PATH"].split(os.pathsep)
+                                                   if f and not Path(f.strip('"'), "claude.exe").is_file())])
+    profile = {"env": env, "log": base / "claude.log"}
+    version = subprocess.run(["powershell.exe", "-NoProfile", "-Command", "$PSVersionTable.PSVersion.ToString()"],
+                             capture_output=True, text=True).stdout.strip()
+    print(f"\n[install.ps1] Windows PowerShell {version}")
+    assert version.startswith("5.1")
+
+    done = _install_ps1(install, profile, "-Pill", "-Barge")
+    assert done.returncode == 0
+    stable = root / "python" / "cpython-3.12-windows-x86_64-none" / "python.exe"
+    assert stable.is_file()
+    want = ["mcp", "add", "--scope", "user", "voicemode", "-e", f"VOICEMODE_NATIVE_ROOT={root}",
+            "--", str(stable), str(SCRIPT), "launch"]
+    assert _calls(profile) == [want]
+    data = json.loads(claude_json.read_text(encoding="utf-8"))
+    assert data["projects"] == {"C:/x": {"a": 1}} and data["mcpServers"]["other"] == {"command": "o"}
+    entry = data["mcpServers"]["voicemode"]
+    assert entry["command"] == str(stable) and entry["args"] == [str(SCRIPT), "launch"]
+    for line in ("Root:", "Runtime:", "Disk:", "MCP entry: voicemode ->", "pill on|off|status", "-Uninstall"):
+        assert line in done.stdout, line
+    settings = (home / ".voicemode" / "voicemode.env").read_bytes()  # bytes: read_text drops the CR
+    assert b"VOICEMODE_PILL=true\r\n" in settings and b"VOICEMODE_VOICE_BARGE=true\r\n" in settings
+
+    # The registered command itself answers initialize; barge, now on in the file, starts with it.
+    launch_env = {k: v for k, v in env.items() if k != "VOICEMODE_NATIVE_ROOT"}
+    launch_env.update(entry["env"])
+    launch_env.pop("VOICEMODE_PILL")  # as Claude Code would start it: no override in the environment
+    proc = subprocess.Popen([entry["command"], *entry["args"]], env=launch_env, stdin=subprocess.PIPE,
+                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, encoding="utf-8")
+    try:
+        proc.stdin.write(INITIALIZE)
+        proc.stdin.flush()
+        line = _read_line(proc.stdout, 180)
+        assert line and json.loads(line)["id"] == 1
+        state = _state(install)
+        print(f"[install.ps1] the entry's launch started: {sorted(state)}")
+        assert {"tts", "stt", "barge", "pill"} <= set(state)
+        proc.stdin.close()
+        assert proc.wait(60) == 0
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+    assert not _wait_none_left(base, 45)
+
+    # Again: the same entry is kept, with no claude call.
+    assert _install_ps1(install, profile).returncode == 0
+    assert len(_calls(profile)) == 1
+    # A different entry is reported, not replaced, unless -Force.
+    data = json.loads(claude_json.read_text(encoding="utf-8"))
+    data["mcpServers"]["voicemode"] = {"type": "stdio", "command": "C:\\elsewhere\\voice.exe", "args": []}
+    claude_json.write_text(json.dumps(data))
+    done = _install_ps1(install, profile)
+    assert done.returncode == 0 and "already exists and was not changed" in done.stdout and "elsewhere" in done.stdout
+    assert len(_calls(profile)) == 1
+    done = _install_ps1(install, profile, "-Force")
+    assert done.returncode == 0
+    assert _calls(profile)[1:] == [["mcp", "remove", "--scope", "user", "voicemode"], want]
+
+    # Uninstall: the entry goes, the data stays; then -RemoveData deletes the root.
+    done = _install_ps1(install, profile, "-Uninstall")
+    assert done.returncode == 0 and root.is_dir()
+    assert _calls(profile)[-1] == ["mcp", "remove", "--scope", "user", "voicemode"]
+    data = json.loads(claude_json.read_text(encoding="utf-8"))
+    assert "voicemode" not in data["mcpServers"] and data["mcpServers"]["other"] == {"command": "o"}
+    done = _install_ps1(install, profile, "-Uninstall", "-RemoveData")
+    assert done.returncode == 0 and not root.exists(), done.stdout
+    assert (Path(os.environ["LOCALAPPDATA"]) / "voicemode-local").exists() == WSL_PILL_EXISTED
+    real = Path(os.environ["USERPROFILE"]) / ".claude.json"
+    assert str(root).lower() not in real.read_text(encoding="utf-8", errors="replace").lower()
+
+
+WSL_PILL_EXISTED = sys.platform == "win32" and (Path(os.environ.get("LOCALAPPDATA", "")) / "voicemode-local").exists()

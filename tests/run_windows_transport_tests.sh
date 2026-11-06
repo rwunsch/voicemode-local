@@ -39,8 +39,8 @@ cp "$REPO/patches/"*.py "$REPO/patches/manifest.json" "$REPO/patches/manifest.wi
 cp "$REPO/scripts/windows/voicemode_native.py" "$REPO/scripts/windows/dependencies.json" \
    "$REPO/scripts/windows/requirements.lock" "$DIR/scripts/windows/"
 cp "$REPO/kokoro-onnx-server.py" "$DIR/"
-# The pill window and its page, for its native mode.
-cp "$REPO/pill-windows.ps1" "$DIR/"
+# The pill window and its page, for its native mode; install.ps1 for its native mode.
+cp "$REPO/pill-windows.ps1" "$REPO/install.ps1" "$DIR/"
 mkdir -p "$DIR/ui"
 cp -r "$REPO/ui/pill" "$DIR/ui/"
 cp "$REPO/tests/pill_fake_backend.py" "$DIR/tests/"
