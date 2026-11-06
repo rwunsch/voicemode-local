@@ -21,9 +21,12 @@ VOICEMODE_STREAMING_ENABLED=true. FELIX-MAC reported otherwise (cut playback wit
 streaming at its default); see docs/voice-barge-in/README.md.
 
 Enable with ``voicemode-switch barge on``. The mic comes through parec on Linux and WSL,
-through sounddevice (PortAudio) on Windows and macOS.
+through sounddevice (PortAudio) on Windows and macOS. On macOS with the built-in
+speakers it comes through macOS voice processing (echo cancellation) instead, or not at
+all without pyobjc-framework-AVFoundation; see open_capture.
 Installed into voice_mode/voice_barge.py by patches/apply.sh.
 """
+import ctypes
 import logging
 import os
 import select
@@ -237,11 +240,336 @@ class SoundDeviceCapture:
             self._stream.close()
 
 
-def open_capture(backend: str, device: str):
-    """The mic for one stretch of speech, by the backend capture_backend() chose."""
+# --- macOS: echo cancellation on the built-in speakers ---------------------------
+#
+# Plain capture on a MacBook's built-in speakers hears the assistant at the level of
+# speech: barge cut itself off 2 of 2 (FELIX-MAC, 2026-11-06). macOS voice processing
+# (AVAudioEngine, in this separate process) removed that echo in a spike. Headphones
+# need none of it, so the route is read at each stretch start and decides the capture.
+
+def _fourcc(code: str) -> int:
+    return int.from_bytes(code.encode("ascii"), "big")
+
+
+class _PropertyAddress(ctypes.Structure):
+    _fields_ = [("mSelector", ctypes.c_uint32), ("mScope", ctypes.c_uint32),
+                ("mElement", ctypes.c_uint32)]
+
+
+_SYSTEM_OBJECT = 1                              # kAudioObjectSystemObject
+_DEFAULT_OUTPUT = _fourcc("dOut")               # kAudioHardwarePropertyDefaultOutputDevice
+_TRANSPORT = _fourcc("tran")                    # kAudioDevicePropertyTransportType
+_DATA_SOURCE = _fourcc("ssrc")                  # kAudioDevicePropertyDataSource
+_SCOPE_GLOBAL = _fourcc("glob")
+_SCOPE_OUTPUT = _fourcc("outp")
+_ELEMENT_MAIN = 0
+_BUILT_IN = _fourcc("bltn")                     # kAudioDeviceTransportTypeBuiltIn
+_HEADPHONE_JACK = _fourcc("hdpn")
+_COREAUDIO_PATH = "/System/Library/Frameworks/CoreAudio.framework/CoreAudio"
+_COREAUDIO: dict = {}
+
+
+def _platform() -> str:
+    return sys.platform
+
+
+def _coreaudio():
+    """The CoreAudio library through ctypes, loaded once, or None."""
+    if "lib" not in _COREAUDIO:
+        try:
+            lib = ctypes.CDLL(_COREAUDIO_PATH)
+            fn = lib.AudioObjectGetPropertyData
+            fn.argtypes = [ctypes.c_uint32, ctypes.POINTER(_PropertyAddress), ctypes.c_uint32,
+                           ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint32),
+                           ctypes.POINTER(ctypes.c_uint32)]
+            fn.restype = ctypes.c_int32
+        except (OSError, AttributeError):
+            lib = None
+        _COREAUDIO["lib"] = lib
+    return _COREAUDIO["lib"]
+
+
+def _property_u32(lib, obj: int, selector: int, scope: int):
+    """One UInt32 property, or None when CoreAudio says no (OSStatus not 0)."""
+    address = _PropertyAddress(selector, scope, _ELEMENT_MAIN)
+    size = ctypes.c_uint32(4)
+    out = ctypes.c_uint32(0)
+    status = lib.AudioObjectGetPropertyData(obj, ctypes.pointer(address), 0, None,
+                                            ctypes.pointer(size), ctypes.pointer(out))
+    return None if status != 0 else int(out.value)
+
+
+def output_route(platform=None, lib=None) -> str:
+    """Where the default output plays: "headphones", "speakers" or "unknown".
+
+    Built-in device: 'hdpn' (headphone jack) is headphones; 'ispk', any other or an
+    unreadable data source is speakers. Any other transport (Bluetooth, USB, HDMI,
+    AirPlay, ...) counts as headphones. Off macOS, or when CoreAudio does not answer:
+    unknown. Three property reads, no subprocess."""
+    if (platform or _platform()) != "darwin":
+        return "unknown"
+    lib = lib if lib is not None else _coreaudio()
+    if lib is None:
+        return "unknown"
+    try:
+        device = _property_u32(lib, _SYSTEM_OBJECT, _DEFAULT_OUTPUT, _SCOPE_GLOBAL)
+        if not device:
+            return "unknown"
+        transport = _property_u32(lib, device, _TRANSPORT, _SCOPE_GLOBAL)
+        if transport is None:
+            return "unknown"
+        if transport != _BUILT_IN:
+            return "headphones"
+        source = _property_u32(lib, device, _DATA_SOURCE, _SCOPE_OUTPUT)
+    except Exception:  # noqa: BLE001 - a route we cannot read is unknown, never a crash
+        return "unknown"
+    return "headphones" if source == _HEADPHONE_JACK else "speakers"
+
+
+_VP_AVAILABLE: dict = {}
+
+
+def voice_processing_available() -> bool:
+    """Does AVFoundation (pyobjc-framework-AVFoundation) import here? Asked once."""
+    if "ok" not in _VP_AVAILABLE:
+        try:
+            import AVFoundation  # noqa: F401
+            _VP_AVAILABLE["ok"] = True
+        except Exception:  # noqa: BLE001 - ImportError, or a broken pyobjc install
+            _VP_AVAILABLE["ok"] = False
+    return _VP_AVAILABLE["ok"]
+
+
+ECHO_SETTING = "VOICEMODE_VOICE_BARGE_ECHO"
+
+
+def echo_mode(raw) -> str:
+    """VOICEMODE_VOICE_BARGE_ECHO: auto (default), on or off. Anything else is auto."""
+    value = (raw or "").strip().strip('"').strip("'").lower()
+    return value if value in ("auto", "on", "off") else "auto"
+
+
+def choose_capture(route: str, echo: str, vp_available: bool) -> str:
+    """"sounddevice", "voice-processing" or "refused", for one stretch on macOS.
+
+    off: never voice processing. on: always, refused without AVFoundation. auto: only
+    on the speakers, and there refused without AVFoundation, because plain capture on
+    the speakers cuts the assistant off with its own voice."""
+    if echo == "off":
+        return "sounddevice"
+    if echo == "on" or route == "speakers":
+        return "voice-processing" if vp_available else "refused"
+    return "sounddevice"
+
+
+# Channel 0 of the voice-processed input tap. The spike on a MacBook Pro tapped 48 kHz,
+# 9 channels, read channel 0 and the echo was gone. UNVERIFIED: that channel 0 is the
+# processed (echo-cancelled) signal rather than one raw mic of the array; nothing
+# documents the layout. tests/manual/mac_barge_vp_check.md checks it on a real Mac.
+VP_CHANNEL = 0
+VP_DUCKING_MINIMUM = (False, 10)   # (enableAdvancedDucking, AVAudioVoiceProcessingOtherAudioDuckingLevelMin)
+VP_TAP_FRAMES = 4096
+
+
+class _Resampler:
+    """Streaming low-pass and resample to 16 kHz: no seams between buffers.
+
+    A windowed-sinc FIR cuts everything above about 7.2 kHz first (plain [::3]
+    folds 8-24 kHz back into the speech band), then each output sample is read by
+    linear interpolation between filtered samples, which handles 44.1 kHz as well
+    as 48 kHz."""
+
+    TAPS = 127
+
+    def __init__(self, in_rate: float, out_rate: int = SAMPLE_RATE):
+        self.step = float(in_rate) / out_rate
+        cutoff = 0.45 * out_rate / float(in_rate)          # cycles per input sample
+        n = np.arange(self.TAPS) - (self.TAPS - 1) / 2
+        h = 2 * cutoff * np.sinc(2 * cutoff * n) * np.blackman(self.TAPS)
+        self._h = (h / h.sum()).astype(np.float64)
+        self._history = np.zeros(self.TAPS - 1)
+        self._last = 0.0
+        self._pos = 0.0     # where the next output sample sits, in this chunk's filtered samples
+
+    def process(self, x: np.ndarray) -> np.ndarray:
+        x = np.asarray(x, dtype=np.float64)
+        if len(x) == 0:
+            return np.zeros(0, dtype=np.float32)
+        filtered = np.convolve(np.concatenate([self._history, x]), self._h, mode="valid")
+        self._history = np.concatenate([self._history, x])[-(self.TAPS - 1):]
+        count = len(filtered)
+        positions = self._pos + self.step * np.arange(int(np.floor((count - 1 - self._pos) / self.step)) + 1)
+        # index 0 of `padded` is the previous chunk's last sample, at position -1
+        padded = np.concatenate([[self._last], filtered])
+        out = np.interp(positions + 1, np.arange(count + 1), padded)
+        self._pos = (positions[-1] + self.step if len(positions) else self._pos) - count
+        self._last = filtered[-1]
+        return out.astype(np.float32)
+
+
+def _ok(result) -> bool:
+    """pyobjc returns (BOOL, NSError) for an error: out-parameter, or BOOL alone."""
+    return bool(result[0]) if isinstance(result, tuple) else bool(result)
+
+
+def _call_with_error(method, *args):
+    """The spike called setVoiceProcessingEnabled_error_(True) with the error left out;
+    some pyobjc versions want it passed as None. Try the spike's form first."""
+    try:
+        return method(*args)
+    except TypeError:
+        return method(*args, None)
+
+
+def _channel_samples(buffer, channel: int) -> np.ndarray:
+    """One channel of an AVAudioPCMBuffer of float32 as a numpy array (a copy)."""
+    frames = int(buffer.frameLength())
+    data = buffer.floatChannelData()
+    stride = int(buffer.stride()) if hasattr(buffer, "stride") else 1
+    if stride > 1:                         # interleaved: every channel behind pointer 0
+        return _floats(data[0], frames * stride)[channel::stride].copy()
+    return _floats(data[channel], frames).copy()
+
+
+def _floats(pointer, count: int) -> np.ndarray:
+    if hasattr(pointer, "as_buffer"):
+        return np.frombuffer(pointer.as_buffer(count), dtype=np.float32)
+    return np.fromiter((pointer[i] for i in range(count)), dtype=np.float32, count=count)
+
+
+class _QueuedWindows:
+    """read_window() over int16 blocks put on a queue by an audio callback."""
+
+    def _init_queue(self):
+        import queue
+        self._queue = queue.Queue()
+        self._buf = np.zeros(0, dtype=np.int16)
+
+    def read_window(self):
+        """One 512-sample float window at 16 kHz, or None after 200 ms of nothing."""
+        import queue
+        while len(self._buf) < WINDOW_SAMPLES:
+            try:
+                self._buf = np.concatenate([self._buf, self._queue.get(timeout=0.2)])
+            except queue.Empty:
+                return None
+        raw, self._buf = self._buf[:WINDOW_SAMPLES], self._buf[WINDOW_SAMPLES:]
+        return raw.astype(np.float32) / 32768.0
+
+
+class VoiceProcessingCapture(_QueuedWindows):
+    """macOS: the default mic through AVAudioEngine with voice processing (echo
+    cancellation) on and other-audio ducking at its minimum. Same contract as
+    SoundDeviceCapture. Ignores VOICEMODE_VOICE_BARGE_DEVICE: voice processing takes
+    the system's default input."""
+
+    def __init__(self):
+        import AVFoundation
+        self._init_queue()
+        self._engine = AVFoundation.AVAudioEngine.alloc().init()
+        self._input = self._engine.inputNode()
+        self._tapped = False
+        try:
+            if not _ok(_call_with_error(self._input.setVoiceProcessingEnabled_error_, True)):
+                raise RuntimeError("macOS refused to turn voice processing on")
+            try:
+                self._input.setVoiceProcessingOtherAudioDuckingConfiguration_(VP_DUCKING_MINIMUM)
+            except AttributeError:   # before macOS 14: default ducking, see the docs
+                logger.info("voice processing: other-audio ducking not settable here (macOS < 14)")
+            fmt = self._input.outputFormatForBus_(0)
+            self._channels = int(fmt.channelCount())
+            self._resampler = _Resampler(float(fmt.sampleRate()))
+            self._input.installTapOnBus_bufferSize_format_block_(0, VP_TAP_FRAMES, fmt, self._on_buffer)
+            self._tapped = True
+            self._engine.prepare()
+            if not _ok(_call_with_error(self._engine.startAndReturnError_)):
+                raise RuntimeError("the voice-processing audio engine did not start")
+        except Exception:
+            self.close()
+            raise
+
+    def _on_buffer(self, buffer, when):
+        try:
+            mono = _channel_samples(buffer, VP_CHANNEL if self._channels > VP_CHANNEL else 0)
+            out = self._resampler.process(mono)
+            self._queue.put((np.clip(out, -1.0, 1.0) * 32767).astype(np.int16))
+        except Exception:  # noqa: BLE001 - never raise into CoreAudio's thread
+            logger.exception("voice processing tap failed")
+
+    def close(self) -> None:
+        try:
+            self._engine.stop()
+        finally:
+            if self._tapped:
+                self._tapped = False
+                self._input.removeTapOnBus_(0)
+
+
+class _RefusalLog:
+    """Log a refusal once per route change, not at every poll."""
+
+    def __init__(self):
+        self.reset()
+
+    def reset(self) -> None:
+        self._route = object()
+        self._logged = False
+
+    def seen(self, route: str) -> None:
+        if route != self._route:
+            self._route, self._logged = route, False
+
+    def refuse(self, message: str) -> None:
+        if not self._logged:
+            self._logged = True
+            logger.warning("%s", message)
+
+
+_REFUSALS = _RefusalLog()
+REFUSE_NO_AVFOUNDATION = ("barge: built-in speakers without echo cancellation; use headphones "
+                          "(pyobjc-framework-AVFoundation missing)")
+REFUSE_ECHO_ON = ("barge: VOICEMODE_VOICE_BARGE_ECHO=on but echo cancellation is unavailable "
+                  "(pyobjc-framework-AVFoundation missing); not opening the mic")
+
+
+def _plain_capture(backend: str, device: str):
     if backend == "parec":
         return ParecCapture(device)
     return SoundDeviceCapture(device)
+
+
+def mac_capture_choice(echo: str):
+    """(route, capture name) as this stretch would choose them; for status."""
+    route = output_route()
+    return route, choose_capture(route, echo, voice_processing_available())
+
+
+def open_capture(backend: str, device: str, platform=None, echo: str = "auto",
+                 route=None, vp_available=None):
+    """The mic for one stretch of speech, by the backend capture_backend() chose.
+
+    On macOS the output route decides (choose_capture): plain capture, voice
+    processing, or None, meaning refused: no mic this stretch. The capture then
+    carries ``stretch_note`` for the stretch line. Elsewhere: as before."""
+    if (platform or _platform()) != "darwin":
+        return _plain_capture(backend, device)
+    where = (route or output_route)()
+    _REFUSALS.seen(where)
+    choice = choose_capture(where, echo, (vp_available or voice_processing_available)())
+    if choice == "refused":
+        _REFUSALS.refuse(REFUSE_ECHO_ON if echo == "on" and where != "speakers" else REFUSE_NO_AVFOUNDATION)
+        return None
+    if choice == "voice-processing":
+        try:
+            capture = VoiceProcessingCapture()
+        except Exception as e:  # noqa: BLE001 - never fall back to plain capture on the speakers
+            _REFUSALS.refuse(f"barge: echo cancellation did not start ({e}); not opening the mic")
+            return None
+    else:
+        capture = _plain_capture(backend, device)
+        choice = backend  # plain capture is parec where a Mac has it, else sounddevice
+    capture.stretch_note = f"route={where}, capture={choice}"
+    return capture
 
 
 class StretchStats:
@@ -253,14 +581,14 @@ class StretchStats:
     def add(self, db: float) -> None:
         self.dbs.append(db)
 
-    def line(self, seconds: float, fired: bool) -> str:
+    def line(self, seconds: float, fired: bool, note=None) -> str:
         if self.dbs:
             peak = f"{max(self.dbs):.1f} dBFS"
             p90 = f"{float(np.percentile(self.dbs, 90)):.1f} dBFS"
         else:
             peak = p90 = "n/a"
         return (f"stretch: {seconds:.1f} s, windows {len(self.dbs)}, max {peak}, "
-                f"p90 {p90}, fired {'yes' if fired else 'no'}")
+                f"p90 {p90}, fired {'yes' if fired else 'no'}" + (f", {note}" if note else ""))
 
 
 def is_speaking(path: Path) -> bool:
@@ -360,6 +688,15 @@ def run(poll_speaking, open_capture, vad, detector, send_barge, sleep=time.sleep
         detector.reset()
         vad.reset()
         capture = open_capture()
+        if capture is None:  # refused (macOS speakers without echo cancellation): wait this one out
+            while True:
+                speaking = poll_speaking()
+                if speaking is None:
+                    return
+                if not speaking:
+                    break
+                sleep(idle_poll_s)
+            continue
         fired = False
         count = 0
         recent = deque(maxlen=preroll_windows)
@@ -396,7 +733,8 @@ def run(poll_speaking, open_capture, vad, detector, send_barge, sleep=time.sleep
                     break
         finally:
             try:
-                logger.info("%s", stats.line(stretch_clock() - opened_at, fired))
+                logger.info("%s", stats.line(stretch_clock() - opened_at, fired,
+                                             getattr(capture, "stretch_note", None)))
             finally:
                 capture.close()
 
@@ -436,11 +774,16 @@ CANNOT_RUN = ("cannot run: voice barge-in needs a mic reader, parec (PulseAudio 
 
 
 def status_line() -> str:
-    """on, off or cannot run: <reason>. What FELIX reads at voice start."""
+    """on, off or cannot run: <reason>. What FELIX reads at voice start. On macOS, when
+    it can run, a second line: ``route: <route>, capture: <capture or refused>``."""
     state = barge_state()
     if state is None:
         return CANNOT_RUN
-    return "on" if state else "off"
+    first = "on" if state else "off"
+    if _platform() != "darwin":
+        return first
+    route, capture = mac_capture_choice(echo_mode(trigger_settings().get(ECHO_SETTING)))
+    return f"{first}\nroute: {route}, capture: {capture}"
 
 
 def main() -> int:
@@ -474,6 +817,12 @@ def main() -> int:
                          "or a device number", e)
             return 1
 
+    echo = echo_mode(settings.get(ECHO_SETTING))
+    if _platform() == "darwin":
+        logger.info("macOS: %s=%s, echo cancellation (AVFoundation) %s, route now %s",
+                    ECHO_SETTING, echo, "available" if voice_processing_available() else "missing",
+                    output_route())
+
     stop = threading.Event()
     install_stop_handlers(stop)
 
@@ -482,7 +831,7 @@ def main() -> int:
                 gate_db, need, device, backend, path)
     run(
         poll_speaking=lambda: None if stop.is_set() else is_speaking(path),
-        open_capture=lambda: open_capture(backend, device),
+        open_capture=lambda: open_capture(backend, device, echo=echo),
         vad=SileroVad(model),
         detector=BargeDetector(gate_db, need),
         send_barge=lambda: send_barge_in(path),
