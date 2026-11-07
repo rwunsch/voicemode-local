@@ -108,3 +108,12 @@ def test_idle_wake_has_a_cooldown_and_a_switch():
 def test_the_listener_no_longer_polls_a_threshold():
     src = (PATCHES / "ptt_listener_macos.py").read_text(encoding="utf-8")
     assert "poll_hold" not in src and "HOLD_THRESHOLD" not in src
+
+
+def test_wake_text_names_a_message_and_stays_short():
+    """voice-mode 8.12's converse refuses a call with no `message` (live Mac test 2026-11-07:
+    "converse needs either `message` ... or a non-empty `turns` list"). The Mac types this
+    line into Terminal, and a long line is taken for a paste and never submitted."""
+    assert 'message="Listening."' in mac.WAKE_TEXT
+    assert "skip_tts=true" in mac.WAKE_TEXT
+    assert len(mac.WAKE_TEXT) <= 60

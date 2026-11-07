@@ -59,7 +59,7 @@ Files: log `~/.voicemode/logs/ptt-listener.log`, pid `~/.voicemode/run/ptt-liste
      (`ps -o tty=`). Detached or stale servers show `??` and are skipped.
   2. Wait until Control/Option are physically released.
   3. AppleScript selects the Terminal.app tab whose `tty` matches exactly (no window-title
-     guessing), `do script` types `[push-to-talk] listen now (converse, skip_tts=true)`, then
+     guessing), `do script` types `[push-to-talk] converse message="Listening." skip_tts=true`, then
      System Events presses Return.
   4. Claude Code receives that as a user message; the agent calls `converse` with `skip_tts=true`
      and records immediately.
@@ -72,6 +72,7 @@ Files: log `~/.voicemode/logs/ptt-listener.log`, pid `~/.voicemode/run/ptt-liste
 | Hold during a reply did nothing; only a tap cut it | Kokoro on macOS plays through `streaming.py`, which `patch_hold_barges_in` did not cover | Patch extended to both streaming loops |
 | Control-Option-Escape "stopped" voice by killing the tool call | Escape reached Claude Code, which interrupts the running tool | Swallow both hotkeys; send the control-channel `stop` |
 | Wake line typed but never submitted | A 127-char line is taken as a **paste** by Claude Code, and the Return after it does not send | Keep `WAKE_TEXT` short (~50 chars) |
+| Woken agent got `converse needs either message ... or a non-empty turns list` (2026-11-07, n=1) | The old wake line `listen now (converse, skip_tts=true)` named no message; voice-mode 8.12's converse refuses a call with neither | `WAKE_TEXT` now names one: `message="Listening."` (58 chars; skip_tts keeps it silent) |
 | Same, while the key was still held | Return pressed under held Control-Option arrives as Control-Option-Return | Wait for modifier release before typing and pressing Return |
 | Wake line typed 3–5 times | Key auto-repeat re-fired the wake while held | Wake only on a fresh press |
 | `do script` text alone never submits | Its newline lands in Claude Code's input box rather than submitting | Real Return via System Events |

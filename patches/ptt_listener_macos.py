@@ -78,7 +78,10 @@ def touch_pill() -> None:
 
 # Keep this short. A 127-char line never submitted: Claude Code took the burst
 # for a paste and the Return after it did not send. ~50 chars works (2026-10-20).
-WAKE_TEXT = "[push-to-talk] listen now (converse, skip_tts=true)"
+# It must name a message: voice-mode 8.12's converse refuses a call with neither
+# `message` nor `turns` (live Mac test, 2026-11-07); with skip_tts=true the message
+# is not spoken and converse listens at once. 58 chars.
+WAKE_TEXT = '[push-to-talk] converse message="Listening." skip_tts=true'
 WAKE_COOLDOWN = 5.0  # seconds
 
 
