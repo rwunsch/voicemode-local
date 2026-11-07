@@ -377,6 +377,23 @@ def output_route(platform=None, lib=None) -> str:
     return "headphones" if source == _HEADPHONE_JACK else "speakers"
 
 
+def output_is_bluetooth(platform=None, lib=None) -> bool:
+    """Is the default output a Bluetooth device (transport 'blue' or 'blea')? Two property
+    reads; False off macOS, when CoreAudio does not answer, or on any error."""
+    if (platform or _platform()) != "darwin":
+        return False
+    lib = lib if lib is not None else _coreaudio()
+    if lib is None:
+        return False
+    try:
+        device = _property_u32(lib, _SYSTEM_OBJECT, _DEFAULT_OUTPUT, _SCOPE_GLOBAL)
+        if not device:
+            return False
+        return _property_u32(lib, device, _TRANSPORT, _SCOPE_GLOBAL) in _BLUETOOTH
+    except Exception:  # noqa: BLE001 - unreadable is "not Bluetooth"
+        return False
+
+
 _VP_AVAILABLE: dict = {}
 
 
@@ -400,13 +417,16 @@ def echo_mode(raw) -> str:
     return value if value in ("auto", "on", "off") else "auto"
 
 
-def choose_capture(route: str, echo: str, vp_available: bool) -> str:
+def choose_capture(route: str, echo: str, vp_available: bool, bluetooth: bool = False) -> str:
     """"sounddevice", "voice-processing" or "refused", for one stretch on macOS.
 
     off: never voice processing. on: always, refused without AVFoundation. auto: only
     on the speakers, and there refused without AVFoundation, because plain capture on
-    the speakers cuts the assistant off with its own voice."""
-    if echo == "off":
+    the speakers cuts the assistant off with its own voice. Bluetooth is always plain
+    capture, even for ``on``: measured on a Mac 2026-11-07 (n=2), voice processing on a
+    Bluetooth headset stops itself within 0.17 s (configuration change, engine not running,
+    no taps)."""
+    if echo == "off" or bluetooth:
         return "sounddevice"
     if echo == "on" or route == "speakers":
         return "voice-processing" if vp_available else "refused"
@@ -549,6 +569,7 @@ class VoiceProcessingCapture(_QueuedWindows):
         self._first_tap_at = None
         self._running_after_start = None
         self._config_changes = 0
+        self._warned_stopped = False
         self._observer = None
         self._center = None
         self._engine = AVFoundation.AVAudioEngine.alloc().init()
@@ -596,9 +617,12 @@ class VoiceProcessingCapture(_QueuedWindows):
 
     def _on_config_change(self, note) -> None:
         self._config_changes += 1
+        running = self._engine_running()
         logger.info("voice processing %#x: engine configuration changed (device change?), "
-                    "engine running %s, taps so far %d", id(self), _yes(self._engine_running()),
-                    self._taps)
+                    "engine running %s, taps so far %d", id(self), _yes(running), self._taps)
+        if running is False and not self._warned_stopped:
+            self._warned_stopped = True   # once per stretch: one capture is one stretch
+            logger.warning("barge: echo cancellation stopped by a device change")
 
     def _engine_running(self):
         try:
@@ -763,7 +787,8 @@ def _label(choice: str, backend) -> str:
 def mac_capture_choice(echo: str):
     """(route, capture label) as the trigger's next stretch would choose them; for status."""
     route = output_route()
-    choice = choose_capture(route, echo, voice_processing_available())
+    choice = choose_capture(route, echo, voice_processing_available(),
+                            bluetooth=echo == "on" and output_is_bluetooth())
     if choice == "voice-processing" and _vp_failed_on(route):
         return route, VP_FAILED_NOTE
     if choice == "refused":
@@ -772,7 +797,7 @@ def mac_capture_choice(echo: str):
 
 
 def open_capture(backend: str, device: str, platform=None, echo: str = "auto",
-                 route=None, vp_available=None, vp_probe: bool = False):
+                 route=None, vp_available=None, vp_probe: bool = False, bluetooth=None):
     """The mic for one stretch of speech, by the backend capture_backend() chose.
 
     On macOS the output route decides (choose_capture): plain capture, voice
@@ -784,7 +809,9 @@ def open_capture(backend: str, device: str, platform=None, echo: str = "auto",
     if where not in _VP_FAILED:
         _VP_FAILED.clear()   # route changed: voice processing gets another try
     _REFUSALS.seen(where)
-    choice = choose_capture(where, echo, (vp_available or voice_processing_available)())
+    # Only `on` needs the question: `auto` is plain on every Bluetooth route already.
+    is_bt = echo == "on" and bool((bluetooth or output_is_bluetooth)())
+    choice = choose_capture(where, echo, (vp_available or voice_processing_available)(), bluetooth=is_bt)
     if choice == "refused":
         _REFUSALS.refuse(REFUSE_ECHO_ON if echo == "on" and where != "speakers" else REFUSE_NO_AVFOUNDATION)
         return RefusedCapture(f"route={where}, capture={NO_AVFOUNDATION_NOTE}")
@@ -802,6 +829,9 @@ def open_capture(backend: str, device: str, platform=None, echo: str = "auto",
     else:
         capture = _plain_capture(backend, device)
     capture.stretch_note = f"route={where}, capture={_label(choice, backend)}"
+    if is_bt:
+        capture.stretch_note += (" (Bluetooth: VOICEMODE_VOICE_BARGE_ECHO=on not applied, "
+                                 "voice processing stops itself on a Bluetooth headset)")
     return capture
 
 

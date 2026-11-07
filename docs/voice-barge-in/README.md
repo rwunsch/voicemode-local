@@ -116,7 +116,12 @@ restarts. Every refused stretch still logs its stretch line, ending
 `capture=refused (echo cancellation failed to start)`.
 
 `VOICEMODE_VOICE_BARGE_ECHO` overrides the rule: `auto` (default) as above, `on` always uses
-voice processing (refused without AVFoundation), `off` never does. Voice processing takes
+voice processing (refused without AVFoundation) except on a Bluetooth output (transport
+`blue` or `blea`), where it stays plain capture and the stretch note says so: measured on a
+Mac 2026-11-07 (n=2), voice processing on a Bluetooth headset stops itself within 0.17 s
+(configuration change, engine running no, taps 0). `off` never uses it. On macOS, a
+voice-processing engine that reports a configuration change and is not running logs one
+warning per stretch, `barge: echo cancellation stopped by a device change`. Voice processing takes
 the system default input and ignores `VOICEMODE_VOICE_BARGE_DEVICE`.
 
 On macOS the stretch line ends with the choice after the timings, e.g.

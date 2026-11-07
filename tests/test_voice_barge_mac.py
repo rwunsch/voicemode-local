@@ -1045,3 +1045,86 @@ def test_a_threaded_capture_keeps_delivering_across_warm_drain_and_speaking(capl
     import re
     n = int(re.search(r"windows (\d+)", line).group(1))
     assert n >= 30 and "first_window none" not in line, line
+
+
+# --- Bluetooth: voice processing stops itself there (FELIX-MAC 2026-11-07, n=2) ---
+
+@pytest.mark.parametrize("transport,expected", [("blue", True), ("blea", True), ("bltn", False),
+                                                ("usb ", False), (None, False)])
+def test_output_is_bluetooth_by_transport(transport, expected):
+    lib = FakeCoreAudio(transport, "ispk" if transport == "bltn" else None, inputs=0)
+    assert vb.output_is_bluetooth(platform="darwin", lib=lib) is expected
+
+
+def test_output_is_bluetooth_is_false_off_macos_and_without_coreaudio():
+    assert vb.output_is_bluetooth(platform="linux") is False
+    assert vb.output_is_bluetooth(platform="darwin", lib=FakeCoreAudio(None, default=0)) is False
+
+
+def test_choose_capture_echo_on_stays_plain_on_bluetooth():
+    assert vb.choose_capture("headphones", "on", True, bluetooth=True) == "sounddevice"
+    assert vb.choose_capture("headphones", "on", False, bluetooth=True) == "sounddevice"
+    assert vb.choose_capture("headphones", "on", True, bluetooth=False) == "voice-processing"
+
+
+def test_echo_on_over_bluetooth_opens_plain_capture_and_says_why(monkeypatch):
+    o = Opener(monkeypatch, route="headphones", vp=True)
+    cap = vb.open_capture("sounddevice", "", platform="darwin", echo="on",
+                          route=lambda: "headphones", vp_available=lambda: True,
+                          bluetooth=lambda: True)
+    assert cap.kind == "sounddevice"
+    assert cap.stretch_note.startswith("route=headphones, capture=sounddevice")
+    assert "Bluetooth" in cap.stretch_note and "voice processing" in cap.stretch_note
+    assert o.made[-1] is cap
+
+
+def test_echo_on_over_bluetooth_does_not_need_avfoundation(monkeypatch, caplog):
+    Opener(monkeypatch, route="headphones", vp=False)
+    with caplog.at_level(logging.INFO, logger="voicemode.voice_barge"):
+        cap = vb.open_capture("sounddevice", "", platform="darwin", echo="on",
+                              route=lambda: "headphones", vp_available=lambda: False,
+                              bluetooth=lambda: True)
+    assert cap.kind == "sounddevice" and not [r for r in caplog.records if r.levelname == "WARNING"]
+
+
+def test_echo_auto_over_bluetooth_has_no_extra_note(monkeypatch):
+    Opener(monkeypatch, route="headphones", vp=True)
+    cap = vb.open_capture("sounddevice", "", platform="darwin", echo="auto",
+                          route=lambda: "headphones", vp_available=lambda: True,
+                          bluetooth=lambda: True)
+    assert cap.stretch_note == "route=headphones, capture=sounddevice"
+
+
+# --- a voice-processing engine that stops itself is a visible warning, once ----------
+
+def test_engine_stopped_by_a_configuration_change_warns_once_per_stretch(av, caplog):
+    fake = av()
+    cap = vb.VoiceProcessingCapture()
+    fake.engine.running = False   # macOS stops the engine on a device change
+    with caplog.at_level(logging.INFO, logger="voicemode.voice_barge"):
+        fake.config_change()
+        fake.config_change()
+    warns = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert warns == ["barge: echo cancellation stopped by a device change"]
+    assert cap.diagnostics().endswith("config_changes 2")
+    cap.close()
+
+
+def test_configuration_change_with_the_engine_still_running_does_not_warn(av, caplog):
+    fake = av()
+    cap = vb.VoiceProcessingCapture()
+    with caplog.at_level(logging.INFO, logger="voicemode.voice_barge"):
+        fake.config_change()
+    assert not [r for r in caplog.records if r.levelname == "WARNING"]
+    cap.close()
+
+
+def test_the_next_stretch_warns_again(av, caplog):
+    fake = av()
+    with caplog.at_level(logging.INFO, logger="voicemode.voice_barge"):
+        for _ in range(2):
+            cap = vb.VoiceProcessingCapture()
+            fake.engine.running = False
+            fake.config_change()
+            cap.close()
+    assert len([r for r in caplog.records if r.levelname == "WARNING"]) == 2
