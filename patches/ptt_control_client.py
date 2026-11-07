@@ -252,9 +252,19 @@ def wake_idle_session():
     session_wake checks it is idle, rate-limits (one per 5 s) and logs the outcome to
     ~/.voicemode/logs/session-wake.log. Returns (ok, detail); never raises."""
     try:
-        return _session_wake().wake(reason="ptt")
+        mod = _session_wake()
+        ok, detail = mod.wake(reason="ptt")
+        label = getattr(mod, "last_label", None)
+        if ok and label:
+            detail = f"woke {label}; talk after the chime"
+        return ok, detail
     except Exception as e:  # noqa: BLE001 - never break a key listener
         return False, "failed: " + _one_line(e)
+
+
+def _wake_and_log() -> None:
+    ok, detail = wake_idle_session()
+    logger.info("no voice turn running: %s", detail if ok else "could not wake: " + detail)
 
 
 def warm() -> str:
@@ -273,6 +283,7 @@ def serve_lines(stdin, stdout) -> None:
     listener died mid-hold (``ptt off``, watchdog, kill_tree): send hold_end, or the
     recording runs to max_duration."""
     holding = False
+    woke_only = False   # this hold began with no voice channel: nothing to end on release
     for line in iter(stdin.readline, ""):
         action = line.strip()
         if action:
@@ -280,6 +291,13 @@ def serve_lines(stdin, stdout) -> None:
                 holding = True
             elif action in ("hold_release", "short_press"):
                 holding = False
+            if action == "hold_release" and woke_only:
+                woke_only = False
+                answer = "no-channel"
+                stdout.write(answer + "\n")
+                stdout.flush()
+                _wake_and_log()
+                continue
             if action == "warm":
                 try:
                     answer = warm()
@@ -289,11 +307,13 @@ def serve_lines(stdin, stdout) -> None:
                 answer = action_outcome(action)
             stdout.write(answer + "\n")
             stdout.flush()
+            if action == "hold_start":
+                woke_only = answer == "no-channel"
             # A hold with no voice turn running: wake the last voice session. After the
             # answer, so the listener never waits on it; once per press (one release).
             if action == "hold_release" and answer == "no-channel":
-                wake_idle_session()
-    if holding:
+                _wake_and_log()
+    if holding and not woke_only:
         deliver(COMMANDS["hold_release"])
 
 

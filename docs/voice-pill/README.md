@@ -61,9 +61,13 @@ Files are in `%LOCALAPPDATA%\voicemode-local`: `webview2\` (two DLLs), `webview2
   last voice session the backend can find, the pill shows a ▶ button. It sends
   `{"cmd":"play"}`; the backend calls `session_wake.wake(<claude pid>, "play")`, which asks
   that Claude Code session, through its own session socket, to call converse with a short
-  greeting. The state text shows `Woke <label>` or `Can't wake <label>: <why>` (busy,
-  waiting for a permission answer, rate limited, ...). If the session's registry status has
-  not turned `busy` within 5 s it shows `No answer from <label>`. The last voice session is
+  greeting. While the wake is pending the state text shows `Waking <label>... talk after the chime`
+  (until the session's registry status turns `busy` or 5 s pass), then `Woke <label>`, or
+  `Can't wake <label>: <why>` (busy, waiting for a permission answer, rate limited, ...). If
+  the status has not turned `busy` within 5 s it shows `No answer from <label>`. Like an
+  idle push-to-talk hold, Play only wakes: talk after the listening chime, which took 6 s
+  and 11 s to arrive when measured live 2026-11-07 (n=2). (The pill shows its own Play
+  wakes only; a push-to-talk wake is not shown.) The last voice session is
   the newest live conch holder in voice-mode's events log, then the pill's own session
   records; its voice-server pid is mapped up its parents to the claude pid. Hidden when
   `VOICEMODE_SESSION_WAKE=off`. Same rules and caveats as the push-to-talk wake

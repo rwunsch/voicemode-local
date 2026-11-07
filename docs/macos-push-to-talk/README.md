@@ -18,7 +18,7 @@
 | Key | During a voice call | No call running (idle prompt) |
 |-----|---------------------|-------------------------------|
 | Control-Option-Space, **key down** | `hold_start` at once: cuts the reply (also while it is still being generated), mic open, no silence cut-off | nothing yet |
-| … released after 0.8s (**hold**) | `hold_end` after a 0.35s tail: what you said is transcribed and answered | **Wake**: last session starts recording you |
+| … released after 0.8s (**hold**) | `hold_end` after a 0.35s tail: what you said is transcribed and answered | **Wake** only: the last session is asked to listen; **talk after the listening chime** (measured live 2026-11-07, wake to listening 6 s and 11 s, n=2; words spoken during the hold are lost by design) |
 | … released within 0.8s (**tap**) | `stop` (hint switch-to-text): full stop, the recording is dropped, the agent continues in text | nothing |
 | Control-Option-Escape | `stop`: reply cut, no listening, `converse` returns `[control: stop]`, agent continues in text | nothing |
 

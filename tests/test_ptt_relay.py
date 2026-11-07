@@ -90,3 +90,17 @@ def test_relay_forward_never_raises(relay):
         def wake_idle_session(self):
             raise RuntimeError("x")
     relay.forward("hold_release", Broken("no-channel"))
+
+
+def test_relay_does_not_send_hold_end_for_a_hold_that_started_with_no_channel(relay):
+    client = FakeClient("no-channel")
+    relay.forward("hold_start", client)
+    relay.forward("hold_release", client)
+    assert client.sent == ["hold_start"] and client.woke == 1
+
+
+def test_relay_still_sends_hold_end_after_a_hold_with_a_channel(relay):
+    client = FakeClient("sent")
+    relay.forward("hold_start", client)
+    relay.forward("hold_release", client)
+    assert client.sent == ["hold_start", "hold_release"] and client.woke == 0

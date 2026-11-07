@@ -298,8 +298,10 @@ def wake_view(ctx, now=None):
             w["answered"] = sw.registry_status(w["claude_pid"]) == "busy"
         except Exception:  # noqa: BLE001
             pass
-    if w.get("answered") or age < WAKE_ANSWER_S:
+    if w.get("answered"):
         return {"text": f"Woke {w['label']}", "ok": True}
+    if age < WAKE_ANSWER_S:
+        return {"text": f"Waking {w['label']}\u2026 talk after the chime", "ok": True}
     return {"text": f"No answer from {w['label']}", "ok": False}
 
 

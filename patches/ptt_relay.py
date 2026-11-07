@@ -81,6 +81,9 @@ class _Handler(socketserver.StreamRequestHandler):
             pass
 
 
+_woke_only = False   # the current hold began with no voice channel
+
+
 def forward(action: str, client=None) -> None:
     """Hand one action to the control channel. A hold released with no voice turn
     running (``no-channel``) wakes the last voice session instead (session_wake).
@@ -88,12 +91,19 @@ def forward(action: str, client=None) -> None:
     try:
         if client is None:
             from voice_mode import ptt_control_client as client
-        outcome = client.action_outcome(action)
+        global _woke_only
+        if action == "hold_release" and _woke_only:
+            # The hold began with no voice turn: there is nothing to end, only a wake.
+            _woke_only = False
+            outcome = "no-channel"
+        else:
+            outcome = client.action_outcome(action)
+            if action == "hold_start":
+                _woke_only = outcome == "no-channel"
         if outcome == "no-channel":
             if action == "hold_release":
                 ok, detail = client.wake_idle_session()
-                logger.info("   no voice turn running: wake the last voice session -> %s",
-                            "sent" if ok else detail)
+                logger.info("   no voice turn running: %s", detail if ok else "could not wake: " + detail)
             else:
                 logger.info(
                     "   ...but voice-mode's control socket is not bound: it exists only "

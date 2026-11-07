@@ -36,6 +36,17 @@ session socket (`patches/session_wake.py`): it sends one fixed message, which th
 shows as "Another Claude session sent a message", asking the agent to call converse with
 `message="Listening."`, `skip_tts=true` and `wait_for_response=true`. A tap never wakes.
 
+**The gesture, honestly (Robert's decision 2026-11-07, "option 1"): an idle hold only
+wakes the session.** Hold the key, release, wait for the listening chime, then talk. Words
+spoken during the hold are lost by design: the session needs its own time to wake and call
+converse. Measured live 2026-11-07, wake to converse listening: 6 s and 11 s (n=2; the model
+and the tool lookup). By reading the code (not yet heard live), the chime does play with
+`skip_tts=true`: converse's listen path plays it whenever audio feedback is on (voice-mode
+8.12 `converse.py` 1951, reached from 3840; `config.py` 569); only a still-held key or a barge suppresses it. Because the hold had nothing to end
+(no voice turn was running when it began), the release sends no `hold_end`; the log says
+`woke <label>; talk after the chime`. The voice pill shows `Waking <label>... talk after the
+chime` for Play wakes only.
+
 - Native: the sender wakes after answering `hold_release` with `no-channel` (the answer
   word is unchanged, so the script needs no change). WSL relay: `ptt_relay.forward` does it.
 - Only an **idle** session is woken. Busy, waiting on a permission prompt, running a shell

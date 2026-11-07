@@ -104,6 +104,7 @@ STATUS_REASONS = {
 
 _lock = threading.Lock()
 _last_sent: Optional[float] = None
+last_label: Optional[str] = None   # the session the last successful wake went to
 
 
 def _now() -> float:
@@ -461,6 +462,8 @@ def _attempt(target_claude_pid, reason, cdir, home, base):
         except (OSError, socket.timeout) as e:
             raise Refused("send failed: " + _one_line(e)) from None
         _last_sent = _now()
+    global last_label
+    last_label = label
     return pid, label
 
 

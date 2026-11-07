@@ -404,3 +404,38 @@ def test_wake_idle_session_never_raises(client_mod, monkeypatch):
 def test_the_real_session_wake_module_loads_beside_the_client(client_mod):
     mod = client_mod._session_wake()
     assert set(mod.MESSAGES) == {"ptt", "play"}
+
+
+# --- an idle hold only wakes: nothing to end (2026-11-07, option 1) ----------
+
+def test_a_hold_started_with_no_channel_sends_no_hold_end(client_mod, monkeypatch):
+    events, out = _serve_with(client_mod, monkeypatch, "no-channel", "hold_start\nhold_release\n")
+    assert [e for e in events if e[0] == "deliver"] == [("deliver", "hold_start")]
+    assert out == "no-channel\nno-channel\n"  # the listener's protocol is unchanged
+    assert events.count(("wake",)) == 1
+
+
+def test_a_hold_started_with_a_channel_still_sends_hold_end(client_mod, monkeypatch):
+    events, _ = _serve_with(client_mod, monkeypatch, "sent", "hold_start\nhold_release\n")
+    assert [e for e in events if e[0] == "deliver"] == [("deliver", "hold_start"), ("deliver", "hold_end")]
+
+
+def test_the_next_hold_is_judged_afresh(client_mod, monkeypatch):
+    import io
+    answers = iter(["no-channel", "sent", "sent"])
+    sent = []
+    monkeypatch.setattr(client_mod, "deliver", lambda c: sent.append(c) or next(answers))
+    monkeypatch.setattr(client_mod, "wake_idle_session", lambda: (True, "x"))
+    client_mod.serve_lines(io.StringIO("hold_start\nhold_release\nhold_start\nhold_release\n"), io.StringIO())
+    assert sent == ["hold_start", "hold_start", "hold_end"]
+
+
+def test_wake_idle_session_names_the_session_and_the_chime(client_mod, monkeypatch):
+    class Fake:
+        last_label = "demo"
+
+        @staticmethod
+        def wake(target_claude_pid=None, reason="ptt"):
+            return True, "sent"
+    monkeypatch.setattr(client_mod, "_session_wake", lambda: Fake)
+    assert client_mod.wake_idle_session() == (True, "woke demo; talk after the chime")
