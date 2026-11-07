@@ -129,6 +129,9 @@ def sess(pid, label="s", started_at=1.0, voice="af_heart"):
 @pytest.mark.parametrize("status,paused,sessions,phase", [
     ({"speaking": True, "listening": True}, True, [sess(1)], "paused"),
     ({"speaking": True, "listening": True}, False, [sess(1)], "speaking"),
+    # push-to-talk key down (2026-11-07): the hold is what the user is doing right now
+    ({"holding": True, "speaking": True, "listening": True}, False, [sess(1)], "holding"),
+    ({"holding": True}, True, [sess(1)], "paused"),
     ({"listening": True}, False, [sess(1)], "listening"),
     ({}, False, [sess(1)], "working"),
     ({}, False, [], "idle"),
@@ -652,3 +655,9 @@ def test_a_failed_barge_toggle_reaches_the_log(ctx, tmp_path, capfd):
     ctx.barge_thread.join(5)
     out, err = capfd.readouterr()
     assert "no model" in err and "no model" not in out  # stdout is the protocol
+
+
+def test_a_held_key_polls_at_the_turn_rate(monkeypatch):
+    import io
+    monkeypatch.setattr(vp, "gather", lambda ctx: {"phase": "holding"})
+    assert vp._emit(None, io.StringIO()) == vp.TURN_INTERVAL_S

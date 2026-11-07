@@ -64,9 +64,18 @@ test("interruption count wording", () => {
 
 test("keys match platform", () => {
   assert.deepEqual(viewModel(snap({ platform: "windows" }), 0, 0).keys,
-    [{ keys: ["Ctrl", "Space"], text: "tap: skip, hold: talk" }]);
+    [{ keys: ["Ctrl", "Space"], text: "tap: stop, hold: talk" }]);
+  assert.deepEqual(viewModel(snap({ platform: "linux" }), 0, 0).keys,
+    [{ keys: ["Ctrl", "Space"], text: "tap: stop, hold: talk" }]);
   const mac = viewModel(snap({ platform: "mac" }), 0, 0).keys;
   assert.deepEqual(mac.map((k) => k.keys.join("-")), ["Control-Option-Space", "Control-Option-Escape"]);
+  assert.equal(mac[0].text, "tap: stop, hold: talk");
+});
+
+test("a held push-to-talk key shows Holding", () => {
+  const vm = viewModel(snap({ phase: "holding" }), 0, 0);
+  assert.equal(vm.label, "Holding\u2026");
+  assert.equal(vm.stateText, "Holding\u2026");
 });
 
 test("queue row shows position", () => {

@@ -9,7 +9,7 @@
   var LANGUAGES = ["English", "German"];
   function languageOf(voice) { return voice && (voice.indexOf("dm_") === 0 || voice.indexOf("p_de_") === 0) ? "German" : "English"; }
   var PAUSE = "\u23F8\uFE0E", RESUME = "\u25B6\uFE0E";
-  var LABELS = { speaking: "Speaking", listening: "Listening", working: "Between turns",
+  var LABELS = { speaking: "Speaking", listening: "Listening", holding: "Holding\u2026", working: "Between turns",
     idle: "Not in a voice turn", paused: "Paused", stopped: "Stopped", disconnected: "Disconnected" };
 
   function ordinal(n) {
@@ -24,10 +24,11 @@
 
   function keysFor(platform) {
     if (platform === "mac") {
-      return [{ keys: ["Control", "Option", "Space"], text: "tap: skip, hold: talk" },
+      return [{ keys: ["Control", "Option", "Space"], text: "tap: stop, hold: talk" },
         { keys: ["Control", "Option", "Escape"], text: "stop" }];
     }
-    return [{ keys: ["Ctrl", "Space"], text: "tap: skip, hold: talk" }];
+    // Same rule everywhere (2026-11-07): a tap under 0.8 s stops, back to text; a hold talks.
+    return [{ keys: ["Ctrl", "Space"], text: "tap: stop, hold: talk" }];
   }
 
   function viewModel(snapshot, lastSeenMs, nowMs) {

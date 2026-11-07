@@ -522,7 +522,7 @@ document.addEventListener('DOMContentLoaded',function(){
         System.Drawing.Icon icon;
         if (trayIcons.TryGetValue(phase, out icon)) return icon;
         var colour = phase == "speaking" ? System.Drawing.Color.FromArgb(139, 92, 246)
-            : phase == "listening" ? System.Drawing.Color.FromArgb(13, 148, 136) : System.Drawing.Color.FromArgb(148, 163, 184);
+            : phase == "listening" || phase == "holding" ? System.Drawing.Color.FromArgb(13, 148, 136) : System.Drawing.Color.FromArgb(148, 163, 184);
         using (var bmp = new System.Drawing.Bitmap(32, 32))
         using (var g = System.Drawing.Graphics.FromImage(bmp))
         using (var brush = new System.Drawing.SolidBrush(colour)) {

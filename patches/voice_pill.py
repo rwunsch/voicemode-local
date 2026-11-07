@@ -170,6 +170,10 @@ def build_snapshot(status, sessions, conch, *, paused=False, ptt=False, dismisse
     visible = bool(new) if dismissed is not None else bool(sessions or ptt)
     if paused:
         phase = "paused"
+    elif status.get("holding"):
+        # The push-to-talk key is down (patch_ptt_instant's status field): the press
+        # has cut the reply, so this outranks speaking and listening.
+        phase = "holding"
     elif status.get("speaking"):
         phase = "speaking"
     elif status.get("listening"):
@@ -354,7 +358,7 @@ def _emit(ctx, out) -> float:
     snap = gather(ctx)
     out.write(json.dumps(snap) + "\n")
     out.flush()
-    return TURN_INTERVAL_S if snap["phase"] in ("speaking", "listening") else IDLE_INTERVAL_S
+    return TURN_INTERVAL_S if snap["phase"] in ("speaking", "listening", "holding") else IDLE_INTERVAL_S
 
 
 class SelectInput:
