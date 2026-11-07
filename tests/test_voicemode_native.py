@@ -155,14 +155,10 @@ def test_allow_flag_reaches_the_watchdog(vn, tmp_path, monkeypatch):
     assert seen[0][-2:] == ["watch", "--allow-root-outside-profile"]
 
 
-def test_push_to_talk_is_refused_natively_until_task_7(vn, home, monkeypatch, capsys):
+def test_push_to_talk_starts_natively(vn, home, monkeypatch, capsys):
     monkeypatch.setattr(vn, "WINDOWS", True)
     _env_file(home, "VOICEMODE_PILL=true\nVOICEMODE_PTT_ENABLED=true\n")
-    assert vn.optional_services() == ["pill"]
-    err = capsys.readouterr().err.strip().splitlines()
-    assert len(err) == 1 and "push-to-talk" in err[0] and "8765" in err[0]
-    _env_file(home, "VOICEMODE_PILL=true\n")
-    assert vn.optional_services() == ["pill"]
+    assert vn.optional_services() == ["pill", "ptt"]
     assert capsys.readouterr().err == ""
 
 
@@ -697,6 +693,56 @@ def test_pill_command_root_defaults_to_the_runtimes_install(vn, tmp_path):
     assert vn.optional_command("pill", runtime) == vn.optional_command("pill", runtime, root)
 
 
+# -- push-to-talk, native (task 7) -------------------------------------------
+
+def test_ptt_command_runs_the_sender_from_the_runtime(vn, home, tmp_path, monkeypatch):
+    monkeypatch.setattr(vn, "WINDOWS", True)
+    root = tmp_path / "root"
+    runtime = root / "runtime" / "abc"
+    command, marker = vn.optional_command("ptt", runtime, root)
+    assert marker == str(vn.REPO / "ptt-listener-windows.ps1")
+    assert command[0] == vn.powershell() and command[command.index("-File") + 1] == marker
+
+    def value(flag):
+        return command[command.index(flag) + 1]
+
+    # The sender names the pipe itself, per send, from the environment voice-mode also gets.
+    assert value("-SenderExe") == str(vn.venv_program(runtime, "python"))
+    assert value("-SenderArgs") == "-m voice_mode.ptt_control_client --stdin"
+    assert value("-LogPath") == str(root / "run" / "ptt-listener.log")
+    text = " ".join(command)
+    assert "-RelayHost" not in text and "-Port" not in text and "wsl" not in text.lower()
+
+
+def test_the_sender_names_the_pipe_voice_mode_serves(home, tmp_path, monkeypatch):
+    """ptt_control_client resolves control.sock as voice_pill_state does (upstream's
+    VOICEMODE_CONTROL_SOCKET, else the base dir), and the transport turns it into the pipe."""
+    client = _load(REPO / "patches" / "ptt_control_client.py", "ptt_cc_pipe")
+    ct = _load(REPO / "patches" / "control_transport.py", "ct_ptt_pipe")
+    monkeypatch.delenv("VOICEMODE_CONTROL_SOCKET", raising=False)
+    monkeypatch.delenv("VOICEMODE_CONTROL_SOCKET_PATH", raising=False)
+    monkeypatch.setenv("VOICEMODE_BASE_DIR", str(tmp_path / "base"))
+    assert client.socket_path() == tmp_path / "base" / "control.sock"
+    seen = []
+    monkeypatch.setattr(client, "_control_transport", lambda: type("T", (), {
+        "connect": staticmethod(lambda path, timeout: seen.append(ct.pipe_name(path)) or (_ for _ in ()).throw(
+            FileNotFoundError(2, "no pipe")))})())
+    monkeypatch.delattr(client.socket, "AF_UNIX", raising=False)
+    assert client.action_outcome("short_press") == "no-channel"
+    assert seen == [ct.pipe_name(tmp_path / "base" / "control.sock")]
+
+
+def test_ptt_command_root_defaults_to_the_runtimes_install(vn, tmp_path):
+    root = tmp_path / "root"
+    runtime = root / "runtime" / "abc"
+    assert vn.optional_command("ptt", runtime) == vn.optional_command("ptt", runtime, root)
+
+
+def test_ptt_is_a_switch(vn):
+    assert vn.SWITCHES["ptt"] == vn.OPTIONAL_SETTINGS["ptt"] == "VOICEMODE_PTT_ENABLED"
+    assert vn.SWITCH_NOUNS["ptt"] == "listener"
+
+
 def test_pill_names_are_per_data_dir_and_ignore_case_and_trailing_slash(vn):
     mutex, stop = vn.pill_names(r"C:\Users\Me\AppData\Local\voicemode-local-native\pill")
     assert re.fullmatch(r"Local\\VoiceModePillWindow-[0-9a-f]{12}", mutex)
@@ -782,7 +828,8 @@ class Switch:
         return json.loads((self.root / "run" / "state.json").read_text())
 
 
-@pytest.mark.parametrize("kind,name", [("barge", "VOICEMODE_VOICE_BARGE"), ("pill", "VOICEMODE_PILL")])
+@pytest.mark.parametrize("kind,name", [("barge", "VOICEMODE_VOICE_BARGE"), ("pill", "VOICEMODE_PILL"),
+                                       ("ptt", "VOICEMODE_PTT_ENABLED")])
 def test_switch_on_writes_the_setting_and_starts_the_service_for_a_running_connector(
         vn, home, tmp_path, monkeypatch, capsys, kind, name):
     s = Switch(vn, home, tmp_path, monkeypatch)
@@ -817,7 +864,7 @@ def test_switch_starts_into_the_services_job_like_ensure_services(vn, home, tmp_
     assert json.loads(envs[0]["VOICEMODE_BARGE_CONTROL_COMMAND"])[-1] == "barge"
 
 
-@pytest.mark.parametrize("kind", ["barge", "pill"])
+@pytest.mark.parametrize("kind", ["barge", "pill", "ptt"])
 def test_switch_on_without_a_connector_only_writes_the_setting(vn, home, tmp_path, monkeypatch, capsys, kind):
     s = Switch(vn, home, tmp_path, monkeypatch, lease=False)
     assert vn.switch(s.root, kind, "on") == 0
@@ -850,6 +897,27 @@ def test_pill_off_sets_the_stop_event_first_then_kills_what_is_left(vn, home, tm
     monkeypatch.setattr(vn, "set_pill_stop_event", lambda root: s.world.commands.pop(pid) and True)
     vn.switch(s.root, "pill", "off")
     assert s.events == []
+
+
+def test_ptt_off_kills_the_listener(vn, home, tmp_path, monkeypatch):
+    s = Switch(vn, home, tmp_path, monkeypatch)
+    vn.switch(s.root, "ptt", "on")
+    s.events.clear()
+    assert vn.switch(s.root, "ptt", "off") == 0
+    assert "VOICEMODE_PTT_ENABLED=false" in s.env_file()
+    assert s.events == ["kill:ptt"]                          # no stop event: it holds no state
+    assert "ptt" not in s.state()
+
+
+def test_ptt_status_is_on_or_off_then_the_listener(vn, home, tmp_path, monkeypatch, capsys):
+    s = Switch(vn, home, tmp_path, monkeypatch)
+    vn.switch(s.root, "ptt", "status")
+    assert capsys.readouterr().out.splitlines() == ["off", "listener: not running"]
+    vn.switch(s.root, "ptt", "on")
+    capsys.readouterr()
+    vn.switch(s.root, "ptt", "status")
+    pid = s.state()["ptt"]["pid"]
+    assert capsys.readouterr().out.splitlines() == ["on", f"listener: running (process {pid})"]
 
 
 def test_barge_on_refuses_without_the_silero_model(vn, home, tmp_path, monkeypatch, capsys):
@@ -968,7 +1036,8 @@ def test_main_parses_the_switch_and_restarts_with_its_action(vn, home, tmp_path,
     monkeypatch.setattr(vn, "restart_with_runtime_python", lambda root, args: seen.append(args) or 0)
     assert vn.main(["barge", "on"]) == 0
     assert vn.main(["pill", "status"]) == 0
-    assert seen == [["barge", "on"], ["pill", "status"]]
+    assert vn.main(["ptt", "off"]) == 0
+    assert seen == [["barge", "on"], ["pill", "status"], ["ptt", "off"]]
     with pytest.raises(SystemExit):
         vn.main(["barge", "maybe"])
     with pytest.raises(SystemExit):

@@ -190,3 +190,114 @@ def _wait(pred, timeout=2.0):
             return
         time.sleep(0.01)
     raise AssertionError("timed out waiting for the server to receive a command")
+
+
+# --- outcomes and the stdin sender (native Windows listener, task 7) ----------
+
+def test_action_outcome_says_what_happened(client_mod, server, monkeypatch, tmp_path):
+    monkeypatch.delenv("VOICEMODE_CONTROL_SOCKET", raising=False)
+    monkeypatch.setenv("VOICEMODE_CONTROL_SOCKET_PATH", str(tmp_path / "nope.sock"))
+    assert client_mod.action_outcome("short_press") == "no-channel"
+    assert client_mod.action_outcome("press") == "none"
+    assert client_mod.action_outcome("bogus") == "failed: unknown action 'bogus'"  # visible, not silent
+    srv = server()
+    assert [client_mod.action_outcome(a) for a in ("short_press", "hold_start", "press", "hold_release")] == [
+        "sent", "sent", "none", "sent"]
+    _wait(lambda: len(srv.received) >= 3)
+    assert srv.commands() == ["skip_forward", "hold_start", "hold_end"]
+
+
+def test_action_outcome_reports_a_refusal_on_one_line(client_mod, monkeypatch):
+    def refuse(path, timeout):
+        raise PermissionError(5, "control pipe owner S-1-5-18 is not\nthe current user", "pipe")
+
+    monkeypatch.setattr(client_mod, "_connect", refuse)
+    outcome = client_mod.action_outcome("hold_start")
+    assert outcome.startswith("refused: ") and "S-1-5-18" in outcome and "\n" not in outcome
+
+
+@pytest.mark.parametrize("error,word", [(TimeoutError("timed out"), "busy"), (ConnectionRefusedError(), "no-channel"),
+                                        (OSError(22, "bad"), "failed"), (RuntimeError("odd"), "failed")])
+def test_action_outcome_never_raises(client_mod, monkeypatch, error, word):
+    def fail(path, timeout):
+        raise error
+
+    monkeypatch.setattr(client_mod, "_connect", fail)
+    assert client_mod.action_outcome("short_press").split(":")[0] == word
+
+
+def test_on_action_uses_the_same_table(client_mod):
+    assert client_mod.COMMANDS == {"short_press": "skip_forward", "hold_start": "hold_start",
+                                   "hold_release": "hold_end"}
+
+
+def test_stdin_mode_answers_one_line_per_action(server, tmp_path):
+    import subprocess
+    import sys
+    srv = server()
+    env = {"VOICEMODE_CONTROL_SOCKET": str(srv.path), "PATH": "/usr/bin:/bin", "HOME": str(tmp_path)}
+    proc = subprocess.Popen([sys.executable, str(CLIENT_PY), "--stdin"], stdin=subprocess.PIPE,
+                            stdout=subprocess.PIPE, text=True, env=env)
+    try:
+        answers = []
+        for action in ("short_press", "", "press", "hold_start\r", "hold_release"):
+            proc.stdin.write(action + "\n")
+            proc.stdin.flush()
+            if action.strip():
+                answers.append(proc.stdout.readline().strip())  # one answer per action, as it happens
+        proc.stdin.close()
+        assert proc.wait(10) == 0
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+    assert answers == ["sent", "none", "sent", "sent"]
+    _wait(lambda: len(srv.received) >= 3)
+    assert srv.commands() == ["skip_forward", "hold_start", "hold_end"]
+
+
+def test_stdin_mode_ignores_a_byte_order_mark(server, tmp_path):
+    """.NET Framework's redirected stdin starts with a UTF-8 BOM (seen on Windows 2026-11-07:
+    the first action of every run was lost). The first action must still be sent."""
+    import subprocess
+    import sys
+    srv = server()
+    env = {"VOICEMODE_CONTROL_SOCKET": str(srv.path), "PATH": "/usr/bin:/bin", "HOME": str(tmp_path),
+           "PYTHONIOENCODING": "cp1252"}  # Windows' default when PYTHONUTF8 is unset
+    done = subprocess.run([sys.executable, str(CLIENT_PY), "--stdin"], input=b"\xef\xbb\xbfshort_press\r\nhold_start\r\n",
+                          capture_output=True, env=env, timeout=10)
+    assert done.stdout.decode().split() == ["sent", "sent"], done.stdout + done.stderr
+    _wait(lambda: len(srv.received) >= 3)
+    assert srv.commands() == ["skip_forward", "hold_start", "hold_end"]  # EOF closes the open hold
+
+
+def test_eof_during_a_hold_sends_hold_end(client_mod, monkeypatch):
+    """The listener killed mid-hold (ptt off, watchdog, kill_tree) must not leave the
+    recording running to max_duration: EOF after hold_start sends hold_end."""
+    import io
+    sent = []
+    monkeypatch.setattr(client_mod, "deliver", lambda command: sent.append(command) or "sent")
+    out = io.StringIO()
+    client_mod.serve_lines(io.StringIO("hold_start\n"), out)
+    assert sent == ["hold_start", "hold_end"]
+
+
+def test_eof_after_a_released_hold_sends_nothing_more(client_mod, monkeypatch):
+    import io
+    sent = []
+    monkeypatch.setattr(client_mod, "deliver", lambda command: sent.append(command) or "sent")
+    client_mod.serve_lines(io.StringIO("hold_start\nhold_release\n"), io.StringIO())
+    assert sent == ["hold_start", "hold_end"]
+
+
+def test_stdin_mode_survives_invalid_utf8(server, tmp_path):
+    import subprocess
+    import sys
+    srv = server()
+    env = {"VOICEMODE_CONTROL_SOCKET": str(srv.path), "PATH": "/usr/bin:/bin", "HOME": str(tmp_path)}
+    done = subprocess.run([sys.executable, str(CLIENT_PY), "--stdin"],
+                          input=b"\xff\xfe junk\nshort_press\n", capture_output=True, env=env, timeout=10)
+    lines = done.stdout.decode().splitlines()
+    assert done.returncode == 0, done.stderr
+    assert lines[0].startswith("failed:") and lines[1] == "sent", done.stdout + done.stderr
+    _wait(lambda: len(srv.received) >= 1)
+    assert srv.commands() == ["skip_forward"]

@@ -9,9 +9,9 @@
 
 | Field        | Value |
 |--------------|-------|
-| Status       | In progress (tasks 4, 6 and 8 of the native Windows plan done) |
+| Status       | In progress (tasks 4, 6, 7 and 8 of the native Windows plan done) |
 | Created      | 2026-11-05 |
-| Last Updated | 2026-11-06 |
+| Last Updated | 2026-11-07 |
 | Project      | voicemode-local, branch feature/windows-native |
 
 ## Why
@@ -52,9 +52,8 @@ where it came from.
 - **Launcher** (`launch`, the MCP command). It writes the lease, starts the watchdog, then the
   TTS and STT services, then the pill (`VOICEMODE_PILL=true`) and the voice barge-in trigger
   (`VOICEMODE_VOICE_BARGE=true`; `python -m voice_mode.voice_barge <silero>`, hearing the mic through
-  sounddevice). Each is one per install, under the same lease and watchdog. Push-to-talk is refused natively, with
-  one line of explanation on stderr, until task 7: `ptt-listener-windows.ps1` still sends to
-  the WSL relay on 127.0.0.1:8765, so it would drive the WSL install. It waits until TTS and STT answer and checks that the process
+  sounddevice), and the push-to-talk listener (`VOICEMODE_PTT_ENABLED=true`; native mode, see
+  below). Each is one per install, under the same lease and watchdog. It waits until TTS and STT answer and checks that the process
   answering is the one it started. Then it runs voice-mode with stdin, stdout and stderr passed
   by name (FELIX's `connector_options`). Settings come from the environment first, then
   `voicemode.env`, through `patches/voice_pill_state.setting`.
@@ -82,13 +81,12 @@ where it came from.
   PowerShell's `-File` binds a value that starts with `-` correctly (checked 2026-11-06,
   n=3 strings, one with quotes and a non-ASCII letter). Details in `docs/voice-pill/README.md`,
   section "Windows native".
-- **Tests.** `tests/test_voicemode_native.py` has the launcher's and the switch's Linux tests, `tests/test_install_ps1.py` install.ps1's, and `tests/test_conftest_release_check.py` 3 more. `tests/test_voicemode_native_windows.py`
+- **Tests.** `tests/test_voicemode_native.py` has the launcher's and the switch's Linux tests (push-to-talk included), `tests/test_install_ps1.py` install.ps1's, and `tests/test_conftest_release_check.py` 3 more. `tests/test_voicemode_native_windows.py`
   has 8 Windows tests (4 added for the switch and install.ps1), run by `tests/run_windows_transport_tests.sh`. `tests/conftest.py`
   turns a skip caused by a missing `VM812_SRC` into a failure under `VOICEMODE_RELEASE_CHECK=1`,
   and prints a loud warning otherwise.
 
-Not done here: the native mode of `ptt-listener-windows.ps1` (task 7; it still sends to the
-WSL relay). The launcher starts the pill only when enabled, and push-to-talk not at all yet.
+The launcher starts the pill and push-to-talk only when enabled.
 The pill's native tests are `tests/test_pill_windows_native.py` (Linux: static checks, and
 the name derivation compared with PowerShell's through `powershell.exe`) and
 `tests/test_pill_windows_native_windows.py` (Windows, 9 tests). MCP registration and `install.ps1` belong to
@@ -138,23 +136,24 @@ test checks that.
 ```powershell
 & <python> <repo>\scripts\windows\voicemode_native.py barge on|off|status
 & <python> <repo>\scripts\windows\voicemode_native.py pill on|off|status
+& <python> <repo>\scripts\windows\voicemode_native.py ptt on|off|status
 ```
 
-`on` and `off` write `VOICEMODE_VOICE_BARGE` or `VOICEMODE_PILL` to
+`on` and `off` write `VOICEMODE_VOICE_BARGE`, `VOICEMODE_PILL` or `VOICEMODE_PTT_ENABLED` to
 `%USERPROFILE%\.voicemode\voicemode.env`. Other lines, comments, a BOM and the line endings
 stay; the file is replaced atomically and created if missing. While a voice connector runs,
-`on` starts the trigger or the pill window into the install's services Job Object, one per
+`on` starts the trigger, the pill window or the push-to-talk listener into the install's services Job Object, one per
 install, recorded in `run\state.json` under the service lock, as `ensure_services` does.
 `off` closes the pill through its stop event, then kills what is left after 5 s; the trigger
-is killed. Without a running connector, the setting takes effect with the next one.
+and the listener (with its sender) are killed. Without a running connector, the setting takes effect with the next one.
 `barge on` refuses, and exits 1, when the Silero model is missing from the runtime. Like
 `voicemode-switch barge on`, it adds `voice_barge_tool` to a `VOICEMODE_TOOLS_ENABLED` list
 that already exists, and never creates one.
 
 `status` prints one line, then whether the process runs. For barge the first line is exactly
 what `python -m voice_mode.voice_barge status` prints: `on`, `off` or `cannot run: <reason>`.
-For the pill it is `on` or `off`. The second line is `trigger: running (process N)`,
-`window: not running` and so on. Both read voicemode.env first, as the switch writes it.
+For the pill and push-to-talk it is `on` or `off`. The second line is `trigger: running (process N)`,
+`window: not running`, `listener: running (process N)` and so on. Both read voicemode.env first, as the switch writes it.
 
 The environment wins over voicemode.env when the launcher decides what to start. If the
 environment holds a different value, the switch says so. Under a connector only what the
@@ -223,6 +222,37 @@ writers of that file (voicemode-switch, upstream's `update_config`) do not take 
 process that cannot be put in its Job Object is killed before its first instruction and the
 start fails with a next step, instead of running unsupervised. A setting counts as on when it
 says `true` in any case, with or without quotes, as `barge_state` reads it.
+
+## Push-to-talk, native (task 7)
+
+`optional_command("ptt")` starts `ptt-listener-windows.ps1 -SenderExe <runtime python>
+-SenderArgs "-m voice_mode.ptt_control_client --stdin" -LogPath <root>\run\ptt-listener.log`.
+The script reads Ctrl+Space exactly as in WSL relay mode (tap, or hold past 400 ms, only
+while a terminal process has focus) and hands each action word to the sender, a child
+process: one line in, one outcome line back (`sent`, `none`, `no-channel`, `busy`,
+`refused: ...`, `failed: ...`). The sender maps the action with `ptt_control_client`'s own
+table (`short_press` to `skip_forward`, `hold_start`, `hold_release` to `hold_end`, `press` to
+nothing), names the pipe with `control_transport.pipe_name()` of the path the resolver gives
+(`VOICEMODE_CONTROL_SOCKET`, else the base dir's `control.sock`) on every send, never
+cached, checks the pipe's owner and the serving process (`_verify_server`), and writes the
+JSON line. It gets the launcher's environment, the one voice-mode also gets, so both name
+the same pipe. The press probe is dropped natively: the pipe exists only during a voice
+turn. No pipe is logged once (`no control pipe: no voice turn is running ...`), then only
+when the outcome changes; nothing pops up. Relay mode (no `-SenderExe`) is unchanged;
+`-SenderExe` with `-Port` or `-RelayHost` exits 2. Details and the morning check:
+`docs/windows-push-to-talk/README.md`.
+
+**Why a sender, and not `NamedPipeClientStream` in the script (spec section 4).** The first
+version did that: a C# pipe client inside the script, with `OpenProcessToken`,
+`GetTokenInformation`, `GetSecurityInfo` and `GetNamedPipeServerProcessId` for the owner and
+server checks, next to the `GetAsyncKeyState` polling. On 2026-11-07 Windows Defender
+blocked it as "malicious content" when run from the WSL checkout, and deleted a copy in
+`%TEMP%` (n=1 quarantine; the block was seen on every run, n=5). The original script and
+the C# part alone were not flagged (one scan each, by running them with an unknown parameter,
+which parses but runs nothing). On a native checkout, Defender would remove the listener
+itself. The sender keeps one implementation of the mapping and the trust check, already
+tested against real pipes; the script with the sender has run under powershell.exe with no
+block since (counts in `docs/windows-push-to-talk/README.md`).
 
 ## What is installed, measured
 

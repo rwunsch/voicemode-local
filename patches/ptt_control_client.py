@@ -33,8 +33,21 @@ Everything is best-effort: a control channel that is disabled, not yet bound,
 or mid-restart must degrade to "PTT does nothing", never to an exception in a
 key-listener thread.
 
+Sender for the native Windows listener
+======================================
+``python -m voice_mode.ptt_control_client --stdin`` reads one action name per
+line and answers each with one line: ``sent``, ``none`` (nothing to send),
+``no-channel`` (no voice turn is serving the channel), ``busy``, ``refused: ...``
+(the pipe's owner or server is not this user; see control_transport) or
+``failed: ...`` (also for an unknown action word). ptt-listener-windows.ps1 starts it in native mode: the
+PowerShell side only reads the keys, and the mapping, the pipe name and the
+owner check stay here, in one place. (A PowerShell pipe client that read the
+token next to the key polling was quarantined by Windows Defender as malicious,
+2026-11-07; see docs/windows-native/README.md.)
+
 Installed into voice_mode/ptt_control_client.py by patches/apply.sh.
 """
+import argparse
 import importlib.util
 import json
 import logging
@@ -148,6 +161,28 @@ def _send_line(payload: dict, read_reply: bool = False) -> Optional[str]:
         return None
 
 
+def deliver(command: str) -> str:
+    """Send one command; say what happened (see the module docstring). Never raises."""
+    path = socket_path()
+    try:
+        with _connect(path, CONNECT_TIMEOUT) as s:
+            s.sendall((json.dumps({"command": command}) + "\n").encode("utf-8"))
+        return "sent"
+    except (FileNotFoundError, ConnectionRefusedError):
+        return "no-channel"
+    except PermissionError as e:
+        return "refused: " + _one_line(e)
+    except (socket.timeout, TimeoutError):
+        return "busy"
+    except Exception as e:  # noqa: BLE001 - never break a key listener
+        return "failed: " + _one_line(e)
+
+
+def _one_line(error: BaseException) -> str:
+    text = error.strerror if isinstance(error, OSError) and error.strerror else str(error)
+    return " ".join(str(text or type(error).__name__).split())
+
+
 def send(command: str) -> bool:
     """Fire one control command. True if it went out (not that it was acted on)."""
     if not command:
@@ -181,12 +216,57 @@ def on_action(action: str) -> None:
     ``hold_release`` -> ``hold_end``
     ``press``        -> nothing (fires before short-vs-hold is known)
     """
-    if action == "short_press":
-        send("skip_forward")
-    elif action == "hold_start":
-        send("hold_start")
-    elif action == "hold_release":
-        send("hold_end")
+    command = COMMANDS.get(action)
+    if command:
+        send(command)
+
+
+def action_outcome(action: str) -> str:
+    """on_action's mapping, answering what happened: ``none`` for ``press``, which sends
+    nothing; an unknown word is a visible failure, not a silent ``none``."""
+    command = COMMANDS.get(action)
+    if command:
+        return deliver(command)
+    return "none" if action == "press" else f"failed: unknown action {action!r}"
+
+
+def serve_lines(stdin, stdout) -> None:
+    """One answer line per non-empty action line, flushed at once, until EOF.
+
+    EOF while a hold is open means the listener died mid-hold (``ptt off``, watchdog,
+    kill_tree): send hold_end, or the recording runs to max_duration."""
+    holding = False
+    for line in iter(stdin.readline, ""):
+        action = line.strip()
+        if action:
+            if action == "hold_start":
+                holding = True
+            elif action in ("hold_release", "short_press"):
+                holding = False
+            stdout.write(action_outcome(action) + "\n")
+            stdout.flush()
+    if holding:
+        deliver(COMMANDS["hold_release"])
+
+
+def main(argv=None) -> int:
+    parser = argparse.ArgumentParser(description="Send push-to-talk actions to voice-mode's control channel.")
+    parser.add_argument("--stdin", action="store_true", required=True,
+                        help="read one action per line, answer one outcome per line")
+    parser.parse_args(argv)
+    # .NET Framework's redirected stdin begins with a UTF-8 BOM, which made the first action
+    # of every run unknown (Windows, 2026-11-07); utf-8-sig drops it. The listener reads
+    # stdout as UTF-8.
+    for stream, encoding in ((sys.stdin, "utf-8-sig"), (sys.stdout, "utf-8")):
+        if hasattr(stream, "reconfigure"):
+            # errors="replace": stray bytes become an unknown action ("failed: ..."), not a crash.
+            stream.reconfigure(encoding=encoding, errors="replace")
+    serve_lines(sys.stdin, sys.stdout)
+    return 0
+
+
+# ptt_core action -> control command; press (and anything else) sends nothing.
+COMMANDS = {"short_press": "skip_forward", "hold_start": "hold_start", "hold_release": "hold_end"}
 
 
 def available() -> bool:
@@ -196,3 +276,7 @@ def available() -> bool:
             return True
     except Exception:  # noqa: BLE001
         return False
+
+
+if __name__ == "__main__":
+    sys.exit(main())

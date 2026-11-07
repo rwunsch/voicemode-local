@@ -244,9 +244,9 @@ INITIALIZE = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize", "par
     "clientInfo": {"name": "vml-native-test", "version": "0"}}}) + "\n"
 
 
-def _start_launch(install, stderr=subprocess.DEVNULL):
+def _start_launch(install, stderr=subprocess.DEVNULL, env=None):
     """`launch` under this Python, which lacks psutil: it restarts under the runtime's Python."""
-    proc = subprocess.Popen([sys.executable, str(SCRIPT), "launch"], env=install["env"],
+    proc = subprocess.Popen([sys.executable, str(SCRIPT), "launch"], env=env or install["env"],
                             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=stderr,
                             text=True, encoding="utf-8")
     proc.stdin.write(INITIALIZE)
@@ -476,6 +476,122 @@ def test_pill_switch_closes_the_window_through_its_stop_event(install):
             _wait(lambda: not [c for c in _ours(install["base"]).values() if "voice_pill" in c or "pill-windows" in c],
                   20, "the pill's processes to end")
             print(f"[pill] cycle {cycle + 1}: window {pid} and its backend started, then closed by its stop event")
+
+
+# -- push-to-talk, native (task 7) ------------------------------------------------
+# The listener only polls two key states; nothing here presses or synthesises a key.
+
+def _transport():
+    import importlib.util as iu
+    spec = iu.spec_from_file_location("vml_ct_native_test", REPO / "patches" / "control_transport.py")
+    module = iu.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _control_sock(install):
+    """control.sock as voice-mode resolves it for the test's profile (no base dir set)."""
+    return Path(install["home"]) / ".voicemode" / "control.sock"
+
+
+def _command_line(pid):
+    out = subprocess.run(["powershell.exe", "-NoProfile", "-Command",
+                          f"(Get-CimInstance Win32_Process -Filter 'ProcessId={pid}').CommandLine"],
+                         capture_output=True, text=True, timeout=60)
+    return out.stdout.strip()
+
+
+def _listener_ready(install, count):
+    log = install["root"] / "run" / "ptt-listener.log"
+    _wait(lambda: log.exists() and log.read_text(encoding="utf-8-sig", errors="replace")
+          .count("native: sending through " + str(install["python"])) == count, 60, "the listener's start line")
+
+
+def test_ptt_switch_starts_and_stops_the_listener_in_the_services_job(install):
+    log = install["root"] / "run" / "ptt-listener.log"
+    if log.exists():
+        log.unlink()
+    with _serving(install):
+        for cycle in range(2):
+            done = _switch(install, "ptt", "on")
+            assert done.returncode == 0 and "started (process" in done.stdout, done.stdout + done.stderr
+            pid = _state(install)["ptt"]["pid"]
+            assert _in_services_job(install["root"], pid)
+            _listener_ready(install, cycle + 1)
+            assert _alive(pid)
+            line = _command_line(pid)
+            assert str(install["python"]) in line and "voice_mode.ptt_control_client --stdin" in line, line
+            assert "-RelayHost" not in line, line
+            # Its sender, the runtime's Python, is a child in the same job.
+            children = [p for p, c in _ours(install["base"]).items() if "ptt_control_client" in c and p != pid]
+            assert children and all(_in_services_job(install["root"], c) for c in children), children
+            assert _switch(install, "ptt", "status").stdout.splitlines() == ["on", f"listener: running (process {pid})"]
+            done = _switch(install, "ptt", "off")
+            assert done.returncode == 0 and f"Stopped the listener (process {pid})" in done.stdout
+            assert not _alive(pid) and "ptt" not in _state(install)
+            assert _switch(install, "ptt", "status").stdout.splitlines() == ["off", "listener: not running"]
+            print(f"[ptt] cycle {cycle + 1}: listener {pid} started in the services job, then stopped")
+    env_file = install["home"] / ".voicemode" / "voicemode.env"
+    assert "VOICEMODE_PTT_ENABLED=false" in env_file.read_text(encoding="utf-8")
+
+
+def test_ptt_runtime_sender_reaches_the_pipe_voice_mode_serves(install):
+    """The installed voice_mode.ptt_control_client, run as the launcher runs it, names the
+    same pipe as the patched server for this profile and delivers the mapped command. The
+    server is the transport's own, on that real pipe name; the listener is called through
+    -SendAction, so no key is involved."""
+    ct = _transport()
+    server = ct.create_server(_control_sock(install))
+    server.settimeout(10)
+    got = []
+
+    def accept():
+        try:
+            conn, _ = server.accept()
+        except OSError:
+            return
+        with conn:
+            conn.settimeout(5)
+            got.append(conn.recv(4096))
+
+    thread = threading.Thread(target=accept, daemon=True)
+    thread.start()
+    log = install["base"] / "ptt-send.log"
+    try:
+        done = subprocess.run(["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+                               str(REPO / "ptt-listener-windows.ps1"), "-SenderExe", str(install["python"]),
+                               "-LogPath", str(log), "-SendAction", "short_press"],
+                              env=install["env"], capture_output=True, text=True, timeout=120)
+        thread.join(15)
+    finally:
+        server.close()
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert got == [b'{"command": "skip_forward"}\n'], (got, log.read_text(encoding="utf-8-sig"))
+
+
+def test_ptt_launch_starts_the_listener_and_it_ends_with_the_launcher(install):
+    log = install["root"] / "run" / "ptt-listener.log"
+    if log.exists():
+        log.unlink()
+    env = dict(install["env"], VOICEMODE_PTT_ENABLED="true")
+    proc = _start_launch(install, env=env)
+    try:
+        pid = _state(install)["ptt"]["pid"]
+        assert _in_services_job(install["root"], pid)
+        _listener_ready(install, 1)
+        assert _alive(pid)
+        # voice-mode got the control channel, without which the pipe never exists.
+        records = [json.loads(f.read_text(encoding="utf-8")) for f in (install["root"] / "run" / "clients").iterdir()]
+        assert any(r.get("control_channel") is True for r in records), records
+        print(f"[ptt] launch started listener {pid} in the services job; control channel on")
+        proc.stdin.close()
+        assert proc.wait(60) == 0
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+    left = _wait_none_left(install["base"], 30)
+    assert not left, left
+    assert not _alive(pid)
 
 
 def _call(proc, request_id, name, arguments):
