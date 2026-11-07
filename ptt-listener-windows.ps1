@@ -3,16 +3,25 @@
     Windows push-to-talk listener for VoiceMode Local: WSL2 relay or native.
 
 .DESCRIPTION
-    Watches for Ctrl+Space. Two modes, chosen by -SenderExe:
+    Watches for Ctrl+Space. The rule is the same on every platform (Robert,
+    2026-11-07): key down sends hold_start at once -- the reply is cut and the
+    mic opens; key up after $TapMaxMs (800 ms) sends hold_release -- the
+    recording is transcribed and answered; key up sooner sends short_press, a
+    tap, which the control client turns into a full stop (back to text mode,
+    the partial recording dropped).
 
-    Relay mode (no -SenderExe; WSL2, unchanged): forwards press / hold /
-    release to the WSL-side relay (patches/ptt_relay.py), which hands them to
-    voice-mode's control socket.
+    Two modes, chosen by -SenderExe:
+
+    Relay mode (no -SenderExe; WSL2): forwards each action to the WSL-side
+    relay (patches/ptt_relay.py), which hands them to voice-mode's control
+    socket.
 
     Native mode (-SenderExe; voice-mode runs on Windows, no WSL): hands each
     action to a sender process, `python -m voice_mode.ptt_control_client
-    --stdin`, one line in and one outcome line back. The sender maps it
-    (a tap is skip_forward, a hold is hold_start then hold_end), names the
+    --stdin`, one line in and one outcome line back. The sender is started
+    and warmed (a `warm` line loads its modules) when this script starts, so
+    the first press is as fast as later ones. It maps each action (hold_start,
+    hold_end, a tap is stop), names the
     control pipe from the same settings voice-mode reads, checks the pipe's
     owner and server before writing (patches/control_transport.py), and writes
     the control channel's JSON line. This script never opens the pipe itself:
@@ -39,8 +48,8 @@
     bound to 0.0.0.0 inside WSL and reached through localhostForwarding.
 
 .PARAMETER HoldThresholdMs
-    Press shorter than this is a short press; longer becomes a hold.
-    Default 400ms. (ptt_core uses 1000ms; 400 feels better with a real key.)
+    No longer used (the hold starts on key-down since 2026-11-07); still
+    accepted so an old shortcut that passes it keeps starting.
 
 .PARAMETER SenderExe
     Native mode: the Python that runs the sender (the native runtime's).
@@ -60,9 +69,14 @@
     hold_release, press; comma-separated or repeated) through the same send
     function the keys use, log each, then exit 0. Reads no keys.
 
+.PARAMETER ReplayKeys
+    Diagnosis and tests: key events as "<ms>:down" / "<ms>:up", comma-
+    separated (e.g. "0:down,500:up"), run through the same rule the key loop
+    uses and sent; each is logged as "replay <action> sent=...". Reads no keys.
+
 .EXAMPLE
     .\ptt-listener-windows.ps1
-    .\ptt-listener-windows.ps1 -HoldThresholdMs 300 -RelayHost 172.24.32.135
+    .\ptt-listener-windows.ps1 -RelayHost 172.24.32.135
     .\ptt-listener-windows.ps1 -SenderExe <runtime>\.venv\Scripts\python.exe -SendAction short_press
 
 .NOTES
@@ -72,12 +86,18 @@
 param(
     [int]$Port = 8765,
     [string]$RelayHost = "127.0.0.1",
-    [int]$HoldThresholdMs = 400,
+    [int]$HoldThresholdMs = 0,
     [string]$SenderExe = "",
     [string]$SenderArgs = "-m voice_mode.ptt_control_client --stdin",
     [string]$LogPath = "",
-    [string[]]$SendAction = @()
+    [string[]]$SendAction = @(),
+    [string]$ReplayKeys = ""
 )
+
+# A release sooner than this is a tap: a full stop, back to text mode. Later is a
+# hold: the recording is transcribed. Robert's number (2026-11-07); a deliberate
+# tap measured 0.66 s. The same value as patches/ptt_core.py TAP_MAX_S.
+[int]$TapMaxMs = 800
 
 $ErrorActionPreference = "Stop"
 
@@ -250,6 +270,35 @@ function Send-Action {
     return Send-RelayAction $Action
 }
 
+# The release rule, one place: the key loop and -ReplayKeys both use it.
+function Get-ReleaseAction {
+    param([double]$HeldMs)
+    if ($HeldMs -ge $TapMaxMs) { return "hold_release" }
+    return "short_press"
+}
+
+if ($ReplayKeys) {
+    try {
+        $downAt = $null
+        foreach ($item in ($ReplayKeys -split ",")) {
+            $parts = $item.Trim() -split ":"
+            $ms = [double]$parts[0]
+            if ($parts[1] -eq "down" -and $null -eq $downAt) {
+                $downAt = $ms
+                $action = "hold_start"
+            } elseif ($parts[1] -eq "up" -and $null -ne $downAt) {
+                $action = Get-ReleaseAction ($ms - $downAt)
+                $downAt = $null
+            } else { continue }
+            $ok = Send-Action $action
+            Log ("replay {0} sent={1}" -f $action, $ok)
+        }
+    } finally {
+        Stop-Sender
+    }
+    exit 0
+}
+
 if ($SendAction.Count -gt 0) {
     try {
         foreach ($item in $SendAction) {
@@ -273,6 +322,11 @@ if ($Native) {
         Log ("FATAL: cannot start the sender " + $SenderExe + " -- " + $_.Exception.Message) "Red"
         exit 1
     }
+    # Warm it now: Python's start-up and the module loads would otherwise land on the
+    # first press (0.97 s measured, against ~0.05 s for later ones, 2026-11-07).
+    $warmStart = Get-Date
+    $warm = Invoke-Sender "warm"
+    Log ("sender {0} in {1:N0} ms" -f $warm, ((Get-Date) - $warmStart).TotalMilliseconds) "DarkGray"
 }
 
 Write-Host ""
@@ -283,7 +337,8 @@ Write-Host "  sender       : $SenderExe $SenderArgs"
 Write-Host "  relay        : $RelayHost`:$Port"
 }
 Write-Host "  hotkey       : Ctrl+Space"
-Write-Host "  hold after   : ${HoldThresholdMs}ms"
+Write-Host "  tap (<${TapMaxMs}ms) : stop, back to text"
+Write-Host "  hold         : talk (the mic opens on key-down)"
 Write-Host "  active while : a terminal process has focus"
 Write-Host "  Ctrl+C to stop." -ForegroundColor DarkGray
 Write-Host ""
@@ -303,7 +358,6 @@ if (Send-Action "press") {
 
 $down        = $false
 $pressedAt   = $null
-$holdFired   = $false
 $lastSeen    = $false
 
 try {
@@ -319,28 +373,23 @@ try {
             }
             $down      = $true
             $pressedAt = Get-Date
-            $holdFired = $false
-        }
-        elseif ($isDown -and $down -and -not $holdFired) {
-            if (((Get-Date) - $pressedAt).TotalMilliseconds -ge $HoldThresholdMs) {
-                $holdFired = $true
-                $ok = Send-Action "hold_start"
-                Log ("hold_start  (mic open)  sent=" + $ok) "Green"
-            }
+            $ok = Send-Action "hold_start"
+            Log ("hold_start  (mic open)  sent=" + $ok) "Green"
         }
         elseif (-not $isDown -and $down) {
             $down = $false
-            if ($holdFired) {
-                $ok = Send-Action "hold_release"
-                Log ("hold_end    (sending)  sent=" + $ok) "Green"
+            $heldMs = ((Get-Date) - $pressedAt).TotalMilliseconds
+            $action = Get-ReleaseAction $heldMs
+            $ok = Send-Action $action
+            if ($action -eq "hold_release") {
+                Log ("hold_end    (sending, {0:N0} ms)  sent={1}" -f $heldMs, $ok) "Green"
             } else {
-                $ok = Send-Action "short_press"
-                Log ("short_press  sent=" + $ok) "DarkCyan"
+                Log ("tap -> stop ({0:N0} ms)  sent={1}" -f $heldMs, $ok) "DarkCyan"
             }
         }
     }
 } finally {
-    if ($down -and $holdFired) { [void](Send-Action "hold_release") }
+    if ($down) { [void](Send-Action "hold_release") }
     if ($Native) { Stop-Sender }
     Write-Host "`n  listener stopped." -ForegroundColor DarkGray
 }

@@ -30,7 +30,8 @@ def test_script_is_ascii():
 def test_relay_mode_keeps_its_defaults_and_wire_format():
     assert re.search(r"\[int\]\$Port = 8765\b", TEXT)
     assert re.search(r'\[string\]\$RelayHost = "127\.0\.0\.1"', TEXT)
-    assert re.search(r"\[int\]\$HoldThresholdMs = 400\b", TEXT)
+    # -HoldThresholdMs is still accepted (an old shortcut may pass it) but no longer used.
+    assert re.search(r"\[int\]\$HoldThresholdMs = 0\b", TEXT)
     # The WSL log file stays the default when no -LogPath is given in relay mode.
     assert '"\\\\wsl.localhost\\Ubuntu\\home\\wunsch\\.voicemode\\logs\\ptt-listener.log"' in TEXT
     # The relay speaks {"action": ...} lines over TCP, as patches/ptt_relay.py reads them.
@@ -101,3 +102,53 @@ def test_a_sender_that_cannot_start_is_reported_not_thrown(tmp_path):
     text = log.read_text(encoding="utf-8-sig")
     assert text.count("control pipe failed:") == 1, text  # logged once, not per key
     assert "short_press sent=False" in text and "hold_start sent=False" in text
+
+
+# --- the key rule (Robert, 2026-11-07): down opens the mic, a release within 0.8 s stops ---
+
+def _code():
+    code = re.sub(r"<#.*?#>", "", TEXT, flags=re.S)
+    return "\n".join(line for line in code.splitlines() if not line.lstrip().startswith("#"))
+
+
+def test_tap_max_is_one_named_constant_of_800_ms():
+    assert re.search(r"\[int\]\$TapMaxMs = 800\b", TEXT)
+    assert "-ge $TapMaxMs" in _code()
+
+
+def test_key_down_sends_hold_start_without_waiting():
+    code = _code()
+    down = code.index("if ($isDown -and -not $down)")
+    up = code.index("elseif (-not $isDown -and $down)")
+    assert 'Send-Action "hold_start"' in code[down:up]
+    assert "$HoldThresholdMs" not in code[down:]  # no threshold in the key loop
+
+
+def test_release_maps_through_one_function():
+    code = _code()
+    fn = code[code.index("function Get-ReleaseAction"):]
+    fn = fn[:fn.index("\n}") + 2]
+    assert '"hold_release"' in fn and '"short_press"' in fn and "-ge $TapMaxMs" in fn
+    up = code[code.index("elseif (-not $isDown -and $down)"):]
+    assert "Get-ReleaseAction" in up[:up.index("\n        }")]
+
+
+def test_native_mode_warms_the_sender_before_the_first_key():
+    code = _code()
+    loop = code.index("while ($true)")
+    warm = code.index('Invoke-Sender "warm"')
+    assert code.index("Start-Sender", code.index("if ($Native) {\n    try {")) < warm < loop
+    client = (REPO / "patches" / "ptt_control_client.py").read_text(encoding="utf-8")
+    assert '"warm"' in client and '"ready"' in client
+
+
+@needs_powershell
+@pytest.mark.parametrize("keys,expected", [("0:down,500:up", ["hold_start", "short_press"]),
+                                           ("0:down,1200:up", ["hold_start", "hold_release"]),
+                                           ("0:down,800:up", ["hold_start", "hold_release"])])
+def test_replayed_keys_map_like_every_other_listener(tmp_path, keys, expected):
+    log = tmp_path / "ptt.log"
+    done = _ps("-Port", "9", "-LogPath", _win(log), "-ReplayKeys", keys)
+    assert done.returncode == 0, done.stdout + done.stderr
+    sent = re.findall(r"replay (\w+) sent=", log.read_text(encoding="utf-8-sig"))
+    assert sent == expected
