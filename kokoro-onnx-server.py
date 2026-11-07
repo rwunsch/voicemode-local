@@ -116,6 +116,16 @@ def download_german():
             urlretrieve(url, str(path))
 
 
+def encode_audio(samples, sample_rate, response_format):
+    """(body, content type) for an OpenAI-style response_format. "pcm" is raw 16-bit
+    little-endian mono, as voice-mode's streaming player expects (it plays the bytes as
+    int16, so a WAV header would be heard). Anything else gets WAV, as before."""
+    import numpy as np
+    if (response_format or "").lower() == "pcm":
+        return (np.clip(samples, -1.0, 1.0) * 32767).astype("<i2").tobytes(), "audio/pcm"
+    return pcm_to_wav(samples, sample_rate=sample_rate), "audio/wav"
+
+
 def pcm_to_wav(pcm_data, sample_rate=24000, channels=1, sample_width=2):
     """Convert raw PCM float32 samples to WAV bytes."""
     import numpy as np
@@ -234,13 +244,13 @@ class TTSHandler(BaseHTTPRequestHandler):
             print(f"[kokoro-onnx] Generated {len(samples)/sample_rate:.1f}s audio "
                   f"in {elapsed:.1f}s (voice={voice_id})")
 
-            wav_bytes = pcm_to_wav(samples, sample_rate=sample_rate)
+            body, content_type = encode_audio(samples, sample_rate, data.get("response_format"))
 
             self.send_response(200)
-            self.send_header("Content-Type", "audio/wav")
-            self.send_header("Content-Length", str(len(wav_bytes)))
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(body)))
             self.end_headers()
-            self.wfile.write(wav_bytes)
+            self.wfile.write(body)
 
         except Exception as e:
             print(f"[kokoro-onnx] Error: {e}")
