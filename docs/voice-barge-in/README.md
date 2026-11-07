@@ -91,12 +91,18 @@ property reads) and picks the mic for that stretch:
 
 | Output route | How it is detected | Mic |
 |---|---|---|
-| `headphones` | built-in with data source `hdpn`, or not built-in (Bluetooth, USB, ...) and the output device also has input streams: a headset | plain capture (sounddevice) |
-| `speakers` | built-in with data source `ispk`, any other, or unreadable; or not built-in with no input streams: USB, Bluetooth or display speakers, HDMI, AirPlay, and headphones without a mic | macOS voice processing (AVAudioEngine, echo cancellation, other-audio ducking at its minimum) |
-| `unknown` | CoreAudio did not answer, including an external device whose streams cannot be read | plain capture |
+| `headphones` | built-in with data source `hdpn`; any Bluetooth transport (`blue`, `blea`); or another external transport (USB, ...) whose output device also has input streams: a headset | plain capture (sounddevice) |
+| `speakers` | built-in with data source `ispk`, any other, or unreadable; HDMI, DisplayPort, AirPlay (`hdmi`, `dprt`, `airp`); or another external transport with no input streams: USB speakers | macOS voice processing (AVAudioEngine, echo cancellation, other-audio ducking at its minimum) |
+| `unknown` | CoreAudio did not answer, including a USB/other device whose streams cannot be read | plain capture |
 
-Input streams are read with `kAudioDevicePropertyStreams` in the input scope of the default
-output device (one more property read, only for a device that is not built-in).
+Bluetooth is decided by transport alone, before any stream rule. Measured on FELIX-MAC
+2026-11-07: a Jabra Engage 75 appears in CoreAudio as **two** devices, "1 in, 0 out" and
+"0 in, 2 out", transport `blue`. The input-stream rule of a2ef7e3 looked at the output
+device, found 0 inputs and said `speakers`, so a headset got voice processing (at 7c81771
+it was `headphones`, capture sounddevice, 221 windows). A Bluetooth speaker without a mic
+is now `headphones` too, so it gets plain capture. For USB and other transports, input
+streams are read with `kAudioDevicePropertyStreams` in the input scope of the default
+output device (one more property read).
 
 Voice processing needs `pyobjc-framework-AVFoundation` in the trigger's venv
 (`./install-mac.sh --barge` installs it). Without it the speakers are **refused**: the
@@ -148,11 +154,38 @@ Not verified yet (no Mac in this repo's test runs; everything above is tested wi
   `deaf` field says how much was left. Whether starting voice processing while the server
   is about to open its own recording disturbs that recording (it already overlapped by up
   to 100 ms before) is untested.
-- **The headset rule.** That a Bluetooth or USB headset reports its mic as input streams on
-  the same CoreAudio device as its output, and that external speakers, HDMI and AirPlay
-  report none, is from the CoreAudio model, not from a device here (tested with fakes only).
-  Before 2026-11-07 every external output counted as headphones, so external speakers got
-  plain capture and could cut themselves off.
+- **The headset rule.** Bluetooth: measured wrong on one headset (above) and replaced by
+  the transport rule. USB: that a USB headset reports its mic as input streams on the same
+  CoreAudio device as its output is still from the CoreAudio model, not from a device
+  (fakes only).
+
+### Diagnosing "windows 0" on voice processing
+
+Reported on FELIX-MAC 2026-11-07 (checkout ad2eb0d): five voice-processing stretches in a
+row, 19:09-19:16Z, logged `windows 0 ... first_window none`, warm and cold; then at 19:22Z
+the **same trigger process** got 227 windows and cut a talk-over. Between them the Jabra
+was switched off. A separate script opening the same capture got 60/60 windows (n=2). The
+cause is not known yet. These lines exist to find it:
+
+- Every voice-processing stretch line ends with
+  `taps N, samples M, engine_running yes|no (after start yes|no), first_tap T ms|none,
+  config_changes K`, read just before the capture closes. `taps 0` with
+  `engine_running yes` means the engine runs but its input tap never fires; `engine_running
+  no` means it stopped (or never ran); `config_changes` counts
+  `AVAudioEngineConfigurationChangeNotification` for this engine (macOS posts it when the
+  device under an engine changes, and the engine stops). Each such notification is also an
+  INFO line, `voice processing 0x...: engine configuration changed`.
+- `VOICEMODE_DEBUG=true` (environment, else `~/.voicemode/voicemode.env`) now sets the
+  trigger's log level to DEBUG; before, it was hard-coded INFO. At DEBUG:
+  `capture open: <class> id=0x..., phase warm|speaking` and `capture close: ...` per
+  capture, so a second open is visible; `voice processing 0x...: engine started, running
+  yes, 9 ch at 48000 Hz`; and `phase <phase>: <reason>` at each change of the phase tracker,
+  e.g. `phase idle: spoken already in this converse` or `phase idle: status has no
+  'listening' ...`, which says why a stretch was cold with warm on.
+
+Ruled out on Linux with a model, not on a Mac: `drain()` at the warm-to-speaking switch
+racing the audio thread, and the loop starving a producer thread (a threaded fake capture
+delivers through warm, drain and speaking).
 
 Steps for a real Mac: `tests/manual/mac_barge_vp_check.md`.
 

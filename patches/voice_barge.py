@@ -285,6 +285,8 @@ _STREAMS = _fourcc("stm#")                      # kAudioDevicePropertyStreams
 _ELEMENT_MAIN = 0
 _BUILT_IN = _fourcc("bltn")                     # kAudioDeviceTransportTypeBuiltIn
 _HEADPHONE_JACK = _fourcc("hdpn")
+_BLUETOOTH = (_fourcc("blue"), _fourcc("blea"))  # kAudioDeviceTransportTypeBluetooth, ...BluetoothLE
+_DISPLAY_OR_AIRPLAY = (_fourcc("hdmi"), _fourcc("dprt"), _fourcc("airp"))
 _COREAUDIO_PATH = "/System/Library/Frameworks/CoreAudio.framework/CoreAudio"
 _COREAUDIO: dict = {}
 
@@ -335,14 +337,19 @@ def _input_stream_count(lib, device: int):
 def output_route(platform=None, lib=None) -> str:
     """Where the default output plays: "headphones", "speakers" or "unknown".
 
-    Built-in device: 'hdpn' (headphone jack) is headphones; 'ispk', any other or an
-    unreadable data source is speakers. Any other transport (Bluetooth, USB, HDMI,
-    AirPlay, ...): headphones if the output device also has input streams (a headset),
-    speakers if it has none (external speakers, a display, AirPlay, or headphones without
-    a mic, which then get echo cancellation they do not need). Off macOS, or when CoreAudio
-    does not answer: unknown. Three property reads, no subprocess.
-    UNVERIFIED on hardware: that a Bluetooth or USB headset reports its mic as input
-    streams on the same device as its output (tests use fakes)."""
+    By transport, in this order:
+    - built-in ('bltn'): 'hdpn' (headphone jack) is headphones; 'ispk', any other or an
+      unreadable data source is speakers.
+    - Bluetooth ('blue', 'blea'): headphones, never asking for input streams. Measured on
+      FELIX-MAC 2026-11-07: a Jabra Engage 75 is two CoreAudio devices, "1 in, 0 out" and
+      "0 in, 2 out", so its output device has no input streams; the input-stream rule
+      (a2ef7e3) called it speakers and put voice processing on a headset. A Bluetooth
+      speaker now counts as headphones too: no echo cancellation for it.
+    - HDMI, DisplayPort, AirPlay ('hdmi', 'dprt', 'airp'): speakers.
+    - anything else (USB, virtual, ...): headphones if the output device also has input
+      streams (a headset), speakers if none, unknown if unreadable.
+    Off macOS, or when CoreAudio does not answer: unknown. At most three property reads,
+    no subprocess."""
     if (platform or _platform()) != "darwin":
         return "unknown"
     lib = lib if lib is not None else _coreaudio()
@@ -355,6 +362,10 @@ def output_route(platform=None, lib=None) -> str:
         transport = _property_u32(lib, device, _TRANSPORT, _SCOPE_GLOBAL)
         if transport is None:
             return "unknown"
+        if transport in _BLUETOOTH:
+            return "headphones"
+        if transport in _DISPLAY_OR_AIRPLAY:
+            return "speakers"
         if transport != _BUILT_IN:
             inputs = _input_stream_count(lib, device)
             if inputs is None:
@@ -510,6 +521,10 @@ class _QueuedWindows:
 _DUCKING_LOGGED: set = set()
 
 
+def _yes(flag) -> str:
+    return "unknown" if flag is None else ("yes" if flag else "no")
+
+
 class VoiceProcessingCapture(_QueuedWindows):
     """macOS: the default mic through AVAudioEngine with voice processing (echo
     cancellation) on and other-audio ducking at its minimum. Same contract as
@@ -528,8 +543,17 @@ class VoiceProcessingCapture(_QueuedWindows):
         self._probe_sumsq = None
         self._probe_frames = 0
         self._channels = 1
+        self._opened_at = time.monotonic()
+        self._taps = 0
+        self._samples = 0
+        self._first_tap_at = None
+        self._running_after_start = None
+        self._config_changes = 0
+        self._observer = None
+        self._center = None
         self._engine = AVFoundation.AVAudioEngine.alloc().init()
         self._input = self._engine.inputNode()
+        self._observe_config_changes(AVFoundation)
         try:
             if not _ok(_call_with_error(self._input.setVoiceProcessingEnabled_error_, True)):
                 raise RuntimeError("macOS refused to turn voice processing on")
@@ -550,11 +574,54 @@ class VoiceProcessingCapture(_QueuedWindows):
             self._engine.prepare()
             if not _ok(_call_with_error(self._engine.startAndReturnError_)):
                 raise RuntimeError("the voice-processing audio engine did not start")
+            self._running_after_start = self._engine_running()
+            logger.debug("voice processing %#x: engine started, running %s, %d ch at %.0f Hz",
+                         id(self), _yes(self._running_after_start), self._channels,
+                         float(fmt.sampleRate()))
         except Exception:
             self.close()
             raise
 
+    def _observe_config_changes(self, av) -> None:
+        """Log AVAudioEngineConfigurationChangeNotification for this engine: macOS posts
+        it when the device under the engine changes (and stops the engine). Best effort."""
+        try:
+            center = av.NSNotificationCenter.defaultCenter()
+            self._observer = center.addObserverForName_object_queue_usingBlock_(
+                av.AVAudioEngineConfigurationChangeNotification, self._engine, None,
+                self._on_config_change)
+            self._center = center
+        except Exception as e:  # noqa: BLE001 - diagnostics only
+            logger.debug("voice processing: cannot observe configuration changes (%s)", e)
+
+    def _on_config_change(self, note) -> None:
+        self._config_changes += 1
+        logger.info("voice processing %#x: engine configuration changed (device change?), "
+                    "engine running %s, taps so far %d", id(self), _yes(self._engine_running()),
+                    self._taps)
+
+    def _engine_running(self):
+        try:
+            return bool(self._engine.isRunning())
+        except Exception:  # noqa: BLE001
+            return None
+
+    def diagnostics(self) -> str:
+        """For the stretch line: did the tap fire, and is the engine still running?"""
+        first = ("none" if self._first_tap_at is None
+                 else f"{round((self._first_tap_at - self._opened_at) * 1000)} ms")
+        return (f"taps {self._taps}, samples {self._samples}, engine_running "
+                f"{_yes(self._engine_running())} (after start {_yes(self._running_after_start)}), "
+                f"first_tap {first}, config_changes {self._config_changes}")
+
     def _on_buffer(self, buffer, when):
+        self._taps += 1
+        if self._first_tap_at is None:
+            self._first_tap_at = time.monotonic()
+        try:
+            self._samples += int(buffer.frameLength())
+        except Exception:  # noqa: BLE001 - counted as a tap failure below
+            pass
         try:
             mono = _channel_samples(buffer, VP_CHANNEL if self._channels > VP_CHANNEL else 0)
             if self._probe:
@@ -574,6 +641,12 @@ class VoiceProcessingCapture(_QueuedWindows):
         self._probe_frames += int(buffer.frameLength())
 
     def close(self) -> None:
+        if self._observer is not None:
+            try:
+                self._center.removeObserver_(self._observer)
+            except Exception:  # noqa: BLE001
+                pass
+            self._observer = None
         try:
             self._engine.stop()
         finally:
@@ -856,22 +929,35 @@ class PhaseTracker:
         self._status = status
         self._warm = warm
         self._spent = False
+        self._last = ("idle", "no converse running")
 
     def __call__(self) -> str:
+        phase, why = self._decide()
+        if (phase, why) != self._last:   # one DEBUG line per change, not per poll
+            self._last = (phase, why)
+            logger.debug("phase %s%s", phase, f": {why}" if why else "")
+        return phase
+
+    def _decide(self):
         s = self._status()
         if not s:
             self._spent = False   # no converse running: the next one may warm again
-            return "idle"
+            return "idle", "no converse running"
         if s.get("speaking"):
             self._spent = True
-            return "speaking"
+            return "speaking", ""
         if s.get("listening"):
             self._spent = True
-            return "idle"
-        if (not self._warm or self._spent or "listening" not in s
-                or s.get("state") in ("stopped", "paused")):
-            return "idle"
-        return "warm"
+            return "idle", "listening"
+        if not self._warm:
+            return "idle", "warm off"
+        if self._spent:
+            return "idle", "spoken already in this converse"
+        if "listening" not in s:
+            return "idle", "status has no 'listening' (server without patch_voice_pill): no warm"
+        if s.get("state") in ("stopped", "paused"):
+            return "idle", f"state {s.get('state')}"
+        return "warm", "converse running, not yet spoken"
 
 
 class _Stretch:
@@ -889,6 +975,20 @@ class _Stretch:
             return "none" if t is None else f"{round((t - self.asked_at) * 1000)} ms"
         warm = "cold" if self.warm_s is None else f"warm {round(self.warm_s * 1000)} ms"
         return f"first_window {ms(self.first_window_at)}, deaf {ms(self.heard_at)}, {warm}"
+
+
+def _note_with_diagnostics(capture):
+    """The capture's stretch note plus its diagnostics (macOS voice processing: taps,
+    engine state), read before close."""
+    note = getattr(capture, "stretch_note", None)
+    diag = getattr(capture, "diagnostics", None)
+    if diag is None:
+        return note
+    try:
+        extra = diag()
+    except Exception as e:  # noqa: BLE001 - diagnostics never cost a stretch line
+        extra = f"diagnostics failed: {e}"
+    return f"{note}, {extra}" if note else extra
 
 
 def _log_stretch(stretch: _Stretch, seconds: float, fired: bool, note) -> None:
@@ -948,6 +1048,9 @@ def run(poll_speaking=None, open_capture=None, vad=None, detector=None, send_bar
 
         opened_at = stretch_clock()
         capture = open_capture()
+        if capture is not None:
+            logger.debug("capture open: %s id=%#x, phase %s", type(capture).__name__,
+                         id(capture), phase)
         if capture is None or getattr(capture, "refused", False):
             if _wait_out_refused(capture, phase, poll_phase, is_paused, sleep, idle_poll_s,
                                  stretch_clock) is None:
@@ -1018,8 +1121,9 @@ def run(poll_speaking=None, open_capture=None, vad=None, detector=None, send_bar
             try:
                 if stretch is not None:
                     _log_stretch(stretch, stretch_clock() - stretch.asked_at, fired,
-                                 getattr(capture, "stretch_note", None))
+                                 _note_with_diagnostics(capture))
             finally:
+                logger.debug("capture close: %s id=%#x", type(capture).__name__, id(capture))
                 capture.close()
 
         # Don't reopen the mic for the utterance that is being cut.
@@ -1081,11 +1185,20 @@ def _preload_backend(backend) -> None:
         pass
 
 
+def log_level(raw) -> int:
+    """VOICEMODE_DEBUG: DEBUG when true, 1, yes or on; INFO otherwise."""
+    value = (raw or "").strip().strip('"').strip("'").lower()
+    return logging.DEBUG if value in ("1", "true", "yes", "on") else logging.INFO
+
+
 def main() -> int:
     if sys.argv[1:2] == ["status"]:
         print(status_line())
         return 0
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
+    debug = os.environ.get("VOICEMODE_DEBUG")
+    if debug is None:
+        debug = read_env_file().get("VOICEMODE_DEBUG")
+    logging.basicConfig(level=log_level(debug), format="%(asctime)s %(name)s %(levelname)s %(message)s")
     settings = trigger_settings()
     backend = capture_backend()
     if backend is None:

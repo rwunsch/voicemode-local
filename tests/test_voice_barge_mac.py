@@ -64,13 +64,17 @@ class FakeCoreAudio:
 
 
 @pytest.mark.parametrize("transport,source,inputs,route", [
-    ("blue", None, 1, "headphones"),     # Bluetooth headset (FELIX-MAC: Jabra reports 'blue', no data source)
-    ("blue", None, 0, "speakers"),       # Bluetooth speaker, or headphones without a mic
+    ("blue", None, 1, "headphones"),     # Bluetooth headset with the mic on the same device
+    ("blue", None, 0, "headphones"),     # FELIX-MAC Jabra Engage 75: output device "0 in, 2 out"
+    ("blue", None, None, "headphones"),  # Bluetooth: streams are never asked
+    ("blea", None, 0, "headphones"),     # Bluetooth LE
     ("usb ", None, 2, "headphones"),     # USB headset
     ("usb ", None, 0, "speakers"),       # USB speakers
-    ("hdmi", None, 0, "speakers"),       # a display's speakers
-    ("airp", None, 0, "speakers"),       # AirPlay
-    ("blue", None, None, "unknown"),     # streams unreadable
+    ("usb ", None, None, "unknown"),     # USB, streams unreadable
+    ("virt", None, 0, "speakers"),       # any other transport: the input-stream rule
+    ("hdmi", None, 2, "speakers"),       # a display's speakers, even with a mic on it
+    ("dprt", None, 0, "speakers"),       # DisplayPort
+    ("airp", None, None, "speakers"),    # AirPlay
     ("bltn", "hdpn", None, "headphones"),  # built-in, headphone jack
     ("bltn", "ispk", None, "speakers"),    # built-in speakers
     ("bltn", None, None, "speakers"),      # built-in, data source unreadable
@@ -84,6 +88,15 @@ def test_external_output_asks_for_input_streams_on_the_output_device():
     lib = FakeCoreAudio("usb ", inputs=0)
     vb.output_route(platform="darwin", lib=lib)
     assert lib.calls[-1] == (FakeCoreAudio.DEVICE, cc("stm#"), cc("inpt"), 0)
+
+
+def test_two_device_bluetooth_headset_is_headphones_without_asking_for_streams():
+    # FELIX-MAC 2026-11-07: a Jabra Engage 75 shows up as two CoreAudio devices, "1 in,
+    # 0 out" and "0 in, 2 out"; the default output is the second, transport 'blue'. At
+    # a2ef7e3 its 0 input streams made it "speakers", so voice processing ran on a headset.
+    lib = FakeCoreAudio("blue", inputs=0)
+    assert vb.output_route(platform="darwin", lib=lib) == "headphones"
+    assert all(call[1] != cc("stm#") for call in lib.calls)
 
 
 def test_built_in_output_never_asks_for_streams():
@@ -411,6 +424,29 @@ class FakeEngine:
         self.running = False
         self.stops += 1
 
+    def isRunning(self):
+        return self.running
+
+
+class FakeNotificationCenter:
+    def __init__(self):
+        self.observers = {}   # token -> (name, obj, block)
+        self.removed = []
+
+    def addObserverForName_object_queue_usingBlock_(self, name, obj, queue, block):
+        token = object()
+        self.observers[token] = (name, obj, block)
+        return token
+
+    def removeObserver_(self, token):
+        self.removed.append(token)
+        self.observers.pop(token, None)
+
+    def post(self, name, obj):
+        for n, o, block in list(self.observers.values()):
+            if n == name and o is obj:
+                block(None)
+
 
 class FakeAVFoundation:
     def __init__(self, rate=48000, channels=9, interleaved=False, vp_ok=True, start_ok=True):
@@ -427,6 +463,17 @@ class FakeAVFoundation:
             def alloc():
                 return _Alloc()
         self.AVAudioEngine = AVAudioEngine
+        self.AVAudioEngineConfigurationChangeNotification = "AVAudioEngineConfigurationChangeNotification"
+        self.center = FakeNotificationCenter()
+
+        class NSNotificationCenter:
+            @staticmethod
+            def defaultCenter():
+                return av.center
+        self.NSNotificationCenter = NSNotificationCenter
+
+    def config_change(self):
+        self.center.post(self.AVAudioEngineConfigurationChangeNotification, self.engine)
 
     def deliver(self, channels, interleaved=False):
         self.node.tap[3](FakeBuffer(channels, interleaved), None)
@@ -861,3 +908,140 @@ def test_switch_barge_status_elsewhere_has_no_route_line(tmp_path):
     done, calls = _switch_status(tmp_path, "Linux")
     assert done.returncode == 0, done.stderr
     assert "route:" not in done.stdout and "voice_barge status" not in calls
+
+
+# --- diagnostics: is the voice-processing engine running, and does its tap fire? ---
+# FELIX-MAC 2026-11-07: every voice-processing stretch in the trigger logged
+# "windows 0 ... first_window none" while a script with the same objects got 60/60.
+
+def test_diagnostics_count_taps_and_samples_and_time_the_first_tap(av):
+    fake = av(rate=48000, channels=1)
+    cap = vb.VoiceProcessingCapture()
+    fake.deliver(np.zeros((1, 4096), dtype=np.float32))
+    fake.deliver(np.zeros((1, 4096), dtype=np.float32))
+    import re
+    d = cap.diagnostics()
+    assert re.fullmatch(r"taps 2, samples 8192, engine_running yes \(after start yes\), "
+                        r"first_tap \d+ ms, config_changes 0", d), d
+    cap.close()
+
+
+def test_diagnostics_with_no_tap_at_all_say_none_and_the_engine_state(av):
+    fake = av()
+    cap = vb.VoiceProcessingCapture()
+    fake.engine.running = False   # the engine stopped behind our back
+    assert cap.diagnostics() == ("taps 0, samples 0, engine_running no (after start yes), "
+                                 "first_tap none, config_changes 0")
+    cap.close()
+
+
+def test_engine_configuration_change_is_logged_and_counted_and_unobserved_at_close(av, caplog):
+    fake = av()
+    cap = vb.VoiceProcessingCapture()
+    with caplog.at_level(logging.INFO, logger="voicemode.voice_barge"):
+        fake.config_change()
+    assert any("configuration changed" in r.getMessage() for r in caplog.records)
+    assert cap.diagnostics().endswith("config_changes 1")
+    cap.close()
+    assert fake.center.observers == {} and len(fake.center.removed) == 1
+
+
+def test_no_notification_center_is_no_crash(av):
+    fake = av()
+    del fake.NSNotificationCenter
+    cap = vb.VoiceProcessingCapture()
+    cap.close()
+
+
+def test_stretch_line_carries_the_capture_diagnostics_taken_before_close(caplog):
+    class Diag(Cap):
+        def diagnostics(self):
+            return "closed already" if self.closed else "taps 3, engine_running yes"
+    with caplog.at_level(logging.INFO, logger="voicemode.voice_barge"):
+        _run([True, True, False], lambda: Diag(note="route=speakers, capture=voice-processing"))
+    (line,) = [r.getMessage() for r in caplog.records if r.getMessage().startswith("stretch:")]
+    assert line.endswith("route=speakers, capture=voice-processing, taps 3, engine_running yes"), line
+
+
+def test_each_capture_open_and_close_is_a_debug_line_with_the_object_id(caplog):
+    caps = []
+
+    def opener():
+        caps.append(Cap())
+        return caps[-1]
+    with caplog.at_level(logging.DEBUG, logger="voicemode.voice_barge"):
+        _run([True, True, False, True, False], opener)
+    msgs = [r.getMessage() for r in caplog.records if r.levelname == "DEBUG"]
+    for c in caps:
+        assert f"capture open: Cap id={id(c):#x}, phase speaking" in msgs
+        assert f"capture close: Cap id={id(c):#x}" in msgs
+
+
+@pytest.mark.parametrize("raw,level", [(None, logging.INFO), ("", logging.INFO), ("false", logging.INFO),
+                                       ("true", logging.DEBUG), ("1", logging.DEBUG),
+                                       ('"True"', logging.DEBUG), ("yes", logging.DEBUG)])
+def test_voicemode_debug_sets_the_log_level(raw, level):
+    assert vb.log_level(raw) == level
+
+
+def test_main_honours_voicemode_debug():
+    src = MODULE.read_text()
+    main = src[src.index("def main()"):]
+    assert "level=logging.INFO" not in main and "log_level(" in main
+
+
+def test_phase_changes_are_debug_lines_with_the_reason(caplog):
+    # FELIX-MAC 19:22Z: a stretch logged "cold" with warm on. Say why the tracker chose
+    # each phase, once per change, not once per poll.
+    statuses = iter([{}, {"listening": False}, {"listening": False}, {"speaking": True},
+                     {"speaking": False, "listening": False}, {}])
+    t = vb.PhaseTracker(lambda: next(statuses))
+    with caplog.at_level(logging.DEBUG, logger="voicemode.voice_barge"):
+        got = [t() for _ in range(6)]
+    assert got == ["idle", "warm", "warm", "speaking", "idle", "idle"]
+    msgs = [r.getMessage() for r in caplog.records if r.getMessage().startswith("phase ")]
+    assert msgs == ["phase warm: converse running, not yet spoken",
+                    "phase speaking",
+                    "phase idle: spoken already in this converse",
+                    "phase idle: no converse running"], msgs
+
+
+def test_phase_reason_when_the_server_reports_no_listening_key(caplog):
+    t = vb.PhaseTracker(lambda: {"speaking": False})
+    with caplog.at_level(logging.DEBUG, logger="voicemode.voice_barge"):
+        assert t() == "idle"
+    assert [r.getMessage() for r in caplog.records] == [
+        "phase idle: status has no 'listening' (server without patch_voice_pill): no warm"]
+
+
+def test_a_threaded_capture_keeps_delivering_across_warm_drain_and_speaking(caplog):
+    # Candidate for FELIX-MAC "windows 0": drain() at the warm->speaking switch racing the
+    # audio thread, or the loop starving it. A real producer thread, like a tap.
+    import threading
+
+    class Threaded(vb._QueuedWindows):
+        def __init__(self):
+            self._init_queue()
+            self._stop = threading.Event()
+            self.stretch_note = "route=speakers, capture=voice-processing"
+            self._t = threading.Thread(target=self._feed, daemon=True)
+            self._t.start()
+
+        def _feed(self):
+            while not self._stop.is_set():
+                self._queue.put(np.full(vb.WINDOW_SAMPLES, 300, dtype=np.int16))
+                time.sleep(0.004)
+
+        def close(self):
+            self._stop.set()
+            self._t.join(1)
+
+    phases = ["warm"] * 20 + ["speaking"] * 40
+    with caplog.at_level(logging.INFO, logger="voicemode.voice_barge"):
+        vb.run(poll_phase=lambda: phases.pop(0) if phases else None, open_capture=Threaded,
+               vad=Vad(), detector=vb.BargeDetector(-35.0, 3), send_barge=lambda: None,
+               sleep=lambda s: None, warmup_windows=6, poll_every_windows=1)
+    (line,) = [r.getMessage() for r in caplog.records if r.getMessage().startswith("stretch:")]
+    import re
+    n = int(re.search(r"windows (\d+)", line).group(1))
+    assert n >= 30 and "first_window none" not in line, line
