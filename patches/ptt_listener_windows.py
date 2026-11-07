@@ -4,8 +4,9 @@
 Run this on the WINDOWS side (not inside WSL) with a Windows Python
 install: `python ptt_listener_windows.py`. It captures Control-Space,
 checks that the focused window is your WSL terminal (Windows Terminal,
-by process name/title match), classifies press/hold/release the same way
-patches/ptt_core.py does, and sends the classified events to
+by process name/title match), classifies press/release the same way
+patches/ptt_core.py does (key down: hold_start at once; key up within
+TAP_MAX_S = 0.8 s: short_press, a full stop; later: hold_release), and sends the classified events to
 127.0.0.1:<port> — which WSL2's localhostForwarding delivers into the
 Linux guest's relay server (patches/ptt_ipc.py / ptt_listener's role is
 played by the guest-side relay started by `voicemode-switch` or apply.sh;
@@ -30,8 +31,7 @@ import win32process
 from pynput import keyboard
 
 PORT = 8765
-HOLD_THRESHOLD = 1.0
-POLL_INTERVAL = 0.05
+TAP_MAX_S = 0.8  # as ptt_core.TAP_MAX_S: a release sooner is a tap (stop, back to text)
 TERMINAL_PROCESS_NAMES = {"WindowsTerminal.exe", "OpenConsole.exe"}
 
 
@@ -44,31 +44,21 @@ class PTTAction(Enum):
 
 @dataclass
 class PTTKeyState:
-    hold_threshold: float = HOLD_THRESHOLD
+    tap_max: float = TAP_MAX_S
     _press_ts: Optional[float] = field(default=None, init=False)
-    _hold_fired: bool = field(default=False, init=False)
 
     def on_press(self, ts):
-        if self._press_ts is None:
-            self._press_ts = ts
-            self._hold_fired = False
-        return PTTAction.PRESS
-
-    def poll_hold(self, now):
-        if self._press_ts is None or self._hold_fired:
+        if self._press_ts is not None:
             return None
-        if now - self._press_ts >= self.hold_threshold:
-            self._hold_fired = True
-            return PTTAction.HOLD_START
-        return None
+        self._press_ts = ts
+        return PTTAction.HOLD_START
 
     def on_release(self, ts):
         if self._press_ts is None:
             return None
-        was_hold = self._hold_fired
+        held_for = ts - self._press_ts
         self._press_ts = None
-        self._hold_fired = False
-        return PTTAction.HOLD_RELEASE if was_hold else PTTAction.SHORT_PRESS
+        return PTTAction.HOLD_RELEASE if held_for >= self.tap_max - 1e-9 else PTTAction.SHORT_PRESS
 
 
 def focused_window_is_terminal() -> bool:
@@ -103,7 +93,9 @@ def main() -> None:
             if not focused_window_is_terminal():
                 return
             held = True
-            send_event(state.on_press(time.monotonic()))
+            action = state.on_press(time.monotonic())
+            if action is not None:
+                send_event(action)
 
     def on_release(key):
         nonlocal ctrl_down, held
@@ -120,12 +112,7 @@ def main() -> None:
     listener.start()
     print(f"WSL2 push-to-talk companion running — forwarding to 127.0.0.1:{PORT}")
     try:
-        while True:
-            if held:
-                action = state.poll_hold(time.monotonic())
-                if action is not None:
-                    send_event(action)
-            time.sleep(POLL_INTERVAL)
+        listener.join()
     except KeyboardInterrupt:
         pass
     finally:

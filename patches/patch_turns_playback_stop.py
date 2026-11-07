@@ -95,8 +95,19 @@ R_CALL = (
 )
 
 
+def _read(target: Path):
+    """The file as LF text, and whether it used CRLF. UTF-8 whatever the locale."""
+    text = target.read_bytes().decode("utf-8")
+    return text.replace("\r\n", "\n"), "\r\n" in text
+
+
+def _write(target: Path, text: str, crlf: bool) -> None:
+    """Write UTF-8 in the file's own line endings."""
+    target.write_bytes((text.replace("\n", "\r\n") if crlf else text).encode("utf-8"))
+
+
 def apply(target: Path) -> int:
-    src = target.read_text()
+    src, crlf = _read(target)
     if MARKER in src:
         print(f"  already patched: {target}")
         return 0
@@ -114,7 +125,7 @@ def apply(target: Path) -> int:
 
     out = src.replace(A_HELPER, R_HELPER, 1).replace(A_CALL, R_CALL, 1)
     compile(out, str(target), "exec")  # syntax safety net before writing
-    target.write_text(out)
+    _write(target, out, crlf)
     print(f"  patched (turns playback stop): {target}")
     return 0
 

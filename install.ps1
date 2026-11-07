@@ -1,5 +1,4 @@
-#requires -Version 7.0
-<#
+﻿<#
 .SYNOPSIS
     Set up VoiceMode local voice services for Claude Code on Windows.
 
@@ -12,11 +11,14 @@
       wsl-shared      voice-mode runs on Windows, proxies run in WSL (forwarded
                       via localhost). Currently affected by issue #5 (recording
                       loop hangs on Windows audio path).
-      windows-native  Everything on Windows: voice-mode, proxies, no WSL needed.
-                      Also affected by issue #5 today.
+      windows-native  Everything on Windows, no WSL, no Docker, no admin rights:
+                      scripts\windows\voicemode_native.py installs a private
+                      runtime and is the MCP command (docs/windows-native).
+                      Runs on Windows PowerShell 5.1 and PowerShell 7.
 
-    In all modes, Docker containers (voicemode-whisper, voicemode-kokoro,
-    voicemode-piper) are managed via Docker Desktop and shared.
+    In the two WSL modes, Docker containers (voicemode-whisper, voicemode-kokoro,
+    voicemode-piper) are managed via Docker Desktop and shared, and PowerShell 7
+    is needed.
 
 .PARAMETER Mode
     wsl-shared | windows-native. Prompts if not specified.
@@ -33,6 +35,34 @@
 .PARAMETER WslPath
     WSL filesystem path to a working voicemode-local checkout. Used only for
     wsl-shared mode detection. Default: /home/<wsl-user>/git/voicemode-local
+
+.PARAMETER Root
+    windows-native: the install folder (VOICEMODE_NATIVE_ROOT). Default
+    %LOCALAPPDATA%\voicemode-local-native. Given, the MCP entry carries it.
+
+.PARAMETER InstallUv
+    windows-native: install uv for this user if it is missing. Without it the
+    exact command is printed and nothing is installed.
+
+.PARAMETER Pill
+    windows-native: switch the voice pill on after setup. Default off.
+
+.PARAMETER Barge
+    windows-native: switch interrupt by voice on after setup. Default off.
+
+.PARAMETER Force
+    windows-native: replace an existing, different voicemode MCP entry.
+
+.PARAMETER AllowWslCheckout
+    windows-native: install from a \\wsl path anyway. The MCP command would then
+    need WSL running.
+
+.PARAMETER Uninstall
+    windows-native: stop the services and remove the MCP entry if it points at
+    this checkout. The install folder stays unless -RemoveData is given.
+
+.PARAMETER RemoveData
+    With -Uninstall: also delete the install folder.
 
 .PARAMETER ComputeMode
     auto | cpu | gpu | hybrid. Which Docker compute mode for the STT/TTS backends.
@@ -51,7 +81,16 @@ param(
     # Compute mode for the Docker STT/TTS backends. "auto" -> hybrid if an NVIDIA
     # GPU is usable by Docker, else cpu. hybrid = Kokoro GPU + Whisper CPU (recommended).
     [ValidateSet("auto","cpu","gpu","hybrid")]
-    [string]$ComputeMode = "auto"
+    [string]$ComputeMode = "auto",
+    # windows-native only (see docs/windows-native/README.md)
+    [string]$Root = "",
+    [switch]$InstallUv,
+    [switch]$Pill,
+    [switch]$Barge,
+    [switch]$Force,
+    [switch]$AllowWslCheckout,
+    [switch]$Uninstall,
+    [switch]$RemoveData
 )
 
 $ErrorActionPreference = "Stop"
@@ -86,6 +125,276 @@ function Invoke-Py {
     } finally {
         Remove-Item $tmp -Force -ErrorAction SilentlyContinue
     }
+}
+
+# --- windows-native: no WSL, no Docker, no admin ------------------------------
+# Written for Windows PowerShell 5.1 as well as 7: no ??, no ternary, no && or ||,
+# two-argument Join-Path only. ASCII only below this line.
+
+$UvInstallCommand = 'powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"'
+
+# Reads and writes the voicemode entry of ~/.claude.json, keeping everything else.
+$McpHelper = @'
+import json, os, shutil, sys, tempfile, time
+action, path = sys.argv[1], sys.argv[2]
+try:
+    with open(path, encoding="utf-8-sig") as f:  # a BOM is allowed
+        data = json.load(f)
+except FileNotFoundError:
+    data = {}
+entry = (data.get("mcpServers") or {}).get("voicemode")
+
+def save():
+    if os.path.exists(path):
+        shutil.copy2(path, path + ".bak." + time.strftime("%Y%m%d-%H%M%S"))
+    fd, tmp = tempfile.mkstemp(prefix=".claude.json.", dir=os.path.dirname(os.path.abspath(path)))
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+    os.replace(tmp, path)
+
+def norm(p):
+    return os.path.normcase(os.path.normpath(str(p)))
+
+# state <path> <python> <script> <root> <default root> <1|0: the entry carries the root>
+# ours: this script and this root (an entry without VOICEMODE_NATIVE_ROOT is the default root's);
+# same: ours, and exactly what install would write. Anything else is another install's.
+if action == "state":
+    python, script, root, default, with_env = sys.argv[3:8]
+    env = {"VOICEMODE_NATIVE_ROOT": root} if with_env == "1" else {}
+    if not isinstance(entry, dict):
+        state = "absent"
+    else:
+        args = [a for a in entry.get("args") or [] if isinstance(a, str)]
+        entry_env = entry.get("env") or {}
+        entry_root = entry_env.get("VOICEMODE_NATIVE_ROOT") or default
+        ours = any(norm(a) == norm(script) for a in args) and norm(entry_root) == norm(root)
+        same = (ours and norm(entry.get("command", "")) == norm(python)
+                and [norm(a) for a in args] == [norm(script), "launch"]
+                and {k: norm(v) for k, v in entry_env.items()} == {k: norm(v) for k, v in env.items()})
+        state = "same" if same else "ours" if ours else "other"
+    print(state)
+    print(json.dumps(entry, ensure_ascii=False))
+elif action == "set":
+    python, script, root, with_env = sys.argv[3:7]
+    env = {"VOICEMODE_NATIVE_ROOT": root} if with_env == "1" else {}
+    data.setdefault("mcpServers", {})["voicemode"] = {
+        "type": "stdio", "command": python, "args": [script, "launch"], "env": env}
+    save()
+elif action == "remove":
+    if isinstance(entry, dict):
+        data["mcpServers"].pop("voicemode")
+        save()
+'@
+
+function Invoke-Helper {
+    param([string]$Python, [string[]]$Arguments)
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) ("vml-mcp-" + [guid]::NewGuid().ToString("N") + ".py")
+    try {
+        [IO.File]::WriteAllText($tmp, $McpHelper, (New-Object Text.UTF8Encoding($false)))
+        $out = & $Python $tmp @Arguments
+        if ($LASTEXITCODE -ne 0) { throw "the MCP entry helper exited $LASTEXITCODE" }
+        return $out
+    } finally {
+        Remove-Item $tmp -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Find-NativePython {
+    # A Python 3.10+ to run the launcher: py -3, then python. Each is asked for its own path.
+    $probe = "import sys; print(sys.executable if sys.version_info >= (3, 10) else '')"
+    $tries = @()
+    if (Get-Command py -CommandType Application -ErrorAction SilentlyContinue) { $tries += ,@("py", "-3") }
+    if (Get-Command python -CommandType Application -ErrorAction SilentlyContinue) { $tries += ,@("python") }
+    foreach ($try in $tries) {
+        $exe = $try[0]
+        $rest = @($try | Select-Object -Skip 1)
+        $out = & $exe @rest -c $probe 2>$null
+        if ($LASTEXITCODE -eq 0 -and $out) {
+            $path = ([string]($out | Select-Object -Last 1)).Trim()
+            if ($path -and (Test-Path -LiteralPath $path)) { return $path }
+        }
+    }
+    return $null
+}
+
+function Find-Uv {
+    # The same override setup honours.
+    if ($env:VOICEMODE_UV -and (Test-Path -LiteralPath $env:VOICEMODE_UV)) { return $env:VOICEMODE_UV }
+    $found = Get-Command uv -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($found) { return $found.Path }
+    # Where uv's own installer puts it for this user; a new shell has it on PATH.
+    foreach ($candidate in @((Join-Path $env:USERPROFILE ".local\bin\uv.exe"), (Join-Path $env:USERPROFILE ".cargo\bin\uv.exe"))) {
+        if (Test-Path -LiteralPath $candidate) { return $candidate }
+    }
+    return $null
+}
+
+function Get-ClaudeCli {
+    $found = Get-Command claude -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($found) { return $found.Path }
+    return $null
+}
+
+function Get-NativeInfo {
+    param([string]$Python, [string]$Script)
+    $out = & $Python $Script info
+    if ($LASTEXITCODE -ne 0) { return $null }
+    return (($out | Select-Object -Last 1) | ConvertFrom-Json)
+}
+
+function Invoke-NativeInstall {
+    $ErrorActionPreference = "Continue"  # native stderr must never stop us under 5.1
+    $script = Join-Path $ScriptDir "scripts\windows\voicemode_native.py"
+    header "windows-native: checks"
+    if ($ScriptDir -like '\\wsl*' -and -not $AllowWslCheckout) {
+        fail "This checkout is on a WSL path: $ScriptDir"
+        Write-Host "      The MCP command would run the launcher from there, so voice would work only while"
+        Write-Host "      WSL is running. Clone the repo to a Windows folder and run install.ps1 from there,"
+        Write-Host "      or pass -AllowWslCheckout to install from here anyway."
+        return 1
+    }
+    if (-not (Test-Path -LiteralPath $script)) { fail "Missing $script"; return 1 }
+    $python = Find-NativePython
+    if (-not $python) {
+        fail "No Python 3.10 or newer found (tried py -3, then python)."
+        Write-Host "      Install Python from https://www.python.org/downloads/ (no admin needed), then re-run."
+        return 1
+    }
+    ok "Python: $python"
+    $uv = Find-Uv
+    if (-not $uv) {
+        if (-not $InstallUv) {
+            fail "uv not found. Install it for this user (no admin) with:"
+            Write-Host "      $UvInstallCommand"
+            Write-Host "      then re-run install.ps1, or re-run with -InstallUv to have it run that command."
+            return 1
+        }
+        Write-Host "  Installing uv for this user: $UvInstallCommand"
+        & powershell.exe -NoProfile -ExecutionPolicy ByPass -Command "irm https://astral.sh/uv/install.ps1 | iex" | Out-Host
+        $uv = Find-Uv
+        if (-not $uv) { fail "uv is still not found after its installer ran."; return 1 }
+    }
+    ok "uv: $uv"
+    $env:VOICEMODE_UV = $uv
+    if ($Root) { $env:VOICEMODE_NATIVE_ROOT = $Root }
+
+    header "windows-native: setup"
+    & $python $script setup | Out-Host
+    if ($LASTEXITCODE -ne 0) { fail "setup failed (exit $LASTEXITCODE); see the lines above."; return 1 }
+    $info = Get-NativeInfo $python $script
+    if (-not $info) { fail "Could not read the install's details (voicemode_native.py info)."; return 1 }
+    # uv's minor-version link to its Python under the root survives runtime rebuilds; the
+    # runtime's own venv Python does not. Else the Python found above.
+    if ($info.python) {
+        $mcpPython = $info.python
+        ok "MCP Python: $mcpPython (uv's Python under the install folder; kept across rebuilds)"
+    } else {
+        $mcpPython = $python
+        warn "MCP Python: $mcpPython (uv's Python link under the install folder was not found)"
+    }
+
+    header "windows-native: Claude Code MCP entry"
+    $claudeJson = Join-Path $env:USERPROFILE ".claude.json"
+    $withEnv = "0"
+    if ($env:VOICEMODE_NATIVE_ROOT) { $withEnv = "1" }
+    $state = Invoke-Helper $python @("state", $claudeJson, $mcpPython, $script, $info.root, $info.default_root, $withEnv)
+    $kind = [string]($state | Select-Object -First 1)
+    $existing = [string]($state | Select-Object -Last 1)
+    $mcpLine = "voicemode -> `"$mcpPython`" `"$script`" launch"
+    $claude = Get-ClaudeCli
+    if ($kind -eq "same") {
+        ok "voicemode is already registered: $mcpLine"
+    } elseif ($kind -ne "absent" -and -not $Force) {
+        warn "A voicemode MCP entry already exists and was not changed:"
+        Write-Host "      $existing"
+        Write-Host "      To replace it with this install's, re-run with -Force."
+        $mcpLine = "unchanged (see above)"
+    } else {
+        if ($claude) {
+            if ($kind -ne "absent") {
+                & $claude mcp remove --scope user voicemode | Out-Host
+                if ($LASTEXITCODE -ne 0) { fail "claude mcp remove failed (exit $LASTEXITCODE); the old entry is still there."; return 1 }
+            }
+            $addArgs = @("mcp", "add", "--scope", "user", "voicemode")
+            if ($withEnv -eq "1") { $addArgs += @("-e", "VOICEMODE_NATIVE_ROOT=$($info.root)") }
+            $addArgs += @("--", $mcpPython, $script, "launch")
+            & $claude @addArgs | Out-Host
+            if ($LASTEXITCODE -ne 0) { fail "claude mcp add failed (exit $LASTEXITCODE)"; return 1 }
+            ok "Registered with: claude $($addArgs -join ' ')"
+        } else {
+            Invoke-Helper $python @("set", $claudeJson, $mcpPython, $script, $info.root, $withEnv) | Out-Null
+            ok "claude CLI not found; wrote mcpServers.voicemode in $claudeJson (a backup is beside it)"
+        }
+    }
+
+    foreach ($pair in @(@("pill", $Pill), @("barge", $Barge))) {
+        if ($pair[1]) {
+            & $mcpPython $script $pair[0] on | Out-Host
+            if ($LASTEXITCODE -ne 0) { fail "$($pair[0]) on failed (exit $LASTEXITCODE)"; return 1 }
+        }
+    }
+
+    header "Installed (windows-native)"
+    Write-Host "  Root:      $($info.root)"
+    Write-Host "  Runtime:   $($info.runtime)"
+    & $mcpPython $script status | ForEach-Object { Write-Host "             $_" }
+    Write-Host "  MCP entry: $mcpLine"
+    Write-Host "  Pill:      & `"$mcpPython`" `"$script`" pill on|off|status"
+    Write-Host "  Barge:     & `"$mcpPython`" `"$script`" barge on|off|status"
+    Write-Host "  Uninstall: powershell -ExecutionPolicy Bypass -File `"$(Join-Path $ScriptDir 'install.ps1')`" -Mode windows-native -Uninstall [-RemoveData]"
+    Write-Host "  Restart Claude Code (or run /mcp and reconnect voicemode) to use it."
+    return 0
+}
+
+function Invoke-NativeUninstall {
+    $ErrorActionPreference = "Continue"
+    $script = Join-Path $ScriptDir "scripts\windows\voicemode_native.py"
+    header "windows-native: uninstall"
+    $python = Find-NativePython
+    if (-not $python) { fail "No Python 3.10 or newer found (tried py -3, then python)."; return 1 }
+    if ($Root) { $env:VOICEMODE_NATIVE_ROOT = $Root }
+    $info = Get-NativeInfo $python $script
+    if (-not $info) { fail "Could not find the install folder (voicemode_native.py info)."; return 1 }
+
+    $claudeJson = Join-Path $env:USERPROFILE ".claude.json"
+    # Matched by script AND root: another install from this checkout keeps its entry.
+    $state = Invoke-Helper $python @("state", $claudeJson, $python, $script, $info.root, $info.default_root, "0")
+    $kind = [string]($state | Select-Object -First 1)
+    if ($kind -eq "same" -or $kind -eq "ours") {
+        $claude = Get-ClaudeCli
+        if ($claude) {
+            & $claude mcp remove --scope user voicemode | Out-Host
+            if ($LASTEXITCODE -ne 0) { fail "claude mcp remove failed (exit $LASTEXITCODE); the entry is still there."; return 1 }
+        } else {
+            Invoke-Helper $python @("remove", $claudeJson) | Out-Null
+        }
+        ok "Removed the voicemode MCP entry"
+    } elseif ($kind -eq "other") {
+        warn "The voicemode MCP entry is not this install's ($script, $($info.root)); left alone:"
+        Write-Host "      $([string]($state | Select-Object -Last 1))"
+    } else {
+        ok "No voicemode MCP entry"
+    }
+
+    & $python $script stop | Out-Host
+    if (-not $RemoveData) {
+        ok "Kept the install folder $($info.root) (re-run with -RemoveData to delete it)"
+        return 0
+    }
+    # The checks (never the WSL pill's or FELIX's folders, the profile or LOCALAPPDATA, nor a
+    # folder holding one of them) live in voicemode_native.py remove-data, tested on Linux.
+    & $python $script remove-data | Out-Host
+    if ($LASTEXITCODE -ne 0) { fail "The install folder was not deleted (see above)."; return 1 }
+    return 0
+}
+
+if ($Uninstall -and $Mode -ne "windows-native") {
+    fail "-Uninstall is for -Mode windows-native only."
+    exit 2
+}
+if ($Mode -eq "windows-native") {
+    if ($Uninstall) { exit (Invoke-NativeUninstall) }
+    exit (Invoke-NativeInstall)
 }
 
 # ─── Step 0: Mode selection ─────────────────────────────────────
@@ -127,6 +436,11 @@ if (-not $Mode) {
     }
 }
 ok "Mode: $Mode"
+if ($Mode -eq "windows-native") { exit (Invoke-NativeInstall) }
+if ($PSVersionTable.PSVersion.Major -lt 7) {
+    fail "The $Mode mode needs PowerShell 7 (pwsh). windows-native also runs on Windows PowerShell."
+    exit 1
+}
 
 # ─── Step 1: Prerequisites ──────────────────────────────────────
 header "Step 1: Prerequisites"

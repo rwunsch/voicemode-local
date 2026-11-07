@@ -6,12 +6,19 @@
     Hosts ui/pill in a borderless window and runs patches/voice_pill.py inside WSL
     as a child of wsl.exe, speaking JSON lines over stdin/stdout. No network port.
 
+    Native mode (no WSL) starts the backend directly instead: -BackendExe and
+    -BackendArgs, the files in -DataDir, and a mutex and stop event named after a hash
+    of -DataDir, so each install has its own pill. It is chosen when -BackendExe is
+    given, or when there is no -Distro and this script is not on a \\wsl path.
+    scripts/windows/voicemode_native.py starts it so, and derives the same names.
+
     The window never takes focus: push-to-talk only fires while a terminal has it.
     Everything is C# through Add-Type because stdout arrives on a background thread,
     and a PowerShell delegate has no runspace there. An idle wrapper runs no timers.
 
     First run downloads Microsoft.Web.WebView2 from nuget.org, checks the pinned
-    SHA-256, and unpacks two DLLs into %LOCALAPPDATA%\voicemode-local\webview2.
+    SHA-256, and unpacks two DLLs into <data folder>\webview2: -DataDir natively,
+    %LOCALAPPDATA%\voicemode-local in WSL mode.
     Nothing is installed machine-wide. The WebView2 Runtime must already exist.
 
 .PARAMETER Distro
@@ -20,6 +27,15 @@
     The repo's Linux path. Default: taken from this script's path.
 .PARAMETER BackendCommand
     Command line run through wsl.exe --exec. Default: the repo's voice_pill.py.
+.PARAMETER BackendExe
+    Native mode: the backend program, started directly (no wsl.exe, no python3 lookup).
+.PARAMETER BackendArgs
+    Native mode: the backend's arguments, one Windows command line, quoted as CreateProcess expects.
+.PARAMETER DataDir
+    The folder for the log, position, page copy and WebView2 files. Required natively.
+    Default in WSL mode: %LOCALAPPDATA%\voicemode-local.
+.PARAMETER PrintNames
+    Print the mutex and stop-event names this start would use, then exit.
 .PARAMETER Force
     Run even if VOICEMODE_PILL is not true.
 .PARAMETER InstallAutostart
@@ -37,6 +53,10 @@ param(
     [string]$Distro = "",
     [string]$Repo = "",
     [string]$BackendCommand = "",
+    [string]$BackendExe = "",
+    [string]$BackendArgs = "",
+    [string]$DataDir = "",
+    [switch]$PrintNames,
     [switch]$Force,
     [switch]$InstallAutostart,
     [switch]$RemoveAutostart,
@@ -50,19 +70,71 @@ $WebView2Version = "1.0.4314.35"
 # nuget.org's catalog SHA-512 for this package matched the bytes this hash came from.
 $WebView2Sha256 = "90778DEB1B77E36292828B4B5833C9255C27533F40E0DDD55891AE718944EDC4"
 
-$Local = Join-Path $env:LOCALAPPDATA "voicemode-local"
-[void](New-Item -ItemType Directory -Force -Path $Local)
+$ScriptPath = $MyInvocation.MyCommand.Path
+$ScriptDir = Split-Path -Parent $ScriptPath
+$OnWsl = $ScriptDir -match '^\\\\wsl(?:\.localhost|\$)\\'
+# Native: no WSL. Today's WSL starts never pass -BackendExe, so they stay WSL.
+$Native = [bool]$BackendExe -or (-not $Distro -and -not $OnWsl)
+
 # Local on purpose: writing to \\wsl.localhost would boot a terminated distro.
-$LogFile = Join-Path $Local "pill-window.log"
+# A folder's 8.3 short names expanded: the longest prefix that exists goes through
+# GetLongPathNameW, the rest stays as written. GetFullPath alone expands only some of them,
+# depending on what exists. voicemode_native.windows_full_path does the same.
+function Get-LongPath {
+    param([string]$Full)
+    $Full = $Full.TrimEnd('\', '/')
+    if ($Full -notmatch '~') { return $Full }
+    Add-Type -Namespace VmlPath -Name Native -MemberDefinition '[DllImport("kernel32.dll", CharSet = CharSet.Unicode)] public static extern uint GetLongPathNameW(string s, System.Text.StringBuilder b, uint n);'
+    $head = $Full; $rest = @()
+    while ($true) {
+        $buf = New-Object Text.StringBuilder 32768
+        if ([VmlPath.Native]::GetLongPathNameW($head, $buf, 32768) -gt 0) {
+            $out = $buf.ToString()
+            foreach ($r in $rest) { $out = [IO.Path]::Combine($out, $r) }
+            return $out
+        }
+        $parent = [IO.Path]::GetDirectoryName($head); $name = [IO.Path]::GetFileName($head)
+        if (-not $name -or -not $parent -or $parent -eq $head) { return $Full }
+        $rest = @($name) + $rest; $head = $parent
+    }
+}
+if ($DataDir) { $Local = Get-LongPath ([IO.Path]::GetFullPath($DataDir)) } else { $Local = Join-Path $env:LOCALAPPDATA "voicemode-local" }
+$LogFile = [IO.Path]::Combine($Local, "pill-window.log")  # Join-Path fails on a missing drive
 function Log {
     param([string]$Text)
     $line = "{0}  {1}" -f (Get-Date -Format "HH:mm:ss.fff"), $Text
     Write-Host "  $line"
     try { $line | Out-File -Append -FilePath $LogFile -Encoding utf8 } catch { }
 }
+# A refused start goes to stderr, and to the log when -DataDir names a folder. Without
+# -DataDir it would be the WSL pill's log, which is not this start's.
+function Refuse {
+    param([string]$Text)
+    if ($DataDir) {
+        try { [void](New-Item -ItemType Directory -Force -Path $Local) } catch { }
+        Log "FATAL: $Text"
+    }
+    [Console]::Error.WriteLine($Text)
+    exit 1
+}
+if ($Native -and $Distro) { Refuse "pass -Distro (WSL) or -BackendExe (native), not both" }
+if ($Native -and -not $DataDir) { Refuse "native mode needs -DataDir" }
+if ($Native) {
+    # One pill per install: the names carry a hash of the folder. voicemode_native.pill_names
+    # computes the same: SHA-256 of the full long path, trailing slashes dropped, lowercased, UTF-8.
+    $sha = [Security.Cryptography.SHA256]::Create()
+    $bytes = $sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($Local.TrimEnd('\', '/').ToLowerInvariant()))
+    $tag = -join ($bytes[0..5] | ForEach-Object { $_.ToString("x2") })
+    $MutexName = "Local\VoiceModePillWindow-$tag"
+    $StopName = "Local\VoiceModePillStop-$tag"
+} else {
+    # voicemode-switch signals this stop event by name.
+    $MutexName = "Local\VoiceModePillWindow"
+    $StopName = "Local\VoiceModePillStop"
+}
+if ($PrintNames) { Write-Output $MutexName; Write-Output $StopName; exit 0 }
 
-$ScriptPath = $MyInvocation.MyCommand.Path
-$ScriptDir = Split-Path -Parent $ScriptPath
+[void](New-Item -ItemType Directory -Force -Path $Local)
 
 if ($InstallAutostart -or $RemoveAutostart) {
     if (-not $StartupDir) { $StartupDir = [Environment]::GetFolderPath("Startup") }
@@ -112,15 +184,17 @@ $mutex = $null
 try {
     if ([Threading.Thread]::CurrentThread.ApartmentState -ne "STA") { throw "needs an STA thread: run with powershell.exe" }
     $created = $false
-    $mutex = New-Object Threading.Mutex($true, "Local\VoiceModePillWindow", [ref]$created)
+    $mutex = New-Object Threading.Mutex($true, $MutexName, [ref]$created)
     if (-not $created) { Log "another pill window is running; exiting"; $mutex = $null; exit 0 }
 
-    if ($ScriptDir -match '^\\\\wsl(?:\.localhost|\$)\\([^\\]+)(\\.*)$') {
-        if (-not $Distro) { $Distro = $Matches[1] }
-        if (-not $Repo) { $Repo = $Matches[2] -replace '\\', '/' }
+    if (-not $Native) {
+        if ($ScriptDir -match '^\\\\wsl(?:\.localhost|\$)\\([^\\]+)(\\.*)$') {
+            if (-not $Distro) { $Distro = $Matches[1] }
+            if (-not $Repo) { $Repo = $Matches[2] -replace '\\', '/' }
+        }
+        if (-not $Distro -or (-not $Repo -and -not $BackendCommand)) { throw "pass -Distro and -Repo when not run from a \\wsl.localhost path" }
+        if (-not $BackendCommand) { $BackendCommand = "`"$Repo/.venv/bin/python`" `"$Repo/patches/voice_pill.py`" --stdio" }
     }
-    if (-not $Distro -or (-not $Repo -and -not $BackendCommand)) { throw "pass -Distro and -Repo when not run from a \\wsl.localhost path" }
-    if (-not $BackendCommand) { $BackendCommand = "`"$Repo/.venv/bin/python`" `"$Repo/patches/voice_pill.py`" --stdio" }
 
     # A local copy: the page must keep working while the distro is down.
     $ui = Join-Path $Local "ui"
@@ -178,7 +252,7 @@ document.addEventListener('DOMContentLoaded',function(){
   new ResizeObserver(function(){if(c.offsetHeight)window.chrome.webview.postMessage(JSON.stringify({window:{height:c.offsetHeight}}))}).observe(c);
 });";
 
-    string distro, command, local, posFile, logFile; bool force;
+    string distro, command, local, posFile, logFile, exe, args, stopName; bool force, native;
     Window win; IntPtr hwnd; CoreWebView2Controller ctl; Dispatcher ui;
     StreamWriter stdin; Process proc; DateTime startedAt;
     JavaScriptSerializer json = new JavaScriptSerializer();
@@ -207,12 +281,45 @@ document.addEventListener('DOMContentLoaded',function(){
         } catch (Exception) { return -1; }
     }
 
-    public static int Run(string distro, string command, string local, string loader, bool force) {
-        return new VmlPill().Main(distro, command, local, loader, force);
+    // Native mode: VOICEMODE_PILL from the process environment, else voicemode.env in
+    // %USERPROFILE%\.voicemode (its old name .voicemode.env when only that exists), the same
+    // order and file as patches/voice_pill_state.setting. Read here, as UTF-8, CRLF tolerated.
+    public static int NativePillEnabled() {
+        string v = Environment.GetEnvironmentVariable("VOICEMODE_PILL");
+        if (v == null) {
+            string home = Environment.GetEnvironmentVariable("USERPROFILE");
+            if (string.IsNullOrEmpty(home)) home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+            string dir = Path.Combine(home, ".voicemode"), path = Path.Combine(dir, "voicemode.env");
+            string old = Path.Combine(dir, ".voicemode.env");
+            if (!File.Exists(path) && File.Exists(old)) path = old;
+            if (!File.Exists(path)) return 0;
+            string text;
+            try { text = File.ReadAllText(path, new UTF8Encoding(false)); } catch (Exception) { return -1; }
+            v = "";
+            foreach (string raw in text.Split('\n')) {  // patches/voice_pill_state._parse_env
+                string line = raw.Trim();
+                if (line.Length == 0 || line.StartsWith("#") || line.IndexOf('=') < 0) continue;
+                int eq = line.IndexOf('=');
+                string key = line.Substring(0, eq).Trim(), value = line.Substring(eq + 1).Trim();
+                if (key.StartsWith("export ")) key = key.Substring(7).Trim();
+                if (value.Length >= 2 && value[0] == value[value.Length - 1] && (value[0] == '"' || value[0] == '\''))
+                    value = value.Substring(1, value.Length - 2);
+                if (key == "VOICEMODE_PILL") v = value;  // the last one wins
+            }
+        }
+        return v.Trim() == "true" ? 1 : 0;
     }
 
-    int Main(string d, string c, string l, string loader, bool f) {
-        distro = d; command = c; local = l; force = f;
+    int Enabled() { return native ? NativePillEnabled() : PillEnabled(distro); }
+
+    public static int Run(string distro, string command, string exe, string args, string local, string loader,
+                          string stopName, bool force) {
+        return new VmlPill().Main(distro, command, exe, args, local, loader, stopName, force);
+    }
+
+    int Main(string d, string c, string x, string a, string l, string loader, string stop, bool f) {
+        distro = d; command = c; exe = x; args = a; local = l; stopName = stop; force = f;
+        native = !string.IsNullOrEmpty(exe);
         posFile = Path.Combine(local, "pill-position.txt"); logFile = Path.Combine(local, "pill-window.log");
         LoadPosition();
         CoreWebView2Environment.SetLoaderDllFolderPath(loader);
@@ -225,9 +332,10 @@ document.addEventListener('DOMContentLoaded',function(){
         ui.UnhandledException += (s, e) => { Log("FATAL: " + e.Exception); e.Handled = true; exitCode = 2; Shutdown(); };
         Console.CancelKeyPress += (s, e) => { e.Cancel = true; Post(Shutdown); };
         win.Closed += (s, e) => { if (!closing) Shutdown(); };
-        // `voicemode-switch pill off` sets this: the one stop path that needs no backend.
-        var stop = new EventWaitHandle(false, EventResetMode.AutoReset, @"Local\VoiceModePillStop");
-        Background(() => { stop.WaitOne(); Log("stop requested"); Post(Shutdown); });
+        // `voicemode-switch pill off` sets this (WSL), or the native switch: the one stop
+        // path that needs no backend. Named per install natively.
+        var stopEvent = new EventWaitHandle(false, EventResetMode.AutoReset, stopName);
+        Background(() => { stopEvent.WaitOne(); Log("stop requested"); Post(Shutdown); });
         Post(Init);
         Dispatcher.Run();
         return exitCode;
@@ -265,7 +373,15 @@ document.addEventListener('DOMContentLoaded',function(){
     // -- backend -------------------------------------------------------------
     void StartBackend() {
         if (closing) return;
-        var psi = new ProcessStartInfo("wsl.exe", "-d " + distro + " --exec " + command);
+        ProcessStartInfo psi;
+        if (native) {
+            psi = new ProcessStartInfo(exe, args);
+            // Not the caller's folder: voice-mode reads .voicemode.env files walking up from it.
+            psi.WorkingDirectory = local;
+            psi.EnvironmentVariables["PYTHONUTF8"] = "1";  // our reader is UTF-8
+        } else {
+            psi = new ProcessStartInfo("wsl.exe", "-d " + distro + " --exec " + command);
+        }
         psi.UseShellExecute = false; psi.CreateNoWindow = true;
         psi.RedirectStandardInput = psi.RedirectStandardOutput = psi.RedirectStandardError = true;
         psi.StandardOutputEncoding = psi.StandardErrorEncoding = Encoding.UTF8;
@@ -290,7 +406,7 @@ document.addEventListener('DOMContentLoaded',function(){
             }
             p.WaitForExit();
             int code = p.ExitCode, n = lines;
-            bool off = !force && !closing && PillEnabled(distro) == 0;
+            bool off = !force && !closing && Enabled() == 0;
             Post(() => OnExit(code, n, off));
         });
     }
@@ -326,7 +442,7 @@ document.addEventListener('DOMContentLoaded',function(){
         t.Tick += (s, e) => {
             t.Stop();
             Background(() => {
-                bool off = !force && !closing && PillEnabled(distro) == 0;
+                bool off = !force && !closing && Enabled() == 0;
                 Post(() => { if (off) { Log("VOICEMODE_PILL is off; exiting"); Shutdown(); } else StartBackend(); });
             });
         };
@@ -406,7 +522,7 @@ document.addEventListener('DOMContentLoaded',function(){
         System.Drawing.Icon icon;
         if (trayIcons.TryGetValue(phase, out icon)) return icon;
         var colour = phase == "speaking" ? System.Drawing.Color.FromArgb(139, 92, 246)
-            : phase == "listening" ? System.Drawing.Color.FromArgb(13, 148, 136) : System.Drawing.Color.FromArgb(148, 163, 184);
+            : phase == "listening" || phase == "holding" ? System.Drawing.Color.FromArgb(13, 148, 136) : System.Drawing.Color.FromArgb(148, 163, 184);
         using (var bmp = new System.Drawing.Bitmap(32, 32))
         using (var g = System.Drawing.Graphics.FromImage(bmp))
         using (var brush = new System.Drawing.SolidBrush(colour)) {
@@ -576,12 +692,17 @@ document.addEventListener('DOMContentLoaded',function(){
 '@
 
     if (-not $Force) {
-        $on = [VmlPill]::PillEnabled($Distro)
+        if ($Native) { $on = [VmlPill]::NativePillEnabled() } else { $on = [VmlPill]::PillEnabled($Distro) }
         if ($on -eq 0) { Log "VOICEMODE_PILL is not true; exiting"; exit 0 }
-        if ($on -lt 0) { Log "could not read VOICEMODE_PILL from WSL; starting anyway" }
+        if ($on -lt 0) { Log "could not read VOICEMODE_PILL; starting anyway" }
     }
-    Log "pill window starting: distro=$Distro backend=$BackendCommand"
-    $code = [VmlPill]::Run($Distro, $BackendCommand, $Local, $wv2, [bool]$Force)
+    if ($Native) {
+        Log "pill window starting: native backend=$BackendExe $BackendArgs data=$Local"
+        $code = [VmlPill]::Run("", "", $BackendExe, $BackendArgs, $Local, $wv2, $StopName, [bool]$Force)
+    } else {
+        Log "pill window starting: distro=$Distro backend=$BackendCommand"
+        $code = [VmlPill]::Run($Distro, $BackendCommand, "", "", $Local, $wv2, $StopName, [bool]$Force)
+    }
     Log "pill window stopped: code $code"
     exit $code
 } catch {

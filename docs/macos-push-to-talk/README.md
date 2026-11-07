@@ -10,15 +10,16 @@
 |--------------|----------------------------------------|
 | Status       | Complete                               |
 | Created      | 2026-10-20                             |
-| Last Updated | 2026-10-20                             |
+| Last Updated | 2026-11-07 (tap/hold rule)             |
 | Project      | voicemode-local (macOS, Terminal.app)  |
 
 ## Keys
 
 | Key | During a voice call | No call running (idle prompt) |
 |-----|---------------------|-------------------------------|
-| Control-Option-Space, **tap** | `skip_forward`: cuts the reply / ends your turn | **Wake**: last session starts recording you |
-| Control-Option-Space, **hold** (>1s) | `hold_start` … `hold_end`: cuts the reply, mic open until release, no silence cut-off, plus a 0.35s tail | (wake, as tap) |
+| Control-Option-Space, **key down** | `hold_start` at once: cuts the reply (also while it is still being generated), mic open, no silence cut-off | nothing yet |
+| … released after 0.8s (**hold**) | `hold_end` after a 0.35s tail: what you said is transcribed and answered | **Wake** only: the last session is asked to listen; **talk after the listening chime** (measured live 2026-11-07, wake to listening 6 s and 11 s, n=2; words spoken during the hold are lost by design) |
+| … released within 0.8s (**tap**) | `stop` (hint switch-to-text): full stop, the recording is dropped, the agent continues in text | nothing |
 | Control-Option-Escape | `stop`: reply cut, no listening, `converse` returns `[control: stop]`, agent continues in text | nothing |
 
 Other keys in this setup: **Option-Space** is Handy (system-wide dictation into any text field).
@@ -35,8 +36,11 @@ Other keys in this setup: **Option-Space** is Handy (system-wide dictation into 
    Monitoring. Without it the event tap gets nothing and PTT is silently inert.
 4. Restart Claude Code / reconnect the voicemode MCP.
 
+The 0.8s is `TAP_MAX_S` in `patches/ptt_core.py`, the same on every platform (Robert,
+2026-11-07). `VOICEMODE_PTT_HOLD_THRESHOLD` is gone: the hold starts on key-down.
+
 Environment knobs: `VOICEMODE_PTT_MACOS_MODIFIERS` (default `ctrl,alt`),
-`VOICEMODE_PTT_HOLD_THRESHOLD` (1.0s), `VOICEMODE_PTT_RELEASE_TAIL` (0.35s),
+`VOICEMODE_PTT_RELEASE_TAIL` (0.35s),
 `VOICEMODE_PTT_WAKE=false`, `VOICEMODE_PTT_ENABLED=false` (no listener at all).
 
 Files: log `~/.voicemode/logs/ptt-listener.log`, pid `~/.voicemode/run/ptt-listener.pid`.
@@ -55,10 +59,10 @@ Files: log `~/.voicemode/logs/ptt-listener.log`, pid `~/.voicemode/run/ptt-liste
      (`ps -o tty=`). Detached or stale servers show `??` and are skipped.
   2. Wait until Control/Option are physically released.
   3. AppleScript selects the Terminal.app tab whose `tty` matches exactly (no window-title
-     guessing), `do script` types `[push-to-talk] listen now (converse, skip_tts=true)`, then
+     guessing), `do script` types `[push-to-talk] converse message="Listening."`, then
      System Events presses Return.
-  4. Claude Code receives that as a user message; the agent calls `converse` with `skip_tts=true`
-     and records immediately.
+  4. Claude Code receives that as a user message; the agent calls `converse` with `message="Listening."`,
+     which is spoken as the cue, and then listens. Talk after you hear "Listening."
 
 ## Pitfalls found while building it (2026-10-20)
 
@@ -68,6 +72,7 @@ Files: log `~/.voicemode/logs/ptt-listener.log`, pid `~/.voicemode/run/ptt-liste
 | Hold during a reply did nothing; only a tap cut it | Kokoro on macOS plays through `streaming.py`, which `patch_hold_barges_in` did not cover | Patch extended to both streaming loops |
 | Control-Option-Escape "stopped" voice by killing the tool call | Escape reached Claude Code, which interrupts the running tool | Swallow both hotkeys; send the control-channel `stop` |
 | Wake line typed but never submitted | A 127-char line is taken as a **paste** by Claude Code, and the Return after it does not send | Keep `WAKE_TEXT` short (~50 chars) |
+| Woken agent got `converse needs either message ... or a non-empty turns list` (2026-11-07, n=1) | The old wake line `listen now (converse, skip_tts=true)` named no message; voice-mode 8.12's converse refuses a call with neither | `WAKE_TEXT` now names one: `message="Listening."` (58 chars; skip_tts keeps it silent) |
 | Same, while the key was still held | Return pressed under held Control-Option arrives as Control-Option-Return | Wait for modifier release before typing and pressing Return |
 | Wake line typed 3–5 times | Key auto-repeat re-fired the wake while held | Wake only on a fresh press |
 | `do script` text alone never submits | Its newline lands in Claude Code's input box rather than submitting | Real Return via System Events |

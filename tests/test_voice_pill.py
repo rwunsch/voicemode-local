@@ -13,6 +13,7 @@ import sys
 import tempfile
 import threading
 import time
+import types
 from pathlib import Path
 
 import pytest
@@ -42,7 +43,12 @@ def sock_dir():
 
 
 @pytest.fixture
-def ctx(tmp_path, sock_dir):
+def ctx(tmp_path, sock_dir, monkeypatch):
+    # Settings are read from the environment first. Importing the installed voice_mode
+    # elsewhere in the run loads the real voicemode.env into os.environ: keep it out.
+    for key in ("VOICEMODE_VOICE_BARGE", "VOICEMODE_AUDIO_FEEDBACK", "VOICEMODE_PILL",
+                "VOICEMODE_BARGE_CONTROL_COMMAND", "VOICEMODE_BASE_DIR"):
+        monkeypatch.delenv(key, raising=False)
     return vp.Context(base=tmp_path / "pill", home=tmp_path / "vm",
                       sock=sock_dir / "control.sock", switch=None)
 
@@ -124,6 +130,9 @@ def sess(pid, label="s", started_at=1.0, voice="af_heart"):
 @pytest.mark.parametrize("status,paused,sessions,phase", [
     ({"speaking": True, "listening": True}, True, [sess(1)], "paused"),
     ({"speaking": True, "listening": True}, False, [sess(1)], "speaking"),
+    # push-to-talk key down (2026-11-07): the hold is what the user is doing right now
+    ({"holding": True, "speaking": True, "listening": True}, False, [sess(1)], "holding"),
+    ({"holding": True}, True, [sess(1)], "paused"),
     ({"listening": True}, False, [sess(1)], "listening"),
     ({}, False, [sess(1)], "working"),
     ({}, False, [], "idle"),
@@ -182,7 +191,53 @@ def test_voice_and_language_come_from_floor_override():
     assert (s["voice"], s["language"]) == ("bm_george", "German")
     s = snap(sessions=[sess(10, voice="af_heart")],
              conch={"holder": {"pid": 10, "label": "a", "voice": None}, "waiters": []})
-    assert (s["voice"], s["language"]) == ("af_heart", None)
+    assert (s["voice"], s["language"]) == ("af_heart", "English")  # derived from the voice
+
+
+def test_language_is_derived_from_the_voice_when_no_override():
+    for voice, lang in (("dm_martin", "German"), ("p_de_thorsten", "German"), ("p_de_eva", "German"),
+                        ("am_puck", "English"), ("bf_emma", "English"), ("weird", "English")):
+        s = snap(sessions=[sess(10, voice=voice)],
+                 conch={"holder": {"pid": 10, "label": "a", "voice": None}, "waiters": []})
+        assert s["language"] == lang, voice
+
+
+def test_override_language_beats_the_derived_one():
+    s = snap(sessions=[sess(10, voice="af_heart")],
+             conch={"holder": {"pid": 10, "label": "a", "voice": None}, "waiters": []},
+             overrides={10: {"language": "German"}})
+    assert s["language"] == "German"
+
+
+def test_no_floor_shows_the_default_voice_and_english():
+    s = snap(default_voice="am_puck")
+    assert (s["floor"], s["voice"], s["language"]) == (None, "am_puck", "English")
+    s = snap(default_voice="dm_martin")
+    assert (s["voice"], s["language"]) == ("dm_martin", "German")
+
+
+def test_floor_without_a_voice_falls_back_to_the_default_voice():
+    s = snap(sessions=[sess(10, voice=None)], last_floor={"pid": 10, "label": "a"}, default_voice="am_puck")
+    assert s["voice"] == "am_puck"
+
+
+def test_default_voice_reads_first_of_voices_then_tts_voice_then_am_puck(tmp_path, monkeypatch):
+    for k in ("VOICEMODE_VOICES", "VOICEMODE_TTS_VOICE"):
+        monkeypatch.delenv(k, raising=False)
+    assert st.default_voice(tmp_path) == "am_puck"
+    (tmp_path / "voicemode.env").write_text("VOICEMODE_TTS_VOICE=bf_emma\n")
+    assert st.default_voice(tmp_path) == "bf_emma"
+    (tmp_path / "voicemode.env").write_text("VOICEMODE_TTS_VOICE=bf_emma\nVOICEMODE_VOICES=am_adam, af_sky\n")
+    assert st.default_voice(tmp_path) == "am_adam"
+
+
+def test_gather_without_sessions_shows_the_configured_default(ctx, monkeypatch):
+    for k in ("VOICEMODE_VOICES", "VOICEMODE_TTS_VOICE"):
+        monkeypatch.delenv(k, raising=False)
+    ctx.home.mkdir(parents=True, exist_ok=True)
+    (ctx.home / "voicemode.env").write_text("VOICEMODE_VOICES=bm_george,af_sky\n")
+    s = vp.gather(ctx)
+    assert (s["voice"], s["language"]) == ("bm_george", "English")
 
 
 def test_snapshot_shape_and_json_serialisable():
@@ -190,7 +245,8 @@ def test_snapshot_shape_and_json_serialisable():
              barge={"enabled": True, "available": False, "count": 2})
     assert json.loads(json.dumps(s)) == s
     assert set(s) == {"visible", "phase", "floor", "sessions", "voice", "language",
-                      "barge", "beeps", "platform", "ui"}
+                      "barge", "beeps", "platform", "ui", "play", "wake"}
+    assert s["play"] is None and s["wake"] is None
     assert s["platform"] == "mac" and s["ui"] == {"docked": True}
     assert s["barge"] == {"enabled": True, "available": False, "count": 2}
 
@@ -319,12 +375,47 @@ def test_set_voice_and_language_apply_to_floor_only(ctx, child):
     two_sessions(ctx, child)
     vp.handle_command({"cmd": "set_voice", "voice": "bm_george"}, ctx)
     vp.handle_command({"cmd": "set_language", "language": "German"}, ctx)
-    assert st.get_override(child.pid, ctx.base) == {"voice": "bm_george", "language": "German"}
+    # German never keeps an English voice: the voice moves with the language
+    assert st.get_override(child.pid, ctx.base) == {"voice": "dm_martin", "language": "German"}
     assert st.get_override(os.getpid(), ctx.base) == {}
     s = vp.gather(ctx)
-    assert (s["voice"], s["language"]) == ("bm_george", "German")
+    assert (s["voice"], s["language"]) == ("dm_martin", "German")
     vp.handle_command({"cmd": "set_language", "language": ""}, ctx)
-    assert st.get_override(child.pid, ctx.base) == {"voice": "bm_george"}
+    assert st.get_override(child.pid, ctx.base) == {"voice": "dm_martin"}
+
+
+def test_set_language_keeps_a_voice_that_already_fits(ctx, child):
+    two_sessions(ctx, child)
+    vp.handle_command({"cmd": "set_voice", "voice": "p_de_eva"}, ctx)
+    vp.handle_command({"cmd": "set_language", "language": "German"}, ctx)
+    assert st.get_override(child.pid, ctx.base) == {"voice": "p_de_eva", "language": "German"}
+
+
+def test_set_language_english_sets_the_configured_default_voice(ctx, child, monkeypatch):
+    monkeypatch.delenv("VOICEMODE_VOICES", raising=False)
+    monkeypatch.delenv("VOICEMODE_TTS_VOICE", raising=False)
+    ctx.home.mkdir(parents=True, exist_ok=True)
+    (ctx.home / "voicemode.env").write_text("VOICEMODE_VOICES=bm_george,af_sky\n")
+    two_sessions(ctx, child)
+    vp.handle_command({"cmd": "set_voice", "voice": "dm_martin"}, ctx)
+    vp.handle_command({"cmd": "set_language", "language": "English"}, ctx)
+    assert st.get_override(child.pid, ctx.base) == {"voice": "bm_george", "language": "English"}
+
+
+def test_set_language_english_without_configuration_uses_am_puck(ctx, child, monkeypatch):
+    monkeypatch.delenv("VOICEMODE_VOICES", raising=False)
+    monkeypatch.delenv("VOICEMODE_TTS_VOICE", raising=False)
+    two_sessions(ctx, child)
+    vp.handle_command({"cmd": "set_voice", "voice": "p_de_thorsten"}, ctx)
+    vp.handle_command({"cmd": "set_language", "language": "English"}, ctx)
+    assert st.get_override(child.pid, ctx.base) == {"voice": "am_puck", "language": "English"}
+
+
+def test_set_language_english_keeps_an_english_voice(ctx, child):
+    two_sessions(ctx, child)
+    vp.handle_command({"cmd": "set_voice", "voice": "bf_emma"}, ctx)
+    vp.handle_command({"cmd": "set_language", "language": "English"}, ctx)
+    assert st.get_override(child.pid, ctx.base) == {"voice": "bf_emma", "language": "English"}
 
 
 def test_save_ui_round_trips_into_snapshot(ctx):
@@ -334,10 +425,12 @@ def test_save_ui_round_trips_into_snapshot(ctx):
 
 # -- barge ------------------------------------------------------------------
 
-def test_barge_available_follows_parec(ctx, monkeypatch):
-    monkeypatch.setattr(shutil, "which", lambda n: None)
+def test_barge_available_follows_capture_backend(ctx, monkeypatch):
+    st._barge_probe_reset()
+    monkeypatch.setattr(st, "capture_backend", lambda: None)
+    monkeypatch.setattr(st, "barge_interpreter", lambda: None)
     assert vp.gather(ctx)["barge"]["available"] is False
-    monkeypatch.setattr(shutil, "which", lambda n: "/usr/bin/parec")
+    monkeypatch.setattr(st, "capture_backend", lambda: "parec")
     assert vp.gather(ctx)["barge"]["available"] is True
 
 
@@ -564,3 +657,111 @@ def test_a_failed_barge_toggle_reaches_the_log(ctx, tmp_path, capfd):
     ctx.barge_thread.join(5)
     out, err = capfd.readouterr()
     assert "no model" in err and "no model" not in out  # stdout is the protocol
+
+
+def test_a_held_key_polls_at_the_turn_rate(monkeypatch):
+    import io
+    monkeypatch.setattr(vp, "gather", lambda ctx: {"phase": "holding"})
+    assert vp._emit(None, io.StringIO()) == vp.TURN_INTERVAL_S
+
+
+# -- Play: wake the last voice session (session_wake) --------------------------
+
+class FakeWake:
+    """Stands in for session_wake: never touches a real Claude Code session."""
+
+    def __init__(self, target=("demo", 4242), result=(True, "sent"), on=True):
+        self.target, self.result, self.on = target, result, on
+        self.calls, self.status = [], "idle"
+
+    def enabled(self, home=None):
+        return self.on
+
+    def last_voice_session(self, **kw):
+        if self.target is None:
+            return None
+        label, pid = self.target
+        return types.SimpleNamespace(voice_pid=1, claude_pid=pid, label=label)
+
+    def wake(self, target_claude_pid=None, reason="ptt"):
+        self.calls.append((target_claude_pid, reason))
+        return self.result
+
+    def registry_status(self, pid, cdir=None):
+        return self.status
+
+
+@pytest.fixture
+def fake_wake(monkeypatch):
+    fw = FakeWake()
+    monkeypatch.setattr(vp, "sw", fw)
+    return fw
+
+
+def test_snapshot_carries_play_and_wake():
+    s = snap(play={"label": "demo"}, wake={"text": "Woke demo", "ok": True})
+    assert s["play"] == {"label": "demo"} and s["wake"] == {"text": "Woke demo", "ok": True}
+
+
+def test_gather_offers_play_for_the_last_voice_session(ctx, fake_wake):
+    assert vp.gather(ctx)["play"] == {"label": "demo"}
+
+
+def test_gather_offers_no_play_without_a_session(ctx, fake_wake):
+    fake_wake.target = None
+    assert vp.gather(ctx)["play"] is None
+
+
+def test_gather_offers_no_play_when_the_setting_is_off(ctx, fake_wake):
+    fake_wake.on = False
+    assert vp.gather(ctx)["play"] is None
+
+
+def test_wake_wakes_the_last_voice_session_with_reason_wake(ctx, fake_wake):
+    vp.handle_command({"cmd": "wake"}, ctx)
+    assert fake_wake.calls == [(4242, "wake")]
+    assert vp.gather(ctx)["wake"] == {"text": 'Waking demo\u2026 listen for "Listening."', "ok": True}
+
+
+def test_old_play_command_still_wakes(ctx, fake_wake):
+    vp.handle_command({"cmd": "play"}, ctx)
+    assert fake_wake.calls == [(4242, "wake")]
+
+
+def test_play_refused_says_why(ctx, fake_wake):
+    fake_wake.result = (False, "busy")
+    vp.handle_command({"cmd": "play"}, ctx)
+    assert vp.gather(ctx)["wake"] == {"text": "Can't wake demo: busy", "ok": False}
+
+
+def test_play_without_a_session(ctx, fake_wake):
+    fake_wake.target = None
+    vp.handle_command({"cmd": "play"}, ctx)
+    assert fake_wake.calls == []
+    assert vp.gather(ctx)["wake"]["text"] == "No voice session to wake"
+
+
+def test_no_answer_when_the_session_stays_idle_for_5_s(ctx, fake_wake):
+    vp.handle_command({"cmd": "wake"}, ctx)
+    t0 = ctx.wake["at"]
+    assert vp.wake_view(ctx, t0 + 4.9) == {"text": 'Waking demo\u2026 listen for "Listening."', "ok": True}
+    assert vp.wake_view(ctx, t0 + 5.1) == {"text": "No answer from demo", "ok": False}
+    assert vp.wake_view(ctx, t0 + 30) is None
+
+
+def test_busy_within_5_s_is_an_answer(ctx, fake_wake):
+    vp.handle_command({"cmd": "wake"}, ctx)
+    t0 = ctx.wake["at"]
+    assert vp.wake_view(ctx, t0 + 1)["text"].startswith("Waking demo")
+    fake_wake.status = "busy"
+    assert vp.wake_view(ctx, t0 + 2)["text"] == "Woke demo"
+    fake_wake.status = "idle"  # the turn may end again; it did answer
+    assert vp.wake_view(ctx, t0 + 6)["text"] == "Woke demo"
+    assert vp.wake_view(ctx, t0 + 30) is None
+
+
+def test_play_without_session_wake_installed_is_harmless(ctx, monkeypatch):
+    monkeypatch.setattr(vp, "sw", None)
+    vp.handle_command({"cmd": "play"}, ctx)
+    s = vp.gather(ctx)
+    assert s["play"] is None

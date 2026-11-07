@@ -1,0 +1,8 @@
+# Copied from felix-framework plugins/voicemode/runtime/requirements.in at commit aea841ffd.
+# Top-level packages for FELIX's private voice runtime. Regenerate the lock with:
+#   uv pip compile requirements.in --override overrides.txt --generate-hashes \
+#     --universal --python-version 3.12 -o requirements.lock
+voice-mode==8.12.0
+kokoro-onnx==0.4.9
+soundfile==0.13.1
+numpy==2.2.6

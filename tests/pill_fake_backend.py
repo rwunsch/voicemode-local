@@ -6,13 +6,17 @@ Each second it emits <dir>/state.json merged over a default snapshot, and append
 every line received on stdin to <dir>/commands.log. Voice, language, barge and beeps commands
 take effect in what it emits, so those controls hold when clicked. <dir>/startup_exit, if present,
 holds an exit code to use at once, before printing anything (a refused second instance
-exits 1 this way). <dir>/exit_now does the same after output has started, and is deleted
-first. It touches no voice-mode state, opens no mic and plays no audio.
+exits 1 this way). <dir>/go_silent, if present, makes it stop writing after its next line while
+staying alive. <dir>/exit_now does the same after output has started, and is deleted
+first. It touches no voice-mode state, opens no mic and plays no audio. Runs on Linux and on
+Windows (stdin is read by a thread there).
 """
 import json
 import os
+import queue
 import select
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -42,6 +46,33 @@ def apply_command(line: bytes, live: dict) -> None:
         live["barge"] = {**DEFAULT["barge"], "enabled": bool(msg.get("on"))}
 
 
+_chunks = None
+
+
+def read_stdin(timeout: float):
+    """Bytes from stdin, b"" at EOF, None when nothing came within timeout. Windows' select
+    takes only sockets, so there a thread reads stdin into a queue."""
+    global _chunks
+    if sys.platform != "win32":
+        ready, _, _ = select.select([0], [], [], timeout)
+        return os.read(0, 65536) if ready else None
+    if _chunks is None:
+        _chunks = queue.Queue()
+
+        def pump():
+            while True:
+                data = os.read(0, 65536)
+                _chunks.put(data)
+                if not data:
+                    return
+
+        threading.Thread(target=pump, daemon=True).start()
+    try:
+        return _chunks.get(timeout=timeout)
+    except queue.Empty:
+        return None
+
+
 def main(folder: str) -> int:
     d = Path(folder)
     d.mkdir(parents=True, exist_ok=True)
@@ -59,14 +90,16 @@ def main(folder: str) -> int:
         except (OSError, ValueError):
             state = {}
         print(json.dumps({**DEFAULT, **state, **live}), flush=True)
+        if (d / "go_silent").exists():  # alive but writes nothing more: the hang the watchdog is for
+            while True:
+                time.sleep(3600)
         stop = d / "exit_now"
         if stop.exists():
             code = int(stop.read_text().strip() or 1)
             stop.unlink()
             return code
-        ready, _, _ = select.select([0], [], [], 1.0)
-        if ready:
-            chunk = os.read(0, 65536)
+        chunk = read_stdin(1.0)
+        if chunk is not None:
             if not chunk:
                 with (d / "runs.log").open("a") as f:
                     f.write(f"{time.time():.1f} stdin EOF\n")

@@ -241,3 +241,60 @@ def test_pill_backend_pattern_matches_only_the_backend():
                  "/bin/bash -c python3 /repo/patches/voice_pill.py",
                  "/repo/.venv/bin/python -m pytest /repo/tests/test_voice_pill.py"):
         assert not re.search(pattern, line), line
+
+
+# --- barge on/off/status and the control channel -------------------------------
+
+def _run_barge(tmp_path: Path, action: str, env_text: str = ""):
+    """Run `barge <action>` against a fake HOME with a stub Silero model and stubbed services."""
+    import hashlib
+    root, home, bin_dir, scratch = (tmp_path / n for n in ("app", "home", "bin", "scratch"))
+    for d in (root, home / ".voicemode-local", home / ".voicemode", bin_dir, scratch):
+        d.mkdir(parents=True, exist_ok=True)
+    model = root / "models/silero/silero_vad.onnx"
+    model.parent.mkdir(parents=True, exist_ok=True)
+    model.write_bytes(b"stub")
+    sha = hashlib.sha256(b"stub").hexdigest()
+    text = SWITCH.read_text().replace("/tmp/", f"{scratch}/")
+    text = re.sub(r'SILERO_SHA256="[0-9a-f]+"', f'SILERO_SHA256="{sha}"', text)
+    script = root / "voicemode-switch"
+    script.write_text(text)
+    script.chmod(0o755)
+    _stub(root / ".venv/bin/python", "exit 0")
+    _stub(bin_dir / "curl", "exit 1")
+    _stub(bin_dir / "docker", "exit 0")
+    (home / ".voicemode-local/config").write_text("KOKORO_ONNX=false\n")
+    env_file = home / ".voicemode/voicemode.env"
+    env_file.write_text("VOICEMODE_TTS_BASE_URLS=http://127.0.0.1:8880/v1\n" + env_text)
+    env = {**os.environ, "HOME": str(home), "PATH": f"{bin_dir}:{os.environ['PATH']}"}
+    done = subprocess.run([str(script), "barge", action], env=env, capture_output=True, text=True, timeout=30)
+    return done, env_file.read_text()
+
+
+def test_barge_on_also_turns_the_control_channel_on(tmp_path):
+    # Without the channel the trigger's barge_in never reaches the server: barge is inert.
+    done, env = _run_barge(tmp_path, "on")
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert "VOICEMODE_VOICE_BARGE=true\n" in env
+    assert "VOICEMODE_CONTROL_CHANNEL_ENABLED=true\n" in env
+
+
+def test_barge_on_replaces_a_false_channel_without_duplicates(tmp_path):
+    _, env = _run_barge(tmp_path, "on", "VOICEMODE_CONTROL_CHANNEL_ENABLED=false\n")
+    assert env.count("VOICEMODE_CONTROL_CHANNEL_ENABLED=") == 1
+    assert "VOICEMODE_CONTROL_CHANNEL_ENABLED=true\n" in env
+
+
+def test_barge_off_leaves_the_control_channel_on(tmp_path):
+    # The pill and push-to-talk use the channel too.
+    done, env = _run_barge(tmp_path, "off", "VOICEMODE_VOICE_BARGE=true\nVOICEMODE_CONTROL_CHANNEL_ENABLED=true\n")
+    assert done.returncode == 0
+    assert "VOICEMODE_VOICE_BARGE=false\n" in env
+    assert "VOICEMODE_CONTROL_CHANNEL_ENABLED=true\n" in env
+
+
+def test_barge_status_prints_the_channel_state(tmp_path):
+    done, _ = _run_barge(tmp_path, "status", "VOICEMODE_VOICE_BARGE=true\nVOICEMODE_CONTROL_CHANNEL_ENABLED=true\n")
+    assert "Control channel: enabled" in done.stdout
+    done, _ = _run_barge(tmp_path / "b", "status", "VOICEMODE_VOICE_BARGE=true\n")
+    assert "Control channel: disabled" in done.stdout

@@ -15,9 +15,8 @@
   <div class="row top">
     <div id="drag" class="drag"><div class="orb"></div><b id="sub" class="name"></b><span id="waiting" class="waiting"></span></div>
     <div id="label" class="state">Disconnected</div>
-    <button id="interrupt" class="btn pic" title="Interrupt" aria-label="Interrupt">&#x23ED;&#xFE0E;</button>
-    <button id="pause" class="btn pic" title="Pause" aria-label="Pause">&#x23F8;&#xFE0E;</button>
-    <button id="stop" class="btn stop pic" title="Stop" aria-label="Stop">&#x25A0;&#xFE0E;</button>
+    <button id="main" class="btn pic main" title="Stop" aria-label="Stop"><span id="mainStop">&#x25A0;&#xFE0E;</span><span id="mainWake" class="wakeicon" hidden><svg class="sun" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M3 19h18"/><path d="M7 19a5 5 0 0 1 10 0"/><path d="M12 7.5v2.5"/><path d="M5.6 11.6l1.8 1.8"/><path d="M18.4 11.6l-1.8 1.8"/></svg></span></button>
+    <button id="pause" class="btn pic" title="Pause" aria-label="Pause" hidden>&#x23F8;&#xFE0E;</button>
     <button id="expand" class="btn icon" title="Expand" aria-label="Expand" aria-expanded="false">&#x2304;</button>
     <button id="dockTop" class="btn icon" title="Dock to the side" aria-label="Dock to the side">&#x203A;</button>
     <button id="minimize" class="btn icon" title="Minimize" aria-label="Minimize">_</button>

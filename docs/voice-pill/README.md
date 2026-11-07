@@ -7,7 +7,7 @@
 
 | Field | Value |
 |---|---|
-| Status | Released, off by default. WSL backend only; native Windows is next. Open checks are listed below |
+| Status | Released, off by default. WSL backend; a native Windows mode (no WSL) since 2026-11-06, started by the native launcher. Open checks are listed below |
 | Last updated | 2026-11-05 |
 | Measured on | Windows build 26200, PowerShell 5.1, WebView2 Runtime 156, one 1920x1080 monitor at 100% scale |
 
@@ -52,9 +52,77 @@ Files are in `%LOCALAPPDATA%\voicemode-local`: `webview2\` (two DLLs), `webview2
   window exits and logs why. If one has, it stays up and the page shows Disconnected. Exit 1
   after output is treated as a crash and restarted, on the expectation that `wsl --terminate`
   may look like that (not measured).
+- **Push-to-talk** (2026-11-07): while the key is down the pill shows **Holding…** (phase
+  `holding`, from the `holding` field patch_ptt_instant adds to the server's status reply,
+  above Speaking and Listening, green like Listening). The keys hint reads `tap: stop, hold:
+  talk` on every platform: key down cuts the reply and opens the mic, a release within 0.8 s
+  stops (back to text), a later one sends what you said.
+- **Wake and the button layout** (2026-11-07, Robert's decision: a play and a stop button
+  together make no sense, and Skip is dropped). The pill has one main button in the leftmost
+  spot that switches state, and Pause beside it:
+
+  | State | Main button (spot 1) | Spot 2 |
+  |---|---|---|
+  | between turns (idle, between turns, stopped), a last voice session exists, wake enabled | **Wake**: a line-art sunrise (half sun on a horizon with short rays, inline SVG), title `Wake <label>` | hidden |
+  | a voice turn is running | **Stop** (square) | Pause (pause icon) |
+  | paused | Stop | Resume, shown as the play/pause icon (not a plain play) |
+
+  With no session to wake the main button stays Stop (disabled without a floor). There is no
+  Skip button; the backend `interrupt` command still works for other callers (push-to-talk).
+  Wake sends `{"cmd":"wake"}` (the old `{"cmd":"play"}` still works); the backend calls
+  `session_wake.wake(<claude pid>, "wake")`, which asks that Claude Code session, through its
+  own session socket, to call converse with `message="Listening."` and
+  `wait_for_response=true`. The woken session therefore SPEAKS "Listening." and then
+  listens (a silent wake was measured on the Mac 2026-11-07, n=1, beeps on). While the wake is
+  pending the state text shows `Waking <label>... listen for "Listening."` (until the
+  session's registry status turns `busy` or 5 s pass), then `Woke <label>`, or
+  `Can't wake <label>: <why>` (busy, waiting for a permission answer, rate limited, ...). If
+  the status has not turned `busy` within 5 s it shows `No answer from <label>`. Like an
+  idle push-to-talk hold, Wake only wakes: talk after you hear "Listening.", which took 6 s
+  and 11 s to arrive when measured live 2026-11-07 (n=2). (The pill shows its own Wake
+  wakes only; a push-to-talk wake is not shown.) The last voice session is
+  the newest live conch holder in voice-mode's events log, then the pill's own session
+  records; its voice-server pid is mapped up its parents to the claude pid. Hidden when
+  `VOICEMODE_SESSION_WAKE=off`. Same rules and caveats as the push-to-talk wake
+  (docs/windows-push-to-talk): undocumented protocol, idle sessions only, one per 5 s,
+  logged to `~/.voicemode/logs/session-wake.log`, Windows named pipe UNVERIFIED.
 - **Stopping** needs no backend: the window waits on a `Local\VoiceModePillStop` event, which
   `pill off` sets through `powershell.exe`. The flag is also read when a backend exits and
   before each retry.
+
+## Windows native (no WSL)
+
+The native launcher (`scripts/windows/voicemode_native.py`, see `docs/windows-native/README.md`)
+starts the same window in native mode when `VOICEMODE_PILL=true`:
+
+```
+powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File pill-windows.ps1 ^
+  -BackendExe <runtime>\.venv\Scripts\python.exe -BackendArgs "-m voice_mode.voice_pill --stdio" ^
+  -DataDir <native root>\pill
+```
+
+- **When.** Native mode is chosen when `-BackendExe` is given, or when there is no `-Distro`
+  and the script is not on a `\\wsl` path. Every WSL start today passes neither, so it stays
+  WSL. Passing both `-Distro` and `-BackendExe` is refused.
+- **Backend.** Started directly: `-BackendExe` with `-BackendArgs`, one Windows command line.
+  No `wsl.exe`, no `python3` lookup. Its working folder is `-DataDir`, so no project
+  `.voicemode.env` near the caller is read. Same JSON lines on stdin and stdout, same EOF
+  shutdown, same restart rules as WSL.
+- **On or off.** `VOICEMODE_PILL` from the window's environment first, then
+  `%USERPROFILE%\.voicemode\voicemode.env`, read in the window's own process as UTF-8 (BOM and
+  CRLF fine; the last line wins). That is the order and file of `voice_pill_state.setting`,
+  which the launcher uses too. `VOICEMODE_BASE_DIR` does not move that file, as on WSL.
+- **One pill per install.** Its files (log, position, page copy, WebView2 DLLs,
+  `webview2-data`) go to `-DataDir`, required natively. Its mutex and stop event are
+  `Local\VoiceModePillWindow-<12 hex>` and `Local\VoiceModePillStop-<12 hex>`, from SHA-256 of
+  the folder's full long path (`GetFullPath`, 8.3 names expanded, trailing slashes dropped,
+  lowercased, UTF-8), so any spelling of the folder gives the same names. `pill_stop_event(root)` in
+  the launcher gives the same stop name; set that event to close the window.
+  `pill-windows.ps1 -DataDir <dir> -BackendExe x -PrintNames` prints both names.
+- **WSL unchanged.** WSL mode keeps `%LOCALAPPDATA%\voicemode-local` and the two fixed names,
+  which `voicemode-switch pill off` relies on.
+- **Hidden start.** The launcher starts the window with `CREATE_NO_WINDOW`. It still shows,
+  and it does not take focus (measured, below).
 
 ## What was checked
 
@@ -101,19 +169,46 @@ now shows by colour only. Whether the old or new cost affects stutter was not me
 
 - [ ] Pill appears on a real `converse`
 - [ ] States change correctly in a real turn
-- [ ] Interrupt, Pause, Resume and Stop work in a real turn
+- [ ] Pause, Resume and Stop work in a real turn; Wake shows the sunrise between turns and the woken session says "Listening."
 - [ ] Closing the window while paused releases Pause in a real turn
 - [ ] No new stutter under a voice turn (`voicemode-perf`)
 
 ## Known issues
 
-- After Interrupt or Stop, the player's stop call was seen blocking for about 6 s and once 36 s, under load 12 to 20 (2026-11-05, n=2). A silent test of the same call returned in about 0.1 s, n=3. Cause unknown; whether sound continued is not recorded.
-- No Play button or Windows push-to-talk wake yet. A stopped session gets going again when you ask it in its terminal. An agent stayed quiet after Stop, n=1, headless.
+- After Stop (or the old Interrupt), the player's stop call was seen blocking for about 6 s and once 36 s, under load 12 to 20 (2026-11-05, n=2). A silent test of the same call returned in about 0.1 s, n=3. Cause unknown; whether sound continued is not recorded.
+- No Windows push-to-talk wake test on a real Windows Claude Code yet. A stopped session gets going again when you ask it in its terminal. An agent stayed quiet after Stop, n=1, headless.
 - The Interrupt by voice toggle fix has not been retested with a real click.
 - The pill's patches install even with the pill off. A turn then does a few extra file operations and leaves one small file per voice session in `~/.voicemode/pill/sessions/`, which nothing removes while the pill is off (final review, read in the code).
 - `pill off` leaves `~/.voicemode/pill/beeps.json` in place, and it still decides beeps: delete it to go back to `VOICEMODE_AUDIO_FEEDBACK`. It also leaves `VOICEMODE_CONTROL_CHANNEL_ENABLED=true`, which push-to-talk uses too.
 - If every voice turn hangs while Paused and no window is visible, run `voicemode-switch pill off`: it ends the backend, which releases the Pause.
 - To pick up a later pill build, rebuild the venv from pristine voice-mode: the patch skips files it has already marked.
+
+## Checked natively (2026-11-06)
+
+`tests/test_pill_windows_native_windows.py`, run by `tests/run_windows_transport_tests.sh`,
+on this laptop: 9 tests, all passed in each of 3 runs. Each start uses the launcher's own
+command and a process with no window.
+
+- The window shows in 2.6 to 3.9 s (n=6 timed starts). The pill never became the foreground
+  window. In one run (n=3) the foreground was a real window, the same before and after; in
+  another (n=3) Windows reported no foreground window before or after, so that run only shows
+  the pill did not take it.
+- Its files land in `-DataDir`; nothing new appears in `%LOCALAPPDATA%\voicemode-local`.
+- A second start on the same folder exits 0. A start on another folder runs alongside, and
+  each stops only by its own stop event.
+- The stop event closes it with exit 0, and the backend sees stdin EOF.
+- A backend that exits 3 after output is restarted. One that exits 1 before any output ends
+  the window with exit 1.
+- `VOICEMODE_PILL`: false in the file exits; true in a CRLF file with a BOM runs; false in
+  the environment beats true in the file.
+- The real backend (`voice_mode.voice_pill --stdio` in the native runtime) starts, takes its
+  lock in a private base dir and is ended by EOF, without a restart.
+
+Fix round 1 (2026-11-06) made the focus test count only starts with a real foreground
+window (at least 3), and added name checks for relative and 8.3 paths.
+
+Not checked natively: a real voice session shown in the native pill, an elevated voice
+server, more than one monitor, and the native switch (task 8).
 
 ## Not tested
 
@@ -126,6 +221,34 @@ now shows by colour only. Whether the old or new cost affects stutter was not me
 
 - An unhandled Python exception before the first snapshot also exits 1, so it is not retried.
   It appears in `pill-window.log`. Run `pill off`, then `pill on`, to restart.
+- Native Windows (not WSL): run voice-mode and the pill at the same level. If the voice
+  server runs elevated (as administrator) and the pill does not, the pill refuses its control
+  pipe, because it cannot inspect the elevated server's process. The pill then shows no
+  speaking or listening state and its Pause and Stop do not reach the turn. The
+  backend logs the reason once, as `voice control channel refused: ... most likely the voice
+  server runs elevated`. Inferred from Windows' token rules and covered by a unit test; not
+  yet run with a real elevated server.
+- Paths: the pill's own files (the `pill` folder, barge pre-roll, interruptions, the Mac
+  window position) follow `VOICEMODE_BASE_DIR`, taken from the environment, else from
+  `~/.voicemode/voicemode.env`, else `~/.voicemode`. Project `.voicemode.env` files, which
+  upstream finds by walking up from its working folder, are not followed: the backend has
+  no session working folder. The conch, its queue and `voicemode.env` are
+  read from the home folder's `.voicemode`, where upstream keeps them whatever the base dir
+  (`conch.py:133`, `config.py:33`). The control socket follows upstream's `config.py:697`.
+- Settings: `VOICEMODE_PILL` and `VOICEMODE_AUDIO_FEEDBACK` come from the environment first,
+  then `voicemode.env`. `VOICEMODE_VOICE_BARGE` is the other way round, because the pill's
+  own toggle writes it to `voicemode.env`: the file wins when it has the key, and the
+  environment is only the default.
+- The barge toggle runs `VOICEMODE_BARGE_CONTROL_COMMAND` with `on` or `off` appended, when
+  set: a JSON list of strings or one executable path. Otherwise it runs
+  `voicemode-switch barge`. That setting is read from the process environment only, never
+  from `voicemode.env`, because upstream's `update_config` tool lets a model write that file.
+  The voice server copies `voicemode.env` into its own environment on start and on
+  `config_reload`, so the command is also refused, with one warning, whenever any env file
+  upstream loads (global or project) holds the key.
+- For FELIX: there the toggle changes a FELIX preference, not `voicemode.env`, so the pill
+  cannot read the new state from the file. FELIX's barge control command will also need a
+  `status` mode that the pill can ask.
 - A restart attempt boots WSL. After `wsl --shutdown`, a running window starts it again within
   30 s. Use `voicemode-switch pill off` first.
 
@@ -164,7 +287,7 @@ as pywebview's own dependencies). The main venv gains nothing. The backend is st
   to take focus to come back, and push-to-talk only fires while a terminal has focus. Windows 11
   may put a new tray icon in the overflow `^` until it is pinned.
 - **Docked floats, on both platforms.** It sits on the screen edge at its own height, always on
-  top, and takes no screen space. It starts as a slim rail (76 px: status, Interrupt, Pause, Stop);
+  top, and takes no screen space. It starts as a slim rail (76 px: status, Stop or Wake, Pause);
   `‹` opens the full panel, and `›` there goes back to the rail. Dragging moves it up and down the edge only. `›` slides it off
   the edge, leaving a small `‹` tab at the same height; the tab cannot be dragged. Width comes
   from dragging the side edges (320 to 640, default 350), which is not available while docked. Position,
@@ -235,7 +358,7 @@ Window and focus (fake backend):
 - [ ] Voice picker: a real click opens it and a choice lands, with the pill never key. Hover colours still show
 - [ ] Menu bar ball: easy to find on the bar, changes colour with the phase
 - [ ] Width: the grip shows at each edge, dragging changes the width, `pill-window.log` has a `resize` line
-- [ ] Clicking Pause, Interrupt, the dropdown and the expand button: the frontmost app does not change. **Expected to be the weak spot**: a click on any window can activate its app. If it changes, report it; the fallback is a small Swift `NSPanel` (non-activating)
+- [ ] Clicking Pause, Stop or Wake, the dropdown and the expand button: the frontmost app does not change. **Expected to be the weak spot**: a click on any window can activate its app. If it changes, report it; the fallback is a small Swift `NSPanel` (non-activating)
 - [ ] Always on top: another window dragged over it
 - [ ] Above a full-screen app, and visible on a second Space (untested so far). If the window never gets that behaviour, check whether pywebview fires `shown` for a `hidden=True` window (the collection behaviour is set in that handler; look for "window behaviour not set" or its absence in `pill-window.log`)
 - [ ] The page renders from `file://` (the page's CSP says `'self'`): text and buttons present, no blank window; no listening socket (`lsof -nP -iTCP -sTCP:LISTEN | grep -i python` shows nothing from the pill)
@@ -261,7 +384,7 @@ Backend on macOS (real `voice_pill.py`):
 Needs Robert (voice, ears, permissions):
 - [ ] Pill appears on a real `converse`; states follow the turn
 - [ ] Kokoro through `streaming.py` shows Speaking (Task 2)
-- [ ] Interrupt, Pause, Resume and Stop work in a real turn
+- [ ] Pause, Resume and Stop work in a real turn; Wake shows the sunrise between turns and the woken session says "Listening."
 - [ ] The hotkey press makes the pill appear (two-minute rule); Input Monitoring permission as for PTT
 - [ ] No new stutter (`voicemode-perf`)
 - [ ] Autostart at login: not provided on macOS; `voicemode-mcp` starts the window with the first session. (A LaunchAgent is not written.)

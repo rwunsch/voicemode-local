@@ -1,6 +1,7 @@
 """Behaviour of the voice barge-in trigger, with the mic, Silero and socket faked."""
 import importlib.util
 import sys
+import time
 from pathlib import Path
 
 import numpy as np
@@ -343,3 +344,490 @@ class TestBargeControl:
 def test_tool_file_registers_a_voice_barge_mcp_tool():
     src = (MODULE.parent / "voice_barge_tool.py").read_text()
     assert "@mcp.tool()" in src and "async def voice_barge(" in src
+
+
+class TestStatusCommand:
+    """`python -m voice_mode.voice_barge status`: FELIX reads it at voice start (FELIX-voice,
+    2026-11-05). One line, exactly on / off / cannot run: <reason>, exit 0."""
+
+    def _run(self, monkeypatch, capsys, state):
+        monkeypatch.setattr(voice_barge, "barge_state", lambda home=None: state)
+        monkeypatch.setattr(sys, "argv", ["voice_barge", "status"])
+        code = voice_barge.main()
+        return code, capsys.readouterr().out
+
+    @pytest.mark.parametrize("state,line", [(True, "on\n"), (False, "off\n")])
+    def test_on_and_off(self, monkeypatch, capsys, state, line):
+        assert self._run(monkeypatch, capsys, state) == (0, line)
+
+    def test_cannot_run_says_why(self, monkeypatch, capsys):
+        code, out = self._run(monkeypatch, capsys, None)
+        assert code == 0
+        assert out.startswith("cannot run: ") and out.count("\n") == 1
+
+    def test_status_never_starts_the_trigger(self, monkeypatch, capsys):
+        monkeypatch.setattr(voice_barge, "run", lambda *a, **k: pytest.fail("trigger started"))
+        self._run(monkeypatch, capsys, True)
+
+
+class FakeSoundDevice:
+    """Stands in for the sounddevice module: no PortAudio, no mic."""
+
+    def __init__(self, devices=None, hostapis=("MME", "Windows WASAPI"), default_input=None):
+        self.streams = []
+        self._devices = devices if devices is not None else [
+            {"name": "USB MIC", "max_input_channels": 1, "hostapi": 0}]
+        self._hostapis = [{"name": n} for n in hostapis]
+        self.default = type("Default", (), {"device": (default_input if default_input is not None else -1, -1)})()
+
+    def query_devices(self, device=None, kind=None):
+        if device is None:
+            return list(self._devices)
+        return self._devices[device]
+
+    def query_hostapis(self, index=None):
+        return self._hostapis if index is None else self._hostapis[index]
+
+    def InputStream(self, **kwargs):
+        stream = FakeInputStream(kwargs)
+        self.streams.append(stream)
+        return stream
+
+
+class FakeInputStream:
+    def __init__(self, kwargs):
+        self.kwargs, self.started, self.closed = kwargs, False, False
+
+    def start(self):
+        self.started = True
+
+    def stop(self):
+        self.started = False
+
+    def close(self):
+        self.closed = True
+
+    def deliver(self, samples):
+        block = np.asarray(samples, dtype=np.int16).reshape(-1, 1)
+        self.kwargs["callback"](block, len(block), None, None)
+
+
+class TestSoundDeviceCapture:
+    """Windows and macOS have no parec: the mic comes through sounddevice (PortAudio)."""
+
+    @pytest.fixture
+    def sd(self, monkeypatch):
+        fake = FakeSoundDevice()
+        monkeypatch.setitem(sys.modules, "sounddevice", fake)
+        return fake
+
+    def test_opens_16k_mono_int16_in_silero_windows(self, sd):
+        cap = voice_barge.SoundDeviceCapture("@DEFAULT_SOURCE@")
+        kw = sd.streams[0].kwargs
+        assert (kw["samplerate"], kw["channels"], kw["dtype"]) == (16000, 1, "int16")
+        assert kw["blocksize"] == voice_barge.WINDOW_SAMPLES
+        assert kw["device"] is None and sd.streams[0].started
+        cap.close()
+
+    @pytest.mark.parametrize("setting,device", [("", None), ("3", 3), ("USB MIC", 0), ("usb", 0)])
+    def test_device_setting(self, sd, setting, device):
+        voice_barge.SoundDeviceCapture(setting).close()
+        assert sd.streams[0].kwargs["device"] == device
+
+    def test_window_is_scaled_floats_across_uneven_blocks(self, sd):
+        cap = voice_barge.SoundDeviceCapture("")
+        n = voice_barge.WINDOW_SAMPLES
+        sd.streams[0].deliver([16384] * 300)
+        sd.streams[0].deliver([16384] * 300)
+        w = cap.read_window()
+        assert w.dtype == np.float32 and len(w) == n and np.allclose(w, 0.5)
+        sd.streams[0].deliver([0] * (2 * n))
+        assert len(cap.read_window()) == n  # 88 left over + the next block
+        cap.close()
+
+    def test_no_audio_for_200_ms_is_none(self, sd):
+        cap = voice_barge.SoundDeviceCapture("")
+        t = time.monotonic()
+        assert cap.read_window() is None
+        assert 0.15 < time.monotonic() - t < 1.0
+        cap.close()
+
+    def test_close_stops_and_closes_the_stream(self, sd):
+        voice_barge.SoundDeviceCapture("").close()
+        assert not sd.streams[0].started and sd.streams[0].closed
+
+
+class TestBackendChoice:
+    def test_parec_first_then_sounddevice_then_none(self, monkeypatch):
+        st = voice_barge  # re-exports capture_backend from voice_pill_state
+        mod = sys.modules[st.capture_backend.__module__]
+        monkeypatch.setattr(mod.shutil, "which", lambda name: "/usr/bin/parec")
+        assert st.capture_backend() == "parec"
+        monkeypatch.setattr(mod.shutil, "which", lambda name: None)
+        monkeypatch.setattr(mod.importlib.util, "find_spec", lambda name: object() if name == "sounddevice" else None)
+        assert st.capture_backend() == "sounddevice"
+        monkeypatch.setattr(mod.importlib.util, "find_spec", lambda name: None)
+        assert st.capture_backend() is None
+
+    def test_open_capture_follows_the_backend(self, monkeypatch):
+        monkeypatch.setitem(sys.modules, "sounddevice", FakeSoundDevice())
+        cap = voice_barge.open_capture("sounddevice", "")
+        assert isinstance(cap, voice_barge.SoundDeviceCapture)
+        cap.close()
+
+
+AUKEY = lambda api: {"name": "Aukey Microphone", "max_input_channels": 1, "hostapi": api}
+
+
+class TestDeviceByName:
+    """One physical mic shows up once per host API; PortAudio rejects an ambiguous name."""
+
+    def _sd(self, monkeypatch, default_input, devices=None):
+        devices = devices or [AUKEY(0), AUKEY(1), AUKEY(2), AUKEY(3),
+                              {"name": "Speakers", "max_input_channels": 0, "hostapi": 2}]
+        fake = FakeSoundDevice(devices, ("MME", "Windows DirectSound", "Windows WASAPI", "Windows WDM-KS"),
+                               default_input)
+        monkeypatch.setitem(sys.modules, "sounddevice", fake)
+        voice_barge._LOGGED_DEVICES.clear()
+        return fake
+
+    def test_several_matches_pick_the_one_on_the_default_inputs_host_api(self, monkeypatch):
+        sd = self._sd(monkeypatch, default_input=2)
+        voice_barge.SoundDeviceCapture("Aukey").close()
+        assert sd.streams[0].kwargs["device"] == 2
+
+    def test_several_matches_without_a_usable_default_pick_the_first(self, monkeypatch):
+        sd = self._sd(monkeypatch, default_input=None)
+        voice_barge.SoundDeviceCapture("Aukey").close()
+        assert sd.streams[0].kwargs["device"] == 0
+
+    def test_default_on_an_api_with_no_match_picks_the_first(self, monkeypatch):
+        devices = [AUKEY(1), AUKEY(3), {"name": "Other", "max_input_channels": 2, "hostapi": 0}]
+        sd = self._sd(monkeypatch, default_input=2, devices=devices)
+        voice_barge.SoundDeviceCapture("Aukey").close()
+        assert sd.streams[0].kwargs["device"] == 0
+
+    def test_output_only_devices_are_not_matches(self, monkeypatch):
+        sd = self._sd(monkeypatch, default_input=None)
+        with pytest.raises(voice_barge.UnknownDevice):
+            voice_barge.SoundDeviceCapture("Speakers")
+
+    def test_the_chosen_device_is_logged_once(self, monkeypatch, caplog):
+        self._sd(monkeypatch, default_input=2)
+        with caplog.at_level("INFO", logger="voicemode.voice_barge"):
+            for _ in range(3):
+                voice_barge.SoundDeviceCapture("Aukey").close()
+        lines = [r.getMessage() for r in caplog.records if "mic device" in r.getMessage()]
+        assert len(lines) == 1
+        assert "2" in lines[0] and "Aukey Microphone" in lines[0] and "Windows WASAPI" in lines[0]
+
+    def test_unknown_name_is_one_clear_error_and_nonzero_exit_at_start(self, monkeypatch, tmp_path, caplog):
+        self._sd(monkeypatch, default_input=2)
+        model = tmp_path / "m.onnx"
+        model.write_bytes(b"x")
+        monkeypatch.setattr(sys, "argv", ["voice_barge", str(model)])
+        monkeypatch.setattr(voice_barge, "capture_backend", lambda: "sounddevice")
+        monkeypatch.setattr(voice_barge, "trigger_settings", lambda: {"VOICEMODE_VOICE_BARGE_DEVICE": "Nonesuch"})
+        monkeypatch.setattr(voice_barge, "SileroVad", lambda p: pytest.fail("must fail before loading the model"))
+        with caplog.at_level("INFO", logger="voicemode.voice_barge"):
+            assert voice_barge.main() != 0
+        errors = [r for r in caplog.records if r.levelname == "ERROR"]
+        assert len(errors) == 1 and "Nonesuch" in errors[0].getMessage()
+
+
+class TestStretchLog:
+    """One INFO line per speaking stretch: the echo measurement."""
+
+    def _lines(self, h, caplog):
+        with caplog.at_level("INFO", logger="voicemode.voice_barge"):
+            h.run()
+        return [r.getMessage() for r in caplog.records if r.getMessage().startswith("stretch:")]
+
+    def test_a_quiet_stretch_reports_windows_max_p90_and_no_fire(self, caplog):
+        dbs = [-60.0] * 9 + [-50.0]
+        h = Harness([True] * 11 + [False], [(NOT_SPEECH, d) for d in dbs])
+        (line,) = self._lines(h, caplog)
+        import re
+        m = re.fullmatch(r"stretch: (\d+\.\d) s, windows 10, max -50\.0 dBFS, p90 -59\.0 dBFS, fired no, "
+                         r"first_window \d+ ms, deaf \d+ ms, cold", line)
+        assert m, line
+
+    def test_a_fired_stretch_says_yes(self, caplog):
+        h = Harness([True] * 10, [(SPEECH, LOUD)] * 10)
+        (line,) = self._lines(h, caplog)
+        assert "fired yes, first_window " in line and "max -20.0 dBFS" in line
+
+    def test_warmup_windows_are_not_counted(self, caplog):
+        h = Harness([True] * 7 + [False], [(NOT_SPEECH, -10.0)] * 3 + [(NOT_SPEECH, -60.0)] * 4, warmup=3)
+        (line,) = self._lines(h, caplog)
+        assert "windows 3" in line and "max -60.0 dBFS" in line
+
+    def test_one_line_per_stretch_and_nothing_per_window(self, caplog):
+        h = Harness([True, True, False, True, True, False], [(NOT_SPEECH, -60.0)] * 20)
+        h.opened_frames = None
+        with caplog.at_level("INFO", logger="voicemode.voice_barge"):
+            h.run()
+        assert len([r for r in caplog.records if r.getMessage().startswith("stretch:")]) == len(h.opened)
+        assert len(caplog.records) <= len(h.opened)
+
+    def test_a_stretch_with_no_windows_still_reports(self, caplog):
+        h = Harness([True, False], [])
+        (line,) = self._lines(h, caplog)
+        assert "windows 0" in line and "fired no" in line
+
+
+# --- early mic: open while the server generates the reply, not when it starts playing --
+
+def op(speaking=False, listening=False, state="running"):
+    """A status reply from a server mid-converse (patch_voice_barge + patch_voice_pill)."""
+    return {"state": state, "speaking": speaking, "listening": listening, "listen_started_at": None}
+
+
+class TestPhaseTracker:
+    def _phases(self, replies, **kw):
+        it = iter(replies)
+        tracker = voice_barge.PhaseTracker(lambda: next(it), **kw)
+        return [tracker() for _ in replies]
+
+    def test_paused_is_idle_never_warm(self):
+        assert self._phases([op(), op(state="paused"), op()]) == ["warm", "idle", "warm"]
+
+    def test_no_converse_is_idle(self):
+        assert self._phases([{}, {}]) == ["idle", "idle"]
+
+    def test_a_converse_that_has_not_spoken_yet_is_warm(self):
+        assert self._phases([op(), op(speaking=True)]) == ["warm", "speaking"]
+
+    def test_after_speaking_the_mic_stays_closed_until_the_converse_ends(self):
+        replies = [op(), op(speaking=True), op(), op(listening=True), op(), {}, op()]
+        assert self._phases(replies) == ["warm", "speaking", "idle", "idle", "idle", "idle", "warm"]
+
+    def test_listening_closes_the_warm_mic_for_the_rest_of_the_converse(self):
+        assert self._phases([op(), op(listening=True), op()]) == ["warm", "idle", "idle"]
+
+    def test_a_server_that_does_not_report_listening_never_warms(self):
+        # without patch_voice_pill nothing would say when to let go of the mic
+        replies = [{"state": "running", "speaking": False}, {"state": "running", "speaking": True}]
+        assert self._phases(replies) == ["idle", "speaking"]
+
+    def test_a_stopped_converse_is_idle(self):
+        assert self._phases([op(state="stopped")]) == ["idle"]
+
+    def test_warm_off_means_idle_until_speaking(self):
+        assert self._phases([op(), op(speaking=True)], warm=False) == ["idle", "speaking"]
+
+
+class PhaseHarness(Harness):
+    """Drives run() with a scripted phase timeline: 'idle', 'warm', 'speaking'."""
+
+    def __init__(self, phases, frames, warmup=0, paused=None, poll_every=1, warm_poll_every=1):
+        super().__init__([], frames, warmup=warmup, paused=paused)
+        self.phases = list(phases)
+        self.polls = 0
+        self.poll_every = poll_every
+        self.warm_poll_every = warm_poll_every
+
+    def poll_phase(self):
+        self.polls += 1
+        return self.phases.pop(0) if self.phases else None
+
+    def run(self):
+        voice_barge.run(
+            poll_phase=self.poll_phase, open_capture=self.open_capture, vad=self.vad,
+            detector=detector(), send_barge=self.barge, sleep=lambda _s: None,
+            warmup_windows=self.warmup, poll_every_windows=self.poll_every,
+            warm_poll_every_windows=self.warm_poll_every,
+            **({"is_paused": self.paused} if self.paused else {}),
+        )
+
+
+class TestEarlyMic:
+    def test_the_mic_opens_while_warm_and_is_not_reopened_when_speaking_starts(self):
+        h = PhaseHarness(["warm", "warm", "speaking", "speaking", "idle"], [(NOT_SPEECH, -60.0)] * 20)
+        h.run()
+        assert len(h.opened) == 1 and h.opened[0].closed
+
+    def test_speech_before_the_reply_plays_never_barges(self):
+        h = PhaseHarness(["warm"] * 6 + ["idle"], [(SPEECH, LOUD)] * 20)
+        h.run()
+        assert h.barges == 0 and h.opened[0].closed
+
+    def test_speech_once_the_reply_plays_barges(self):
+        h = PhaseHarness(["warm"] * 3 + ["speaking"] * 5, [(NOT_SPEECH, -60.0)] * 3 + [(SPEECH, LOUD)] * 10)
+        h.run()
+        assert h.barges == 1
+
+    def test_warmup_is_spent_while_warm_so_the_first_spoken_window_counts(self):
+        # warmup 3, three windows read while warm: the first speaking-time window is heard
+        h = PhaseHarness(["warm"] * 3 + ["speaking"] * 4, [(NOT_SPEECH, -60.0)] * 3 + [(SPEECH, LOUD)] * 3,
+                         warmup=3)
+        h.run()
+        assert h.barges == 1
+
+    def test_warm_windows_never_reach_the_vad(self):
+        h = PhaseHarness(["warm"] * 5 + ["idle"], [(SPEECH, LOUD)] * 10)
+        calls = []
+        h.vad.prob = lambda w: calls.append(1) or 0.0
+        h.run()
+        assert calls == []
+
+    def test_the_switch_over_window_is_not_fed_to_the_vad(self):
+        # warm, warm, speaking: the windows read up to and including the one read as
+        # `speaking` showed were captured while warm (echo of nothing, or the user)
+        h = PhaseHarness(["warm", "warm", "speaking", "speaking", "idle"],
+                         [(SPEECH, LOUD)] * 2 + [(NOT_SPEECH, -60.0)] * 10)
+        seen = []
+        h.vad.prob = lambda w: seen.append(float(abs(w).max())) or 0.0
+        h.run()
+        assert seen and max(seen) < 0.01, seen
+
+    def test_a_backlog_built_up_while_warm_is_discarded_at_the_switch(self):
+        h = PhaseHarness(["warm", "warm", "speaking", "speaking", "speaking", "idle"],
+                         [(NOT_SPEECH, -60.0)] * 10)
+        loud = np.full(512, 0.5, dtype=np.float32)
+
+        class Backlogged(FakeCapture):
+            def __init__(self, frames, vad):
+                super().__init__(frames, vad)
+                self.backlog = [loud] * 6   # a slow poll left these queued
+                self.drains = 0
+
+            def read_window(self):
+                if self.backlog:
+                    return self.backlog.pop(0)
+                return super().read_window()
+
+            def drain(self):
+                self.drains += 1
+                self.backlog.clear()
+
+        caps = []
+        h.open_capture = lambda: caps.append(Backlogged(h.frames, h.vad)) or caps[-1]
+        seen = []
+        h.vad.prob = lambda w: seen.append(float(abs(w).max())) or 0.0
+        h.run()
+        assert caps[0].drains == 1
+        assert seen and max(seen) < 0.01, seen
+
+    def test_a_queued_capture_drain_empties_buffer_and_queue(self):
+        cap = voice_barge._QueuedWindows()
+        cap._init_queue()
+        for _ in range(4):
+            cap._queue.put(np.ones(512, dtype=np.int16))
+        cap._buf = np.ones(100, dtype=np.int16)
+        cap.drain()
+        assert cap._queue.empty() and len(cap._buf) == 0
+
+    def test_a_converse_that_never_speaks_closes_the_mic_without_a_stretch_line(self, caplog):
+        h = PhaseHarness(["warm", "warm", "idle", "idle"], [(NOT_SPEECH, -60.0)] * 5)
+        with caplog.at_level("INFO", logger="voicemode.voice_barge"):
+            h.run()
+        assert h.opened[0].closed
+        assert not [r for r in caplog.records if r.getMessage().startswith("stretch:")]
+
+    def test_pause_closes_the_warm_mic(self):
+        states = iter([False, False, True, True, True, True])
+        h = PhaseHarness(["warm"] * 6, [(NOT_SPEECH, -60.0)] * 20, paused=lambda: next(states, True))
+        h.run()
+        assert len(h.opened) == 1 and h.opened[0].closed
+
+    def test_paused_means_no_warm_mic_at_all(self):
+        h = PhaseHarness(["warm"] * 4, [(NOT_SPEECH, -60.0)] * 20, paused=lambda: True)
+        h.run()
+        assert h.opened == []
+
+    def test_warm_polls_at_its_own_rate(self):
+        h = PhaseHarness(["warm"] * 4 + ["idle"], [(NOT_SPEECH, -60.0)] * 40, poll_every=3, warm_poll_every=1)
+        h.run()
+        assert len(h.frames) == 40 - 4   # one window read per warm poll after the first
+
+    def test_the_stretch_line_says_how_long_the_mic_was_warm(self, caplog):
+        h = PhaseHarness(["warm", "warm", "speaking", "speaking", "idle"], [(NOT_SPEECH, -60.0)] * 20)
+        with caplog.at_level("INFO", logger="voicemode.voice_barge"):
+            h.run()
+        (line,) = [r.getMessage() for r in caplog.records if r.getMessage().startswith("stretch:")]
+        import re
+        assert re.search(r", first_window \d+ ms, deaf \d+ ms, warm \d+ ms$", line), line
+
+    def test_a_cold_stretch_says_cold(self, caplog):
+        h = PhaseHarness(["speaking", "speaking", "idle"], [(NOT_SPEECH, -60.0)] * 20)
+        with caplog.at_level("INFO", logger="voicemode.voice_barge"):
+            h.run()
+        (line,) = [r.getMessage() for r in caplog.records if r.getMessage().startswith("stretch:")]
+        assert line.endswith(", cold"), line
+
+    def test_deaf_runs_from_speaking_to_the_first_window_the_detector_hears(self, caplog):
+        clock = iter([10.0, 10.1, 10.3] + [11.0] * 5)   # asked, first window, first heard, end
+        h = PhaseHarness(["speaking"] * 4 + ["idle"], [(NOT_SPEECH, -60.0)] * 20, warmup=2)
+        with caplog.at_level("INFO", logger="voicemode.voice_barge"):
+            voice_barge.run(poll_phase=h.poll_phase, open_capture=h.open_capture, vad=h.vad,
+                            detector=detector(), send_barge=h.barge, sleep=lambda _s: None,
+                            warmup_windows=2, poll_every_windows=1, stretch_clock=lambda: next(clock))
+        (line,) = [r.getMessage() for r in caplog.records if r.getMessage().startswith("stretch:")]
+        # asked 10.0, first window 10.1, third window (past warmup 2) 10.3
+        assert ", first_window 100 ms, deaf 300 ms, cold" in line, line
+
+    def test_refused_while_warm_logs_one_line_per_spoken_stretch(self, caplog):
+        opened = []
+
+        def opener():
+            opened.append(1)
+            return voice_barge.RefusedCapture("route=speakers, capture=refused (x)")
+        with caplog.at_level("INFO", logger="voicemode.voice_barge"):
+            voice_barge.run(poll_phase=iter(["warm", "warm", "speaking", "speaking", "idle", None]).__next__,
+                            open_capture=opener, vad=FakeVad(), detector=detector(),
+                            send_barge=lambda: pytest.fail("fired"), sleep=lambda _s: None)
+        assert len(opened) == 1
+        lines = [r.getMessage() for r in caplog.records if r.getMessage().startswith("stretch:")]
+        assert len(lines) == 1 and lines[0].endswith("fired no, route=speakers, capture=refused (x)")
+
+
+def test_warm_setting_is_on_unless_turned_off():
+    assert voice_barge.warm_enabled(None) is True
+    assert voice_barge.warm_enabled("on") is True
+    for off in ("0", "false", "off", " OFF ", '"false"'):
+        assert voice_barge.warm_enabled(off) is False
+
+
+class TestMainWiring:
+    def _main(self, monkeypatch, tmp_path, settings, backend="parec"):
+        model = tmp_path / "m.onnx"
+        model.write_bytes(b"x")
+        got = {}
+        monkeypatch.setattr(sys, "argv", ["voice_barge", str(model)])
+        monkeypatch.setattr(voice_barge, "capture_backend", lambda: backend)
+        monkeypatch.setattr(voice_barge, "trigger_settings", lambda: settings)
+        monkeypatch.setattr(voice_barge, "SileroVad", lambda p: FakeVad())
+        monkeypatch.setattr(voice_barge, "_platform", lambda: "linux")
+        monkeypatch.setattr(voice_barge, "_status", lambda path: op())
+        monkeypatch.setattr(voice_barge, "install_stop_handlers", lambda stop: None)
+        monkeypatch.setattr(voice_barge, "run", lambda **kw: got.update(kw))
+        assert voice_barge.main() == 0
+        return got
+
+    def test_main_warms_the_mic_during_generation_by_default(self, monkeypatch, tmp_path):
+        got = self._main(monkeypatch, tmp_path, {})
+        assert got["poll_phase"]() == "warm"
+
+    def test_warm_off_keeps_the_old_behaviour(self, monkeypatch, tmp_path):
+        got = self._main(monkeypatch, tmp_path, {"VOICEMODE_VOICE_BARGE_WARM": "off"})
+        assert got["poll_phase"]() == "idle"
+
+    def test_sounddevice_is_imported_at_start_not_at_the_first_reply(self, monkeypatch, tmp_path):
+        # measured on Windows: a cold `import sounddevice` took 1063 ms (n=1)
+        imported = []
+        monkeypatch.setattr(voice_barge, "_preload_backend", lambda backend: imported.append(backend))
+        self._main(monkeypatch, tmp_path, {}, backend="sounddevice")
+        assert imported == ["sounddevice"]
+
+    def test_preload_never_raises(self, monkeypatch):
+        import builtins
+        real = builtins.__import__
+
+        def no_sd(name, *a, **k):
+            if name == "sounddevice":
+                raise OSError("PortAudio library not found")
+            return real(name, *a, **k)
+        monkeypatch.setattr(builtins, "__import__", no_sd)
+        voice_barge._preload_backend("sounddevice")
+        voice_barge._preload_backend("parec")

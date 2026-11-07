@@ -11,7 +11,7 @@ html,body{margin:0;background:transparent;color:var(--t);font:13px system-ui,san
 .m{color:var(--m);font-size:12px}
 .orb{width:16px;height:16px;border-radius:50%;flex:none;background:var(--m);transition:background .2s}
 [data-phase=speaking] .orb{background:var(--a)}
-[data-phase=listening] .orb{background:var(--g)}
+[data-phase=listening] .orb,[data-phase=holding] .orb{background:var(--g)}
 [data-phase=paused] .orb{background:transparent;border:3px solid var(--m)}
 [data-phase=disconnected] .orb{opacity:.35}
 .btn,select{-webkit-app-region:no-drag;border:1px solid var(--line);background:transparent;color:var(--t);border-radius:8px;padding:4px 7px;font:inherit;font-size:12px;cursor:pointer}
@@ -49,5 +49,9 @@ html,body{height:100%}
 [data-mode=rail] .btn.icon{width:28px;height:28px;padding:0}
 .tab{display:none;width:100vw;height:100vh;padding:0;border:1px solid var(--line);border-radius:12px;background:var(--bg);color:var(--m);font-size:18px;line-height:1;cursor:pointer}
 .tab:hover,.tab.hover{background:var(--hover)}
-[data-phase=speaking] .tab{color:var(--a)}[data-phase=listening] .tab{color:var(--g)}
+[data-phase=speaking] .tab{color:var(--a)}[data-phase=listening] .tab,[data-phase=holding] .tab{color:var(--g)}
 [data-mode=tab] .tab{display:block}[data-mode=tab] .card{display:none}
+[hidden]{display:none!important}
+.wake:hover:not(:disabled),.wake.hover:not(:disabled){color:var(--g);border-color:var(--g)}
+.main .wakeicon{display:flex;align-items:center;justify-content:center}
+.main .sun{display:block;margin:auto}

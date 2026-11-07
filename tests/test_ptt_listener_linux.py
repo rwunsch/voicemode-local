@@ -103,3 +103,53 @@ def test_listener_no_longer_depends_on_the_retired_event_bus(listener):
     assert "ptt_ipc" not in imported, "still importing the retired event bus"
     assert "asyncio" not in imported, "the listener should be synchronous now"
     assert "ptt_control_client" in imported
+
+
+# --- the key rule (2026-11-07): down opens the mic, a release within 0.8 s stops ---
+
+def _core():
+    spec = importlib.util.spec_from_file_location("vml_ptt_core_linux", REPO / "patches" / "ptt_core.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _hotkey(listener, focused=True):
+    sent = []
+    key = listener.Hotkey(_core().PTTKeyState(), sent.append, lambda: focused)
+    return key, sent
+
+
+def test_ctrl_space_down_sends_hold_start_at_once(listener):
+    key, sent = _hotkey(listener)
+    key.ctrl(True)
+    key.space(True, 10.0)
+    assert sent == ["hold_start"]  # no threshold wait
+
+
+@pytest.mark.parametrize("held_for,expected", [(0.5, ["hold_start", "short_press"]),
+                                               (1.2, ["hold_start", "hold_release"]),
+                                               (0.8, ["hold_start", "hold_release"])])
+def test_release_time_decides_tap_or_talk(listener, held_for, expected):
+    key, sent = _hotkey(listener)
+    key.ctrl(True)
+    key.space(True, 10.0)
+    key.space(True, 10.3)  # auto-repeat
+    key.space(False, 10.0 + held_for)
+    assert sent == expected
+
+
+def test_space_without_ctrl_or_focus_does_nothing(listener):
+    key, sent = _hotkey(listener)
+    key.space(True, 1.0)
+    key.space(False, 2.0)
+    key, sent2 = _hotkey(listener, focused=False)
+    key.ctrl(True)
+    key.space(True, 1.0)
+    key.space(False, 2.0)
+    assert sent == [] and sent2 == []
+
+
+def test_the_listener_no_longer_polls_a_threshold(listener):
+    src = (REPO / "patches" / "ptt_listener_linux.py").read_text()
+    assert "poll_hold" not in src and "HOLD_THRESHOLD" not in src

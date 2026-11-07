@@ -51,6 +51,47 @@ ok()   { echo -e "  ${GREEN}✓${NC} $1"; }
 fail() { echo -e "  ${RED}✗${NC} $1"; }
 warn() { echo -e "  ${YELLOW}!${NC} $1"; }
 
+# --- voicemode.env writes: one writer at a time ------------------------------------
+# Every write to ~/.voicemode/voicemode.env holds flock(2) on voicemode.env.lock beside it,
+# the lock the native switch takes (scripts/windows/voicemode_native.py settings_lock), so
+# this switch, the native one and the pill cannot lose each other's change. macOS has no
+# flock binary, so python's fcntl takes the lock on fd 8, which this shell holds open: an
+# flock belongs to the open file, so it outlives the python and ends when fd 8 is closed.
+_ENV_LOCK_PY='import fcntl, sys, time
+deadline = time.monotonic() + float(sys.argv[1])
+while True:
+    try:
+        fcntl.flock(8, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        break
+    except BlockingIOError:
+        if time.monotonic() >= deadline:
+            sys.exit(3)
+        time.sleep(0.05)'
+
+with_env_lock() {
+    if [ -n "${_VM_ENV_LOCKED:-}" ]; then "$@"; return; fi   # already held by this shell
+    local lock="$HOME/.voicemode/voicemode.env.lock" wait_s="${VOICEMODE_ENV_LOCK_TIMEOUT:-10}" rc=0 err
+    mkdir -p "$HOME/.voicemode"
+    exec 8>>"$lock"
+    # exit 3 is the helper's own "timed out"; anything else is the helper failing
+    # (no interpreter, bad timeout value). Both fail closed: nothing is written.
+    err="$("$VENV_PY" -c "$_ENV_LOCK_PY" "$wait_s" 2>&1)" || {
+        rc=$?
+        exec 8>&-
+        if [ "$rc" -eq 3 ]; then
+            fail "voicemode.env not changed: another writer held $lock for ${wait_s} s"
+        else
+            fail "voicemode.env not changed: could not take the settings lock: ${err##*$'\n'} (exit $rc)"
+        fi
+        return 1
+    }
+    _VM_ENV_LOCKED=1
+    "$@" || rc=$?
+    _VM_ENV_LOCKED=
+    exec 8>&-
+    return $rc
+}
+
 docker_compose_cmd() {
     # Build the docker compose command honoring two config axes:
     #   PIPER_ENABLED  -> include the piper profile
@@ -106,7 +147,7 @@ update_env() {
     # variables override this file, so the routing vars must NOT also be set in
     # ~/.claude.json's env block (we keep only secrets like OPENAI_API_KEY there).
     local stt_urls="$1" tts_urls="$2" voices="$3" mode="${4:-custom}"
-    python3 - "$stt_urls" "$tts_urls" "$voices" "$mode" << 'PYEOF'
+    with_env_lock python3 - "$stt_urls" "$tts_urls" "$voices" "$mode" << 'PYEOF'
 import os, re, sys
 
 stt, tts, voices, mode = sys.argv[1:5]
@@ -119,7 +160,26 @@ END = "# <<< voicemode-switch managed <<<"
 txt = ""
 if os.path.exists(envfile):
     txt = open(envfile).read()
-    txt = re.sub(re.escape(BEGIN) + r".*?" + re.escape(END) + r"\n?", "", txt, flags=re.S)
+
+MODE_VOICES = {"af_sky", "nova", "p_de_thorsten"}   # what the switch itself writes per mode
+OPENAI_VOICES = {"alloy", "ash", "ballad", "coral", "echo", "fable", "nova", "onyx", "sage", "shimmer", "verse"}
+pat = re.compile(re.escape(BEGIN) + r".*?" + re.escape(END) + r"\n?", re.S)
+old = pat.search(txt)
+old_block = old.group(0) if old else ""
+outside = pat.sub("", txt)
+
+def value_in(text):
+    found = re.findall(r"^VOICEMODE_VOICES=(.*)$", text, flags=re.M)
+    return found[-1].strip() if found else ""
+
+# A mode switch changes routing, not the voice: a voice the user has set stays. A voice that is
+# just the default an earlier switch wrote follows the new mode (OpenAI rejects af_sky).
+user_voice = value_in(outside)
+kept = user_voice or (value_in(old_block) if value_in(old_block) not in MODE_VOICES else "")
+if kept:
+    voices = None if user_voice else kept
+    if mode == "openai" and kept.split(",")[0] not in OPENAI_VOICES:
+        print(f"  Note: kept your voice {kept}; cloud-only mode needs an OpenAI voice (e.g. nova)")
 
 block = [BEGIN, f"# mode: {mode}"]
 if stt:
@@ -129,12 +189,19 @@ if tts:
 if voices:
     block.append(f"VOICEMODE_VOICES={voices}")
 block.append(END)
+block_text = "\n".join(block) + "\n"
 
-body = txt.rstrip("\n")
-out = (body + "\n\n" if body else "") + "\n".join(block) + "\n"
-open(envfile, "w").write(out)
+if old:
+    out = txt[:old.start()] + block_text + txt[old.end():]   # in place: nothing else moves
+else:
+    body = txt.rstrip("\n")
+    out = (body + "\n\n" if body else "") + block_text
+if out == txt and os.path.exists(envfile):
+    print(f"  {envfile} already set (mode: {mode})")
+else:
+    open(envfile, "w").write(out)
+    print(f"  Updated {envfile} (mode: {mode})")
 os.chmod(envfile, 0o600)
-print(f"  Updated {envfile} (mode: {mode})")
 PYEOF
     strip_claude_json_routing
 }
@@ -153,6 +220,7 @@ vm = data.get("mcpServers", {}).get("voicemode")
 if not vm:
     raise SystemExit(0)
 env = vm.get("env", {})
+before = json.dumps(env, sort_keys=True)
 for k in ("VOICEMODE_STT_BASE_URLS", "VOICEMODE_TTS_BASE_URLS", "VOICEMODE_VOICES",
           "STT_BASE_URL", "TTS_BASE_URL", "TTS_VOICE"):
     env.pop(k, None)
@@ -162,6 +230,8 @@ if "WSLENV" in env:
         env["WSLENV"] = ":".join(keep)
     else:
         env.pop("WSLENV", None)
+if json.dumps(env, sort_keys=True) == before:
+    raise SystemExit(0)     # nothing to clean: leave the file and the screen alone
 vm["env"] = env
 json.dump(data, open(p, "w"), indent=2)
 print("  Cleaned routing vars from ~/.claude.json (now sourced from voicemode.env)")
@@ -374,7 +444,8 @@ voice_barge_enabled() {
 
 # A tool whitelist would hide the voice_barge MCP tool. Never create a whitelist:
 # without one, every tool already loads.
-expose_barge_tool() {
+expose_barge_tool() { with_env_lock _expose_barge_tool; }
+_expose_barge_tool() {
     local env_file="$HOME/.voicemode/voicemode.env"
     [ -f "$env_file" ] || return 0
     grep -q '^VOICEMODE_TOOLS_ENABLED=' "$env_file" || return 0
@@ -382,7 +453,8 @@ expose_barge_tool() {
     sed -i.bak 's/^\(VOICEMODE_TOOLS_ENABLED=.*\)$/\1,voice_barge_tool/' "$env_file" && rm -f "$env_file.bak"
 }
 
-set_voice_barge() {
+set_voice_barge() { with_env_lock _set_voice_barge "$@"; }
+_set_voice_barge() {
     local env_file="$HOME/.voicemode/voicemode.env"
     mkdir -p "$(dirname "$env_file")"; touch "$env_file"
     sed -i.bak '/^VOICEMODE_VOICE_BARGE=/d' "$env_file" && rm -f "$env_file.bak"
@@ -397,12 +469,18 @@ stop_voice_barge() {
     rm -f "$pidfile"
 }
 
+# sha256 of a file: sha256sum, else shasum -a 256 (older macOS has only the latter)
+sha256_of() {
+    if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | cut -d' ' -f1
+    else shasum -a 256 "$1" | cut -d' ' -f1; fi
+}
+
 fetch_silero_model() {
-    [ -f "$SILERO_MODEL" ] && [ "$(sha256sum "$SILERO_MODEL" | cut -d' ' -f1)" = "$SILERO_SHA256" ] && return 0
+    [ -f "$SILERO_MODEL" ] && [ "$(sha256_of "$SILERO_MODEL")" = "$SILERO_SHA256" ] && return 0
     mkdir -p "$(dirname "$SILERO_MODEL")"
     local tmp="$SILERO_MODEL.download"
     curl -fsSL --max-time 120 -o "$tmp" "$SILERO_URL" || { rm -f "$tmp"; fail "Could not download the Silero model"; return 1; }
-    if [ "$(sha256sum "$tmp" | cut -d' ' -f1)" != "$SILERO_SHA256" ]; then
+    if [ "$(sha256_of "$tmp")" != "$SILERO_SHA256" ]; then
         rm -f "$tmp"; fail "Silero model failed its checksum; not installed"; return 1
     fi
     mv -f "$tmp" "$SILERO_MODEL"
@@ -413,6 +491,9 @@ cmd_barge() {
         on)
             fetch_silero_model || return 1
             set_voice_barge true
+            # The trigger's barge_in travels over the control channel (upstream default: off).
+            # `barge off` leaves it on: the pill and push-to-talk use it too.
+            set_env_value VOICEMODE_CONTROL_CHANNEL_ENABLED true
             stop_voice_barge
             cmd_ensure --quiet
             ok "Voice barge-in on. New voice sessions need /mcp reconnect to pick up the patch."
@@ -424,10 +505,20 @@ cmd_barge() {
             ;;
         status)
             if voice_barge_enabled; then echo "Voice barge-in: enabled"; else echo "Voice barge-in: disabled"; fi
+            if [ "$(env_value VOICEMODE_CONTROL_CHANNEL_ENABLED)" = "true" ]; then
+                echo "Control channel: enabled"
+            else
+                echo "Control channel: disabled (barge-in cannot cut playback without it)"
+            fi
             if [ -f /tmp/voice-barge.pid ] && kill -0 "$(cat /tmp/voice-barge.pid)" 2>/dev/null; then
                 echo "Trigger: running (PID $(cat /tmp/voice-barge.pid), log /tmp/voice-barge.log)"
             else
                 echo "Trigger: not running"
+            fi
+            # macOS: the output route and the mic it gets (echo cancellation on the speakers).
+            # The module prints it as its second line; the first (on/off) is shown above.
+            if [ "$(uname -s)" = "Darwin" ]; then
+                "$VENV_PY" -m voice_mode.voice_barge status 2>/dev/null | sed -n '2,$p'
             fi
             ;;
         *) echo "usage: voicemode-switch barge [on|off|status]"; return 2 ;;
@@ -441,11 +532,21 @@ PILL_BACKEND_RE='^[^ ]*python[^ ]* (-m voice_mode\.voice_pill|[^ ]*/voice_pill\.
 
 env_value() { sed -n "s/^$1=//p" "$HOME/.voicemode/voicemode.env" 2>/dev/null | tail -1; }
 
-set_env_value() {
+set_env_value() { with_env_lock _set_env_value "$@"; }
+_set_env_value() {
     local env_file="$HOME/.voicemode/voicemode.env"
     mkdir -p "$(dirname "$env_file")"; touch "$env_file"
-    sed -i.bak "/^$1=/d" "$env_file" && rm -f "$env_file.bak"
-    echo "$1=$2" >> "$env_file"
+    # Replace the key where it is (comments and order stay); a new key goes at the end.
+    local tmp; tmp="$(mktemp "$env_file.XXXXXX")" || return 1
+    KEY="$1" VAL="$2" awk '
+        BEGIN { k = ENVIRON["KEY"]; v = ENVIRON["VAL"]; done = 0 }
+        index($0, k "=") == 1 { if (!done) { print k "=" v; done = 1 }; next }
+        { print }
+        END { if (!done) print k "=" v }' "$env_file" > "$tmp" \
+        && cat "$tmp" > "$env_file"
+    local rc=$?
+    rm -f "$tmp"
+    return $rc
 }
 
 # macOS: pywebview lives in its own venv, so the main venv gains no dependency.
@@ -881,6 +982,9 @@ _vm_cli() {
     printf '%s' "$VM"
 }
 
+# Sourced (the tests): the functions above are defined, nothing below runs.
+[ "${BASH_SOURCE[0]}" = "$0" ] || return 0
+
 case "${1:-}" in
     local)     cmd_local ;;
     localonly) cmd_localonly ;;
@@ -925,7 +1029,7 @@ case "${1:-}" in
         case "${2:-status}" in
             on|off)
                 val=$([ "${2}" = "on" ] && echo true || echo false)
-                "$PYBIN" - "$ENVF" "$val" <<'PY'
+                with_env_lock "$PYBIN" - "$ENVF" "$val" <<'PY'
 import sys, re, pathlib
 f=pathlib.Path(sys.argv[1]); val=sys.argv[2]
 txt=f.read_text() if f.exists() else ""

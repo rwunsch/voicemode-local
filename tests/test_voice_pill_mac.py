@@ -463,7 +463,7 @@ def test_pickers_let_go_after_a_choice_and_when_the_floor_moves():
 
 def test_session_name_has_its_own_line():
     page = (REPO / "ui/pill/index.html").read_text()
-    assert page.index('id="sub"') < page.index('id="label"') < page.index('id="interrupt"')
+    assert page.index('id="sub"') < page.index('id="label"') < page.index('id="main"')
 
 
 def test_default_height_matches_the_two_line_pill_on_both_platforms():
@@ -600,3 +600,11 @@ def test_a_mode_change_clears_a_stale_hover():
     js = (REPO / "ui/pill/app.js").read_text()
     body = js[js.index("if (vm.mode !== lastMode)"):]
     assert "window.pillHover(-1, -1)" in body[:body.index("\n")]
+
+
+def test_pill_page_has_one_main_button_and_no_skip():
+    page = (REPO / "ui/pill/index.html").read_text()
+    assert page.count('id="main"') == 1 and 'id="play"' not in page
+    assert 'id="interrupt"' not in page and "\u23ED" not in page and "&#x23ED;" not in page
+    assert "<svg" in page  # the line-art sunrise
+    assert page.index('id="main"') < page.index('id="pause"')

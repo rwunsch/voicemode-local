@@ -56,3 +56,51 @@ def test_binds_loopback_by_default(relay):
     src = inspect.getsource(relay.serve)
     assert '"VOICEMODE_PTT_HOST", "127.0.0.1"' in src, \
         "the default bind must stay loopback"
+
+
+# --- wake an idle session on a hold with no voice turn (2026-11-07) ----------
+
+class FakeClient:
+    def __init__(self, outcome):
+        self.outcome, self.sent, self.woke = outcome, [], 0
+
+    def action_outcome(self, action):
+        self.sent.append(action)
+        return self.outcome
+
+    def wake_idle_session(self):
+        self.woke += 1
+        return True, "sent"
+
+
+@pytest.mark.parametrize("action,outcome,woke", [
+    ("hold_release", "no-channel", 1),
+    ("hold_release", "sent", 0),
+    ("hold_start", "no-channel", 0),
+    ("short_press", "no-channel", 0),
+])
+def test_relay_wakes_only_on_a_hold_with_no_channel(relay, action, outcome, woke):
+    client = FakeClient(outcome)
+    relay.forward(action, client)
+    assert client.sent == [action] and client.woke == woke
+
+
+def test_relay_forward_never_raises(relay):
+    class Broken(FakeClient):
+        def wake_idle_session(self):
+            raise RuntimeError("x")
+    relay.forward("hold_release", Broken("no-channel"))
+
+
+def test_relay_does_not_send_hold_end_for_a_hold_that_started_with_no_channel(relay):
+    client = FakeClient("no-channel")
+    relay.forward("hold_start", client)
+    relay.forward("hold_release", client)
+    assert client.sent == ["hold_start"] and client.woke == 1
+
+
+def test_relay_still_sends_hold_end_after_a_hold_with_a_channel(relay):
+    client = FakeClient("sent")
+    relay.forward("hold_start", client)
+    relay.forward("hold_release", client)
+    assert client.sent == ["hold_start", "hold_release"] and client.woke == 0

@@ -11,7 +11,7 @@
 # Safe to re-run: whatever is already present is skipped. If a step fails, fix
 # the cause and run it again; it continues where it stopped.
 #
-# Usage: ./install-mac.sh [--yes] [--pill] [--german] [--help]
+# Usage: ./install-mac.sh [--yes] [--pill] [--barge] [--german] [--help]
 
 set -euo pipefail
 
@@ -32,6 +32,12 @@ header() { echo -e "\n${BOLD}=== $1 ===${NC}"; }
 # upstream version. Same pin as install.sh. Bump deliberately and re-verify the anchors.
 VOICE_MODE_VERSION="8.12.0"
 
+# --barge only: macOS echo cancellation for interrupt by voice on the built-in speakers
+# (AVAudioEngine voice processing, patches/voice_barge.py). Pinned; when the venv already
+# has pyobjc-core (pynput brings it), that release is used instead, so every pyobjc piece
+# comes from one release. This script pins by version, not by hash.
+PYOBJC_AVFOUNDATION_VERSION="12.2.2"
+
 HOMEBREW_INSTALL_CMD='/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"'
 
 # Sources: whisper URL from README.md (macOS section); Kokoro URLs are the
@@ -43,14 +49,19 @@ KOKORO_VOICES_URL="https://github.com/thewh1teagle/kokoro-onnx/releases/download
 
 usage() {
     cat <<'EOF'
-Usage: ./install-mac.sh [--yes] [--pill] [--german] [--help]
+Usage: ./install-mac.sh [--yes] [--pill] [--barge] [--german] [--mode MODE] [--help]
 
 Native macOS setup for voicemode-local (Apple silicon, Homebrew, no Docker).
 
   --yes      Unattended: ask nothing, take every default.
              (Defaults: no voice pill, no German voice.)
   --pill     Install the voice pill (off by default; a failure only warns).
+  --barge    Turn on interrupt by voice (voicemode-switch barge on). On the
+             built-in speakers it uses macOS echo cancellation (installs
+             pyobjc-framework-AVFoundation into the venv); headphones need none.
   --german   Also download the German voice dm_martin (about 325 MB).
+  --mode M   Set the voice mode (local, localonly, piper, hybrid, openai). Without it a
+             first install uses localonly and a re-run keeps the mode you have.
   --help     Show this text.
 
 Safe to re-run: what is already installed or downloaded is skipped.
@@ -60,16 +71,27 @@ EOF
 ASSUME_YES=0
 WANT_PILL=0
 WANT_GERMAN=0
+WANT_BARGE=0
+MODE=""
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --yes|-y)  ASSUME_YES=1 ;;
         --pill)    WANT_PILL=1 ;;
+        --barge)   WANT_BARGE=1 ;;
         --german)  WANT_GERMAN=1 ;;
+        --mode)    [ "$#" -ge 2 ] || { echo "--mode needs a value" >&2; usage >&2; exit 2; }
+                   MODE="$2"; shift ;;
+        --mode=*)  MODE="${1#--mode=}" ;;
         --help|-h) usage; exit 0 ;;
         *) echo "Unknown option: $1" >&2; usage >&2; exit 2 ;;
     esac
     shift
 done
+
+case "$MODE" in
+    ""|local|localonly|piper|hybrid|openai) ;;
+    *) echo "Unknown mode: $MODE (local, localonly, piper, hybrid, openai)" >&2; usage >&2; exit 2 ;;
+esac
 
 CURRENT_PART=""
 cleanup_partial() {
@@ -296,7 +318,14 @@ case ":$PATH:" in
     *) NEED_PATH=1; warn "~/.local/bin is not on your PATH (see the list at the end)" ;;
 esac
 
-"$SCRIPT_DIR/voicemode-switch" localonly || die "voicemode-switch localonly failed"
+# The mode is the user's after the first install: a re-run neither rewrites voicemode.env nor
+# resets the voice. First install = no routing keys yet; --mode MODE always applies MODE.
+ENV_FILE="$HOME/.voicemode/voicemode.env"
+if [ -z "$MODE" ] && grep -Eq '^VOICEMODE_(STT|TTS)_BASE_URLS=' "$ENV_FILE" 2>/dev/null; then
+    ok "Already set up, kept your voice mode ($(sed -n 's/^# mode: //p' "$ENV_FILE" | tail -1 | grep . || echo custom)); change it with ./install-mac.sh --mode M"
+else
+    "$SCRIPT_DIR/voicemode-switch" "${MODE:-localonly}" || die "voicemode-switch ${MODE:-localonly} failed"
+fi
 if ! "$SCRIPT_DIR/voicemode-switch" ensure; then
     warn "voicemode-switch ensure reported a problem; the MCP launcher retries it on every session start."
 fi
@@ -376,6 +405,44 @@ if [ "$WANT_PILL" = "1" ]; then
     else
         PILL_FAILED=1
         warn "The voice pill did not start (the voice itself is unaffected). Try again later with: voicemode-switch pill on"
+    fi
+fi
+
+# ─── Step 10: Interrupt by voice (only on request) ──────────────────────────
+if [ "$WANT_BARGE" = "1" ]; then
+    header "Step 10: Interrupt by voice"
+    # A barge problem must never fail voice: warn and carry on.
+    AVF_OK=0
+    if "$VENV_DIR/bin/python" -c "import importlib.util as u, sys; sys.exit(u.find_spec('AVFoundation') is None)" 2>/dev/null; then
+        ok "pyobjc-framework-AVFoundation already installed (echo cancellation on the speakers)"
+        AVF_OK=1
+    else
+        avf_version="$("$VENV_DIR/bin/python" -c "import importlib.metadata as m; print(m.version('pyobjc-core'))" 2>/dev/null || true)"
+        [ -n "$avf_version" ] || avf_version="$PYOBJC_AVFOUNDATION_VERSION"
+        size_before="$(du -sk "$VENV_DIR" | awk '{print $1}')"
+        # Every pyobjc piece AVFoundation pulls in, pinned to the one release, so uv cannot
+        # move pyobjc-core (or Cocoa, Quartz) away from what pynput is running on.
+        if uv pip install --python "$VENV_DIR/bin/python" \
+            "pyobjc-core==$avf_version" "pyobjc-framework-AVFoundation==$avf_version" \
+            "pyobjc-framework-CoreAudio==$avf_version" "pyobjc-framework-CoreMedia==$avf_version" \
+            "pyobjc-framework-Cocoa==$avf_version" "pyobjc-framework-Quartz==$avf_version"; then
+            size_after="$(du -sk "$VENV_DIR" | awk '{print $1}')"
+            added_mb="$(awk -v k="$((size_after - size_before))" 'BEGIN { printf "%.1f", k / 1024 }')"
+            ok "pyobjc-framework-AVFoundation $avf_version added $added_mb MB to the venv (measured)"
+            AVF_OK=1
+        else
+            warn "pyobjc-framework-AVFoundation $avf_version did not install: on the built-in speakers interrupt by voice stays off; use headphones."
+        fi
+    fi
+    if "$SCRIPT_DIR/voicemode-switch" barge on; then
+        ok "Interrupt by voice on"
+        if [ "$AVF_OK" = "1" ]; then
+            echo "  Interrupt by voice: on the built-in speakers it listens through macOS echo cancellation; with headphones it listens to the mic as it is."
+        else
+            echo "  Interrupt by voice works with headphones only until pyobjc-framework-AVFoundation installs (run ./install-mac.sh --barge again); use headphones."
+        fi
+    else
+        warn "Interrupt by voice did not start (the voice itself is unaffected). Try again later with: voicemode-switch barge on"
     fi
 fi
 

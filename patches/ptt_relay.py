@@ -76,21 +76,41 @@ class _Handler(socketserver.StreamRequestHandler):
                         logger.info("relay <- rejected %r", text.strip()[:80])
                     continue
                 logger.info("relay <- %s", action)
-                try:
-                    from voice_mode import ptt_control_client
-                    reachable = ptt_control_client.available()
-                    ptt_control_client.on_action(action)
-                    if not reachable:
-                        logger.info(
-                            "   ...but voice-mode's control socket is not bound: "
-                            "it exists only DURING a converse call, so this press "
-                            "did nothing. Press while the assistant is speaking or "
-                            "listening."
-                        )
-                except Exception as e:  # noqa: BLE001 - never kill the relay
-                    logger.warning("forward failed: %s", e)
+                forward(action)
         except (OSError, socket.timeout):
             pass
+
+
+_woke_only = False   # the current hold began with no voice channel
+
+
+def forward(action: str, client=None) -> None:
+    """Hand one action to the control channel. A hold released with no voice turn
+    running (``no-channel``) wakes the last voice session instead (session_wake).
+    Never raises."""
+    try:
+        if client is None:
+            from voice_mode import ptt_control_client as client
+        global _woke_only
+        if action == "hold_release" and _woke_only:
+            # The hold began with no voice turn: there is nothing to end, only a wake.
+            _woke_only = False
+            outcome = "no-channel"
+        else:
+            outcome = client.action_outcome(action)
+            if action == "hold_start":
+                _woke_only = outcome == "no-channel"
+        if outcome == "no-channel":
+            if action == "hold_release":
+                ok, detail = client.wake_idle_session()
+                logger.info("   no voice turn running: %s", detail if ok else "could not wake: " + detail)
+            else:
+                logger.info(
+                    "   ...but voice-mode's control socket is not bound: it exists only "
+                    "DURING a converse call. A hold (0.8 s or more) wakes the last voice "
+                    "session instead.")
+    except Exception as e:  # noqa: BLE001 - never kill the relay
+        logger.warning("forward failed: %s", e)
 
 
 class _Server(socketserver.ThreadingTCPServer):

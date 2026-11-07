@@ -68,6 +68,10 @@ case "$1 $2" in
       case "$a" in
         voice-mode==*) echo "${a#voice-mode==}" > "$venv/.stub_vm_version" ;;
         kokoro-onnx) touch "$venv/.stub_pkgs" ;;
+        pyobjc-framework-AVFoundation==*)
+          [ "${STUB_FAIL:-}" = uv-avf ] && { echo "error: stub avf failed" >&2; exit 1; }
+          echo "${a#pyobjc-framework-AVFoundation==}" > "$venv/.stub_avf"
+          head -c 3145728 /dev/zero > "$venv/.stub_avf_bytes" ;;
       esac
     done
     ;;
@@ -80,6 +84,8 @@ echo "python $*" >> "$STUB_LOG"
 here="$(cd "$(dirname "$0")/.." && pwd)"
 if [ "$1" = "-c" ]; then
   case "$2" in
+    *pyobjc-core*) cat "$here/.stub_pyobjc_core" 2>/dev/null; [ -f "$here/.stub_pyobjc_core" ]; exit $? ;;
+    *AVFoundation*) [ -f "$here/.stub_avf" ]; exit $? ;;
     *importlib.metadata*) cat "$here/.stub_vm_version" 2>/dev/null; [ -f "$here/.stub_vm_version" ]; exit $? ;;
     *find_spec*) [ -f "$here/.stub_pkgs" ]; exit $? ;;
     *mcpServers*|*permissions*) shift; exec python3 -c "$@" ;;
@@ -136,6 +142,7 @@ exit 0
 STUB_SWITCH = r'''#!/bin/bash
 echo "switch $*" >> "$STUB_LOG"
 [ "${STUB_FAIL:-}" = pill ] && [ "$1 $2" = "pill on" ] && { echo "pill exploded" >&2; exit 1; }
+[ "${STUB_FAIL:-}" = barge ] && [ "$1 $2" = "barge on" ] && { echo "barge exploded" >&2; exit 1; }
 [ "${STUB_FAIL:-}" = localonly ] && [ "$1" = localonly ] && { echo "localonly failed" >&2; exit 1; }
 [ "${STUB_FAIL:-}" = health ] && [ "$1" = health ] && exit 1
 exit 0
@@ -644,3 +651,177 @@ def test_not_asking_for_the_pill_does_not_claim_it_is_absent(tmp_path):
     done = _box(tmp_path).run("--yes")
     assert "Voice pill: not installed" not in done.stdout
     assert "Voice pill: not requested" in done.stdout
+
+
+# --- --barge: interrupt by voice, only on request --------------------------------
+
+BARGE_LINE = ("Interrupt by voice: on the built-in speakers it listens through macOS echo "
+              "cancellation; with headphones it listens to the mic as it is.")
+
+
+def test_barge_is_not_turned_on_by_default_or_with_yes(tmp_path):
+    # Fails if barge becomes default-on, or --yes implies it.
+    b = _box(tmp_path)
+    done = b.run("--yes")
+    assert done.returncode == 0
+    assert not b.calls("switch barge") and BARGE_LINE not in done.stdout
+
+
+def test_barge_flag_turns_it_on_after_install_and_prints_the_headphones_line(tmp_path):
+    # Fails if --barge is ignored, runs before the services exist, or the warning is missing.
+    b = _box(tmp_path)
+    done = b.run("--barge", "--yes")
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert b.calls("switch barge on")
+    assert BARGE_LINE in done.stdout
+    assert b.calls().index(b.calls("switch barge on")[0]) > b.calls().index(b.calls("switch localonly")[0])
+
+
+def test_a_failing_barge_warns_and_the_install_still_succeeds(tmp_path):
+    # Fails if a barge failure is made fatal.
+    b = _box(tmp_path)
+    done = b.run("--barge", "--yes", fail="barge")
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert "barge" in (done.stdout + done.stderr).lower()
+    assert BARGE_LINE not in done.stdout
+
+
+def test_help_lists_barge(tmp_path):
+    assert "--barge" in _box(tmp_path).run("--help").stdout
+
+
+# --- --barge: pyobjc-framework-AVFoundation for echo cancellation on the speakers ---
+
+AVF = "pyobjc-framework-AVFoundation=="
+
+
+def _installer_pin():
+    m = re.search(r'^PYOBJC_AVFOUNDATION_VERSION="([0-9.]+)"$', INSTALLER.read_text(), re.M)
+    assert m, "install-mac.sh must pin PYOBJC_AVFOUNDATION_VERSION"
+    return m.group(1)
+
+
+def _avf_installs(b):
+    return [c for c in b.calls("uv pip install") if AVF in c]
+
+
+def test_avfoundation_is_not_installed_without_barge(tmp_path):
+    # Fails if the echo-cancellation package is installed for everyone.
+    b = _box(tmp_path)
+    assert b.run("--yes").returncode == 0
+    assert not _avf_installs(b)
+
+
+def test_barge_installs_the_pinned_avfoundation_into_the_venv_before_turning_barge_on(tmp_path):
+    # Fails if --barge stops installing it, unpins it, installs it elsewhere, or after `barge on`.
+    b = _box(tmp_path)
+    done = b.run("--barge", "--yes")
+    assert done.returncode == 0, done.stdout + done.stderr
+    (call,) = _avf_installs(b)
+    assert f"{AVF}{_installer_pin()}" in call
+    assert f"--python {b.repo}/.venv/bin/python" in call
+    assert b.calls().index(call) < b.calls().index(b.calls("switch barge on")[0])
+
+
+def test_avfoundation_matches_the_pyobjc_already_in_the_venv(tmp_path):
+    # pynput pulls pyobjc-core; a framework wrapper from another release is a mismatch.
+    b = _box(tmp_path)
+    assert b.run("--yes").returncode == 0
+    (b.repo / ".venv/.stub_pyobjc_core").write_text("13.0\n")
+    assert b.run("--barge", "--yes").returncode == 0
+    (call,) = _avf_installs(b)
+    assert f"{AVF}13.0" in call
+
+
+def test_barge_prints_the_measured_size_avfoundation_added(tmp_path):
+    # Fails if the size line goes, or prints a constant instead of a measurement.
+    done = _box(tmp_path).run("--barge", "--yes")
+    m = re.search(r"pyobjc-framework-AVFoundation \S+ added ([0-9.]+) MB to the venv \(measured\)", done.stdout)
+    assert m, done.stdout
+    assert 2.5 < float(m.group(1)) < 4.0   # the stub writes 3 MB
+
+
+def test_avfoundation_already_present_is_skipped(tmp_path):
+    b = _box(tmp_path)
+    assert b.run("--barge", "--yes").returncode == 0
+    assert b.run("--barge", "--yes").returncode == 0
+    assert len(_avf_installs(b)) == 1
+
+
+def test_a_failed_avfoundation_install_warns_turns_barge_on_and_says_speakers_are_refused(tmp_path):
+    # Fails if the failure becomes fatal, skips barge for headphone users, or hides the consequence.
+    b = _box(tmp_path)
+    done = b.run("--barge", "--yes", fail="uv-avf")
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert b.calls("switch barge on")
+    assert "use headphones" in done.stdout and BARGE_LINE not in done.stdout
+
+
+def test_help_says_speakers_use_echo_cancellation(tmp_path):
+    assert "echo cancellation" in _box(tmp_path).run("--help").stdout
+
+
+def test_avfoundation_install_pins_every_pyobjc_piece_to_one_release(tmp_path):
+    # Fix round 1, I1: pinning AVFoundation alone lets uv move pyobjc-core (or CoreAudio,
+    # CoreMedia) to a newer release under pynput's Quartz and Cocoa.
+    b = _box(tmp_path)
+    assert b.run("--yes").returncode == 0
+    (b.repo / ".venv/.stub_pyobjc_core").write_text("12.2.1\n")
+    assert b.run("--barge", "--yes").returncode == 0
+    (call,) = _avf_installs(b)
+    for pkg in ("pyobjc-core", "pyobjc-framework-AVFoundation", "pyobjc-framework-CoreAudio",
+                "pyobjc-framework-CoreMedia", "pyobjc-framework-Cocoa", "pyobjc-framework-Quartz"):
+        assert f"{pkg}==12.2.1" in call.split(), (pkg, call)
+
+
+# --- a re-run leaves the voice mode alone ---------------------------------------
+
+def _env_with_mode(b, mode="hybrid", voices="am_puck"):
+    f = b.home / ".voicemode/voicemode.env"
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text("# >>> voicemode-switch managed (do not edit inside this block) >>>\n"
+                 f"# mode: {mode}\nVOICEMODE_STT_BASE_URLS=http://x/v1\nVOICEMODE_TTS_BASE_URLS=http://y/v1\n"
+                 f"VOICEMODE_VOICES={voices}\n# <<< voicemode-switch managed <<<\n")
+    return f
+
+
+def test_first_install_applies_localonly(tmp_path):
+    # Fails if the mode is no longer applied when voicemode.env has no routing keys yet.
+    b = _box(tmp_path)
+    assert b.run("--yes").returncode == 0
+    assert b.calls("switch localonly")
+
+
+def test_rerun_keeps_the_users_voice_mode_and_says_so(tmp_path):
+    # Fails if a re-run calls the mode switch again (it rewrote voicemode.env and the voice).
+    b = _box(tmp_path)
+    _env_with_mode(b, "hybrid")
+    done = b.run("--yes")
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert not b.calls("switch localonly") and not b.calls("switch hybrid")
+    assert "kept your voice mode (hybrid)" in done.stdout
+
+
+def test_explicit_mode_flag_applies_that_mode_even_on_a_rerun(tmp_path):
+    # Fails if --mode is ignored once routing keys exist.
+    b = _box(tmp_path)
+    _env_with_mode(b, "hybrid")
+    done = b.run("--yes", "--mode", "piper")
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert b.calls("switch piper") and not b.calls("switch localonly")
+
+
+def test_mode_flag_on_a_first_install_replaces_localonly(tmp_path):
+    b = _box(tmp_path)
+    assert b.run("--yes", "--mode=local").returncode == 0
+    assert b.calls("switch local") == ["switch local"] and not b.calls("switch localonly")
+
+
+def test_unknown_mode_is_an_error_and_changes_nothing(tmp_path):
+    b = _box(tmp_path)
+    done = b.run("--yes", "--mode", "bogus")
+    assert done.returncode == 2 and not b.calls()
+
+
+def test_help_lists_mode(tmp_path):
+    assert "--mode" in _box(tmp_path).run("--help").stdout

@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import model from "../ui/pill/model.js";
-const { viewModel, VOICES, LANGUAGES, nextHidden } = model;
+const { viewModel, VOICES, GERMAN_VOICES, LANGUAGES, nextHidden } = model;
 
 const snap = (o = {}) => ({
   visible: true, phase: "speaking", floor: { pid: 1, label: "a" },
@@ -13,7 +13,7 @@ test("disconnected after 3s with no snapshot", () => {
   const vm = viewModel(snap(), 1000, 4001);
   assert.equal(vm.connected, false);
   assert.equal(vm.label, "Disconnected");
-  assert.equal(vm.interrupt.enabled, false);
+  assert.equal(vm.main.enabled, false);
   assert.equal(vm.pause.enabled, false);
   assert.equal(vm.stop.enabled, false);
   assert.equal(vm.pickersEnabled, false);
@@ -38,12 +38,6 @@ test("pause button reads Resume when paused", () => {
   assert.equal(q.cmd, "pause");
 });
 
-test("interrupt disabled unless speaking or listening", () => {
-  const e = (phase) => viewModel(snap({ phase }), 0, 0).interrupt.enabled;
-  assert.deepEqual(["speaking", "listening", "working", "paused", "idle"].map(e),
-    [true, true, false, false, false]);
-});
-
 test("stop needs a floor holder", () => {
   assert.equal(viewModel(snap({ floor: null }), 0, 0).stop.enabled, false);
   assert.equal(viewModel(snap(), 0, 0).stop.enabled, true);
@@ -64,9 +58,18 @@ test("interruption count wording", () => {
 
 test("keys match platform", () => {
   assert.deepEqual(viewModel(snap({ platform: "windows" }), 0, 0).keys,
-    [{ keys: ["Ctrl", "Space"], text: "tap: skip, hold: talk" }]);
+    [{ keys: ["Ctrl", "Space"], text: "tap: stop, hold: talk" }]);
+  assert.deepEqual(viewModel(snap({ platform: "linux" }), 0, 0).keys,
+    [{ keys: ["Ctrl", "Space"], text: "tap: stop, hold: talk" }]);
   const mac = viewModel(snap({ platform: "mac" }), 0, 0).keys;
   assert.deepEqual(mac.map((k) => k.keys.join("-")), ["Control-Option-Space", "Control-Option-Escape"]);
+  assert.equal(mac[0].text, "tap: stop, hold: talk");
+});
+
+test("a held push-to-talk key shows Holding", () => {
+  const vm = viewModel(snap({ phase: "holding" }), 0, 0);
+  assert.equal(vm.label, "Holding\u2026");
+  assert.equal(vm.stateText, "Holding\u2026");
 });
 
 test("queue row shows position", () => {
@@ -93,7 +96,7 @@ test("dot and visibility come from ui and snapshot", () => {
 });
 
 test("pickers expose constant lists and current value", () => {
-  assert.ok(VOICES.includes("dm_martin") && VOICES.includes("p_de_thorsten") && VOICES.includes("af_sky"));
+  assert.ok(VOICES.includes("af_sky") && !VOICES.includes("dm_martin") && !VOICES.includes("p_de_thorsten"));
   assert.deepEqual(LANGUAGES, ["English", "German"]);
   assert.equal(viewModel(snap(), 0, 0).voice, "af_sky");
 });
@@ -107,7 +110,7 @@ test("disconnected does not show last state", () => {
 
 test("pause and resume carry icons with the text variation selector", () => {
   assert.equal(viewModel(snap(), 0, 0).pause.icon, "\u23F8\uFE0E");
-  assert.equal(viewModel(snap({ phase: "paused" }), 0, 0).pause.icon, "\u25B6\uFE0E");
+  assert.equal(viewModel(snap({ phase: "paused" }), 0, 0).pause.icon, "\u23EF\uFE0E"); // ⏯, not ▶
 });
 
 test("pickers enabled only with a floor", () => {
@@ -115,10 +118,30 @@ test("pickers enabled only with a floor", () => {
   assert.equal(viewModel(snap({ floor: null, voice: null }), 0, 0).pickersEnabled, false);
 });
 
-test("unknown voice and language stay null", () => {
+test("unknown voice stays null; the language falls back to English", () => {
   const vm = viewModel(snap({ voice: null, language: null }), 0, 0);
   assert.equal(vm.voice, null);
-  assert.equal(vm.language, null);
+  assert.equal(vm.language, "English");
+});
+
+test("language is derived from a German voice when the snapshot has none", () => {
+  assert.equal(viewModel(snap({ voice: "dm_martin", language: null }), 0, 0).language, "German");
+  assert.equal(viewModel(snap({ voice: "p_de_eva", language: null }), 0, 0).language, "German");
+  assert.equal(viewModel(snap({ voice: "am_puck", language: null }), 0, 0).language, "English");
+  assert.equal(viewModel(snap({ voice: "dm_martin", language: "English" }), 0, 0).language, "English");
+});
+
+test("the voice list follows the language", () => {
+  const en = viewModel(snap({ voice: "af_sky", language: "English" }), 0, 0).voices;
+  assert.deepEqual(en, VOICES);
+  assert.ok(!en.some((v) => v.startsWith("dm_") || v.startsWith("p_de_")));
+  const de = viewModel(snap({ voice: "dm_martin", language: "German" }), 0, 0).voices;
+  assert.deepEqual(de, ["dm_martin", "p_de_thorsten", "p_de_eva"]);
+  assert.deepEqual(GERMAN_VOICES, de);
+  // a current voice outside the list is still shown
+  assert.deepEqual(viewModel(snap({ voice: "af_sky", language: "German" }), 0, 0).voices, [...de, "af_sky"]);
+  // empty with no floor and no voice: still the English list, never an empty select
+  assert.deepEqual(viewModel(snap({ floor: null, voice: null, language: null }), 0, 0).voices, VOICES);
 });
 
 test("minimize and dismiss stay enabled when connected too", () => {
@@ -193,4 +216,54 @@ test("beeps switch shows the backend's value", () => {
   assert.equal(viewModel(snap({ beeps: true }), 0, 0).beeps.on, true);
   assert.equal(viewModel(snap({ beeps: false }), 0, 0).beeps.on, false);
   assert.equal(viewModel(null, 0, 0).beeps.on, false);
+});
+
+const wakeTarget = { label: "demo" };
+const buttons = (o) => { const vm = viewModel(snap(o), 0, 0);
+  return { main: vm.main.kind, mainOn: vm.main.enabled, pause: vm.pause.visible, resume: vm.pause.cmd }; };
+
+test("between turns: Wake only; in a turn: Stop + Pause; paused: Stop + Resume", () => {
+  for (const phase of ["idle", "working", "stopped"]) {
+    const b = buttons({ phase, play: wakeTarget });
+    assert.deepEqual([b.main, b.mainOn, b.pause], ["wake", true, false], phase);
+  }
+  for (const phase of ["speaking", "listening", "holding"]) {
+    const b = buttons({ phase, play: wakeTarget });
+    assert.deepEqual([b.main, b.pause, b.resume], ["stop", true, "pause"], phase);
+  }
+  const p = viewModel(snap({ phase: "paused", play: wakeTarget }), 0, 0);
+  assert.deepEqual([p.main.kind, p.pause.visible, p.pause.cmd, p.pause.icon], ["stop", true, "resume", "\u23EF\uFE0E"]);
+});
+
+test("the main button is one element that switches: wake or stop, never both", () => {
+  const w = viewModel(snap({ phase: "idle", play: wakeTarget }), 0, 0).main;
+  assert.deepEqual([w.kind, w.cmd, w.title], ["wake", "wake", "Wake demo"]);
+  const s = viewModel(snap({ phase: "speaking", play: wakeTarget }), 0, 0).main;
+  assert.deepEqual([s.kind, s.cmd, s.title], ["stop", "stop", "Stop"]);
+});
+
+test("without a wakeable session the main button is a disabled-by-floor Stop, not Wake", () => {
+  for (const o of [{ phase: "idle", play: null }, { phase: "idle" }]) {
+    const m = viewModel(snap(o), 0, 0).main;
+    assert.equal(m.kind, "stop");
+  }
+  assert.equal(viewModel(snap({ phase: "idle", play: null, floor: null }), 0, 0).main.enabled, false);
+  const d = viewModel(snap({ phase: "idle", play: wakeTarget }), 1000, 5000);
+  assert.deepEqual([d.main.kind, d.main.enabled, d.pause.visible], ["stop", false, false]); // disconnected
+});
+
+test("no Skip anywhere in the model", () => {
+  const vm = viewModel(snap(), 0, 0);
+  assert.equal("interrupt" in vm, false);
+  assert.equal("play" in vm, false);
+});
+
+test("a Wake result replaces the state text briefly", () => {
+  const vm = viewModel(snap({ phase: "working", wake: { text: "Woke demo", ok: true } }), 0, 0);
+  assert.equal(vm.stateText, "Woke demo");
+  assert.equal(vm.wakeText, "Woke demo");
+  const bad = viewModel(snap({ phase: "working", wake: { text: "Can't wake demo: busy", ok: false } }), 0, 0);
+  assert.equal(bad.stateText, "Can't wake demo: busy");
+  assert.equal(viewModel(snap({ phase: "working", wake: null }), 0, 0).stateText, "Between turns");
+  assert.equal(viewModel(snap({ wake: { text: "x" } }), 1000, 5000).wakeText, "");
 });

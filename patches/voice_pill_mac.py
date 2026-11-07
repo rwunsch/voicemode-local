@@ -32,9 +32,12 @@ BACKOFF_CAP_S = 30
 NONACTIVATING_PANEL = 1 << 7  # NSWindowStyleMaskNonactivatingPanel
 WINDOW_BEHAVIOUR = 1 << 0  # canJoinAllSpaces
 EDGE_W = 10  # the page's .edge width
-TRAY_RGB = {"speaking": (139, 92, 246), "listening": (13, 148, 136)}  # as the Windows tray
+TRAY_RGB = {"speaking": (139, 92, 246), "listening": (13, 148, 136), "holding": (13, 148, 136)}  # as the Windows tray
 TRAY_RGB_IDLE = (148, 163, 184)
 STABLE_RUN_S = 30
+HEARTBEAT_S = 60
+BACKEND_SILENCE_S = 15  # the backend writes every 1 s idle, 0.25 s in a turn: 15 s is 15x the slower
+WATCHDOG_TICK_S = 1.0
 
 
 # -- pure logic ---------------------------------------------------------------
@@ -52,6 +55,21 @@ def route_page_message(text):
     if "cmd" in m:
         return ("cmd", text)
     return None
+
+
+def state_label(state):
+    """What the window is doing, for the log."""
+    if state.dismissed and state.visible:
+        return "dismissed"
+    if state.in_tray:
+        return "minimized to menu bar"
+    return "shown" if state.shown else "hidden"
+
+
+def heartbeat_line(last_line_age, visible, dismissed, mode, win_visible, screens):
+    age = "none" if last_line_age is None else f"{last_line_age:.1f}"
+    return (f"hb last_line_age={age} visible={visible} dismissed={dismissed} mode={mode} "
+            f"win_visible={win_visible} screens={screens}")
 
 
 def snapshot_visible(line):
@@ -357,13 +375,29 @@ def use_panel():
     BrowserView.WindowHost = PillPanel
 
 
+def _pill_state():
+    """voice_pill_state beside this file, by path (it is stdlib only)."""
+    mod = sys.modules.get("_vml_pill_state")
+    if mod is None:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("_vml_pill_state", HERE / "voice_pill_state.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        sys.modules["_vml_pill_state"] = mod
+    return mod
+
+
 class App:
+    @property
+    def pos_file(self) -> Path:
+        """In the pill's own folder, which follows VOICEMODE_BASE_DIR."""
+        return _pill_state().default_base() / "window-position.txt"
+
     def __init__(self, force, backend):
         self.force = force
         self.backend = backend
         self.state = WindowState()
         self.pos = None
-        self.pos_file = Path.home() / ".voicemode" / "pill" / "window-position.txt"
         self.lock = threading.Lock()
         self.proc = self.stdin = self.win = self.tray = self.tray_target = None
         self.slide_gen = 0
@@ -371,6 +405,9 @@ class App:
         self.closing = self.had_output = self.dragging = False
         self.backoff = 1.0
         self.started = None
+        self.nap = threading.Event()  # never set: a sleep that tests' faked time.sleep cannot reach
+        self.last_line = None  # monotonic time of the backend's last line
+        self.label = state_label(self.state)
         try:
             self.pos, width, self.state.dock_y = parse_saved_position(self.pos_file.read_text())
             if width:
@@ -381,11 +418,63 @@ class App:
     def log(self, s):
         print(time.strftime("%H:%M:%S"), s, file=sys.stderr, flush=True)
 
+    def note_state(self):
+        """One log line when what the window is doing changes."""
+        now = state_label(self.state)
+        if now == self.label:
+            return
+        was, self.label = self.label, now
+        if now == "shown" and was == "minimized to menu bar":
+            now = "restored"
+        elif now == "minimized to menu bar":
+            now = "minimized"
+        self.log(f"window: {now} (was {was}; visible={self.state.visible} "
+                 f"dismissed={self.state.dismissed} mode={self.state.mode})")
+
+    def start_heartbeat(self):
+        self.hb_thread = threading.Thread(target=self.heartbeat, daemon=True)
+        self.hb_thread.start()
+
+    def heartbeat(self):
+        while not self.closing:
+            end = time.monotonic() + HEARTBEAT_S
+            while not self.closing and time.monotonic() < end:
+                self.nap.wait(min(1.0, HEARTBEAT_S))  # not time.sleep: tests fake that one
+            if self.closing:
+                return
+            win_visible = screens = None
+            try:
+                win_visible = bool(self.win.native.isVisible()) if self.win and self.win.native else None
+            except Exception as e:
+                win_visible = f"error:{e}"
+            try:
+                from AppKit import NSScreen
+                screens = len(NSScreen.screens())
+            except Exception:
+                pass
+            age = None if self.last_line is None else time.monotonic() - self.last_line
+            self.log(heartbeat_line(age, self.state.visible, self.state.dismissed, self.state.mode,
+                                    win_visible, screens))
+
+    def watchdog(self, p):
+        """Kill a backend that stays alive but writes nothing; supervise() then restarts it."""
+        while p.poll() is None and not self.closing:
+            self.nap.wait(WATCHDOG_TICK_S)
+            quiet = time.monotonic() - (self.last_line or self.started)
+            if p.poll() is None and not self.closing and quiet > BACKEND_SILENCE_S:
+                self.log(f"backend silent for {quiet:.0f} s (limit {BACKEND_SILENCE_S} s): killing pid {p.pid}")
+                try:
+                    p.kill()
+                except OSError:
+                    pass
+                return
+
     # backend
     def start_backend(self):
         if not self.closing:
             self.thread = threading.Thread(target=self.supervise, daemon=True)
             self.thread.start()
+            self.start_heartbeat()
 
     def spawn(self):
         try:
@@ -406,8 +495,11 @@ class App:
             self.started = time.monotonic()
             p, lines = self.spawn(), 0
             if p:
+                self.last_line = None
+                threading.Thread(target=self.watchdog, args=(p,), daemon=True).start()
                 for line in p.stdout:
                     lines += 1
+                    self.last_line = time.monotonic()
                     self.on_line(line.strip())
                 p.wait()
             ran = time.monotonic() - self.started if p else 0  # a failed start ran for nothing
@@ -435,6 +527,7 @@ class App:
             return
         v = snapshot_visible(line)
         if v is not None and self.state.on_snapshot(v):
+            self.note_state()
             self.apply()
         wv = self.webview()
         if wv is not None and self.page_ready:
@@ -461,6 +554,7 @@ class App:
             self.state.on_window(r[1])  # the slide lands through apply() when it ends
             return
         what = self.state.on_window(r[1])
+        self.note_state()
         if what == "drag":
             self.drag()
         elif what == "resize":
