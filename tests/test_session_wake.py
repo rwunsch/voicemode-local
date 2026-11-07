@@ -165,13 +165,24 @@ def test_unknown_reason_is_refused(sw, world):
 # -- refusals: nothing is sent -------------------------------------------------
 
 @pytest.mark.parametrize("status,word", [("busy", "busy"), ("waiting", "permission"),
-                                         ("shell", "shell"), (None, "status")])
+                                         (None, "status")])
 def test_refuses_unless_idle(sw, world, status, word):
     world.write(status=status)
     ok, detail = sw.wake(world.pid, "ptt")
     assert not ok and word in detail
     time.sleep(0.1)
     assert world.peer.data == b""
+
+
+def test_wakes_a_session_whose_background_shell_is_running(sw, world):
+    """status "shell": the session sits at its prompt while a (background) shell command
+    runs. Seen on a Mac, 2026-11-07: an idle session with a background test run was
+    refused three times. The message queues until the session's next turn, so it is safe."""
+    world.write(status="shell")
+    ok, detail = sw.wake(world.pid, "ptt")
+    assert ok, detail
+    time.sleep(0.2)
+    assert b'"type": "auth"' in world.peer.data or b'"type":"auth"' in world.peer.data
 
 
 def test_refuses_missing_key(sw, world):

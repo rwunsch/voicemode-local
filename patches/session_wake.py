@@ -102,8 +102,11 @@ REASON_ALIASES = {"play": "wake"}   # the pill's old Play command
 STATUS_REASONS = {
     "busy": "busy",
     "waiting": "waiting for a permission answer",
-    "shell": "running a shell command",
 }
+# "shell": the session sits at its prompt while a (background) shell command runs. An
+# idle Mac session with a background test run was refused 3 times on 2026-11-07; the
+# message only queues until the session's next turn, so it is woken like an idle one.
+WAKEABLE = ("idle", "shell")
 
 _lock = threading.Lock()
 _last_sent: Optional[float] = None
@@ -441,7 +444,7 @@ def _attempt(info, reason, cdir, home, base):
     if reg.get("peerProtocol") != PEER_PROTOCOL:
         raise Refused(f"peer protocol {reg.get('peerProtocol')!r}, need {PEER_PROTOCOL}")
     status = reg.get("status")
-    if status != "idle":
+    if status not in WAKEABLE:
         raise Refused(STATUS_REASONS.get(status, f"unknown status {status!r}"))
     _check_proc_start(pid, reg)
     path = reg.get("messagingSocketPath")

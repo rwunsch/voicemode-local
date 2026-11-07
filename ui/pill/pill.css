@@ -53,4 +53,5 @@ html,body{height:100%}
 [data-mode=tab] .tab{display:block}[data-mode=tab] .card{display:none}
 [hidden]{display:none!important}
 .wake:hover:not(:disabled),.wake.hover:not(:disabled){color:var(--g);border-color:var(--g)}
+.main .wakeicon{display:flex;align-items:center;justify-content:center}
 .main .sun{display:block;margin:auto}
