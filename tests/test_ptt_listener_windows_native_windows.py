@@ -105,7 +105,7 @@ def test_the_listener_sends_ptt_control_clients_commands_to_the_pipe(tmp_path):
         assert done.returncode == 0, done.stdout + done.stderr
         lines = server.wait_for(3)
         time.sleep(0.5)  # press must not arrive late either
-    assert server.lines == [b'{"command": "skip_forward"}\n', b'{"command": "hold_start"}\n',
+    assert server.lines == [b'{"command": "stop", "hint": "switch-to-text"}\n', b'{"command": "hold_start"}\n',
                             b'{"command": "hold_end"}\n'], (lines, _log(log))
     text = _log(log)
     assert text.count("sent=True") == 3 and "no control pipe" not in text, text

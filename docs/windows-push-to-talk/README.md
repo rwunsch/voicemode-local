@@ -11,15 +11,22 @@
 |--------------|-------|
 | Status       | In progress: built and tested without keys; a real key test is pending |
 | Created      | 2026-11-07 |
-| Last Updated | 2026-11-07 |
+| Last Updated | 2026-11-07 (tap/hold rule: instant hold, tap under 800 ms stops) |
 | Project      | voicemode-local, branch feature/native-ptt (task 7 of the native Windows plan) |
 
 ## Keys (both modes)
 
 | Key | What is sent |
 |-----|--------------|
-| Ctrl+Space, tap (released before 400 ms) | `skip_forward`: cuts the reply, or ends your turn |
-| Ctrl+Space, hold (400 ms or more) | `hold_start`, then `hold_end` on release: the mic stays open while held |
+| Ctrl+Space, key down | `hold_start` at once: the reply is cut (also while still being generated) and the mic opens |
+| released after 800 ms or more (hold) | `hold_end`: what you said is transcribed and answered |
+| released within 800 ms (tap) | `stop` with hint `switch-to-text`: full stop, the recording is dropped, the agent continues in text |
+
+The 800 ms is `$TapMaxMs` in the script and `TAP_MAX_S` in `patches/ptt_core.py`, the same on
+every platform (Robert, 2026-11-07). The script sends the wire words `hold_start`,
+`hold_release` and `short_press`; turning `short_press` into `stop` is the sender's (or, in
+relay mode, `ptt_relay`'s) job, in `ptt_control_client.COMMANDS`. `-HoldThresholdMs` is still
+accepted so old shortcuts keep starting, and ignored.
 
 Only while a terminal process has focus (`WindowsTerminal`, `powershell`, `pwsh`, `wsl`,
 `conhost`, `cmd`, `alacritty`, `wezterm`, `Code`), so Ctrl+Space in other apps is left alone.
@@ -34,7 +41,10 @@ unless `-LogPath` says otherwise.
 
 **Native.** `-SenderExe <python>` (and optionally `-SenderArgs`, default
 `-m voice_mode.ptt_control_client --stdin`). The script starts the sender once, as a hidden
-child process, and for each action writes the action word and reads one outcome line:
+child process, and warms it before reading keys: a `warm` line makes it load the path
+resolver and the pipe transport and answer `ready` (logged as `sender ready in N ms`), so
+the first press costs what later ones do (the first press took 0.97 s cold, 2026-11-07).
+Then for each action it writes the action word and reads one outcome line:
 
 | Outcome | Meaning |
 |---------|---------|
@@ -55,6 +65,9 @@ launcher gives the same settings as voice-mode, so both name the same pipe. A re
 does nothing is logged once, then again only when it changes. There is no start probe, since
 the pipe exists only during a voice turn. `-SenderExe` together with `-Port` or `-RelayHost`,
 or `-SenderArgs` without `-SenderExe`, exits 2.
+
+`-ReplayKeys "0:down,500:up"` runs key events through the same rule as the key loop
+(`Get-ReleaseAction`) and sends the result, logging `replay <action> sent=...`.
 
 `-SendAction short_press,hold_start,...` sends those actions through the same function the
 keys use, logs each and exits. The tests use it, and it is the way to check the path without
@@ -91,7 +104,7 @@ flagged. A test now fails if pipe or token code comes back into the script.
   powershell.exe where WSL interop works: parameter mixing, a sender that cannot start.
 - `tests/test_voicemode_native.py`: the launcher's command, the `ptt` switch, the pipe name.
 - `tests/test_ptt_listener_windows_native_windows.py` (Windows): the transport's own server
-  on a real pipe receives `skip_forward`, `hold_start`, `hold_end` for tap, hold, release, and
+  on a real pipe receives `stop` (hint `switch-to-text`), `hold_start`, `hold_end` for tap, hold, release, and
   nothing for `press`; no pipe is logged once; a Low-integrity squatter of the same user and
   a pipe owned by someone else (the sender told it runs as SYSTEM) are refused before
   anything is written; relay mode still sends `{"action": ...}` over TCP.
@@ -111,11 +124,16 @@ Real keys, focus detection and a spoken turn. See the morning check below.
 2. `& <python> <repo>\scripts\windows\voicemode_native.py ptt on`, then `/mcp` reconnect (so
    voice-mode gets the control channel).
 3. `ptt status` shows `on` and `listener: running (process N)`.
-4. Start a voice conversation. While the assistant speaks, tap Ctrl+Space in the terminal: the
-   reply should stop and recording start. While you speak, tap: your turn should end.
+4. Start a voice conversation. While the assistant speaks, hold Ctrl+Space: the reply stops
+   the moment the key goes down; talk, release after a second or more: you are answered.
 5. Hold Ctrl+Space, pause mid-sentence for 3 s, release: nothing should cut you off until release.
-6. Read `<root>\run\ptt-listener.log` (`<root>` is `%LOCALAPPDATA%\voicemode-local-native` by
-   default): `short_press sent=True`, `hold_start (mic open) sent=True`,
-   `hold_end (sending) sent=True`. Between turns a tap logs `no control pipe` once.
-7. Tap Ctrl+Space with a browser in front: `ignored: foreground is not a terminal`.
-8. `ptt off`: `Stopped the listener (process N)`.
+6. While a reply is still being generated (before any sound), hold Ctrl+Space and talk: no
+   reply is played, your words are answered.
+7. Tap Ctrl+Space (under 0.8 s) while it speaks: the voice turn ends, the agent carries on in
+   text.
+8. Read `<root>\run\ptt-listener.log` (`<root>` is `%LOCALAPPDATA%\voicemode-local-native` by
+   default): `sender ready in N ms`, `hold_start (mic open) sent=True`,
+   `hold_end (sending, N ms) sent=True`, `tap -> stop (N ms) sent=True`. Between turns a press
+   logs `no control pipe` once.
+9. Tap Ctrl+Space with a browser in front: `ignored: foreground is not a terminal`.
+10. `ptt off`: `Stopped the listener (process N)`.

@@ -227,12 +227,12 @@ says `true` in any case, with or without quotes, as `barge_state` reads it.
 
 `optional_command("ptt")` starts `ptt-listener-windows.ps1 -SenderExe <runtime python>
 -SenderArgs "-m voice_mode.ptt_control_client --stdin" -LogPath <root>\run\ptt-listener.log`.
-The script reads Ctrl+Space exactly as in WSL relay mode (tap, or hold past 400 ms, only
-while a terminal process has focus) and hands each action word to the sender, a child
+The script reads Ctrl+Space exactly as in WSL relay mode (hold_start on key-down, then a
+release within 800 ms is a tap, later a hold; only while a terminal process has focus) and hands each action word to the sender, a child
 process: one line in, one outcome line back (`sent`, `none`, `no-channel`, `busy`,
 `refused: ...`, `failed: ...`). The sender maps the action with `ptt_control_client`'s own
-table (`short_press` to `skip_forward`, `hold_start`, `hold_release` to `hold_end`, `press` to
-nothing), names the pipe with `control_transport.pipe_name()` of the path the resolver gives
+table (`short_press` to `stop` with hint `switch-to-text`, `hold_start`, `hold_release` to
+`hold_end`, `press` to nothing), names the pipe with `control_transport.pipe_name()` of the path the resolver gives
 (`VOICEMODE_CONTROL_SOCKET`, else the base dir's `control.sock`) on every send, never
 cached, checks the pipe's owner and the serving process (`_verify_server`), and writes the
 JSON line. It gets the launcher's environment, the one voice-mode also gets, so both name

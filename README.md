@@ -279,15 +279,18 @@ reuses the running one; log in `~/.voicemode/logs/ptt-listener.log`. It needs
 plus **Input Monitoring** for your terminal app (System Settings → Privacy & Security; quit and
 reopen the terminal after granting Input Monitoring).
 
-- **Tap** Control-Option-Space: skip, which cuts the reply or ends your turn.
-- **Hold** (more than 1s): cuts the reply and keeps the mic open, with no silence cut-off, until
-  you let go.
+- **Key down** Control-Option-Space: the reply is cut at once (even while it is still being
+  generated) and the mic opens.
+- **Hold** (released after 0.8s): you talk, with no silence cut-off, until you let go; then
+  the agent answers.
+- **Tap** (released within 0.8s): full stop, back to text mode. What the mic caught is
+  dropped. The same rule on Linux and Windows (Ctrl+Space).
 - **Control-Option-Escape**: full stop. Cuts the reply without listening; the agent continues
   in text. Both hotkeys are swallowed, so they never reach the terminal. A bare Escape would
   interrupt Claude Code's tool call instead of stopping cleanly.
 
-**Wake from idle:** with no voice call running, Control-Option-Space wakes the session you last
-spoke with. The listener maps that session's voice-mode pid (from the conch events log) to its
+**Wake from idle:** with no voice call running, a Control-Option-Space hold wakes the session you
+last spoke with (a tap does nothing). The listener maps that session's voice-mode pid (from the conch events log) to its
 tty, selects the Terminal.app tab with that exact tty, types `[push-to-talk] listen now (converse,
 skip_tts=true)` and presses Return once you release the keys; the agent then records you
 right away. That briefly brings the tab to the front. Terminal.app only;
@@ -295,8 +298,7 @@ disable with `VOICEMODE_PTT_WAKE=false`. A hold keeps recording 0.35s after rele
 (`VOICEMODE_PTT_RELEASE_TAIL`) so the last word is not clipped.
 
 Control-Space is avoided because macOS uses it to switch input sources. Change the modifiers with
-`VOICEMODE_PTT_MACOS_MODIFIERS` (e.g. `ctrl,cmd`), the hold time with `VOICEMODE_PTT_HOLD_THRESHOLD`,
-and disable the listener with `VOICEMODE_PTT_ENABLED=false`.
+`VOICEMODE_PTT_MACOS_MODIFIERS` (e.g. `ctrl,cmd`), and disable the listener with `VOICEMODE_PTT_ENABLED=false`.
 
 ### Switching modes mid-session
 

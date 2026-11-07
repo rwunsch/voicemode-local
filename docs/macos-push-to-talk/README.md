@@ -10,15 +10,16 @@
 |--------------|----------------------------------------|
 | Status       | Complete                               |
 | Created      | 2026-10-20                             |
-| Last Updated | 2026-10-20                             |
+| Last Updated | 2026-11-07 (tap/hold rule)             |
 | Project      | voicemode-local (macOS, Terminal.app)  |
 
 ## Keys
 
 | Key | During a voice call | No call running (idle prompt) |
 |-----|---------------------|-------------------------------|
-| Control-Option-Space, **tap** | `skip_forward`: cuts the reply / ends your turn | **Wake**: last session starts recording you |
-| Control-Option-Space, **hold** (>1s) | `hold_start` … `hold_end`: cuts the reply, mic open until release, no silence cut-off, plus a 0.35s tail | (wake, as tap) |
+| Control-Option-Space, **key down** | `hold_start` at once: cuts the reply (also while it is still being generated), mic open, no silence cut-off | nothing yet |
+| … released after 0.8s (**hold**) | `hold_end` after a 0.35s tail: what you said is transcribed and answered | **Wake**: last session starts recording you |
+| … released within 0.8s (**tap**) | `stop` (hint switch-to-text): full stop, the recording is dropped, the agent continues in text | nothing |
 | Control-Option-Escape | `stop`: reply cut, no listening, `converse` returns `[control: stop]`, agent continues in text | nothing |
 
 Other keys in this setup: **Option-Space** is Handy (system-wide dictation into any text field).
@@ -35,8 +36,11 @@ Other keys in this setup: **Option-Space** is Handy (system-wide dictation into 
    Monitoring. Without it the event tap gets nothing and PTT is silently inert.
 4. Restart Claude Code / reconnect the voicemode MCP.
 
+The 0.8s is `TAP_MAX_S` in `patches/ptt_core.py`, the same on every platform (Robert,
+2026-11-07). `VOICEMODE_PTT_HOLD_THRESHOLD` is gone: the hold starts on key-down.
+
 Environment knobs: `VOICEMODE_PTT_MACOS_MODIFIERS` (default `ctrl,alt`),
-`VOICEMODE_PTT_HOLD_THRESHOLD` (1.0s), `VOICEMODE_PTT_RELEASE_TAIL` (0.35s),
+`VOICEMODE_PTT_RELEASE_TAIL` (0.35s),
 `VOICEMODE_PTT_WAKE=false`, `VOICEMODE_PTT_ENABLED=false` (no listener at all).
 
 Files: log `~/.voicemode/logs/ptt-listener.log`, pid `~/.voicemode/run/ptt-listener.pid`.

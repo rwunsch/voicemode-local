@@ -52,6 +52,11 @@ Files are in `%LOCALAPPDATA%\voicemode-local`: `webview2\` (two DLLs), `webview2
   window exits and logs why. If one has, it stays up and the page shows Disconnected. Exit 1
   after output is treated as a crash and restarted, on the expectation that `wsl --terminate`
   may look like that (not measured).
+- **Push-to-talk** (2026-11-07): while the key is down the pill shows **Holding…** (phase
+  `holding`, from the `holding` field patch_ptt_instant adds to the server's status reply,
+  above Speaking and Listening, green like Listening). The keys hint reads `tap: stop, hold:
+  talk` on every platform: key down cuts the reply and opens the mic, a release within 0.8 s
+  stops (back to text), a later one sends what you said.
 - **Stopping** needs no backend: the window waits on a `Local\VoiceModePillStop` event, which
   `pill off` sets through `powershell.exe`. The flag is also read when a backend exits and
   before each retry.

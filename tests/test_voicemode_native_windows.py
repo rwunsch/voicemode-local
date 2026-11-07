@@ -566,7 +566,7 @@ def test_ptt_runtime_sender_reaches_the_pipe_voice_mode_serves(install):
     finally:
         server.close()
     assert done.returncode == 0, done.stdout + done.stderr
-    assert got == [b'{"command": "skip_forward"}\n'], (got, log.read_text(encoding="utf-8-sig"))
+    assert got == [b'{"command": "stop", "hint": "switch-to-text"}\n'], (got, log.read_text(encoding="utf-8-sig"))
 
 
 def test_ptt_launch_starts_the_listener_and_it_ends_with_the_launcher(install):
