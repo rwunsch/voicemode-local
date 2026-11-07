@@ -8,26 +8,26 @@ newline-delimited JSON, with peer-credential auth and a 0700 directory
 Mapping from ``ptt_core.PTTAction`` to control commands
 =======================================================
 
-``short_press``  -> ``skip_forward``
-    Upstream's skip_forward is already context-sensitive: pressed while the
-    assistant speaks it cuts the utterance and hands over the mic; pressed
-    while *you* speak it ends the recording and transcribes. That is exactly
-    both halves of a short press, so we send one command and let the server
-    decide which it meant.
+The rule since 2026-11-07 (Robert, every platform): key down opens the mic at
+once; a release within ``ptt_core.TAP_MAX_S`` (0.8 s) is a full stop.
 
 ``hold_start``   -> ``hold_start``
-    One command. patch_hold_barges_in makes the playback loops abort on
-    ``is_holding``, so a press during speech cuts the utterance AND holds the
-    mic. No status query: upstream's status cannot report live playback (its
-    own docstring says now_playing is the previous COMPLETED utterance), so a
-    client-side barge-in decision would be a guess.
+    Sent on key DOWN, with no threshold wait. The server cuts the reply wherever
+    it is -- TTS generation (patch_ptt_instant), playback (patch_hold_barges_in)
+    -- and records with silence detection off while the hold lasts. No status
+    query: upstream's status cannot report live playback.
 
 ``hold_release`` -> ``hold_end``
-    Ends the recording via the same path skip_forward uses.
+    Key up after TAP_MAX_S: the recording is transcribed and returned.
+
+``short_press``  -> ``stop`` (hint ``switch-to-text``)
+    Key up before TAP_MAX_S: a tap. The stop dominates the hold the key-down
+    started; the recording is dropped untranscribed and converse returns
+    ``[control: stop] user switched to text mode ...``, so the agent carries on
+    in text. (Until 2026-11-07 a short press was ``skip_forward``.)
 
 ``press``        -> nothing
-    Fires on every key-down, before we know whether it is a short press or a
-    hold. Acting here would double-fire.
+    The relay's reachability probe. Never acts.
 
 Everything is best-effort: a control channel that is disabled, not yet bound,
 or mid-restart must degrade to "PTT does nothing", never to an exception in a
@@ -36,7 +36,8 @@ key-listener thread.
 Sender for the native Windows listener
 ======================================
 ``python -m voice_mode.ptt_control_client --stdin`` reads one action name per
-line and answers each with one line: ``sent``, ``none`` (nothing to send),
+line and answers each with one line: ``ready`` (for ``warm``, sent once at
+listener start so the first press does not load modules), ``sent``, ``none`` (nothing to send),
 ``no-channel`` (no voice turn is serving the channel), ``busy``, ``refused: ...``
 (the pipe's owner or server is not this user; see control_transport) or
 ``failed: ...`` (also for an unknown action word). ptt-listener-windows.ps1 starts it in native mode: the
@@ -132,6 +133,18 @@ def _connect(path: Path, timeout: float):
     return s
 
 
+# What a command carries besides its name. A PTT stop is "back to text mode": the
+# server turns this named hint into its own sentence for the agent (CONTROL_INTENTS).
+HINTS = {"stop": "switch-to-text"}
+
+
+def _payload(command: str) -> dict:
+    payload = {"command": command}
+    if command in HINTS:
+        payload["hint"] = HINTS[command]
+    return payload
+
+
 def _send_line(payload: dict, read_reply: bool = False) -> Optional[str]:
     """Connect, send one JSON line, optionally read one line back.
 
@@ -166,7 +179,7 @@ def deliver(command: str) -> str:
     path = socket_path()
     try:
         with _connect(path, CONNECT_TIMEOUT) as s:
-            s.sendall((json.dumps({"command": command}) + "\n").encode("utf-8"))
+            s.sendall((json.dumps(_payload(command)) + "\n").encode("utf-8"))
         return "sent"
     except (FileNotFoundError, ConnectionRefusedError):
         return "no-channel"
@@ -187,34 +200,17 @@ def send(command: str) -> bool:
     """Fire one control command. True if it went out (not that it was acted on)."""
     if not command:
         return False
-    _send_line({"command": command})
+    _send_line(_payload(command))
     return True
 
 
 def on_action(action: str) -> None:
     """Translate one ptt_core action name into control-channel traffic.
 
-    ``short_press``  -> ``skip_forward``
-        Upstream's skip_forward is already context-sensitive: pressed while the
-        assistant speaks it cuts the utterance and hands over the mic; pressed
-        while *you* speak it ends the recording and transcribes. One command
-        covers both halves of a short press.
-
-    ``hold_start``   -> ``hold_start``
-        Just the one command. The hold is self-sufficient: patch_hold_barges_in
-        makes the playback loops abort on ``is_holding``, so a press during
-        speech cuts the utterance AND holds the mic.
-
-        This deliberately does NOT query status first and send skip_forward.
-        Upstream's status query cannot report live playback -- its own docstring
-        says now_playing is "the previous completed utterance, not the live
-        in-flight stream", and state is "running" whether speaking or listening
-        -- so any client-side barge-in decision would be a guess. Sending
-        skip_forward unconditionally is worse: with nothing playing it latches
-        STATE_SKIP_FORWARD, which the recording loop reads as "end this turn".
-
-    ``hold_release`` -> ``hold_end``
-    ``press``        -> nothing (fires before short-vs-hold is known)
+    See the module docstring for the table. ``hold_start`` never queries status
+    or adds a skip_forward: upstream's status cannot report live playback, and a
+    skip_forward with nothing playing latches STATE_SKIP_FORWARD, which the
+    recording loop reads as "end this turn".
     """
     command = COMMANDS.get(action)
     if command:
@@ -230,11 +226,21 @@ def action_outcome(action: str) -> str:
     return "none" if action == "press" else f"failed: unknown action {action!r}"
 
 
+def warm() -> str:
+    """Load now what the first press would otherwise load: the path resolver and,
+    without AF_UNIX (Windows), the pipe transport. Sends nothing."""
+    socket_path()
+    if not hasattr(socket, "AF_UNIX"):
+        _control_transport()
+    return "ready"
+
+
 def serve_lines(stdin, stdout) -> None:
     """One answer line per non-empty action line, flushed at once, until EOF.
 
-    EOF while a hold is open means the listener died mid-hold (``ptt off``, watchdog,
-    kill_tree): send hold_end, or the recording runs to max_duration."""
+    ``warm`` answers ``ready`` (see warm()). EOF while a hold is open means the
+    listener died mid-hold (``ptt off``, watchdog, kill_tree): send hold_end, or the
+    recording runs to max_duration."""
     holding = False
     for line in iter(stdin.readline, ""):
         action = line.strip()
@@ -243,7 +249,14 @@ def serve_lines(stdin, stdout) -> None:
                 holding = True
             elif action in ("hold_release", "short_press"):
                 holding = False
-            stdout.write(action_outcome(action) + "\n")
+            if action == "warm":
+                try:
+                    answer = warm()
+                except Exception as e:  # noqa: BLE001 - a failed warm-up is not fatal
+                    answer = "failed: " + _one_line(e)
+            else:
+                answer = action_outcome(action)
+            stdout.write(answer + "\n")
             stdout.flush()
     if holding:
         deliver(COMMANDS["hold_release"])
@@ -266,7 +279,7 @@ def main(argv=None) -> int:
 
 
 # ptt_core action -> control command; press (and anything else) sends nothing.
-COMMANDS = {"short_press": "skip_forward", "hold_start": "hold_start", "hold_release": "hold_end"}
+COMMANDS = {"short_press": "stop", "hold_start": "hold_start", "hold_release": "hold_end"}
 
 
 def available() -> bool:

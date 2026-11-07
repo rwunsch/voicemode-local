@@ -1,9 +1,12 @@
 # patches/ptt_listener_macos.py
 """Native macOS push-to-talk key listener.
 
-Captures Control-Option-Space globally via pynput (Quartz event tap), classifies
-press/hold/release with ``ptt_core.PTTKeyState``, and forwards the classified
-action to voice-mode's control channel, exactly like ptt_listener_linux.
+Captures Control-Option-Space globally via pynput (Quartz event tap) and
+forwards it to voice-mode's control channel, exactly like ptt_listener_linux:
+key down sends ``hold_start`` at once (reply cut, mic open); key up after
+``ptt_core.TAP_MAX_S`` (0.8 s) sends ``hold_release`` (transcribe and answer),
+sooner it sends ``short_press``, which the control client turns into a full
+``stop`` (back to text mode). The rule is the same on every platform.
 
 Differences from the Linux listener:
 
@@ -19,16 +22,15 @@ Differences from the Linux listener:
   (control command ``stop``). The converse call returns cleanly with a control
   marker, so the agent carries on in text. Same modifiers as the PTT key.
 - **Wake from idle.** With no voice call running there is no control socket,
-  so a Control-Option-Space press instead wakes the session you last spoke
-  with: it finds that session's voice-mode pid in the conch events log, maps it
+  so a Control-Option-Space HOLD (released after TAP_MAX_S) instead wakes the
+  session you last spoke with; a tap while idle does nothing. The wake: it finds that session's voice-mode pid in the conch events log, maps it
   to its tty, selects the Terminal.app tab with that exact tty, types
   ``WAKE_TEXT`` and presses Return. ``do script`` alone cannot submit to
   Claude Code (its newline lands in the input box), so Return is a System
   Events key press, sent only once Control-Option are released (a held
   modifier turns it into Control-Option-Return, which does not submit).
   ``WAKE_TEXT`` must stay short: a long line is taken for a paste and the
-  Return after it does not submit. Only a fresh press
-  wakes; key auto-repeat is ignored. Selecting the tab briefly brings it to
+  Return after it does not submit. Key auto-repeat is ignored. Selecting the tab briefly brings it to
   the front.
   Terminal.app only; does nothing if the tab cannot be found. Disable with
   ``VOICEMODE_PTT_WAKE=false``.
@@ -53,8 +55,6 @@ import threading
 import time
 
 logger = logging.getLogger("voicemode.ptt_listener_macos")
-
-POLL_INTERVAL = 0.05  # seconds; how often to check the hold threshold while held
 
 DEFAULT_MODIFIERS = "ctrl,alt"
 
@@ -165,6 +165,60 @@ def wake_last_session(flags: int = 0) -> None:
     logger.info("PTT wake: %s", result)
 
 
+class MacHotkey:
+    """The space key of Control-Option-Space as a down/up pair. Pure: every effect is
+    injected, so the rule is testable without a Mac.
+
+    ``mods`` says whether the hotkey's modifiers are down at that moment. While a
+    voice call serves the control socket (``available()``), down sends hold_start
+    and up sends short_press or hold_release (the latter ``release_tail`` seconds
+    late: people let go a beat before their last syllable ends; without a tail the
+    final word was clipped, 2026-10-20). With no call running, a hold of at least
+    the state's ``tap_max`` calls ``wake()`` on release; a tap does nothing.
+    """
+
+    def __init__(self, state, *, emit, available, wake, timer, touch,
+                 release_tail=DEFAULT_RELEASE_TAIL, wake_enabled=True):
+        self._state, self._emit, self._available = state, emit, available
+        self._wake, self._timer, self._touch = wake, timer, touch
+        self._tail, self._wake_enabled = release_tail, wake_enabled
+        self._held = False
+        self._idle_down = None      # when an idle press went down
+        self._last_wake = None
+
+    def space(self, down: bool, ts: float, mods: bool) -> None:
+        if down:
+            if self._held or self._idle_down is not None or not mods:
+                return  # auto-repeat, or not our hotkey
+            self._touch()
+            if not self._available():
+                self._idle_down = ts
+                return
+            self._held = True
+            self._send(self._state.on_press(ts))
+            return
+        if self._idle_down is not None:
+            held_for, self._idle_down = ts - self._idle_down, None
+            if (self._wake_enabled and held_for >= self._state.tap_max - 1e-9
+                    and (self._last_wake is None or ts - self._last_wake > WAKE_COOLDOWN)):
+                self._last_wake = ts
+                self._wake()
+            return
+        if not self._held:
+            return
+        self._held = False
+        action = self._state.on_release(ts)
+        if action is not None and action.value == "hold_release" and self._tail > 0:
+            self._timer(self._tail, lambda: self._send(action))
+        else:
+            self._send(action)
+
+    def _send(self, action) -> None:
+        if action is not None:
+            logger.info("PTT %s", action.value)
+            self._emit(action.value)
+
+
 def modifier_groups(spec: str, keyboard) -> list:
     """Map 'ctrl,alt' to [{ctrl, ctrl_l, ctrl_r}, {alt, alt_l, alt_r}]."""
     names = {
@@ -200,63 +254,31 @@ def run_listener() -> None:
     spec = os.getenv("VOICEMODE_PTT_MACOS_MODIFIERS", DEFAULT_MODIFIERS)
     groups = modifier_groups(spec, keyboard)
     all_mods = set().union(*groups) if groups else set()
-    state = ptt_core.PTTKeyState(
-        hold_threshold=float(
-            os.getenv("VOICEMODE_PTT_HOLD_THRESHOLD", str(ptt_core.DEFAULT_HOLD_THRESHOLD))
-        )
-    )
-    last_wake = [0.0]
-    # Key auto-repeat re-fires on_press while held; only a fresh press wakes.
-    space_down = [False]
-    wake_enabled = os.getenv("VOICEMODE_PTT_WAKE", "true").lower() != "false"
-    release_tail = float(os.getenv("VOICEMODE_PTT_RELEASE_TAIL", str(DEFAULT_RELEASE_TAIL)))
     down = set()
-    held = False
 
-    def _emit(action) -> None:
-        if action is None:
-            return
-        logger.info("PTT %s", action.value)
-        ptt_control_client.on_action(action.value)
+    def _timer(delay, fn):
+        threading.Timer(delay, fn).start()
 
-    def _mods_down() -> bool:
-        return all(down & g for g in groups)
+    def _wake():
+        threading.Thread(target=wake_last_session, args=(want_flags,), daemon=True).start()
+
+    hotkey = MacHotkey(
+        ptt_core.PTTKeyState(), emit=ptt_control_client.on_action,
+        available=ptt_control_client.available, wake=_wake, timer=_timer, touch=touch_pill,
+        release_tail=float(os.getenv("VOICEMODE_PTT_RELEASE_TAIL", str(DEFAULT_RELEASE_TAIL))),
+        wake_enabled=os.getenv("VOICEMODE_PTT_WAKE", "true").lower() != "false")
 
     def on_press(key):
-        nonlocal held
         if key in all_mods:
             down.add(key)
-            return
-        if key == keyboard.Key.space and not held and _mods_down():
-            touch_pill()
-            if wake_enabled and not ptt_control_client.available():
-                # Idle: no call to hold. Wake the last session instead.
-                now = time.monotonic()
-                if not space_down[0] and now - last_wake[0] > WAKE_COOLDOWN:
-                    last_wake[0] = now
-                    threading.Thread(target=wake_last_session, args=(want_flags,),
-                                     daemon=True).start()
-                space_down[0] = True
-                return
-            held = True
-            _emit(state.on_press(time.monotonic()))
+        elif key == keyboard.Key.space:
+            hotkey.space(True, time.monotonic(), mods=all(down & g for g in groups))
 
     def on_release(key):
-        nonlocal held
         if key in all_mods:
             down.discard(key)
-            return
-        if key == keyboard.Key.space:
-            space_down[0] = False
-        if held and key == keyboard.Key.space:
-            held = False
-            action = state.on_release(time.monotonic())
-            if action is not None and action.value == "hold_release" and release_tail > 0:
-                # People let go of the key a beat before their last syllable
-                # ends; without a tail the final word was clipped (2026-10-20).
-                threading.Timer(release_tail, _emit, args=(action,)).start()
-            else:
-                _emit(action)
+        elif key == keyboard.Key.space:
+            hotkey.space(False, time.monotonic(), mods=True)
 
     import Quartz
 
@@ -293,10 +315,7 @@ def run_listener() -> None:
     logger.info("PTT listener active (%s+space, %s+esc = stop) -> %s", spec, spec, ptt_control_client.socket_path())
 
     try:
-        while True:
-            if held:
-                _emit(state.poll_hold(time.monotonic()))
-            time.sleep(POLL_INTERVAL)
+        listener.join()
     except KeyboardInterrupt:
         pass
     finally:

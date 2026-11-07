@@ -1,10 +1,12 @@
 # patches/ptt_listener_linux.py
 """Native Linux (X11) push-to-talk key listener.
 
-Captures Control-Space globally via pynput, classifies press/hold/release with
-``ptt_core.PTTKeyState``, and forwards the classified action straight to
-voice-mode's control channel — but only while the Claude Code terminal window
-has focus (checked via ``xdotool``).
+Captures Control-Space globally via pynput and forwards it straight to
+voice-mode's control channel -- but only while the Claude Code terminal window
+has focus (checked via ``xdotool``). Key down sends ``hold_start`` at once (the
+reply is cut and the mic opens); key up after ``ptt_core.TAP_MAX_S`` (0.8 s)
+sends ``hold_release`` (transcribe and answer), sooner it sends ``short_press``,
+which the control client turns into a full ``stop`` (back to text mode).
 
 Not usable on pure-Wayland desktops (no XWayland); see the design doc's
 terminal-keybinding fallback for that case.
@@ -25,7 +27,6 @@ Installed into voice_mode/ptt_listener_linux.py by patches/apply.sh.
 Run standalone: `python3 -m voice_mode.ptt_listener_linux`
 """
 import logging
-import os
 import subprocess
 import time
 from typing import Optional
@@ -34,7 +35,36 @@ import psutil
 
 logger = logging.getLogger("voicemode.ptt_listener_linux")
 
-POLL_INTERVAL = 0.05  # seconds; how often to check the hold threshold while held
+
+class Hotkey:
+    """Control-Space as a down/up pair, fed to a ``ptt_core.PTTKeyState``.
+
+    Pure: ``emit`` gets the action name, ``focused`` says whether the terminal has
+    focus. Only a fresh press while focused starts a cycle; auto-repeat is ignored,
+    and the release ends the cycle wherever focus has gone by then.
+    """
+
+    def __init__(self, state, emit, focused):
+        self._state, self._emit, self._focused = state, emit, focused
+        self._ctrl = False
+        self._held = False
+
+    def ctrl(self, down: bool) -> None:
+        self._ctrl = down
+
+    def space(self, down: bool, ts: float) -> None:
+        if down:
+            if self._held or not self._ctrl or not self._focused():
+                return
+            self._held = True
+            action = self._state.on_press(ts)
+        else:
+            if not self._held:
+                return
+            self._held = False
+            action = self._state.on_release(ts)
+        if action is not None:
+            self._emit(action.value)
 
 
 def is_focused_terminal(terminal_pid: int) -> bool:
@@ -92,41 +122,20 @@ def run_listener() -> None:
             ptt_control_client.socket_path(),
         )
 
-    state = ptt_core.PTTKeyState(
-        hold_threshold=float(
-            os.getenv("VOICEMODE_PTT_HOLD_THRESHOLD", str(ptt_core.DEFAULT_HOLD_THRESHOLD))
-        )
-    )
-    held = False
-    ctrl_down = False
-
-    def _emit(action) -> None:
-        if action is None:
-            return
-        ptt_control_client.on_action(action.value)
-
-    def _matches_hotkey(key) -> bool:
-        return key == keyboard.Key.space
+    hotkey = Hotkey(ptt_core.PTTKeyState(), ptt_control_client.on_action,
+                    lambda: is_focused_terminal(terminal_pid))
 
     def on_press(key):
-        nonlocal ctrl_down, held
         if key in (keyboard.Key.ctrl_l, keyboard.Key.ctrl_r):
-            ctrl_down = True
-            return
-        if ctrl_down and _matches_hotkey(key) and not held:
-            if not is_focused_terminal(terminal_pid):
-                return
-            held = True
-            _emit(state.on_press(time.monotonic()))
+            hotkey.ctrl(True)
+        elif key == keyboard.Key.space:
+            hotkey.space(True, time.monotonic())
 
     def on_release(key):
-        nonlocal ctrl_down, held
         if key in (keyboard.Key.ctrl_l, keyboard.Key.ctrl_r):
-            ctrl_down = False
-            return
-        if held and _matches_hotkey(key):
-            held = False
-            _emit(state.on_release(time.monotonic()))
+            hotkey.ctrl(False)
+        elif key == keyboard.Key.space:
+            hotkey.space(False, time.monotonic())
 
     listener = keyboard.Listener(on_press=on_press, on_release=on_release)
     listener.start()
@@ -135,10 +144,7 @@ def run_listener() -> None:
     )
 
     try:
-        while True:
-            if held:
-                _emit(state.poll_hold(time.monotonic()))
-            time.sleep(POLL_INTERVAL)
+        listener.join()
     except KeyboardInterrupt:
         pass
     finally:
