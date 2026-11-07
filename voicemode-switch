@@ -70,14 +70,21 @@ while True:
 
 with_env_lock() {
     if [ -n "${_VM_ENV_LOCKED:-}" ]; then "$@"; return; fi   # already held by this shell
-    local lock="$HOME/.voicemode/voicemode.env.lock" wait_s="${VOICEMODE_ENV_LOCK_TIMEOUT:-10}" rc=0
+    local lock="$HOME/.voicemode/voicemode.env.lock" wait_s="${VOICEMODE_ENV_LOCK_TIMEOUT:-10}" rc=0 err
     mkdir -p "$HOME/.voicemode"
     exec 8>>"$lock"
-    if ! "$VENV_PY" -c "$_ENV_LOCK_PY" "$wait_s"; then
+    # exit 3 is the helper's own "timed out"; anything else is the helper failing
+    # (no interpreter, bad timeout value). Both fail closed: nothing is written.
+    err="$("$VENV_PY" -c "$_ENV_LOCK_PY" "$wait_s" 2>&1)" || {
+        rc=$?
         exec 8>&-
-        fail "voicemode.env not changed: another writer held $lock for ${wait_s} s"
+        if [ "$rc" -eq 3 ]; then
+            fail "voicemode.env not changed: another writer held $lock for ${wait_s} s"
+        else
+            fail "voicemode.env not changed: could not take the settings lock: ${err##*$'\n'} (exit $rc)"
+        fi
         return 1
-    fi
+    }
     _VM_ENV_LOCKED=1
     "$@" || rc=$?
     _VM_ENV_LOCKED=

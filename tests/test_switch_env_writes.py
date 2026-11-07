@@ -262,3 +262,36 @@ def test_the_lock_is_released_after_each_write(tmp_path):
     assert r.returncode == 0, r.stderr
     holder = hold_native_lock(tmp_path, 0.1)   # would hang if the shell still held it
     assert holder.wait(timeout=20) == 0
+
+
+def test_a_lock_timeout_says_another_writer_held_it(tmp_path):
+    envfile(tmp_path).parent.mkdir()
+    envfile(tmp_path).write_text("A=1\n")
+    holder = hold_native_lock(tmp_path, 3.0)
+    try:
+        r = sourced(tmp_path, "set_env_value SHELL_KEY 1", {"VOICEMODE_ENV_LOCK_TIMEOUT": "0.5"})
+    finally:
+        holder.wait(timeout=20)
+    out = r.stdout + r.stderr
+    assert r.returncode != 0 and "another writer held" in out, out
+    assert "could not take the settings lock" not in out
+
+
+def test_a_helper_failure_is_not_reported_as_a_busy_lock(tmp_path):
+    envfile(tmp_path).parent.mkdir()
+    envfile(tmp_path).write_text("A=1\n")
+    r = sourced(tmp_path, 'VENV_PY=/nonexistent/python; set_env_value SHELL_KEY 1')
+    out = r.stdout + r.stderr
+    assert r.returncode != 0 and "could not take the settings lock" in out, out
+    assert "another writer held" not in out
+    assert "SHELL_KEY" not in envfile(tmp_path).read_text()
+
+
+def test_a_bad_lock_timeout_fails_closed_with_the_reason(tmp_path):
+    envfile(tmp_path).parent.mkdir()
+    envfile(tmp_path).write_text("A=1\n")
+    r = sourced(tmp_path, "set_env_value SHELL_KEY 1", {"VOICEMODE_ENV_LOCK_TIMEOUT": "soon"})
+    out = r.stdout + r.stderr
+    assert r.returncode != 0 and "could not take the settings lock" in out, out
+    assert "another writer held" not in out
+    assert "SHELL_KEY" not in envfile(tmp_path).read_text()

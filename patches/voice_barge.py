@@ -149,6 +149,14 @@ class ParecCapture:
         raw, self._buf = self._buf[:need], self._buf[need:]
         return np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
 
+    def drain(self) -> None:
+        """Throw away everything captured so far, buffered or still in the pipe."""
+        self._buf = b""
+        fd = self._proc.stdout.fileno()
+        while select.select([fd], [], [], 0)[0]:
+            if not os.read(fd, 65536):
+                break
+
     def close(self) -> None:
         self._proc.terminate()
         try:
@@ -222,6 +230,16 @@ class SoundDeviceCapture:
 
     def _on_block(self, block, frames, time_info, status):
         self._queue.put(np.array(block[:, 0], dtype=np.int16))
+
+    def drain(self) -> None:
+        """Throw away everything captured so far, buffered or still queued."""
+        import queue
+        self._buf = np.zeros(0, dtype=np.int16)
+        while True:
+            try:
+                self._queue.get_nowait()
+            except queue.Empty:
+                return
 
     def read_window(self):
         import queue
@@ -466,6 +484,16 @@ class _QueuedWindows:
         import queue
         self._queue = queue.Queue()
         self._buf = np.zeros(0, dtype=np.int16)
+
+    def drain(self) -> None:
+        """Throw away everything captured so far, buffered or still queued."""
+        import queue
+        self._buf = np.zeros(0, dtype=np.int16)
+        while True:
+            try:
+                self._queue.get_nowait()
+            except queue.Empty:
+                return
 
     def read_window(self):
         """One 512-sample float window at 16 kHz, or None after 200 ms of nothing."""
@@ -841,7 +869,7 @@ class PhaseTracker:
             self._spent = True
             return "idle"
         if (not self._warm or self._spent or "listening" not in s
-                or s.get("state") == "stopped"):
+                or s.get("state") in ("stopped", "paused")):
             return "idle"
         return "warm"
 
@@ -950,10 +978,17 @@ def run(poll_speaking=None, open_capture=None, vad=None, detector=None, send_bar
                     if phase not in MIC_PHASES:
                         break
                     if phase == "speaking" and stretch is None:
+                        # Everything captured so far, this window included, is from the
+                        # warm time: drop it, so only audio captured after `speaking`
+                        # was seen reaches the detector and the pre-roll.
+                        drain = getattr(capture, "drain", None)
+                        if drain is not None:
+                            drain()
                         detector.reset()
                         vad.reset()
                         now = stretch_clock()
                         stretch = _Stretch(now, now - opened_at)
+                        continue
                 if stretch is None or window is None:
                     continue
                 if stretch.first_window_at is None:

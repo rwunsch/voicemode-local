@@ -589,6 +589,9 @@ class TestPhaseTracker:
         tracker = voice_barge.PhaseTracker(lambda: next(it), **kw)
         return [tracker() for _ in replies]
 
+    def test_paused_is_idle_never_warm(self):
+        assert self._phases([op(), op(state="paused"), op()]) == ["warm", "idle", "warm"]
+
     def test_no_converse_is_idle(self):
         assert self._phases([{}, {}]) == ["idle", "idle"]
 
@@ -667,6 +670,53 @@ class TestEarlyMic:
         h.vad.prob = lambda w: calls.append(1) or 0.0
         h.run()
         assert calls == []
+
+    def test_the_switch_over_window_is_not_fed_to_the_vad(self):
+        # warm, warm, speaking: the windows read up to and including the one read as
+        # `speaking` showed were captured while warm (echo of nothing, or the user)
+        h = PhaseHarness(["warm", "warm", "speaking", "speaking", "idle"],
+                         [(SPEECH, LOUD)] * 2 + [(NOT_SPEECH, -60.0)] * 10)
+        seen = []
+        h.vad.prob = lambda w: seen.append(float(abs(w).max())) or 0.0
+        h.run()
+        assert seen and max(seen) < 0.01, seen
+
+    def test_a_backlog_built_up_while_warm_is_discarded_at_the_switch(self):
+        h = PhaseHarness(["warm", "warm", "speaking", "speaking", "speaking", "idle"],
+                         [(NOT_SPEECH, -60.0)] * 10)
+        loud = np.full(512, 0.5, dtype=np.float32)
+
+        class Backlogged(FakeCapture):
+            def __init__(self, frames, vad):
+                super().__init__(frames, vad)
+                self.backlog = [loud] * 6   # a slow poll left these queued
+                self.drains = 0
+
+            def read_window(self):
+                if self.backlog:
+                    return self.backlog.pop(0)
+                return super().read_window()
+
+            def drain(self):
+                self.drains += 1
+                self.backlog.clear()
+
+        caps = []
+        h.open_capture = lambda: caps.append(Backlogged(h.frames, h.vad)) or caps[-1]
+        seen = []
+        h.vad.prob = lambda w: seen.append(float(abs(w).max())) or 0.0
+        h.run()
+        assert caps[0].drains == 1
+        assert seen and max(seen) < 0.01, seen
+
+    def test_a_queued_capture_drain_empties_buffer_and_queue(self):
+        cap = voice_barge._QueuedWindows()
+        cap._init_queue()
+        for _ in range(4):
+            cap._queue.put(np.ones(512, dtype=np.int16))
+        cap._buf = np.ones(100, dtype=np.int16)
+        cap.drain()
+        assert cap._queue.empty() and len(cap._buf) == 0
 
     def test_a_converse_that_never_speaks_closes_the_mic_without_a_stretch_line(self, caplog):
         h = PhaseHarness(["warm", "warm", "idle", "idle"], [(NOT_SPEECH, -60.0)] * 5)
