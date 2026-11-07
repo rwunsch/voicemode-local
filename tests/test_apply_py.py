@@ -88,6 +88,26 @@ def current_modules(old):
     return old
 
 
+# Patches added to manifest.json on purpose since the baseline, each applied to the
+# baseline's output so everything else must still match to the byte. Extend this list,
+# never loosen the comparison.
+INTENDED_SINCE_BASELINE = [
+    ("patch_ptt_instant.py", ["control_channel.py", "control_socket.py", "tools/converse.py"]),
+]
+
+
+def apply_intended(pkg: Path) -> None:
+    for script, targets in INTENDED_SINCE_BASELINE:
+        for rel in targets:
+            r = subprocess.run([sys.executable, str(PATCHES / script), str(pkg / rel)],
+                               capture_output=True, text=True, env=dict(os.environ, PYTHONUTF8="1"))
+            assert r.returncode == 0, r.stdout + r.stderr
+
+
+def without_intended_log(out: str) -> str:
+    return "".join(line for line in out.splitlines(keepends=True) if "(ptt instant)" not in line)
+
+
 def hardlink_core(venv: Path, outside: Path) -> None:
     os.link(pkg_of(venv) / "core.py", outside)
 
@@ -100,6 +120,7 @@ def baseline(tmp_path_factory):
     hardlink_core(venv, root / "core_link.py")
     r = subprocess.run(["bash", str(old / "apply.sh"), str(venv)], capture_output=True, text=True)
     assert r.returncode == 0, r.stdout + r.stderr
+    apply_intended(pkg_of(venv))
     return root, venv, r.stdout
 
 
@@ -122,7 +143,7 @@ def test_delegating_apply_sh_is_byte_identical_to_the_baseline(baseline, tmp_pat
     assert r.returncode == 0, r.stdout + r.stderr
     assert state(pkg_of(old_venv)) == state(pkg_of(venv))
     # Same log too, once the venv paths are made comparable.
-    assert r.stdout.replace(str(venv), "<venv>") == old_out.replace(str(old_venv), "<venv>")
+    assert without_intended_log(r.stdout).replace(str(venv), "<venv>") == old_out.replace(str(old_venv), "<venv>")
 
 
 def test_hardlinks_are_broken_before_patching(baseline, tmp_path):

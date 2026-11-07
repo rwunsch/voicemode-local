@@ -78,6 +78,7 @@ FELIX_MARKERS = {
     "server.py": ["FELIX: NO FFMPEG WARNING"],
 }
 HOLD = "voicemode-local ptt hold"
+INSTANT = "voicemode-local ptt instant"
 
 
 def _src():
@@ -173,14 +174,14 @@ EXPECTED_MARKERS = {
     "felix_ship": {k: OURS_MARKERS.get(k, []) + FELIX_MARKERS.get(k, [])
                    for k in set(OURS_MARKERS) | set(FELIX_MARKERS)},
     "full": {
-        "control_channel.py": [HOLD, BARGE, PILL],
-        "control_socket.py": [BARGE, PILL, TRANSPORT],
+        "control_channel.py": [HOLD, BARGE, PILL, INSTANT],
+        "control_socket.py": [BARGE, PILL, TRANSPORT, INSTANT],
         "core.py": ["voicemode-local hold barge-in", BARGE],
         "streaming.py": ["voicemode-local hold barge-in", PILL],
         "simple_failover.py": ["NO SILENT SWAP (voicemode-local)"],
         "tools/converse.py": ["voicemode-local listen overrun", "voicemode-local turns playback stop",
                               "voicemode-local session name", HOLD, "LANGUAGE-LOCKED VOICES",
-                              BARGE, PILL],
+                              BARGE, PILL, INSTANT],
     },
 }
 

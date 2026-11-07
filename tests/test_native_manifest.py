@@ -85,18 +85,37 @@ def _steps(name):
     return json.loads((PATCHES / name).read_text(encoding="utf-8"))["steps"]
 
 
-# -- WSL and Mac: unchanged -------------------------------------------------
+# -- WSL and Mac: unchanged but for the patches added on purpose ------------
+
+# Steps added to manifest.json since BEFORE, each by design; the rest stays byte-identical.
+INTENDED_STEP_LINES = [
+    b'    {"patch": "patch_ptt_instant.py",\n'
+    b'     "targets": ["control_channel.py", "control_socket.py", "tools/converse.py"],\n'
+    b'     "why": "push-to-talk cuts TTS generation, records at once, a stop clears the hold; '
+    b'needs hold, barge and pill"},\n',
+]
+INTENDED_PATCHES = [("patch_ptt_instant.py", ["control_channel.py", "control_socket.py", "tools/converse.py"])]
+
 
 def test_default_manifest_file_is_unchanged():
     old = subprocess.run(["git", "-C", str(REPO), "show", f"{BEFORE}:patches/manifest.json"],
                          capture_output=True, check=True).stdout
-    assert (PATCHES / "manifest.json").read_bytes() == old
+    now = (PATCHES / "manifest.json").read_bytes()
+    for lines in INTENDED_STEP_LINES:
+        assert now.count(lines) == 1
+        now = now.replace(lines, b"")
+    assert now == old
 
 
 def test_default_output_is_byte_identical_to_before(tmp_path):
     old = _patches_at(BEFORE, tmp_path / "old")
     before, now = _tree(tmp_path / "a"), _tree(tmp_path / "b")
     _apply(old / "apply.py", before)
+    for script, targets in INTENDED_PATCHES:
+        for rel in targets:
+            r = subprocess.run([sys.executable, str(PATCHES / script), str(before / rel)],
+                               capture_output=True, text=True, env=dict(os.environ, PYTHONUTF8="1"))
+            assert r.returncode == 0, r.stdout + r.stderr
     _apply(PATCHES / "apply.py", now)
     assert _files(now) == _files(before)
     assert "FELIX: NO FFMPEG" not in (now / "tools/converse.py").read_text(encoding="utf-8")
