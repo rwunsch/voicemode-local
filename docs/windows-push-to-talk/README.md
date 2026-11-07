@@ -45,6 +45,8 @@ child process, and for each action writes the action word and reads one outcome 
 | `refused: <why>` | the pipe is not owned by this user, or its server runs as another user or at a lower integrity level |
 | `failed: <why>` | anything else; the sender is restarted on the next key if it died |
 
+Keys pressed while the sender is starting or hung (up to 5 s) are lost.
+
 The sender maps the action with `ptt_control_client.COMMANDS`, names the pipe with
 `control_transport.pipe_name()` of `VOICEMODE_CONTROL_SOCKET` or the base dir's
 `control.sock`, on every send, and checks owner and server before writing

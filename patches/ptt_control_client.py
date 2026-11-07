@@ -231,12 +231,22 @@ def action_outcome(action: str) -> str:
 
 
 def serve_lines(stdin, stdout) -> None:
-    """One answer line per non-empty action line, flushed at once, until EOF."""
+    """One answer line per non-empty action line, flushed at once, until EOF.
+
+    EOF while a hold is open means the listener died mid-hold (``ptt off``, watchdog,
+    kill_tree): send hold_end, or the recording runs to max_duration."""
+    holding = False
     for line in iter(stdin.readline, ""):
         action = line.strip()
         if action:
+            if action == "hold_start":
+                holding = True
+            elif action in ("hold_release", "short_press"):
+                holding = False
             stdout.write(action_outcome(action) + "\n")
             stdout.flush()
+    if holding:
+        deliver(COMMANDS["hold_release"])
 
 
 def main(argv=None) -> int:
@@ -249,7 +259,8 @@ def main(argv=None) -> int:
     # stdout as UTF-8.
     for stream, encoding in ((sys.stdin, "utf-8-sig"), (sys.stdout, "utf-8")):
         if hasattr(stream, "reconfigure"):
-            stream.reconfigure(encoding=encoding)
+            # errors="replace": stray bytes become an unknown action ("failed: ..."), not a crash.
+            stream.reconfigure(encoding=encoding, errors="replace")
     serve_lines(sys.stdin, sys.stdout)
     return 0
 

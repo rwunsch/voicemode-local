@@ -266,5 +266,38 @@ def test_stdin_mode_ignores_a_byte_order_mark(server, tmp_path):
     done = subprocess.run([sys.executable, str(CLIENT_PY), "--stdin"], input=b"\xef\xbb\xbfshort_press\r\nhold_start\r\n",
                           capture_output=True, env=env, timeout=10)
     assert done.stdout.decode().split() == ["sent", "sent"], done.stdout + done.stderr
-    _wait(lambda: len(srv.received) >= 2)
-    assert srv.commands() == ["skip_forward", "hold_start"]
+    _wait(lambda: len(srv.received) >= 3)
+    assert srv.commands() == ["skip_forward", "hold_start", "hold_end"]  # EOF closes the open hold
+
+
+def test_eof_during_a_hold_sends_hold_end(client_mod, monkeypatch):
+    """The listener killed mid-hold (ptt off, watchdog, kill_tree) must not leave the
+    recording running to max_duration: EOF after hold_start sends hold_end."""
+    import io
+    sent = []
+    monkeypatch.setattr(client_mod, "deliver", lambda command: sent.append(command) or "sent")
+    out = io.StringIO()
+    client_mod.serve_lines(io.StringIO("hold_start\n"), out)
+    assert sent == ["hold_start", "hold_end"]
+
+
+def test_eof_after_a_released_hold_sends_nothing_more(client_mod, monkeypatch):
+    import io
+    sent = []
+    monkeypatch.setattr(client_mod, "deliver", lambda command: sent.append(command) or "sent")
+    client_mod.serve_lines(io.StringIO("hold_start\nhold_release\n"), io.StringIO())
+    assert sent == ["hold_start", "hold_end"]
+
+
+def test_stdin_mode_survives_invalid_utf8(server, tmp_path):
+    import subprocess
+    import sys
+    srv = server()
+    env = {"VOICEMODE_CONTROL_SOCKET": str(srv.path), "PATH": "/usr/bin:/bin", "HOME": str(tmp_path)}
+    done = subprocess.run([sys.executable, str(CLIENT_PY), "--stdin"],
+                          input=b"\xff\xfe junk\nshort_press\n", capture_output=True, env=env, timeout=10)
+    lines = done.stdout.decode().splitlines()
+    assert done.returncode == 0, done.stderr
+    assert lines[0].startswith("failed:") and lines[1] == "sent", done.stdout + done.stderr
+    _wait(lambda: len(srv.received) >= 1)
+    assert srv.commands() == ["skip_forward"]
