@@ -223,3 +223,28 @@ test("beeps switch shows the backend's value", () => {
   assert.equal(viewModel(snap({ beeps: false }), 0, 0).beeps.on, false);
   assert.equal(viewModel(null, 0, 0).beeps.on, false);
 });
+
+test("Play shows only with no voice turn and a session to wake", () => {
+  const play = { label: "demo" };
+  const v = (o) => viewModel(snap(o), 0, 0).play;
+  for (const phase of ["idle", "working", "stopped"]) {
+    assert.equal(v({ phase, play }).visible, true, phase);
+  }
+  for (const phase of ["speaking", "listening", "holding", "paused"]) {
+    assert.equal(v({ phase, play }).visible, false, phase);
+  }
+  assert.equal(v({ phase: "idle", play: null }).visible, false);
+  assert.equal(v({ phase: "idle" }).visible, false);
+  assert.equal(v({ phase: "idle", play }).title, "Play: wake demo to talk");
+  assert.equal(viewModel(snap({ phase: "idle", play }), 1000, 5000).play.visible, false); // disconnected
+});
+
+test("a Play result replaces the state text briefly", () => {
+  const vm = viewModel(snap({ phase: "working", wake: { text: "Woke demo", ok: true } }), 0, 0);
+  assert.equal(vm.stateText, "Woke demo");
+  assert.equal(vm.wakeText, "Woke demo");
+  const bad = viewModel(snap({ phase: "working", wake: { text: "Can't wake demo: busy", ok: false } }), 0, 0);
+  assert.equal(bad.stateText, "Can't wake demo: busy");
+  assert.equal(viewModel(snap({ phase: "working", wake: null }), 0, 0).stateText, "Between turns");
+  assert.equal(viewModel(snap({ wake: { text: "x" } }), 1000, 5000).wakeText, "");
+});

@@ -13,6 +13,7 @@ import sys
 import tempfile
 import threading
 import time
+import types
 from pathlib import Path
 
 import pytest
@@ -244,7 +245,8 @@ def test_snapshot_shape_and_json_serialisable():
              barge={"enabled": True, "available": False, "count": 2})
     assert json.loads(json.dumps(s)) == s
     assert set(s) == {"visible", "phase", "floor", "sessions", "voice", "language",
-                      "barge", "beeps", "platform", "ui"}
+                      "barge", "beeps", "platform", "ui", "play", "wake"}
+    assert s["play"] is None and s["wake"] is None
     assert s["platform"] == "mac" and s["ui"] == {"docked": True}
     assert s["barge"] == {"enabled": True, "available": False, "count": 2}
 
@@ -661,3 +663,99 @@ def test_a_held_key_polls_at_the_turn_rate(monkeypatch):
     import io
     monkeypatch.setattr(vp, "gather", lambda ctx: {"phase": "holding"})
     assert vp._emit(None, io.StringIO()) == vp.TURN_INTERVAL_S
+
+
+# -- Play: wake the last voice session (session_wake) --------------------------
+
+class FakeWake:
+    """Stands in for session_wake: never touches a real Claude Code session."""
+
+    def __init__(self, target=("demo", 4242), result=(True, "sent"), on=True):
+        self.target, self.result, self.on = target, result, on
+        self.calls, self.status = [], "idle"
+
+    def enabled(self, home=None):
+        return self.on
+
+    def last_voice_session(self, **kw):
+        if self.target is None:
+            return None
+        label, pid = self.target
+        return types.SimpleNamespace(voice_pid=1, claude_pid=pid, label=label)
+
+    def wake(self, target_claude_pid=None, reason="ptt"):
+        self.calls.append((target_claude_pid, reason))
+        return self.result
+
+    def registry_status(self, pid, cdir=None):
+        return self.status
+
+
+@pytest.fixture
+def fake_wake(monkeypatch):
+    fw = FakeWake()
+    monkeypatch.setattr(vp, "sw", fw)
+    return fw
+
+
+def test_snapshot_carries_play_and_wake():
+    s = snap(play={"label": "demo"}, wake={"text": "Woke demo", "ok": True})
+    assert s["play"] == {"label": "demo"} and s["wake"] == {"text": "Woke demo", "ok": True}
+
+
+def test_gather_offers_play_for_the_last_voice_session(ctx, fake_wake):
+    assert vp.gather(ctx)["play"] == {"label": "demo"}
+
+
+def test_gather_offers_no_play_without_a_session(ctx, fake_wake):
+    fake_wake.target = None
+    assert vp.gather(ctx)["play"] is None
+
+
+def test_gather_offers_no_play_when_the_setting_is_off(ctx, fake_wake):
+    fake_wake.on = False
+    assert vp.gather(ctx)["play"] is None
+
+
+def test_play_wakes_the_last_voice_session_with_reason_play(ctx, fake_wake):
+    vp.handle_command({"cmd": "play"}, ctx)
+    assert fake_wake.calls == [(4242, "play")]
+    assert vp.gather(ctx)["wake"] == {"text": "Woke demo", "ok": True}
+
+
+def test_play_refused_says_why(ctx, fake_wake):
+    fake_wake.result = (False, "busy")
+    vp.handle_command({"cmd": "play"}, ctx)
+    assert vp.gather(ctx)["wake"] == {"text": "Can't wake demo: busy", "ok": False}
+
+
+def test_play_without_a_session(ctx, fake_wake):
+    fake_wake.target = None
+    vp.handle_command({"cmd": "play"}, ctx)
+    assert fake_wake.calls == []
+    assert vp.gather(ctx)["wake"]["text"] == "No voice session to wake"
+
+
+def test_no_answer_when_the_session_stays_idle_for_5_s(ctx, fake_wake):
+    vp.handle_command({"cmd": "play"}, ctx)
+    t0 = ctx.wake["at"]
+    assert vp.wake_view(ctx, t0 + 4.9)["text"] == "Woke demo"
+    assert vp.wake_view(ctx, t0 + 5.1) == {"text": "No answer from demo", "ok": False}
+    assert vp.wake_view(ctx, t0 + 30) is None
+
+
+def test_busy_within_5_s_is_an_answer(ctx, fake_wake):
+    vp.handle_command({"cmd": "play"}, ctx)
+    t0 = ctx.wake["at"]
+    fake_wake.status = "busy"
+    assert vp.wake_view(ctx, t0 + 2)["text"] == "Woke demo"
+    fake_wake.status = "idle"  # the turn may end again; it did answer
+    assert vp.wake_view(ctx, t0 + 6)["text"] == "Woke demo"
+    assert vp.wake_view(ctx, t0 + 30) is None
+
+
+def test_play_without_session_wake_installed_is_harmless(ctx, monkeypatch):
+    monkeypatch.setattr(vp, "sw", None)
+    vp.handle_command({"cmd": "play"}, ctx)
+    s = vp.gather(ctx)
+    assert s["play"] is None

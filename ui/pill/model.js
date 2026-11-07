@@ -39,7 +39,8 @@
       return { connected: false, phase: "disconnected", label: LABELS.disconnected, mode: "pill", side: null,
         interrupt: off, pause: { enabled: false, label: "Pause", cmd: "pause", icon: PAUSE }, stop: off,
         pickersEnabled: false, minimizeEnabled: true, dismissEnabled: true, queue: [], queueMore: "", voice: null, language: null, keys: [], session: "", stateText: LABELS.disconnected, waitingText: "",
-        barge: { visible: false, on: false, enabled: false, countText: "" }, beeps: { on: false }, voices: VOICES, languages: LANGUAGES };
+        barge: { visible: false, on: false, enabled: false, countText: "" }, beeps: { on: false }, voices: VOICES, languages: LANGUAGES,
+        play: { visible: false, title: "" }, wakeText: "" };
     }
     var s = snapshot, phase = s.phase || "idle", ui = s.ui || {}, barge = s.barge || {};
     var count = barge.count || 0;
@@ -51,6 +52,10 @@
     var language = s.language || languageOf(s.voice);
     var base = language === "German" ? GERMAN_VOICES : VOICES;
     var voices = s.voice && base.indexOf(s.voice) < 0 ? base.concat([s.voice]) : base;
+    // Play wakes the last voice session: only with no voice turn running (idle, between
+    // turns, stopped) and a session the backend can name.
+    var playable = !!s.play && (phase === "idle" || phase === "working" || phase === "stopped");
+    var wakeText = s.wake && s.wake.text ? s.wake.text : "";
     var mode = ui.minimized ? "dot" : ui.docked ? (ui.tucked ? "tab" : ui.dockOpen ? "docked" : "rail") : ui.expanded ? "expanded" : "pill";
     return {
       connected: true, phase: phase, label: LABELS[phase] || LABELS.idle, mode: mode,
@@ -72,7 +77,9 @@
       beeps: { on: !!s.beeps },
       voices: voices, languages: LANGUAGES,
       session: name,
-      stateText: LABELS[phase] || LABELS.idle,
+      stateText: wakeText || LABELS[phase] || LABELS.idle,
+      wakeText: wakeText,
+      play: { visible: playable, title: playable ? "Play: wake " + (s.play.label || "the last session") + " to talk" : "" },
       waitingText: waiting ? "+" + waiting + " waiting" : "",
     };
   }

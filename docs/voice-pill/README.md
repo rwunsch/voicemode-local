@@ -57,6 +57,18 @@ Files are in `%LOCALAPPDATA%\voicemode-local`: `webview2\` (two DLLs), `webview2
   above Speaking and Listening, green like Listening). The keys hint reads `tap: stop, hold:
   talk` on every platform: key down cuts the reply and opens the mic, a release within 0.8 s
   stops (back to text), a later one sends what you said.
+- **Play** (2026-11-07): with no voice turn running (idle, between turns, stopped) and a
+  last voice session the backend can find, the pill shows a ▶ button. It sends
+  `{"cmd":"play"}`; the backend calls `session_wake.wake(<claude pid>, "play")`, which asks
+  that Claude Code session, through its own session socket, to call converse with a short
+  greeting. The state text shows `Woke <label>` or `Can't wake <label>: <why>` (busy,
+  waiting for a permission answer, rate limited, ...). If the session's registry status has
+  not turned `busy` within 5 s it shows `No answer from <label>`. The last voice session is
+  the newest live conch holder in voice-mode's events log, then the pill's own session
+  records; its voice-server pid is mapped up its parents to the claude pid. Hidden when
+  `VOICEMODE_SESSION_WAKE=off`. Same rules and caveats as the push-to-talk wake
+  (docs/windows-push-to-talk): undocumented protocol, idle sessions only, one per 5 s,
+  logged to `~/.voicemode/logs/session-wake.log`, Windows named pipe UNVERIFIED.
 - **Stopping** needs no backend: the window waits on a `Local\VoiceModePillStop` event, which
   `pill off` sets through `powershell.exe`. The flag is also read when a backend exits and
   before each retry.

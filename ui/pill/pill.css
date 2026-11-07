@@ -51,3 +51,5 @@ html,body{height:100%}
 .tab:hover,.tab.hover{background:var(--hover)}
 [data-phase=speaking] .tab{color:var(--a)}[data-phase=listening] .tab,[data-phase=holding] .tab{color:var(--g)}
 [data-mode=tab] .tab{display:block}[data-mode=tab] .card{display:none}
+[hidden]{display:none!important}
+.play:hover:not(:disabled),.play.hover:not(:disabled){color:var(--g);border-color:var(--g)}

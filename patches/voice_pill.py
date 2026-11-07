@@ -16,6 +16,8 @@ files are read where upstream keeps them; the pill's own follow the base dir
   ~/.voicemode/conch, conch.queue.d/*.json         who holds the floor, who waits
   ~/.voicemode/voicemode.env                       barge flag, beeps default
   <base>/pill/...                                  sessions, pause, overrides, ui
+  ~/.claude/sessions/<pid>.json                    Play: is the woken session busy yet
+                                                   (session_wake, read only)
 
 The conch file formats are those of voice-mode 8.12.0 (conch.py, conch_queue.py).
 Installed as voice_mode/voice_pill.py by patches/apply.sh.
@@ -39,6 +41,11 @@ try:  # beside this file, installed or not; never via the heavy voice_mode packa
 except ImportError:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     import voice_pill_state as st
+
+try:  # Play: wake the last voice session. Absent on an install that never copied it.
+    import session_wake as sw
+except ImportError:
+    sw = None
 
 try:
     import fcntl
@@ -65,6 +72,7 @@ class Context:
         self.switch = switch              # barge command: None = the setting, else voicemode-switch
         self.dismissed = dismissed        # session keys hidden by Dismiss
         self.barge_thread = barge_thread
+        self.wake = None                  # the last Play: label, ok, detail, at, claude_pid
 
     base = property(lambda self: Path(self._base) if self._base else st.default_base(),
                     lambda self, v: setattr(self, "_base", v), doc="pill state dir")
@@ -163,7 +171,7 @@ def _floor_voice(floor, is_holder, sessions, conch, overrides):
 
 def build_snapshot(status, sessions, conch, *, paused=False, ptt=False, dismissed=None,
                    last_floor=None, overrides=None, barge=None, ui=None, platform=None, beeps=False,
-                   default_voice=st.FALLBACK_VOICE) -> dict:
+                   default_voice=st.FALLBACK_VOICE, play=None, wake=None) -> dict:
     overrides = overrides or {}
     floor, is_holder = _floor(sessions, conch, last_floor)
     new = session_keys(sessions) - (dismissed or frozenset())
@@ -205,7 +213,8 @@ def build_snapshot(status, sessions, conch, *, paused=False, ptt=False, dismisse
             "voice": voice, "language": language,
             "barge": barge or {"enabled": False, "available": False, "count": 0},
             "beeps": beeps,
-            "platform": platform or detect_platform(), "ui": ui or {}}
+            "platform": platform or detect_platform(), "ui": ui or {},
+            "play": play, "wake": wake}
 
 
 def _barge_enabled(home) -> bool:
@@ -239,8 +248,64 @@ def _remember_floor(ctx, conch):
     return record
 
 
+# -- Play (session_wake) -------------------------------------------------------
+
+WAKE_ANSWER_S = 5.0     # a woken session that is not busy by then did not answer
+WAKE_SHOW_S = 10.0      # how long a Play result stays in the pill
+WAKE_FAIL_SHOW_S = 6.0
+
+
+def _play_target(ctx, sessions):
+    """The session Play would wake, or None (no session, setting off, module missing)."""
+    if sw is None:
+        return None
+    try:
+        if not sw.enabled(ctx.home):
+            return None
+        return sw.last_voice_session(home=ctx.home, base=ctx.base, sessions=sessions)
+    except Exception:  # noqa: BLE001 - a broken lookup hides Play, never the pill
+        return None
+
+
+def _play(ctx) -> None:
+    now = time.monotonic()
+    target = _play_target(ctx, st.live_sessions(ctx.base))
+    if target is None:
+        ctx.wake = {"label": None, "ok": False, "detail": "no session", "at": now, "claude_pid": None}
+        return
+    ok, detail = sw.wake(target.claude_pid, "play")
+    print(f"voice_pill: play -> {target.label}: {'sent' if ok else detail}", file=sys.stderr, flush=True)
+    ctx.wake = {"label": target.label, "ok": ok, "detail": detail, "at": now,
+                "claude_pid": target.claude_pid, "answered": False}
+
+
+def wake_view(ctx, now=None):
+    """The Play result to show, or None once it has been shown long enough."""
+    w = ctx.wake
+    if not w:
+        return None
+    now = time.monotonic() if now is None else now
+    age = now - w["at"]
+    if w["label"] is None:
+        return {"text": "No voice session to wake", "ok": False} if age < WAKE_FAIL_SHOW_S else None
+    if not w["ok"]:
+        return ({"text": f"Can't wake {w['label']}: {w['detail']}", "ok": False}
+                if age < WAKE_FAIL_SHOW_S else None)
+    if age >= WAKE_SHOW_S:
+        return None
+    if not w.get("answered"):
+        try:
+            w["answered"] = sw.registry_status(w["claude_pid"]) == "busy"
+        except Exception:  # noqa: BLE001
+            pass
+    if w.get("answered") or age < WAKE_ANSWER_S:
+        return {"text": f"Woke {w['label']}", "ok": True}
+    return {"text": f"No answer from {w['label']}", "ok": False}
+
+
 def gather(ctx) -> dict:
     sessions = st.live_sessions(ctx.base)
+    play = _play_target(ctx, sessions)
     conch = read_conch(ctx.home)
     barge = {"enabled": _barge_enabled(ctx.home), "available": st.barge_available(),
              "count": st.interruptions_since(_midnight(), ctx.base)}
@@ -250,7 +315,8 @@ def gather(ctx) -> dict:
         last_floor=_remember_floor(ctx, conch),
         overrides={s["pid"]: st.get_override(s["pid"], ctx.base) for s in sessions},
         barge=barge, ui=st.load_ui(ctx.base), beeps=_beeps_on(ctx),
-        default_voice=st.default_voice(ctx.home))
+        default_voice=st.default_voice(ctx.home),
+        play={"label": play.label} if play else None, wake=wake_view(ctx))
 
 
 # -- commands ----------------------------------------------------------------
@@ -315,6 +381,9 @@ def handle_command(msg, ctx=None) -> None:
                     change["voice"] = (GERMAN_VOICE if msg[key] == "German" else
                                        default if voice_language(default) == "English" else st.FALLBACK_VOICE)
             _set_override(ctx, floor, **change)
+    elif cmd == "play":
+        if sw is not None:
+            _play(ctx)
     elif cmd == "save_ui" and isinstance(msg.get("ui"), dict):
         st.save_ui(msg["ui"], ctx.base)
 
