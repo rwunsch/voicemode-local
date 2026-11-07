@@ -53,12 +53,16 @@
       if (f === $("voice") || f === $("language")) document.activeElement.blur();
     }
     document.body.hidden = hidden;
-    [["interrupt", vm.interrupt.enabled], ["stop", vm.stop.enabled], ["pause", vm.pause.enabled],
+    [["main", vm.main.enabled], ["pause", vm.pause.enabled],
       ["voice", vm.pickersEnabled], ["language", vm.pickersEnabled], ["barge", vm.barge.enabled],
       ["minimize", vm.minimizeEnabled], ["dismiss", vm.dismissEnabled], ["expand", true], ["dock", true]]
       .forEach(function (p) { $(p[0]).disabled = !p[1]; });
-    $("play").hidden = !vm.play.visible;
-    $("play").title = vm.play.title; $("play").setAttribute("aria-label", vm.play.title || "Play");
+    // One button that switches: the sunrise (Wake) between turns, the square (Stop) in a turn.
+    $("main").classList.toggle("wake", vm.main.kind === "wake");
+    $("main").classList.toggle("stop", vm.main.kind === "stop");
+    $("mainWake").hidden = vm.main.kind !== "wake"; $("mainStop").hidden = vm.main.kind !== "stop";
+    $("main").title = vm.main.title; $("main").setAttribute("aria-label", vm.main.title);
+    $("pause").hidden = !vm.pause.visible;
     $("pause").textContent = vm.pause.icon;
     $("pause").title = vm.pause.label; $("pause").setAttribute("aria-label", vm.pause.label);
     $("expand").setAttribute("aria-expanded", String(vm.mode === "expanded" || vm.mode === "docked"));
@@ -106,9 +110,7 @@
   };
 
   function cmd(c, extra) { return function () { send(Object.assign({ cmd: c }, extra)); }; }
-  $("interrupt").onclick = cmd("interrupt");
-  $("stop").onclick = cmd("stop");
-  $("play").onclick = cmd("play");
+  $("main").onclick = function () { send({ cmd: M.viewModel(snapshot, lastSeen, Date.now()).main.cmd }); };
   $("pause").onclick = function () { send({ cmd: M.viewModel(snapshot, lastSeen, Date.now()).pause.cmd }); };
   $("dismiss").onclick = function () { send({ cmd: "dismiss" }); hidden = true; send({ window: { mode: "hidden" } }); render(); };
   $("voice").onchange = function () { send({ cmd: "set_voice", voice: this.value }); this.blur(); };

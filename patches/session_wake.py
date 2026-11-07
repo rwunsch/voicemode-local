@@ -88,13 +88,16 @@ EVENTS_TAIL_BYTES = 256 * 1024
 # 2026-11-07. With skip_tts=true the message is not spoken and converse listens at
 # once (8.12 converse.py: should_skip_tts makes TTS a no-op).
 MESSAGES = {
+    # The woken session SPEAKS a short cue first: a silent wake was measured on the Mac
+    # 2026-11-07 (n=1, beeps on), so the user could not tell when to talk.
     "ptt": ('Push-to-talk: the user is holding the key to speak to you. Call the voicemode '
-            'converse tool now with message="Listening.", skip_tts=true and '
-            'wait_for_response=true to listen, then answer them by voice.'),
-    "play": ("Voice pill Play: the user wants to talk. Call the voicemode converse tool now "
-             "with a short greeting as the message and wait_for_response=true, then keep "
-             "the voice conversation going."),
+            'converse tool now with message="Listening." and wait_for_response=true to '
+            'listen, then answer them by voice.'),
+    "wake": ('Voice pill Wake: the user wants to talk. Call the voicemode converse tool now '
+             'with message="Listening." and wait_for_response=true, then keep the voice '
+             'conversation going.'),
 }
+REASON_ALIASES = {"play": "wake"}   # the pill's old Play command
 
 STATUS_REASONS = {
     "busy": "busy",
@@ -416,25 +419,25 @@ def _one_line(error: BaseException) -> str:
 
 # -- wake --------------------------------------------------------------------
 
-def _attempt(target_claude_pid, reason, cdir, home, base):
-    """(ok, detail, claude_pid, label). Raises Refused for a reason not to send."""
+def _attempt(info, reason, cdir, home, base):
+    """(claude_pid, label). ``info`` carries pid/label as soon as they are known, so a
+    refusal logs the label too. Raises Refused for a reason not to send."""
     global _last_sent
+    pid, label = info.get("pid"), info.get("label")
     if not enabled(home):
         raise Refused(f"off ({SETTING}=off)")
     text = MESSAGES.get(reason)
     if text is None:
         raise Refused(f"unknown reason {reason!r}")
-    label = None
-    pid = target_claude_pid
     if pid is None:
         target = last_voice_session(home=home, base=base, cdir=cdir)
         if target is None:
             raise Refused("no voice session to wake")
         pid, label = target.claude_pid, target.label
+        info.update(pid=pid, label=label)
     reg = read_registry(pid, cdir)
     if reg is None or reg.get("pid") != pid:
         raise Refused("no registry entry for that session")
-    label = label or _registry_label(pid, cdir)
     if reg.get("peerProtocol") != PEER_PROTOCOL:
         raise Refused(f"peer protocol {reg.get('peerProtocol')!r}, need {PEER_PROTOCOL}")
     status = reg.get("status")
@@ -471,16 +474,24 @@ def wake(target_claude_pid=None, reason="ptt", *, cdir=None, home=None, base=Non
     """Ask an idle Claude Code session to start a voice turn. Returns (ok, detail).
 
     ``target_claude_pid`` None means the last voice session. ``reason`` picks the
-    fixed message: "ptt" or "play". Never raises; never reveals the token.
+    fixed message: "ptt" or "wake" ("play" is the old name for "wake"). Never raises; never reveals the token.
     """
-    pid, label = target_claude_pid, None
+    reason = REASON_ALIASES.get(reason, reason)
+    info = {"pid": target_claude_pid, "label": None}
+    if target_claude_pid is not None:   # the label before any refusal check
+        try:
+            info["label"] = _registry_label(target_claude_pid, cdir)
+        except Exception:  # noqa: BLE001 - a missing label only costs a log field
+            pass
     try:
-        pid, label = _attempt(target_claude_pid, reason, cdir, home, base)
+        pid, label = _attempt(info, reason, cdir, home, base)
         ok, detail = True, "sent"
     except Refused as e:
         ok, detail = False, str(e)
+        pid, label = info["pid"], info["label"]
     except Exception as e:  # noqa: BLE001 - a wake must never break a key listener or the pill
         ok, detail = False, "failed: " + type(e).__name__
+        pid, label = info["pid"], info["label"]
     _log(reason, pid, label, ok, detail)
     return ok, detail
 

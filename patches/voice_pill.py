@@ -16,7 +16,7 @@ files are read where upstream keeps them; the pill's own follow the base dir
   ~/.voicemode/conch, conch.queue.d/*.json         who holds the floor, who waits
   ~/.voicemode/voicemode.env                       barge flag, beeps default
   <base>/pill/...                                  sessions, pause, overrides, ui
-  ~/.claude/sessions/<pid>.json                    Play: is the woken session busy yet
+  ~/.claude/sessions/<pid>.json                    Wake: is the woken session busy yet
                                                    (session_wake, read only)
 
 The conch file formats are those of voice-mode 8.12.0 (conch.py, conch_queue.py).
@@ -42,7 +42,7 @@ except ImportError:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     import voice_pill_state as st
 
-try:  # Play: wake the last voice session. Absent on an install that never copied it.
+try:  # Wake: wake the last voice session. Absent on an install that never copied it.
     import session_wake as sw
 except ImportError:
     sw = None
@@ -72,7 +72,7 @@ class Context:
         self.switch = switch              # barge command: None = the setting, else voicemode-switch
         self.dismissed = dismissed        # session keys hidden by Dismiss
         self.barge_thread = barge_thread
-        self.wake = None                  # the last Play: label, ok, detail, at, claude_pid
+        self.wake = None                  # the last Wake: label, ok, detail, at, claude_pid
 
     base = property(lambda self: Path(self._base) if self._base else st.default_base(),
                     lambda self, v: setattr(self, "_base", v), doc="pill state dir")
@@ -248,22 +248,22 @@ def _remember_floor(ctx, conch):
     return record
 
 
-# -- Play (session_wake) -------------------------------------------------------
+# -- Wake (session_wake; the pill's old Play) -------------------------------------------------------
 
 WAKE_ANSWER_S = 5.0     # a woken session that is not busy by then did not answer
-WAKE_SHOW_S = 10.0      # how long a Play result stays in the pill
+WAKE_SHOW_S = 10.0      # how long a Wake result stays in the pill
 WAKE_FAIL_SHOW_S = 6.0
 
 
 def _play_target(ctx, sessions):
-    """The session Play would wake, or None (no session, setting off, module missing)."""
+    """The session Wake would wake, or None (no session, setting off, module missing)."""
     if sw is None:
         return None
     try:
         if not sw.enabled(ctx.home):
             return None
         return sw.last_voice_session(home=ctx.home, base=ctx.base, sessions=sessions)
-    except Exception:  # noqa: BLE001 - a broken lookup hides Play, never the pill
+    except Exception:  # noqa: BLE001 - a broken lookup hides Wake, never the pill
         return None
 
 
@@ -273,14 +273,14 @@ def _play(ctx) -> None:
     if target is None:
         ctx.wake = {"label": None, "ok": False, "detail": "no session", "at": now, "claude_pid": None}
         return
-    ok, detail = sw.wake(target.claude_pid, "play")
-    print(f"voice_pill: play -> {target.label}: {'sent' if ok else detail}", file=sys.stderr, flush=True)
+    ok, detail = sw.wake(target.claude_pid, "wake")
+    print(f"voice_pill: wake -> {target.label}: {'sent' if ok else detail}", file=sys.stderr, flush=True)
     ctx.wake = {"label": target.label, "ok": ok, "detail": detail, "at": now,
                 "claude_pid": target.claude_pid, "answered": False}
 
 
 def wake_view(ctx, now=None):
-    """The Play result to show, or None once it has been shown long enough."""
+    """The Wake result to show, or None once it has been shown long enough."""
     w = ctx.wake
     if not w:
         return None
@@ -301,7 +301,7 @@ def wake_view(ctx, now=None):
     if w.get("answered"):
         return {"text": f"Woke {w['label']}", "ok": True}
     if age < WAKE_ANSWER_S:
-        return {"text": f"Waking {w['label']}\u2026 talk after the chime", "ok": True}
+        return {"text": f"Waking {w['label']}\u2026 listen for \"Listening.\"", "ok": True}
     return {"text": f"No answer from {w['label']}", "ok": False}
 
 
@@ -383,7 +383,7 @@ def handle_command(msg, ctx=None) -> None:
                     change["voice"] = (GERMAN_VOICE if msg[key] == "German" else
                                        default if voice_language(default) == "English" else st.FALLBACK_VOICE)
             _set_override(ctx, floor, **change)
-    elif cmd == "play":
+    elif cmd in ("wake", "play"):   # "play" is the old name; keep it working
         if sw is not None:
             _play(ctx)
     elif cmd == "save_ui" and isinstance(msg.get("ui"), dict):

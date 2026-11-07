@@ -59,10 +59,10 @@ Files: log `~/.voicemode/logs/ptt-listener.log`, pid `~/.voicemode/run/ptt-liste
      (`ps -o tty=`). Detached or stale servers show `??` and are skipped.
   2. Wait until Control/Option are physically released.
   3. AppleScript selects the Terminal.app tab whose `tty` matches exactly (no window-title
-     guessing), `do script` types `[push-to-talk] converse message="Listening." skip_tts=true`, then
+     guessing), `do script` types `[push-to-talk] converse message="Listening."`, then
      System Events presses Return.
-  4. Claude Code receives that as a user message; the agent calls `converse` with `skip_tts=true`
-     and records immediately.
+  4. Claude Code receives that as a user message; the agent calls `converse` with `message="Listening."`,
+     which is spoken as the cue, and then listens. Talk after you hear "Listening."
 
 ## Pitfalls found while building it (2026-10-20)
 

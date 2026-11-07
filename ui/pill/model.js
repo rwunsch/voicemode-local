@@ -8,7 +8,7 @@
   var GERMAN_VOICES = ["dm_martin", "p_de_thorsten", "p_de_eva"];
   var LANGUAGES = ["English", "German"];
   function languageOf(voice) { return voice && (voice.indexOf("dm_") === 0 || voice.indexOf("p_de_") === 0) ? "German" : "English"; }
-  var PAUSE = "\u23F8\uFE0E", RESUME = "\u25B6\uFE0E";
+  var PAUSE = "\u23F8\uFE0E", RESUME = "\u23EF\uFE0E"  /* play/pause, not a plain play: no second play-like icon */;
   var LABELS = { speaking: "Speaking", listening: "Listening", holding: "Holding\u2026", working: "Between turns",
     idle: "Not in a voice turn", paused: "Paused", stopped: "Stopped", disconnected: "Disconnected" };
 
@@ -37,10 +37,11 @@
     if (!connected) {
       // Never show the last known state: a stale "Listening" is worse than none.
       return { connected: false, phase: "disconnected", label: LABELS.disconnected, mode: "pill", side: null,
-        interrupt: off, pause: { enabled: false, label: "Pause", cmd: "pause", icon: PAUSE }, stop: off,
+        main: { kind: "stop", cmd: "stop", title: "Stop", enabled: false },
+        pause: { visible: false, enabled: false, label: "Pause", cmd: "pause", icon: PAUSE }, stop: off,
         pickersEnabled: false, minimizeEnabled: true, dismissEnabled: true, queue: [], queueMore: "", voice: null, language: null, keys: [], session: "", stateText: LABELS.disconnected, waitingText: "",
         barge: { visible: false, on: false, enabled: false, countText: "" }, beeps: { on: false }, voices: VOICES, languages: LANGUAGES,
-        play: { visible: false, title: "" }, wakeText: "" };
+        wakeText: "" };
     }
     var s = snapshot, phase = s.phase || "idle", ui = s.ui || {}, barge = s.barge || {};
     var count = barge.count || 0;
@@ -52,16 +53,22 @@
     var language = s.language || languageOf(s.voice);
     var base = language === "German" ? GERMAN_VOICES : VOICES;
     var voices = s.voice && base.indexOf(s.voice) < 0 ? base.concat([s.voice]) : base;
-    // Play wakes the last voice session: only with no voice turn running (idle, between
-    // turns, stopped) and a session the backend can name.
-    var playable = !!s.play && (phase === "idle" || phase === "working" || phase === "stopped");
+    // The main button is Wake between turns (idle, between turns, stopped) when the backend
+    // can name a session to wake, and Stop otherwise. One button, never both. Pause/Resume
+    // exist only during a voice turn. (There is no Skip: the backend "interrupt" command stays.)
+    var inTurn = phase === "speaking" || phase === "listening" || phase === "holding" || phase === "paused";
+    var wakeable = !!s.play && (phase === "idle" || phase === "working" || phase === "stopped");
+    var stopOn = !!s.floor && phase !== "stopped";
+    var main = wakeable
+      ? { kind: "wake", cmd: "wake", title: "Wake " + (s.play.label || "the last session"), enabled: true }
+      : { kind: "stop", cmd: "stop", title: "Stop", enabled: stopOn };
     var wakeText = s.wake && s.wake.text ? s.wake.text : "";
     var mode = ui.minimized ? "dot" : ui.docked ? (ui.tucked ? "tab" : ui.dockOpen ? "docked" : "rail") : ui.expanded ? "expanded" : "pill";
     return {
       connected: true, phase: phase, label: LABELS[phase] || LABELS.idle, mode: mode,
       side: mode === "docked" || mode === "rail" || mode === "tab" ? (ui.side === "left" ? "left" : "right") : null,
-      interrupt: { enabled: phase === "speaking" || phase === "listening" },
-      pause: { enabled: true, label: phase === "paused" ? "Resume" : "Pause",
+      main: main,
+      pause: { visible: inTurn, enabled: true, label: phase === "paused" ? "Resume" : "Pause",
         cmd: phase === "paused" ? "resume" : "pause", icon: phase === "paused" ? RESUME : PAUSE },
       stop: { enabled: !!s.floor && phase !== "stopped" },
       pickersEnabled: !!s.floor, minimizeEnabled: true, dismissEnabled: true,
@@ -79,7 +86,6 @@
       session: name,
       stateText: wakeText || LABELS[phase] || LABELS.idle,
       wakeText: wakeText,
-      play: { visible: playable, title: playable ? "Play: wake " + (s.play.label || "the last session") + " to talk" : "" },
       waitingText: waiting ? "+" + waiting + " waiting" : "",
     };
   }

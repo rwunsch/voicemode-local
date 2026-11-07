@@ -13,7 +13,7 @@ test("disconnected after 3s with no snapshot", () => {
   const vm = viewModel(snap(), 1000, 4001);
   assert.equal(vm.connected, false);
   assert.equal(vm.label, "Disconnected");
-  assert.equal(vm.interrupt.enabled, false);
+  assert.equal(vm.main.enabled, false);
   assert.equal(vm.pause.enabled, false);
   assert.equal(vm.stop.enabled, false);
   assert.equal(vm.pickersEnabled, false);
@@ -36,12 +36,6 @@ test("pause button reads Resume when paused", () => {
   const q = viewModel(snap(), 0, 0).pause;
   assert.equal(q.label, "Pause");
   assert.equal(q.cmd, "pause");
-});
-
-test("interrupt disabled unless speaking or listening", () => {
-  const e = (phase) => viewModel(snap({ phase }), 0, 0).interrupt.enabled;
-  assert.deepEqual(["speaking", "listening", "working", "paused", "idle"].map(e),
-    [true, true, false, false, false]);
 });
 
 test("stop needs a floor holder", () => {
@@ -116,7 +110,7 @@ test("disconnected does not show last state", () => {
 
 test("pause and resume carry icons with the text variation selector", () => {
   assert.equal(viewModel(snap(), 0, 0).pause.icon, "\u23F8\uFE0E");
-  assert.equal(viewModel(snap({ phase: "paused" }), 0, 0).pause.icon, "\u25B6\uFE0E");
+  assert.equal(viewModel(snap({ phase: "paused" }), 0, 0).pause.icon, "\u23EF\uFE0E"); // ⏯, not ▶
 });
 
 test("pickers enabled only with a floor", () => {
@@ -224,22 +218,47 @@ test("beeps switch shows the backend's value", () => {
   assert.equal(viewModel(null, 0, 0).beeps.on, false);
 });
 
-test("Play shows only with no voice turn and a session to wake", () => {
-  const play = { label: "demo" };
-  const v = (o) => viewModel(snap(o), 0, 0).play;
+const wakeTarget = { label: "demo" };
+const buttons = (o) => { const vm = viewModel(snap(o), 0, 0);
+  return { main: vm.main.kind, mainOn: vm.main.enabled, pause: vm.pause.visible, resume: vm.pause.cmd }; };
+
+test("between turns: Wake only; in a turn: Stop + Pause; paused: Stop + Resume", () => {
   for (const phase of ["idle", "working", "stopped"]) {
-    assert.equal(v({ phase, play }).visible, true, phase);
+    const b = buttons({ phase, play: wakeTarget });
+    assert.deepEqual([b.main, b.mainOn, b.pause], ["wake", true, false], phase);
   }
-  for (const phase of ["speaking", "listening", "holding", "paused"]) {
-    assert.equal(v({ phase, play }).visible, false, phase);
+  for (const phase of ["speaking", "listening", "holding"]) {
+    const b = buttons({ phase, play: wakeTarget });
+    assert.deepEqual([b.main, b.pause, b.resume], ["stop", true, "pause"], phase);
   }
-  assert.equal(v({ phase: "idle", play: null }).visible, false);
-  assert.equal(v({ phase: "idle" }).visible, false);
-  assert.equal(v({ phase: "idle", play }).title, "Play: wake demo to talk");
-  assert.equal(viewModel(snap({ phase: "idle", play }), 1000, 5000).play.visible, false); // disconnected
+  const p = viewModel(snap({ phase: "paused", play: wakeTarget }), 0, 0);
+  assert.deepEqual([p.main.kind, p.pause.visible, p.pause.cmd, p.pause.icon], ["stop", true, "resume", "\u23EF\uFE0E"]);
 });
 
-test("a Play result replaces the state text briefly", () => {
+test("the main button is one element that switches: wake or stop, never both", () => {
+  const w = viewModel(snap({ phase: "idle", play: wakeTarget }), 0, 0).main;
+  assert.deepEqual([w.kind, w.cmd, w.title], ["wake", "wake", "Wake demo"]);
+  const s = viewModel(snap({ phase: "speaking", play: wakeTarget }), 0, 0).main;
+  assert.deepEqual([s.kind, s.cmd, s.title], ["stop", "stop", "Stop"]);
+});
+
+test("without a wakeable session the main button is a disabled-by-floor Stop, not Wake", () => {
+  for (const o of [{ phase: "idle", play: null }, { phase: "idle" }]) {
+    const m = viewModel(snap(o), 0, 0).main;
+    assert.equal(m.kind, "stop");
+  }
+  assert.equal(viewModel(snap({ phase: "idle", play: null, floor: null }), 0, 0).main.enabled, false);
+  const d = viewModel(snap({ phase: "idle", play: wakeTarget }), 1000, 5000);
+  assert.deepEqual([d.main.kind, d.main.enabled, d.pause.visible], ["stop", false, false]); // disconnected
+});
+
+test("no Skip anywhere in the model", () => {
+  const vm = viewModel(snap(), 0, 0);
+  assert.equal("interrupt" in vm, false);
+  assert.equal("play" in vm, false);
+});
+
+test("a Wake result replaces the state text briefly", () => {
   const vm = viewModel(snap({ phase: "working", wake: { text: "Woke demo", ok: true } }), 0, 0);
   assert.equal(vm.stateText, "Woke demo");
   assert.equal(vm.wakeText, "Woke demo");

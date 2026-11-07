@@ -403,7 +403,7 @@ def test_wake_idle_session_never_raises(client_mod, monkeypatch):
 
 def test_the_real_session_wake_module_loads_beside_the_client(client_mod):
     mod = client_mod._session_wake()
-    assert set(mod.MESSAGES) == {"ptt", "play"}
+    assert set(mod.MESSAGES) == {"ptt", "wake"}
 
 
 # --- an idle hold only wakes: nothing to end (2026-11-07, option 1) ----------
@@ -438,4 +438,4 @@ def test_wake_idle_session_names_the_session_and_the_chime(client_mod, monkeypat
         def wake(target_claude_pid=None, reason="ptt"):
             return True, "sent"
     monkeypatch.setattr(client_mod, "_session_wake", lambda: Fake)
-    assert client_mod.wake_idle_session() == (True, "woke demo; talk after the chime")
+    assert client_mod.wake_idle_session() == (True, "woke demo; talk after Listening.")

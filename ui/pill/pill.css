@@ -52,4 +52,5 @@ html,body{height:100%}
 [data-phase=speaking] .tab{color:var(--a)}[data-phase=listening] .tab,[data-phase=holding] .tab{color:var(--g)}
 [data-mode=tab] .tab{display:block}[data-mode=tab] .card{display:none}
 [hidden]{display:none!important}
-.play:hover:not(:disabled),.play.hover:not(:disabled){color:var(--g);border-color:var(--g)}
+.wake:hover:not(:disabled),.wake.hover:not(:disabled){color:var(--g);border-color:var(--g)}
+.main .sun{display:block;margin:auto}

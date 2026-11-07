@@ -256,7 +256,7 @@ def wake_idle_session():
         ok, detail = mod.wake(reason="ptt")
         label = getattr(mod, "last_label", None)
         if ok and label:
-            detail = f"woke {label}; talk after the chime"
+            detail = f"woke {label}; talk after Listening."
         return ok, detail
     except Exception as e:  # noqa: BLE001 - never break a key listener
         return False, "failed: " + _one_line(e)

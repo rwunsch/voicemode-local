@@ -120,7 +120,7 @@ def _log_text(w):
 
 # -- the happy path: exactly two lines, token never logged --------------------
 
-@pytest.mark.parametrize("reason", ["ptt", "play"])
+@pytest.mark.parametrize("reason", ["ptt", "wake"])
 def test_wake_sends_exactly_auth_then_user(sw, world, reason, caplog):
     caplog.set_level(logging.DEBUG)
     ok, detail = sw.wake(world.pid, reason)
@@ -138,12 +138,13 @@ def test_wake_sends_exactly_auth_then_user(sw, world, reason, caplog):
 
 
 def test_messages_are_fixed_and_short(sw):
-    assert set(sw.MESSAGES) == {"ptt", "play"}
-    assert "skip_tts=true" in sw.MESSAGES["ptt"] and "wait_for_response=true" in sw.MESSAGES["ptt"]
-    assert "greeting" in sw.MESSAGES["play"]
-    # converse refuses a call without `message` (voice-mode 8.12; seen live 2026-11-07)
-    assert 'message="Listening."' in sw.MESSAGES["ptt"]
-    assert "as the message" in sw.MESSAGES["play"]
+    assert set(sw.MESSAGES) == {"ptt", "wake"}
+    # The woken session SPEAKS "Listening." (a silent wake was heard live, 2026-11-07), so no skip_tts.
+    for key in ("ptt", "wake"):
+        text = sw.MESSAGES[key]
+        assert 'message="Listening."' in text and "wait_for_response=true" in text
+        assert "skip_tts" not in text
+    assert "Wake" in sw.MESSAGES["wake"]
     for text in sw.MESSAGES.values():
         assert len(text.encode("utf-8")) <= sw.MAX_MESSAGE_BYTES
         assert "\n" not in text
@@ -403,3 +404,24 @@ def test_pipe_refusal_sends_nothing(sw, world, monkeypatch):
 def test_is_pipe(sw):
     assert sw.is_pipe(r"\\.\pipe\x") and sw.is_pipe("//./pipe/x")
     assert not sw.is_pipe("/tmp/cc-socks-1000/1.sock")
+
+
+def test_old_play_reason_sends_the_wake_message(sw, world):
+    ok, detail = sw.wake(world.pid, "play")
+    assert ok, detail
+    assert json.loads(world.peer.lines()[1])["message"]["content"] == sw.MESSAGES["wake"]
+    assert "reason=wake" in _log_text(world)
+
+
+def test_refusal_logs_the_label(sw, world):
+    world.write(status="busy")
+    ok, detail = sw.wake(world.pid, "wake")
+    assert not ok and detail == "busy"
+    assert "label='my-session'" in _log_text(world), _log_text(world)
+
+
+def test_off_refusal_logs_the_label_too(sw, world, monkeypatch):
+    monkeypatch.setenv("VOICEMODE_SESSION_WAKE", "off")
+    ok, detail = sw.wake(world.pid, "wake")
+    assert not ok
+    assert "label='my-session'" in _log_text(world)

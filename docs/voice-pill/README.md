@@ -57,16 +57,29 @@ Files are in `%LOCALAPPDATA%\voicemode-local`: `webview2\` (two DLLs), `webview2
   above Speaking and Listening, green like Listening). The keys hint reads `tap: stop, hold:
   talk` on every platform: key down cuts the reply and opens the mic, a release within 0.8 s
   stops (back to text), a later one sends what you said.
-- **Play** (2026-11-07): with no voice turn running (idle, between turns, stopped) and a
-  last voice session the backend can find, the pill shows a ▶ button. It sends
-  `{"cmd":"play"}`; the backend calls `session_wake.wake(<claude pid>, "play")`, which asks
-  that Claude Code session, through its own session socket, to call converse with a short
-  greeting. While the wake is pending the state text shows `Waking <label>... talk after the chime`
-  (until the session's registry status turns `busy` or 5 s pass), then `Woke <label>`, or
+- **Wake and the button layout** (2026-11-07, Robert's decision: a play and a stop button
+  together make no sense, and Skip is dropped). The pill has one main button in the leftmost
+  spot that switches state, and Pause beside it:
+
+  | State | Main button (spot 1) | Spot 2 |
+  |---|---|---|
+  | between turns (idle, between turns, stopped), a last voice session exists, wake enabled | **Wake**: a line-art sunrise (half sun on a horizon with short rays, inline SVG), title `Wake <label>` | hidden |
+  | a voice turn is running | **Stop** (square) | Pause (pause icon) |
+  | paused | Stop | Resume, shown as the play/pause icon (not a plain play) |
+
+  With no session to wake the main button stays Stop (disabled without a floor). There is no
+  Skip button; the backend `interrupt` command still works for other callers (push-to-talk).
+  Wake sends `{"cmd":"wake"}` (the old `{"cmd":"play"}` still works); the backend calls
+  `session_wake.wake(<claude pid>, "wake")`, which asks that Claude Code session, through its
+  own session socket, to call converse with `message="Listening."` and
+  `wait_for_response=true`. The woken session therefore SPEAKS "Listening." and then
+  listens (a silent wake was measured on the Mac 2026-11-07, n=1, beeps on). While the wake is
+  pending the state text shows `Waking <label>... listen for "Listening."` (until the
+  session's registry status turns `busy` or 5 s pass), then `Woke <label>`, or
   `Can't wake <label>: <why>` (busy, waiting for a permission answer, rate limited, ...). If
   the status has not turned `busy` within 5 s it shows `No answer from <label>`. Like an
-  idle push-to-talk hold, Play only wakes: talk after the listening chime, which took 6 s
-  and 11 s to arrive when measured live 2026-11-07 (n=2). (The pill shows its own Play
+  idle push-to-talk hold, Wake only wakes: talk after you hear "Listening.", which took 6 s
+  and 11 s to arrive when measured live 2026-11-07 (n=2). (The pill shows its own Wake
   wakes only; a push-to-talk wake is not shown.) The last voice session is
   the newest live conch holder in voice-mode's events log, then the pill's own session
   records; its voice-server pid is mapped up its parents to the claude pid. Hidden when
@@ -156,14 +169,14 @@ now shows by colour only. Whether the old or new cost affects stutter was not me
 
 - [ ] Pill appears on a real `converse`
 - [ ] States change correctly in a real turn
-- [ ] Interrupt, Pause, Resume and Stop work in a real turn
+- [ ] Pause, Resume and Stop work in a real turn; Wake shows the sunrise between turns and the woken session says "Listening."
 - [ ] Closing the window while paused releases Pause in a real turn
 - [ ] No new stutter under a voice turn (`voicemode-perf`)
 
 ## Known issues
 
-- After Interrupt or Stop, the player's stop call was seen blocking for about 6 s and once 36 s, under load 12 to 20 (2026-11-05, n=2). A silent test of the same call returned in about 0.1 s, n=3. Cause unknown; whether sound continued is not recorded.
-- No Play button or Windows push-to-talk wake yet. A stopped session gets going again when you ask it in its terminal. An agent stayed quiet after Stop, n=1, headless.
+- After Stop (or the old Interrupt), the player's stop call was seen blocking for about 6 s and once 36 s, under load 12 to 20 (2026-11-05, n=2). A silent test of the same call returned in about 0.1 s, n=3. Cause unknown; whether sound continued is not recorded.
+- No Windows push-to-talk wake test on a real Windows Claude Code yet. A stopped session gets going again when you ask it in its terminal. An agent stayed quiet after Stop, n=1, headless.
 - The Interrupt by voice toggle fix has not been retested with a real click.
 - The pill's patches install even with the pill off. A turn then does a few extra file operations and leaves one small file per voice session in `~/.voicemode/pill/sessions/`, which nothing removes while the pill is off (final review, read in the code).
 - `pill off` leaves `~/.voicemode/pill/beeps.json` in place, and it still decides beeps: delete it to go back to `VOICEMODE_AUDIO_FEEDBACK`. It also leaves `VOICEMODE_CONTROL_CHANNEL_ENABLED=true`, which push-to-talk uses too.
@@ -211,7 +224,7 @@ server, more than one monitor, and the native switch (task 8).
 - Native Windows (not WSL): run voice-mode and the pill at the same level. If the voice
   server runs elevated (as administrator) and the pill does not, the pill refuses its control
   pipe, because it cannot inspect the elevated server's process. The pill then shows no
-  speaking or listening state and its Interrupt, Pause and Stop do not reach the turn. The
+  speaking or listening state and its Pause and Stop do not reach the turn. The
   backend logs the reason once, as `voice control channel refused: ... most likely the voice
   server runs elevated`. Inferred from Windows' token rules and covered by a unit test; not
   yet run with a real elevated server.
@@ -274,7 +287,7 @@ as pywebview's own dependencies). The main venv gains nothing. The backend is st
   to take focus to come back, and push-to-talk only fires while a terminal has focus. Windows 11
   may put a new tray icon in the overflow `^` until it is pinned.
 - **Docked floats, on both platforms.** It sits on the screen edge at its own height, always on
-  top, and takes no screen space. It starts as a slim rail (76 px: status, Interrupt, Pause, Stop);
+  top, and takes no screen space. It starts as a slim rail (76 px: status, Stop or Wake, Pause);
   `‹` opens the full panel, and `›` there goes back to the rail. Dragging moves it up and down the edge only. `›` slides it off
   the edge, leaving a small `‹` tab at the same height; the tab cannot be dragged. Width comes
   from dragging the side edges (320 to 640, default 350), which is not available while docked. Position,
@@ -345,7 +358,7 @@ Window and focus (fake backend):
 - [ ] Voice picker: a real click opens it and a choice lands, with the pill never key. Hover colours still show
 - [ ] Menu bar ball: easy to find on the bar, changes colour with the phase
 - [ ] Width: the grip shows at each edge, dragging changes the width, `pill-window.log` has a `resize` line
-- [ ] Clicking Pause, Interrupt, the dropdown and the expand button: the frontmost app does not change. **Expected to be the weak spot**: a click on any window can activate its app. If it changes, report it; the fallback is a small Swift `NSPanel` (non-activating)
+- [ ] Clicking Pause, Stop or Wake, the dropdown and the expand button: the frontmost app does not change. **Expected to be the weak spot**: a click on any window can activate its app. If it changes, report it; the fallback is a small Swift `NSPanel` (non-activating)
 - [ ] Always on top: another window dragged over it
 - [ ] Above a full-screen app, and visible on a second Space (untested so far). If the window never gets that behaviour, check whether pywebview fires `shown` for a `hidden=True` window (the collection behaviour is set in that handler; look for "window behaviour not set" or its absence in `pill-window.log`)
 - [ ] The page renders from `file://` (the page's CSP says `'self'`): text and buttons present, no blank window; no listening socket (`lsof -nP -iTCP -sTCP:LISTEN | grep -i python` shows nothing from the pill)
@@ -371,7 +384,7 @@ Backend on macOS (real `voice_pill.py`):
 Needs Robert (voice, ears, permissions):
 - [ ] Pill appears on a real `converse`; states follow the turn
 - [ ] Kokoro through `streaming.py` shows Speaking (Task 2)
-- [ ] Interrupt, Pause, Resume and Stop work in a real turn
+- [ ] Pause, Resume and Stop work in a real turn; Wake shows the sunrise between turns and the woken session says "Listening."
 - [ ] The hotkey press makes the pill appear (two-minute rule); Input Monitoring permission as for PTT
 - [ ] No new stutter (`voicemode-perf`)
 - [ ] Autostart at login: not provided on macOS; `voicemode-mcp` starts the window with the first session. (A LaunchAgent is not written.)

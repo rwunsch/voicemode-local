@@ -717,10 +717,15 @@ def test_gather_offers_no_play_when_the_setting_is_off(ctx, fake_wake):
     assert vp.gather(ctx)["play"] is None
 
 
-def test_play_wakes_the_last_voice_session_with_reason_play(ctx, fake_wake):
+def test_wake_wakes_the_last_voice_session_with_reason_wake(ctx, fake_wake):
+    vp.handle_command({"cmd": "wake"}, ctx)
+    assert fake_wake.calls == [(4242, "wake")]
+    assert vp.gather(ctx)["wake"] == {"text": 'Waking demo\u2026 listen for "Listening."', "ok": True}
+
+
+def test_old_play_command_still_wakes(ctx, fake_wake):
     vp.handle_command({"cmd": "play"}, ctx)
-    assert fake_wake.calls == [(4242, "play")]
-    assert vp.gather(ctx)["wake"] == {"text": "Waking demo\u2026 talk after the chime", "ok": True}
+    assert fake_wake.calls == [(4242, "wake")]
 
 
 def test_play_refused_says_why(ctx, fake_wake):
@@ -737,15 +742,15 @@ def test_play_without_a_session(ctx, fake_wake):
 
 
 def test_no_answer_when_the_session_stays_idle_for_5_s(ctx, fake_wake):
-    vp.handle_command({"cmd": "play"}, ctx)
+    vp.handle_command({"cmd": "wake"}, ctx)
     t0 = ctx.wake["at"]
-    assert vp.wake_view(ctx, t0 + 4.9) == {"text": "Waking demo\u2026 talk after the chime", "ok": True}
+    assert vp.wake_view(ctx, t0 + 4.9) == {"text": 'Waking demo\u2026 listen for "Listening."', "ok": True}
     assert vp.wake_view(ctx, t0 + 5.1) == {"text": "No answer from demo", "ok": False}
     assert vp.wake_view(ctx, t0 + 30) is None
 
 
 def test_busy_within_5_s_is_an_answer(ctx, fake_wake):
-    vp.handle_command({"cmd": "play"}, ctx)
+    vp.handle_command({"cmd": "wake"}, ctx)
     t0 = ctx.wake["at"]
     assert vp.wake_view(ctx, t0 + 1)["text"].startswith("Waking demo")
     fake_wake.status = "busy"

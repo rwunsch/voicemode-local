@@ -115,5 +115,5 @@ def test_wake_text_names_a_message_and_stays_short():
     "converse needs either `message` ... or a non-empty `turns` list"). The Mac types this
     line into Terminal, and a long line is taken for a paste and never submitted."""
     assert 'message="Listening."' in mac.WAKE_TEXT
-    assert "skip_tts=true" in mac.WAKE_TEXT
+    assert "skip_tts" not in mac.WAKE_TEXT  # the woken session speaks the cue
     assert len(mac.WAKE_TEXT) <= 60
