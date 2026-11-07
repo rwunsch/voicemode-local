@@ -1,4 +1,4 @@
-# DRAFT (not filed) — issue only (no PR unless the maintainer engages)
+# FILED 2026-11-07 (#588) — issue only (no PR unless the maintainer engages)
 
 **Title:** Control channel can't run on native Windows (AF_UNIX), and enabling it there can fail the converse call
 

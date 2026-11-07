@@ -82,3 +82,14 @@ unmodified master under `-n 4` (2/2 runs) and passes alone — pre-existing upst
 
 Deliberately **not** upstreamed: the Docker compose stack itself. See
 [`why-upstream-builds-from-source.md`](why-upstream-builds-from-source.md).
+
+## Filed 2026-11-07 (from the v1.1.0 native Windows work)
+
+| Item | What | Downstream |
+|---|---|---|
+| issue #586 -> PR #587 | Windows: TTS temp file deleted while still open (WinError 32), TTS side of #135; fix closes first | `patch_windows_tempfile.py` (native list) until it merges |
+| issue #588 | control channel uses AF_UNIX (none on Windows); an AttributeError there can escape `start_control_listener` (by reading) | `patch_control_transport.py` named pipe; PR offered, not opened |
+
+Drafts: `issue-windows-tts-tempfile.md`, `issue-windows-control-channel.md`. Maintainer on #541
+(2026-10-20): simpleaudio is being removed; "a massive bit of work" with new features is coming —
+check it against our patches before building more (barge, push-to-talk, Windows).

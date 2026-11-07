@@ -1,4 +1,4 @@
-# DRAFT (not filed) — issue + small PR
+# FILED 2026-11-07 (#586 + PR #587) — issue + small PR
 
 **Title:** Windows: every buffered TTS turn fails with WinError 32 — the temp file is deleted while still open (TTS side of #135)
 
