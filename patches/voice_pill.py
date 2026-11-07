@@ -437,8 +437,15 @@ def _install_stop_signals() -> None:
             pass
 
 
+def _log_prune(msg: str) -> None:
+    print(f"voice_pill: {msg}", file=sys.stderr, flush=True)
+
+
 def main(argv=None) -> int:
     ctx = Context()
+    print(f"voice_pill: started pid={os.getpid()} base={ctx.base} home={ctx.home} sock={ctx.sock} "
+          f"TZ={os.environ.get('TZ', '')}", file=sys.stderr, flush=True)
+    st.prune_log = _log_prune
     lock = acquire_lock(ctx.base)
     if lock is None:
         print("voice_pill: another backend is running", file=sys.stderr)

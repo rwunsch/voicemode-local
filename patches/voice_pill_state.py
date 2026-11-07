@@ -261,9 +261,12 @@ def process_start(pid: int) -> str | None:
             # comm may contain spaces/parens: fields resume after the last ')'.
             # starttime is field 22 overall = index 19 after state (field 3).
             return data[data.rindex(")") + 2:].split()[19]
+        # lstart prints local time in the caller's locale: pin both, or the same process gets a
+        # different token from a process with another TZ (or after the zone changes).
         out = subprocess.run(
             ["ps", "-o", "lstart=", "-p", str(int(pid))],
             capture_output=True, text=True, timeout=5,
+            env={**os.environ, "TZ": "UTC", "LC_ALL": "C"},
         ).stdout.strip()
         return out or None
     except (OSError, ValueError, IndexError, subprocess.SubprocessError):
@@ -287,16 +290,23 @@ def pid_exists(pid) -> bool:
     return True
 
 
-def _alive_same(pid, start) -> bool:
-    """Same process as the one recorded. A record without a start time never matches, so a
-    reused pid cannot inherit it. If only the current start is unknown (ps failed), an
-    alive pid is kept: losing a live session is worse."""
+def _not_same_reason(pid, start):
+    """None if pid is the process recorded; else why not. A record without a start time never
+    matches, so a reused pid cannot inherit it. If only the current start is unknown (ps
+    failed), an alive pid is kept: losing a live session is worse."""
     cur = process_start(pid)  # first, as before: same spawns on a Mac as before
     if start is None:
-        return False
+        return "no start token recorded"
     if cur is not None:
-        return cur == start
-    return pid_exists(pid)
+        return None if cur == start else f"start token differs: stored {start!r}, now {cur!r}"
+    return None if pid_exists(pid) else "process gone"
+
+
+def _alive_same(pid, start) -> bool:
+    return _not_same_reason(pid, start) is None
+
+
+prune_log = None  # the backend sets a function here; it reports each session file deleted
 
 
 def windows_pid_alive(pid: int) -> bool:
@@ -412,7 +422,13 @@ def live_sessions(base=None) -> list[dict]:
         if status == "unreadable":  # busy for a moment, or no access: never delete it
             continue
         pid = s.get("pid")
-        if not isinstance(pid, int) or not _alive_same(pid, s.get("start")):
+        why = "pid is not an integer" if not isinstance(pid, int) else _not_same_reason(pid, s.get("start"))
+        if why:
+            if prune_log:
+                try:
+                    prune_log(f"pruned session {path.name} (pid {pid!r}): {why}")
+                except Exception:
+                    pass
             _unlink(path)
             if isinstance(pid, int):  # a reused pid must not inherit these
                 set_override(pid, None, None, base)

@@ -6,7 +6,8 @@ Each second it emits <dir>/state.json merged over a default snapshot, and append
 every line received on stdin to <dir>/commands.log. Voice, language, barge and beeps commands
 take effect in what it emits, so those controls hold when clicked. <dir>/startup_exit, if present,
 holds an exit code to use at once, before printing anything (a refused second instance
-exits 1 this way). <dir>/exit_now does the same after output has started, and is deleted
+exits 1 this way). <dir>/go_silent, if present, makes it stop writing after its next line while
+staying alive. <dir>/exit_now does the same after output has started, and is deleted
 first. It touches no voice-mode state, opens no mic and plays no audio. Runs on Linux and on
 Windows (stdin is read by a thread there).
 """
@@ -89,6 +90,9 @@ def main(folder: str) -> int:
         except (OSError, ValueError):
             state = {}
         print(json.dumps({**DEFAULT, **state, **live}), flush=True)
+        if (d / "go_silent").exists():  # alive but writes nothing more: the hang the watchdog is for
+            while True:
+                time.sleep(3600)
         stop = d / "exit_now"
         if stop.exists():
             code = int(stop.read_text().strip() or 1)
