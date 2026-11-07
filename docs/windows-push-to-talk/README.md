@@ -28,6 +28,31 @@ every platform (Robert, 2026-11-07). The script sends the wire words `hold_start
 relay mode, `ptt_relay`'s) job, in `ptt_control_client.COMMANDS`. `-HoldThresholdMs` is still
 accepted so old shortcuts keep starting, and ignored.
 
+### A hold with no voice turn running wakes the last voice session (2026-11-07)
+
+Between voice turns there is no control channel (`no-channel`). A **hold** (released after
+800 ms) then asks the last voice session to start listening, through Claude Code's own
+session socket (`patches/session_wake.py`): it sends one fixed message, which the session
+shows as "Another Claude session sent a message", asking the agent to call converse with
+`message="Listening."`, `skip_tts=true` and `wait_for_response=true`. A tap never wakes.
+
+- Native: the sender wakes after answering `hold_release` with `no-channel` (the answer
+  word is unchanged, so the script needs no change). WSL relay: `ptt_relay.forward` does it.
+- Only an **idle** session is woken. Busy, waiting on a permission prompt, running a shell
+  command, a stale registry entry, a key or socket that is not private: refused, nothing sent.
+- One wake per 5 s. Every attempt is logged to `~/.voicemode/logs/session-wake.log`
+  (in WSL for the relay, in the Windows profile for native); the token never is.
+- Off: `VOICEMODE_SESSION_WAKE=off` (environment or voicemode.env).
+- The protocol is Claude Code's undocumented internal one (read from its binary, validated
+  n=1 on WSL, Claude Code 2.1.319). Native Windows uses a named pipe there: implemented
+  behind the same function with fakes only, **UNVERIFIED** on a real Windows Claude Code.
+- A session whose `crossSessionInbound` setting is `hold` will not act on it. The binary
+  also says a session that bypasses permission prompts holds a message whose sender did not
+  attest its permission mode; we attest nothing, so a bypass-mode session may hold the wake
+  (not tested).
+
+The Mac keeps its own wake (typing into Terminal), see docs/macos-push-to-talk.
+
 Only while a terminal process has focus (`WindowsTerminal`, `powershell`, `pwsh`, `wsl`,
 `conhost`, `cmd`, `alacritty`, `wezterm`, `Code`), so Ctrl+Space in other apps is left alone.
 The key states are polled every 50 ms with `GetAsyncKeyState`; nothing is hooked or swallowed.

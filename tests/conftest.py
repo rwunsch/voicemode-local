@@ -43,3 +43,11 @@ def pytest_terminal_summary(terminalreporter):
     terminalreporter.write_line("The patch checks against pristine voice-mode 8.12.0 did NOT run. "
                                 "Set VM812_SRC, or VOICEMODE_RELEASE_CHECK=1 to make this fail.",
                                 red=True, bold=True)
+
+
+@pytest.fixture(autouse=True)
+def _no_real_claude_sessions(tmp_path_factory, monkeypatch):
+    """session_wake reads Claude Code's session registry (CLAUDE_CONFIG_DIR, else
+    ~/.claude). Point it at an empty temp dir for every test, so no test can ever
+    find, let alone message, a real Claude Code session on this machine."""
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path_factory.mktemp("no-claude")))

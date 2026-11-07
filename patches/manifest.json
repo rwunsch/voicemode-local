@@ -36,6 +36,7 @@
     {"copy": "ptt_listener_macos.py", "to": "ptt_listener_macos.py"},
     {"copy": "voice_barge.py", "to": "voice_barge.py"},
     {"copy": "voice_pill_state.py", "to": "voice_pill_state.py"},
+    {"copy": "session_wake.py", "to": "session_wake.py", "why": "wake an idle Claude Code session: push-to-talk hold and the pill's Play"},
     {"copy": "voice_pill.py", "to": "voice_pill.py",
      "why": "modules go in before the pill patch makes converse import them"},
     {"patch": "patch_voice_pill.py",

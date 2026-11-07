@@ -342,3 +342,65 @@ def test_stdin_mode_survives_invalid_utf8(server, tmp_path):
     assert lines[0].startswith("failed:") and lines[1] == "sent", done.stdout + done.stderr
     _wait(lambda: len(srv.received) >= 1)
     assert srv.commands() == ["stop"]
+
+
+# --- wake an idle session on a hold with no voice turn (2026-11-07) ----------
+
+def _serve_with(client_mod, monkeypatch, outcome, text):
+    import io
+    events = []
+    monkeypatch.setattr(client_mod, "deliver", lambda command: events.append(("deliver", command)) or outcome)
+    monkeypatch.setattr(client_mod, "wake_idle_session",
+                        lambda: events.append(("wake",)) or (True, "sent"))
+
+    class Out(io.StringIO):
+        def write(self, s):
+            events.append(("answer", s.strip()))
+            return super().write(s)
+    out = Out()
+    client_mod.serve_lines(io.StringIO(text), out)
+    return events, out.getvalue()
+
+
+def test_a_hold_with_no_channel_wakes_the_last_session_once(client_mod, monkeypatch):
+    events, out = _serve_with(client_mod, monkeypatch, "no-channel", "hold_start\nhold_release\n")
+    assert out == "no-channel\nno-channel\n"  # the listener's protocol is unchanged
+    assert events.count(("wake",)) == 1
+    # answered first: the listener waits for the answer, never for the wake
+    assert events.index(("answer", "no-channel"), 2) < events.index(("wake",))
+
+
+def test_a_tap_with_no_channel_does_not_wake(client_mod, monkeypatch):
+    events, _ = _serve_with(client_mod, monkeypatch, "no-channel", "hold_start\nshort_press\n")
+    assert ("wake",) not in events
+
+
+def test_a_hold_during_a_voice_turn_does_not_wake(client_mod, monkeypatch):
+    events, _ = _serve_with(client_mod, monkeypatch, "sent", "hold_start\nhold_release\n")
+    assert ("wake",) not in events
+
+
+def test_wake_idle_session_uses_session_wake_for_ptt(client_mod, monkeypatch):
+    calls = []
+
+    class Fake:
+        @staticmethod
+        def wake(target_claude_pid=None, reason="ptt"):
+            calls.append(reason)
+            return False, "busy"
+    monkeypatch.setattr(client_mod, "_session_wake", lambda: Fake)
+    assert client_mod.wake_idle_session() == (False, "busy")
+    assert calls == ["ptt"]
+
+
+def test_wake_idle_session_never_raises(client_mod, monkeypatch):
+    def boom():
+        raise ImportError("no session_wake")
+    monkeypatch.setattr(client_mod, "_session_wake", boom)
+    ok, detail = client_mod.wake_idle_session()
+    assert not ok and "failed" in detail
+
+
+def test_the_real_session_wake_module_loads_beside_the_client(client_mod):
+    mod = client_mod._session_wake()
+    assert set(mod.MESSAGES) == {"ptt", "play"}

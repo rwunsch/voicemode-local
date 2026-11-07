@@ -95,6 +95,11 @@ INTENDED_STEP_LINES = [
     b'needs hold, barge and pill"},\n',
 ]
 INTENDED_PATCHES = [("patch_ptt_instant.py", ["control_channel.py", "control_socket.py", "tools/converse.py"])]
+# 2026-11-07: session_wake.py, copied in after voice_pill_state.py.
+INTENDED_STEP_LINES.append(
+    b'    {"copy": "session_wake.py", "to": "session_wake.py", "why": "wake an idle Claude Code '
+    b'session: push-to-talk hold and the pill\'s Play"},\n')
+INTENDED_COPIES = ["session_wake.py"]
 
 
 def test_default_manifest_file_is_unchanged():
@@ -116,6 +121,8 @@ def test_default_output_is_byte_identical_to_before(tmp_path):
             r = subprocess.run([sys.executable, str(PATCHES / script), str(before / rel)],
                                capture_output=True, text=True, env=dict(os.environ, PYTHONUTF8="1"))
             assert r.returncode == 0, r.stdout + r.stderr
+    for name in INTENDED_COPIES:
+        shutil.copy(PATCHES / name, before / name)
     _apply(PATCHES / "apply.py", now)
     assert _files(now) == _files(before)
     assert "FELIX: NO FFMPEG" not in (now / "tools/converse.py").read_text(encoding="utf-8")

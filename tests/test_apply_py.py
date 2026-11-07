@@ -94,9 +94,13 @@ def current_modules(old):
 INTENDED_SINCE_BASELINE = [
     ("patch_ptt_instant.py", ["control_channel.py", "control_socket.py", "tools/converse.py"]),
 ]
+# Modules added as "copy" steps since the baseline (2026-11-07: session_wake.py).
+INTENDED_COPIES_SINCE_BASELINE = ["session_wake.py"]
 
 
 def apply_intended(pkg: Path) -> None:
+    for name in INTENDED_COPIES_SINCE_BASELINE:
+        shutil.copy(PATCHES / name, pkg / name)
     for script, targets in INTENDED_SINCE_BASELINE:
         for rel in targets:
             r = subprocess.run([sys.executable, str(PATCHES / script), str(pkg / rel)],
@@ -105,7 +109,9 @@ def apply_intended(pkg: Path) -> None:
 
 
 def without_intended_log(out: str) -> str:
-    return "".join(line for line in out.splitlines(keepends=True) if "(ptt instant)" not in line)
+    copied = tuple(f"[patches] installed {name}" for name in INTENDED_COPIES_SINCE_BASELINE)
+    return "".join(line for line in out.splitlines(keepends=True)
+                   if "(ptt instant)" not in line and not line.strip().startswith(copied))
 
 
 def hardlink_core(venv: Path, outside: Path) -> None:

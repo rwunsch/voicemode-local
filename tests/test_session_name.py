@@ -58,6 +58,9 @@ def resolver(patched):
 def clean_env(monkeypatch):
     monkeypatch.delenv("VOICEMODE_SESSION_NAME", raising=False)
     monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+    # These tests put Claude Code's registry under a temp HOME; conftest's CLAUDE_CONFIG_DIR
+    # (which keeps session_wake off real sessions) would otherwise point elsewhere.
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
 
 
 # --- the patch itself -------------------------------------------------------

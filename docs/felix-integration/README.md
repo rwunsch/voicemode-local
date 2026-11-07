@@ -58,6 +58,7 @@ Repair (FELIX point 7) should check all three, and nuget.org joins the hosts tha
 | `VOICEMODE_BARGE_PYTHON` | the trigger's interpreter | the pill asks it whether barge can run, when the pill's own Python cannot hear the mic (macOS pill venv) |
 | `VOICEMODE_TOOLS_ENABLED` | include `voice_barge_tool` if FELIX uses a tool list | voice-mode 8.12 loads only converse and service without a list; our native launcher adds it when no list is set |
 | `VOICEMODE_STREAMING_ENABLED` | our native launcher sets `false` with barge unless the user set it | the README once said barge is inert with streaming; on macOS it cut playback 3 times with streaming on (reported). Not re-tested on Windows with streaming on |
+| `VOICEMODE_SESSION_WAKE` | `off` for FELIX | default `on`. Push-to-talk holds with no voice turn and the pill's Play wake an idle Claude Code session through Claude Code's undocumented session socket (`patches/session_wake.py`). See section 6 |
 | `VOICEMODE_VOICE_BARGE_ECHO` | `auto` (default), `on`, `off` | macOS only: whether speakers use voice processing |
 
 ## 4. Starting and stopping (FELIX point 1 and 10)
@@ -90,6 +91,16 @@ barge will cut itself off: a Windows echo-cancelled capture is planned, not buil
 Every stretch logs one line (`stretch: s, windows, max, p90, fired, …`) for diagnosis.
 
 ## 6. Known gaps
+
+- **Session wake: FELIX should not use it** (set `VOICEMODE_SESSION_WAKE=off`).
+  `patches/session_wake.py` messages an idle Claude Code session over Claude Code's internal
+  peer socket. That protocol is undocumented (read from the binary's strings), validated
+  once (n=1, WSL, 2.1.319), and may change in any Claude Code release; it is used on Robert's
+  machine by his permission for his own sessions. A session whose `crossSessionInbound` is
+  `hold` (user, repo or managed settings) will not act on it, and a bypass-permissions session
+  may hold it because the sender attests no permission mode. Native Windows (named pipe) is
+  UNVERIFIED. With it off, the pill shows no Play button and a push-to-talk hold between turns
+  does nothing, as before.
 
 - Barge hears nothing for the first 0.8-0.9 s of each reply (mic start-up; reported on macOS, n=6).
 - On macOS, all 9 voice-processing channels measured identical; channel 0 is echo-free either way.

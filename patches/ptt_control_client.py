@@ -38,7 +38,9 @@ Sender for the native Windows listener
 ``python -m voice_mode.ptt_control_client --stdin`` reads one action name per
 line and answers each with one line: ``ready`` (for ``warm``, sent once at
 listener start so the first press does not load modules), ``sent``, ``none`` (nothing to send),
-``no-channel`` (no voice turn is serving the channel), ``busy``, ``refused: ...``
+``no-channel`` (no voice turn is serving the channel; after a ``hold_release``
+that answered ``no-channel`` the sender also wakes the last voice session, see
+session_wake), ``busy``, ``refused: ...``
 (the pipe's owner or server is not this user; see control_transport) or
 ``failed: ...`` (also for an unknown action word). ptt-listener-windows.ps1 starts it in native mode: the
 PowerShell side only reads the keys, and the mapping, the pipe name and the
@@ -226,6 +228,35 @@ def action_outcome(action: str) -> str:
     return "none" if action == "press" else f"failed: unknown action {action!r}"
 
 
+_WAKE_FILE = Path(__file__).with_name("session_wake.py")
+_WAKE = None
+
+
+def _session_wake():
+    """session_wake: the installed voice_mode's, or the file beside this one."""
+    global _WAKE
+    installed = sys.modules.get("voice_mode.session_wake")
+    if installed is not None:
+        return installed
+    if _WAKE is None:
+        spec = importlib.util.spec_from_file_location("_vml_session_wake", _WAKE_FILE)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _WAKE = mod
+    return _WAKE
+
+
+def wake_idle_session():
+    """Push-to-talk held with no voice turn: ask the last voice session to listen.
+
+    session_wake checks it is idle, rate-limits (one per 5 s) and logs the outcome to
+    ~/.voicemode/logs/session-wake.log. Returns (ok, detail); never raises."""
+    try:
+        return _session_wake().wake(reason="ptt")
+    except Exception as e:  # noqa: BLE001 - never break a key listener
+        return False, "failed: " + _one_line(e)
+
+
 def warm() -> str:
     """Load now what the first press would otherwise load: the path resolver and,
     without AF_UNIX (Windows), the pipe transport. Sends nothing."""
@@ -258,6 +289,10 @@ def serve_lines(stdin, stdout) -> None:
                 answer = action_outcome(action)
             stdout.write(answer + "\n")
             stdout.flush()
+            # A hold with no voice turn running: wake the last voice session. After the
+            # answer, so the listener never waits on it; once per press (one release).
+            if action == "hold_release" and answer == "no-channel":
+                wake_idle_session()
     if holding:
         deliver(COMMANDS["hold_release"])
 
