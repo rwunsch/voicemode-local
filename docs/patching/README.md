@@ -47,8 +47,9 @@ on every run, taking the old `patches/` from git.
 | 9 | patch_voice_barge | control_channel, control_socket, core, converse | 5 if present |
 | 10 | copy control_transport, ptt_*, voice_barge, voice_pill_state, voice_pill | package | none |
 | 11 | patch_voice_pill | control_channel, control_socket, converse, streaming | 9; 4 if present; 10 |
-| 12 | patch_control_transport | control_socket | 10 |
-| 13 | copy voice_barge_tool | tools/ | none |
+| 12 | patch_ptt_instant | control_channel, control_socket, converse | 5, 9, 11 |
+| 13 | patch_control_transport | control_socket | 10 |
+| 14 | copy voice_barge_tool | tools/ | none |
 
 Optional dependencies, so FELIX's tree (no hold or session-name patches) works:
 
