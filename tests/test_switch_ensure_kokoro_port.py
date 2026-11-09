@@ -298,3 +298,21 @@ def test_barge_status_prints_the_channel_state(tmp_path):
     assert "Control channel: enabled" in done.stdout
     done, _ = _run_barge(tmp_path / "b", "status", "VOICEMODE_VOICE_BARGE=true\n")
     assert "Control channel: disabled" in done.stdout
+
+
+def test_pill_ensure_opens_the_window_when_enabled_without_touching_settings(tmp_path):
+    """Per-session start (voicemode-mcp on WSL): opens the window if the pill is on, writes
+    nothing (sessions start often; settings stay the user's), and the window's own
+    single-instance lock makes a second call harmless."""
+    original = "KEEP=1\n# comment\nVOICEMODE_PILL=true\n"
+    done, env, calls = _run_pill(tmp_path, "ensure", original)
+    assert done.returncode == 0
+    assert "pill-windows.ps1" in calls
+    assert env == original
+
+
+def test_pill_ensure_does_nothing_when_disabled(tmp_path):
+    for i, text in enumerate(("VOICEMODE_PILL=false\n", "")):
+        done, env, calls = _run_pill(tmp_path / str(i), "ensure", text)
+        assert done.returncode == 0
+        assert "powershell.exe" not in calls and env == text

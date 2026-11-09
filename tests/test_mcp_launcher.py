@@ -84,3 +84,48 @@ def test_same_explicit_session_reaps_previous_server(launcher):
     second = launcher("same-session")
     assert first.wait(timeout=5) != 0
     assert second.poll() is None
+
+
+def _wsl_launcher_env(tmp_path, pill):
+    """A WSL-looking environment: WSL_DISTRO_NAME set, a powershell.exe on PATH, and the
+    pill setting in voicemode.env. The fake voicemode-switch records its arguments."""
+    (tmp_path / ".voicemode").mkdir(exist_ok=True)
+    (tmp_path / ".voicemode" / "voicemode.env").write_text(f"VOICEMODE_PILL={pill}\n")
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    ps = bin_dir / "powershell.exe"
+    ps.write_text("#!/usr/bin/env bash\nexit 0\n")
+    ps.chmod(0o755)
+    calls = tmp_path / "switch-calls.txt"
+    (tmp_path / "voicemode-switch").write_text(
+        f'#!/usr/bin/env bash\necho "$*" >> "{calls}"\nexit 0\n')
+    return {"WSL_DISTRO_NAME": "Ubuntu", "PATH": f"{bin_dir}:{os.environ['PATH']}"}, calls
+
+
+def _start_with(launcher_dir, extra):
+    import time
+    env = dict(os.environ, HOME=str(launcher_dir), **extra)
+    env.pop("CLAUDE_CODE_SESSION_ID", None)
+    p = subprocess.Popen([str(launcher_dir / "voicemode-mcp")], env=env, stdout=subprocess.PIPE,
+                         stderr=subprocess.PIPE, text=True)
+    assert p.stdout.readline() == "ready\n"
+    time.sleep(1.0)  # the pill start runs in the background
+    p.terminate()
+    p.wait(timeout=5)
+    p.stdout.close(); p.stderr.close()
+
+
+def test_wsl_session_start_brings_up_the_pill_when_it_is_on(launcher, tmp_path):
+    """Robert 2026-11-09: on WSL the pill only started on `voicemode-switch pill on`;
+    after a reboot nothing brought it back. macOS and native Windows start it per session."""
+    launcher  # builds the launcher and its fakes in tmp_path
+    extra, calls = _wsl_launcher_env(tmp_path, "true")
+    _start_with(tmp_path, extra)
+    assert calls.exists() and "pill ensure" in calls.read_text()
+
+
+def test_wsl_session_start_leaves_the_pill_alone_when_it_is_off(launcher, tmp_path):
+    launcher
+    extra, calls = _wsl_launcher_env(tmp_path, "false")
+    _start_with(tmp_path, extra)
+    assert not calls.exists() or "pill" not in calls.read_text()

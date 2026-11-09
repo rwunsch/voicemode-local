@@ -96,12 +96,20 @@ ensure_ptt_listener() {
 }
 ensure_ptt_listener
 
-# --- One voice pill window per machine (macOS) -------------------------------
+# --- One voice pill window per machine (macOS, and WSL via voicemode-switch) --
 # Only with VOICEMODE_PILL=true and a pill venv (made by `voicemode-switch pill on`).
 # The window holds its own single-instance lock; this lock only stops two sessions
 # starting at the same moment from spawning two launches.
 ensure_pill_window() {
-    [ "$(uname -s)" = "Darwin" ] || return 0
+    if [ "$(uname -s)" != "Darwin" ]; then
+        # WSL: the window runs on Windows; `voicemode-switch pill ensure` opens it when the
+        # pill is on (its own lock keeps one window). In the background: it waits up to 15 s.
+        [ -n "${WSL_DISTRO_NAME:-}" ] && command -v powershell.exe >/dev/null 2>&1 || return 0
+        [ "$(sed -n 's/^VOICEMODE_PILL=//p' "$HOME/.voicemode/voicemode.env" 2>/dev/null | tail -1)" = "true" ] || return 0
+        nohup "$SCRIPT_DIR/voicemode-switch" pill ensure >> "$LOG_DIR/pill-window.log" 2>&1 < /dev/null &
+        disown 2>/dev/null || true
+        return 0
+    fi
     [ "$(sed -n 's/^VOICEMODE_PILL=//p' "$HOME/.voicemode/voicemode.env" 2>/dev/null | tail -1)" = "true" ] || return 0
     local py="$HOME/.voicemode/pill-venv/bin/python" lock="$RUN_DIR/pill-window.launch.lock"
     [ -x "$py" ] || return 0

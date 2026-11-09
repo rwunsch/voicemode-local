@@ -627,12 +627,18 @@ cmd_pill() {
             pkill -f "$PILL_BACKEND_RE" 2>/dev/null || true
             ok "Voice pill off"
             ;;
+        ensure)
+            # Per session start (voicemode-mcp, WSL): open the window if the pill is on. Writes
+            # no setting; the window's single-instance lock makes a repeat harmless.
+            [ "$(env_value VOICEMODE_PILL)" = "true" ] || return 0
+            start_pill_window || return 1
+            ;;
         status)
             if [ "$(env_value VOICEMODE_PILL)" = "true" ]; then echo "Voice pill: enabled"; else echo "Voice pill: disabled"; fi
             if [ "$(env_value VOICEMODE_CONTROL_CHANNEL_ENABLED)" = "true" ]; then echo "Control channel: enabled"; else echo "Control channel: disabled"; fi
             if pgrep -f "$PILL_BACKEND_RE" >/dev/null 2>&1; then echo "Backend: running"; else echo "Backend: not running"; fi
             ;;
-        *) echo "usage: voicemode-switch pill [on|off|status]"; return 2 ;;
+        *) echo "usage: voicemode-switch pill [on|off|status|ensure]"; return 2 ;;
     esac
 }
 
