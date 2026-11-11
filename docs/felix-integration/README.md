@@ -25,6 +25,24 @@ another session (FELIX-MAC, FELIX-voice) and not re-run here; **inferred** = rea
 | Native install without WSL/Docker/admin | n/a | install.ps1 -Mode windows-native | install-mac.sh (v1.0.0) + `--barge` |
 | Live on/off switch | voicemode-switch | voicemode_native.py barge/pill on/off/status | voicemode-switch |
 
+## What v1.1.2 changes (tagged 2026-11-11, merged to main from fix/conch-minors)
+
+Small fixes from the v1.1.1 final review. No new settings and no manifest changes. Files:
+`patches/conch_wakers.py`, `patches/patch_conch_wakers.py`, `patches/patch_conch_fairness.py`
+and `patches/patch_session_name.py`.
+
+- **Wake counts** (`conch.wakes.json`) are locked across processes, so concurrent pings
+  can no longer exceed the 5-wake cap. Entries older than a day are dropped. On Windows,
+  a refused replace is retried.
+- **A free mic reserved for a queued turn is named.** converse says "<name> (reserved for
+  its queued turn; nobody is speaking yet)" instead of "unknown holds the voice channel".
+- **Copilot chat titles are read as YAML** (`yaml.safe_load`, a voice-mode dependency):
+  block scalars and escaped quotes work. If the file does not parse, the old line reader
+  is the fallback.
+- **An older patch text is reported.** A file with the conch marker but an older text
+  prints a stderr line saying it is kept and that a reinstall gives the new text.
+  It still exits 0.
+
 ## What v1.1.1 changes (tagged 2026-11-11, merged to main from feature/pill-autostart)
 
 Agreed with FELIX-voice on 2026-11-10. Robert's decisions are in
