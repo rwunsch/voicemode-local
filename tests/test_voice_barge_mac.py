@@ -174,8 +174,8 @@ def test_echo_setting(raw, mode):
 class Opener:
     """open_capture on 'darwin' with the route, VP availability and captures faked."""
 
-    def __init__(self, monkeypatch, route="speakers", vp=True):
-        self.route, self.vp = route, vp
+    def __init__(self, monkeypatch, route="speakers", vp=True, bluetooth=False):
+        self.route, self.vp, self.bluetooth = route, vp, bluetooth
         self.made = []
         monkeypatch.setattr(vb, "SoundDeviceCapture", self._maker("sounddevice"))
         monkeypatch.setattr(vb, "VoiceProcessingCapture", self._maker("voice-processing"))
@@ -196,7 +196,8 @@ class Opener:
 
     def __call__(self, echo="auto", backend="sounddevice", platform="darwin"):
         return vb.open_capture(backend, "", platform=platform, echo=echo,
-                               route=lambda: self.route, vp_available=lambda: self.vp)
+                               route=lambda: self.route, vp_available=lambda: self.vp,
+                               bluetooth=lambda: self.bluetooth)   # never the real Mac's output
 
 
 def test_speakers_with_vp_open_voice_processing_and_say_so_in_the_stretch_line(monkeypatch):
