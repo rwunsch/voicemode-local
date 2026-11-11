@@ -410,3 +410,63 @@ def test_barge_interpreter_refuses_setting_from_a_file(monkeypatch, tmp_path):
     switch.write_text("")
     monkeypatch.setattr(st, "default_switch", lambda: switch)
     assert st.barge_interpreter() is None  # no venv beside the switch either
+
+
+# -- closed marker: a user close sticks until voice restarts from scratch ----
+
+def test_closed_marker_round_trip(base):
+    assert not st.pill_closed(base=base)
+    st.set_pill_closed(True, base=base)
+    assert st.pill_closed(base=base)
+    st.set_pill_closed(False, base=base)
+    assert not st.pill_closed(base=base)
+
+
+def test_first_session_after_everyone_left_clears_the_marker(base):
+    st.set_pill_closed(True, base=base)
+    asyncio_run(st.enter(os.getpid(), "demo", None, base=base))
+    assert not st.pill_closed(base=base)
+
+
+def test_marker_stays_while_another_session_is_live(base):
+    other = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        st.register_session(other.pid, "other", None, base=base)
+        st.set_pill_closed(True, base=base)
+        asyncio_run(st.enter(os.getpid(), "demo", None, base=base))
+        assert st.pill_closed(base=base)
+    finally:
+        other.kill()
+        other.wait()
+
+
+def test_a_later_turn_of_a_session_keeps_the_marker(base):
+    asyncio_run(st.enter(os.getpid(), "demo", None, base=base))
+    st.set_pill_closed(True, base=base)
+    asyncio_run(st.enter(os.getpid(), "demo", None, base=base))
+    assert st.pill_closed(base=base)
+
+
+def test_enter_calls_the_autostart_hook_after_registering(base):
+    seen = []
+    st.autostart_hook = lambda b: seen.append([s["pid"] for s in st.live_sessions(base=b)])
+    try:
+        asyncio_run(st.enter(os.getpid(), "demo", None, base=base))
+    finally:
+        st.autostart_hook = None
+    assert seen == [[os.getpid()]]
+
+
+def test_a_failing_autostart_hook_does_not_cost_the_turn(base):
+    def boom(b):
+        raise RuntimeError("no window today")
+    st.autostart_hook = boom
+    try:
+        assert asyncio_run(st.enter(os.getpid(), "demo", None, base=base)) is None
+    finally:
+        st.autostart_hook = None
+
+
+def asyncio_run(coro):
+    import asyncio
+    return asyncio.run(coro)

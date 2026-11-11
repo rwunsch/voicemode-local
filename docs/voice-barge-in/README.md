@@ -9,8 +9,25 @@ voicemode-switch barge off      # takes effect immediately
 voicemode-switch barge status
 ```
 
+**`auto`** (v1.1.1): `voicemode-switch barge auto` (or `VOICEMODE_VOICE_BARGE=auto`)
+runs the trigger but keeps the mic closed unless the default output is headphones or a
+headset. The route is read at most once a second, and changes are logged. Status prints
+`auto (on: headphones)`, `auto (off: speakers)` or `auto (off: unknown)`.
+- **Route sources.**
+  - macOS: CoreAudio, as below.
+  - Windows: the default render endpoint's form factor and enumerator through Core Audio.
+    Form factors 3, 5 and 6, and any Bluetooth enumerator, count as headphones; 1 and 9
+    count as speakers.
+  - Linux and WSL: no route reader, so `auto` stays off there.
+- **Validated on Windows, 2026-11-10.**
+  - Endpoint form factors: Jabra Engage 75 = 5 (USB); Realtek speakers = 1 (INTELAUDIO);
+    VB-Cable = 2.
+  - The Python read returned speakers for the Realtek default: 41 ms the first time, then
+    about 7 ms (n=3).
+  - Not yet run with the Jabra as the default, nor with the trigger live on `auto`.
+
 From inside Claude Code, Copilot or any MCP client, use the `voice_barge` tool with `on`,
-`off` or `status`. `ensure` adds it to `VOICEMODE_TOOLS_ENABLED` if you have a whitelist.
+`off`, `auto` or `status`. `ensure` adds it to `VOICEMODE_TOOLS_ENABLED` if you have a whitelist.
 
 `barge on` also sets `VOICEMODE_CONTROL_CHANNEL_ENABLED=true`: the trigger's `barge_in`
 travels over the control channel, and with it off (upstream's default) barge-in is inert.

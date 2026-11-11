@@ -418,6 +418,8 @@ document.addEventListener('DOMContentLoaded',function(){
         if (closing) return;
         Log("backend exited: code " + code + ", " + lines + " lines");
         if (off) { Log("VOICEMODE_PILL is off; exiting"); Shutdown(); return; }
+        // voice_pill.EXIT_DONE: the last voice session has left. Close, and do not restart.
+        if (code == 3) { Log("no voice session left; closing"); Shutdown(); return; }
         // A second instance exits 1 before printing anything, and so does a failed
         // import: retrying helps neither. Exit 1 after real output is a crash, or the
         // distro going down, and those are what the restart is for.

@@ -50,8 +50,8 @@ where it came from.
   `whisper-proxy.py` already had one (commit 951d46e), and a test now pins its default.
   Natively, STT is whisper-server itself, so the proxy is not used.
 - **Launcher** (`launch`, the MCP command). It writes the lease, starts the watchdog, then the
-  TTS and STT services, then the pill (`VOICEMODE_PILL=true`) and the voice barge-in trigger
-  (`VOICEMODE_VOICE_BARGE=true`; `python -m voice_mode.voice_barge <silero>`, hearing the mic through
+  TTS and STT services, then the voice barge-in trigger
+  (`VOICEMODE_VOICE_BARGE=true` or `auto`; `python -m voice_mode.voice_barge <silero>`, hearing the mic through
   sounddevice), and the push-to-talk listener (`VOICEMODE_PTT_ENABLED=true`; native mode, see
   below). Each is one per install, under the same lease and watchdog. It waits until TTS and STT answer and checks that the process
   answering is the one it started. Then it runs voice-mode with stdin, stdout and stderr passed
@@ -86,7 +86,9 @@ where it came from.
   turns a skip caused by a missing `VM812_SRC` into a failure under `VOICEMODE_RELEASE_CHECK=1`,
   and prints a loud warning otherwise.
 
-The launcher starts the pill and push-to-talk only when enabled.
+The launcher starts push-to-talk only when enabled. Since v1.1.1 it no longer starts the pill:
+the voice server opens it on the first voice turn and it closes after the last session
+(`docs/voice-pill/README.md`, "Who starts and stops the window"). `pill on` still opens it at once.
 The pill's native tests are `tests/test_pill_windows_native.py` (Linux: static checks, and
 the name derivation compared with PowerShell's through `powershell.exe`) and
 `tests/test_pill_windows_native_windows.py` (Windows, 9 tests). MCP registration and `install.ps1` belong to

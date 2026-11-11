@@ -629,7 +629,9 @@ def test_voice_processing_available_imports_avfoundation_once(monkeypatch):
 
 def _status(monkeypatch, capsys, platform, route="speakers", vp=True, echo=None, state=True,
             backend="sounddevice"):
-    monkeypatch.setattr(vb, "barge_state", lambda home=None: state)
+    monkeypatch.setattr(vb, "barge_state", lambda home=None: state if not isinstance(state, str) else True)
+    mode = state if isinstance(state, str) or state is None else ("on" if state else "off")
+    monkeypatch.setattr(vb, "barge_mode", lambda home=None: mode)
     monkeypatch.setattr(vb, "capture_backend", lambda: backend)
     monkeypatch.setattr(vb, "_platform", lambda: platform)
     monkeypatch.setattr(vb, "output_route", lambda platform=None, lib=None: route)
@@ -1128,3 +1130,79 @@ def test_the_next_stretch_warns_again(av, caplog):
             fake.config_change()
             cap.close()
     assert len([r for r in caplog.records if r.levelname == "WARNING"]) == 2
+
+
+# -- Windows route (form factor of the default playback endpoint) -----------
+
+@pytest.mark.parametrize("form, enum, route", [
+    (5, "USB", "headphones"),          # Jabra Engage 75, measured 2026-11-10
+    (3, "HDAUDIO", "headphones"),
+    (6, "USB", "headphones"),
+    (1, "INTELAUDIO", "speakers"),     # Realtek "Speakers", measured 2026-11-10
+    (9, "HDAUDIO", "speakers"),        # HDMI / DisplayPort monitor
+    (2, "ROOT", "unknown"),            # VB-Audio cable, measured 2026-11-10
+    (10, "USB", "unknown"),
+    (None, None, "unknown"),
+    (1, "BTHENUM", "headphones"),      # Bluetooth counts as headphones, as on macOS
+    (1, "bthhfenum", "headphones"),
+])
+def test_windows_route(form, enum, route):
+    assert vb.windows_route(form, enum) == route
+
+
+def test_windows_output_route_uses_the_endpoint_read():
+    assert vb.output_route(platform="win32", lib=lambda: (5, "USB")) == "headphones"
+    assert vb.output_route(platform="win32", lib=lambda: None) == "unknown"
+    def boom():
+        raise OSError("no COM here")
+    assert vb.output_route(platform="win32", lib=boom) == "unknown"
+
+
+def test_linux_route_stays_unknown():
+    assert vb.output_route(platform="linux") == "unknown"
+
+
+# --- auto: listen only while the output route is headphones (Robert, 2026-11-10) ---
+
+@pytest.mark.parametrize("platform,route,first", [
+    ("win32", "headphones", "auto (on: headphones)"),
+    ("win32", "speakers", "auto (off: speakers)"),
+    ("linux", "unknown", "auto (off: unknown)"),
+])
+def test_status_auto(monkeypatch, capsys, platform, route, first):
+    assert _status(monkeypatch, capsys, platform, route, state="auto") == first + "\n"
+
+
+def test_status_auto_on_a_mac_keeps_the_route_line(monkeypatch, capsys):
+    out = _status(monkeypatch, capsys, "darwin", "headphones", state="auto")
+    assert out == "auto (on: headphones)\nroute: headphones, capture: sounddevice\n"
+
+
+def test_route_gate_opens_only_on_headphones_and_caches():
+    routes, now = ["speakers", "headphones", "unknown"], [0.0]
+    reads = []
+    def route():
+        reads.append(1)
+        return routes[0]
+    gate = vb.RouteGate(route=route, clock=lambda: now[0], every_s=1.0)
+    assert gate.closed() is True
+    routes[0] = "headphones"
+    now[0] = 0.5
+    assert gate.closed() is True          # cached: still the speakers read
+    now[0] = 1.0
+    assert gate.closed() is False
+    routes[0] = "unknown"
+    now[0] = 2.0
+    assert gate.closed() is True
+    assert len(reads) == 3
+
+
+@pytest.mark.parametrize("value,mode", [("true", "on"), ("auto", "auto"), (" AUTO ", "auto"),
+                                        ("false", "off"), ("", "off"), ("maybe", "off")])
+def test_barge_mode_reads_auto(monkeypatch, tmp_path, value, mode):
+    st = sys.modules.get("voice_pill_state") or __import__("voice_pill_state")
+    monkeypatch.setattr(st, "capture_backend", lambda: "sounddevice")
+    monkeypatch.setattr(st, "read_env_file", lambda home=None: {})
+    monkeypatch.setenv("VOICEMODE_VOICE_BARGE", value)
+    assert st.barge_mode() == mode
+    assert st.barge_state() is (mode in ("on", "auto"))

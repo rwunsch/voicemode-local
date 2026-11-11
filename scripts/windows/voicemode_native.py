@@ -185,11 +185,17 @@ def truthy(value):
     return (value or "").strip().strip("\"'").strip().lower() == "true"
 
 
+def is_auto(value):
+    """VOICEMODE_VOICE_BARGE=auto: the trigger runs and listens only on headphones."""
+    return (value or "").strip().strip("\"'").strip().lower() == "auto"
+
+
 def optional_services():
     """The pill, the push-to-talk listener and the voice barge-in trigger, each only when its
     setting is exactly true. The listener runs in native mode (optional_command): its sender
     writes to this install's control pipe, never to the WSL relay."""
-    return [kind for kind in OPTIONAL if truthy(setting(OPTIONAL_SETTINGS[kind], ""))]
+    return [kind for kind in OPTIONAL if truthy(setting(OPTIONAL_SETTINGS[kind], ""))
+            or (kind == "barge" and is_auto(setting(OPTIONAL_SETTINGS[kind], "")))]
 
 
 def felix_roots():
@@ -1129,7 +1135,9 @@ def stop_recorded(run_dir, state):
 def ensure_services(root, runtime, env, optional=None):
     """Register a lease, make sure the watchdog runs, then start (or reuse) the speech services and
     the enabled optional ones; wait until both speech services answer. Returns their ports."""
-    optional = optional_services() if optional is None else optional
+    # The pill window is the voice server's own job now (patches/pill_autostart.py, at its
+    # first voice turn): the launcher no longer starts it. `pill on` still opens it at once.
+    optional = [k for k in optional_services() if k != "pill"] if optional is None else optional
     run_dir = root / "run"
     started = {}
     job = services_job(root)
@@ -1382,8 +1390,9 @@ def switch(root, kind, action):
     """barge|pill|ptt on|off|status. See the module docstring."""
     if action == "status":
         return switch_status(root, kind)
-    name, on = SWITCHES[kind], action == "on"
-    value = "true" if on else "false"
+    # auto (barge only): the trigger runs and listens only while the route is headphones.
+    name, on = SWITCHES[kind], action in ("on", "auto")
+    value = "auto" if action == "auto" else ("true" if on else "false")
     if on and kind == "barge":
         runtime, _ = configured_runtime(root, manifest()[1])
         if not silero_present(runtime):
@@ -1429,7 +1438,7 @@ def switch(root, kind, action):
         state.pop(kind, None)
         ports = {k: state[k]["port"] for k in SPEECH if owned(state.get(k))}
         env = runtime_environment(runtime, ports if len(ports) == len(SPEECH) else None)
-        env[name] = "true"  # the window checks it, and a stale false from voice-mode must not stop it
+        env[name] = value  # the window checks it, and a stale false from voice-mode must not stop it
         process = start_service(kind, root, runtime, env, state, services_job(root))
         print(f"The {noun} started (process {process.pid}).")
         records = [read_json(run_dir / "clients" / str(pid), {}) for pid in leases]
@@ -1446,8 +1455,8 @@ def switch_status(root, kind):
     switch writes it; on or off for push-to-talk too. Line 2: whether the trigger, window or
     listener is running."""
     if kind == "barge":
-        state = resolver().barge_state()
-        line = barge_cannot_run() if state is None else ("on" if state else "off")
+        mode = resolver().barge_mode()
+        line = barge_cannot_run() if mode is None else mode
     else:
         line = "on" if truthy(resolver().file_first_setting(SWITCHES[kind], "")) else "off"
     print(line)
@@ -1721,13 +1730,15 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("command", choices=["setup", "launch", "serve", "status", "stop", "watch",
                                             "barge", "pill", "ptt", "info", "remove-data"])
-    parser.add_argument("action", nargs="?", choices=["on", "off", "status"],
-                        help="for barge, pill and ptt: on, off or status")
+    parser.add_argument("action", nargs="?", choices=["on", "off", "auto", "status"],
+                        help="for barge, pill and ptt: on, off or status; barge also auto")
     parser.add_argument("--allow-root-outside-profile", action="store_true",
                         help="accept a VOICEMODE_NATIVE_ROOT outside the profile and LOCALAPPDATA")
     args = parser.parse_args(argv)
     if (args.command in SWITCHES) != (args.action is not None):
         parser.error("on, off or status goes with barge, pill and ptt only, and they need one")
+    if args.action == "auto" and args.command != "barge":
+        parser.error("auto is for barge only")
     global ALLOW_OUTSIDE
     ALLOW_OUTSIDE = args.allow_root_outside_profile
     try:

@@ -115,13 +115,14 @@ def _start_with(launcher_dir, extra):
     p.stdout.close(); p.stderr.close()
 
 
-def test_wsl_session_start_brings_up_the_pill_when_it_is_on(launcher, tmp_path):
-    """Robert 2026-11-09: on WSL the pill only started on `voicemode-switch pill on`;
-    after a reboot nothing brought it back. macOS and native Windows start it per session."""
+def test_wsl_session_start_leaves_the_pill_to_the_voice_server(launcher, tmp_path):
+    """Robert 2026-11-10: the voice server opens the pill itself (pill_autostart) at a
+    session's first voice turn, on every OS. The launcher no longer starts it."""
     launcher  # builds the launcher and its fakes in tmp_path
     extra, calls = _wsl_launcher_env(tmp_path, "true")
     _start_with(tmp_path, extra)
-    assert calls.exists() and "pill ensure" in calls.read_text()
+    assert not calls.exists() or "pill" not in calls.read_text()
+    assert "ensure_pill_window" not in (REPO / "voicemode-mcp").read_text()
 
 
 def test_wsl_session_start_leaves_the_pill_alone_when_it_is_off(launcher, tmp_path):

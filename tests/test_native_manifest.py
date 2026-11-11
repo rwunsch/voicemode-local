@@ -77,6 +77,7 @@ def current_modules(old):
     (main's 5a6cb8d changed voice_pill_state.py) and is covered by its own tests."""
     steps = json.loads((PATCHES / "manifest.json").read_text(encoding="utf-8"))["steps"]
     for name in {s["copy"] for s in steps if "copy" in s}:
+        (old / name).parent.mkdir(parents=True, exist_ok=True)  # "../ui/pill/..." leave patches/
         shutil.copyfile(PATCHES / name, old / name)
     return old
 
@@ -100,6 +101,16 @@ INTENDED_STEP_LINES.append(
     b'    {"copy": "session_wake.py", "to": "session_wake.py", "why": "wake an idle Claude Code '
     b'session: push-to-talk hold and the pill\'s Play"},\n')
 INTENDED_COPIES = ["session_wake.py"]
+# 2026-11-10: the voice server starts the pill window itself (pill_autostart).
+INTENDED_STEP_LINES.append(b'    {"copy": "pill_autostart.py", "to": "pill_autostart.py", "why": "the voice server starts the pill window itself"},\n')
+INTENDED_STEP_LINES.append(b'    {"copy": "../pill-windows.ps1", "to": "pill-windows.ps1", "why": "the Windows pill window, for pill_autostart"},\n')
+INTENDED_STEP_LINES.append(b'    {"copy": "voice_pill_mac.py", "to": "voice_pill_mac.py", "why": "the macOS pill window, for pill_autostart"},\n')
+INTENDED_STEP_LINES.append(b'    {"copy": "../ui/pill/index.html", "to": "ui/pill/index.html"},\n')
+INTENDED_STEP_LINES.append(b'    {"copy": "../ui/pill/app.js", "to": "ui/pill/app.js"},\n')
+INTENDED_STEP_LINES.append(b'    {"copy": "../ui/pill/model.js", "to": "ui/pill/model.js"},\n')
+INTENDED_STEP_LINES.append(b'    {"copy": "../ui/pill/pill.css", "to": "ui/pill/pill.css"},\n')
+INTENDED_COPIES += ["pill_autostart.py", "pill-windows.ps1", "voice_pill_mac.py",
+                    "ui/pill/index.html", "ui/pill/app.js", "ui/pill/model.js", "ui/pill/pill.css"]
 
 
 def test_default_manifest_file_is_unchanged():
@@ -121,8 +132,10 @@ def test_default_output_is_byte_identical_to_before(tmp_path):
             r = subprocess.run([sys.executable, str(PATCHES / script), str(before / rel)],
                                capture_output=True, text=True, env=dict(os.environ, PYTHONUTF8="1"))
             assert r.returncode == 0, r.stdout + r.stderr
+    sources = {s["to"]: s["copy"] for s in _steps("manifest.json") if "copy" in s}
     for name in INTENDED_COPIES:
-        shutil.copy(PATCHES / name, before / name)
+        (before / name).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(PATCHES / sources[name], before / name)
     _apply(PATCHES / "apply.py", now)
     assert _files(now) == _files(before)
     assert "FELIX: NO FFMPEG" not in (now / "tools/converse.py").read_text(encoding="utf-8")

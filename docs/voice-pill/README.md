@@ -8,7 +8,7 @@
 | Field | Value |
 |---|---|
 | Status | Released, off by default. WSL backend; a native Windows mode (no WSL) since 2026-11-06, started by the native launcher. Open checks are listed below |
-| Last updated | 2026-11-05 |
+| Last updated | 2026-11-11 (v1.1.1: the voice server starts and stops the window) |
 | Measured on | Windows build 26200, PowerShell 5.1, WebView2 Runtime 156, one 1920x1080 monitor at 100% scale |
 
 ## Use
@@ -34,6 +34,56 @@ window may have no backend. `pill off` then `pill on` starts clean.
 
 Files are in `%LOCALAPPDATA%\voicemode-local`: `webview2\` (two DLLs), `webview2-data\`,
 `ui\` (copied at each start), `pill-position.txt` and `pill-window.log`.
+
+## Who starts and stops the window (v1.1.1)
+
+Decision (Robert, 2026-11-10): the pill opens with the first voice session and closes
+with the last. This applies to every host, FELIX or not. If the user closes it with ✕, it
+stays closed until voice starts again from scratch. The voice server itself starts the
+window. No launcher starts it any more.
+
+- **Start.** `voice_pill_state.enter()` (on each converse turn) calls
+  `voice_mode/pill_autostart.ensure()`. It starts the window only if all of these hold:
+  - `VOICEMODE_PILL` is true.
+  - `VOICEMODE_PILL_AUTOSTART` is not `off`.
+  - There is no `<base>/pill/closed`.
+  - The pid in `<base>/pill/backend.json` is not alive.
+  - No start was tried in the last 20 s (`autostart.json`).
+
+  Each attempt is logged in `<base>/pill/autostart.log`. The start command depends on the OS:
+  - **Native Windows:** `pill-windows.ps1 -BackendExe <python> -DataDir <VOICEMODE_PILL_DATA_DIR>`.
+    It is started with breakaway from the server's Job Object, and without it if the job refuses.
+  - **WSL:** `Start-Process powershell.exe … pill-windows.ps1 -BackendCommand …`, so the window
+    is not a child of the interop call.
+  - **macOS:** `<VOICEMODE_PILL_PYTHON> voice_pill_mac.py --backend …`. It needs the pill venv
+    that `voicemode-switch pill on` makes.
+
+  `pill-windows.ps1`, `voice_pill_mac.py` and `ui/pill` are copied into the voice_mode
+  package by `patches/apply.py`.
+- **Sticky close.** ✕ writes `<base>/pill/closed`, and the snapshot then says `visible:
+  false`. The marker is removed when a session enters its first turn while no other
+  session is live (a fresh start), and when the backend quits.
+- **Quit.** The backend never quits in its first 30 s. After that, once there has been no
+  live session and no push-to-talk for 20 s, it prints `{"quit": true}` and exits with code 3.
+  Both windows close on code 3 and do not restart. `voice_stop` removes the session at once,
+  and a dead server's session is pruned by pid.
+- **Settings.**
+  - `VOICEMODE_PILL_DATA_DIR`: the Windows folder. Default `<VOICEMODE_NATIVE_ROOT>\pill`,
+    else `<base>/pill/window`. WSL passes none and keeps `%LOCALAPPDATA%\voicemode-local`.
+  - `VOICEMODE_PILL_PYTHON`: the backend interpreter natively, or the pill venv python on
+    macOS.
+  - `voicemode-switch pill on|off` and `voicemode_native.py pill on|off` still open or close
+    the window at once.
+
+Validated live on WSL (2026-11-11, n=1 each step, real converse turns after `/mcp` reconnect):
+- The turn started the window: launch 11:35:21, backend up 11:35:28.
+- ✕ wrote the marker, and the next turn did not reopen the window. That turn came from the
+  same session; a second session's turn is covered by unit tests only.
+- `voice_stop` at about 11:37:48, then the backend exited with code 3 at 11:38:07 and the window
+  stopped with code 0. The marker and `backend.json` were removed.
+- A fresh start reopened the window: launch 11:38:49, backend up 11:38:56, about 7 s.
+
+Not yet run: native Windows (including whether a host's Job Object allows breakaway) and macOS.
 
 ## How it works
 
@@ -92,8 +142,9 @@ Files are in `%LOCALAPPDATA%\voicemode-local`: `webview2\` (two DLLs), `webview2
 
 ## Windows native (no WSL)
 
-The native launcher (`scripts/windows/voicemode_native.py`, see `docs/windows-native/README.md`)
-starts the same window in native mode when `VOICEMODE_PILL=true`:
+The voice server (since v1.1.1; before that the native launcher,
+`scripts/windows/voicemode_native.py`, see `docs/windows-native/README.md`) starts the same
+window in native mode when `VOICEMODE_PILL=true`:
 
 ```
 powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File pill-windows.ps1 ^
@@ -197,8 +248,9 @@ command and a process with no window.
 - A second start on the same folder exits 0. A start on another folder runs alongside, and
   each stops only by its own stop event.
 - The stop event closes it with exit 0, and the backend sees stdin EOF.
-- A backend that exits 3 after output is restarted. One that exits 1 before any output ends
-  the window with exit 1.
+- A backend that exits 3 after output was restarted. Since v1.1.1, code 3 means "no voice
+  session left" and closes the window instead; another non-zero code after output still
+  restarts. One that exits 1 before any output ends the window with exit 1.
 - `VOICEMODE_PILL`: false in the file exits; true in a CRLF file with a BOM runs; false in
   the environment beats true in the file.
 - The real backend (`voice_mode.voice_pill --stdio` in the native runtime) starts, takes its
@@ -272,8 +324,9 @@ voicemode-switch pill off      # clears the flag, stops the window and backend
 voicemode-switch pill status
 ```
 
-`voicemode-mcp` also starts one window per machine when `VOICEMODE_PILL=true` and the venv
-exists (a launch lock like the PTT listener's, and `pgrep` instead of a pidfile, since a launch that loses the window's own lock exits at once). Log: `~/.voicemode/logs/pill-window.log`.
+Since v1.1.1 the voice server starts the window on a voice turn when `VOICEMODE_PILL=true`
+and the venv exists. `voicemode-mcp` no longer does. See "Who starts and stops the window"
+above. Log: `~/.voicemode/logs/pill-window.log`.
 Position: `~/.voicemode/pill/window-position.txt`.
 
 The pill venv holds pywebview 6.2.1 and the six pyobjc packages it needs, pinned to 13.0

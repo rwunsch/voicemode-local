@@ -895,7 +895,7 @@ def test_barge_command_still_rejects_bad_actions(monkeypatch, tmp_path):
     marker = tmp_path / "ran"
     ctl = _script(tmp_path, body=f'touch "{marker}"')
     monkeypatch.setenv("VOICEMODE_BARGE_CONTROL_COMMAND", str(ctl))
-    assert "must be on, off or status" in st.barge_control("on; rm -rf /")
+    assert "must be on, off, auto or status" in st.barge_control("on; rm -rf /")
     assert not marker.exists()
 
 

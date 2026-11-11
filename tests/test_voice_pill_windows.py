@@ -194,3 +194,12 @@ def test_backend_serves_stdin_and_exits_on_eof(private_base):
             p.wait()
         p.stdout.close()
         p.stderr.close()
+
+
+def test_window_closes_for_good_on_backend_done():
+    """voice_pill.EXIT_DONE (3): the last voice session has left; no restart."""
+    from pathlib import Path as _P
+    root = _P(__file__).resolve().parent.parent
+    ps1 = (root / "pill-windows.ps1").read_text(encoding="utf-8")
+    assert "if (code == 3) {" in ps1 and "Shutdown(); return; }" in ps1
+    assert "EXIT_DONE = 3" in (root / "patches" / "voice_pill.py").read_text()

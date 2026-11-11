@@ -25,6 +25,40 @@ another session (FELIX-MAC, FELIX-voice) and not re-run here; **inferred** = rea
 | Native install without WSL/Docker/admin | n/a | install.ps1 -Mode windows-native | install-mac.sh (v1.0.0) + `--barge` |
 | Live on/off switch | voicemode-switch | voicemode_native.py barge/pill on/off/status | voicemode-switch |
 
+## What v1.1.1 changes (2026-11-11, branch feature/pill-autostart, not tagged yet)
+
+Agreed with FELIX-voice on 2026-11-10. Robert's decisions are in
+`docs/superpowers/plans/2026-11-10-pill-autostart.md`.
+
+- **The voice server starts the pill itself.** Section 4's pill line is replaced: FELIX no
+  longer starts or stops a pill window.
+  - It opens on the first voice turn and closes (backend exit code 3) about 20 s after the
+    last voice session ends.
+  - A ✕ close stays closed until voice starts again from scratch.
+  - See `docs/voice-pill/README.md`, "Who starts and stops the window".
+- **New settings** (environment first):
+
+  | Setting | FELIX value |
+  |---|---|
+  | `VOICEMODE_PILL` | `true` to have a pill |
+  | `VOICEMODE_PILL_AUTOSTART` | leave unset (`off` = the server never starts a window) |
+  | `VOICEMODE_PILL_DATA_DIR` | FELIX's pill window folder, e.g. `<voice root>\pill-window`, with WebView2 pre-installed |
+  | `VOICEMODE_PILL_PYTHON` | macOS: the pill venv's python. Windows: optional, default is the server's own interpreter |
+  | `VOICEMODE_CONTROL_CHANNEL_ENABLED` | still `true` for live state |
+
+- **Barge `auto`.** `VOICEMODE_VOICE_BARGE=auto` listens only while output goes to headphones.
+  `VOICEMODE_BARGE_CONTROL_COMMAND` may now receive `auto` as its appended action, besides
+  `on`, `off` and `status`.
+- **Manifests copy files from outside `patches/`.** The copy sources are `../pill-windows.ps1`
+  and `../ui/pill/*`, copied to `pill-windows.ps1` and `ui/pill/*` in the package.
+  `apply.py` now creates the parent folders. A vendored copy needs those files beside
+  `patches/`.
+- **Open for FELIX.**
+  - Whether the Copilot app's Job Object allows breakaway (FELIX-voice is measuring). If it
+    doesn't, the window lives as long as the chat that started it, and the next turn of
+    another chat restarts it.
+  - Native Windows and macOS live runs are still to do. WSL is validated (n=1 per step).
+
 ## 1. Patches
 
 - `patches/manifest.json`: the list for WSL/Linux/macOS (21 steps at 7c81771). Its output is kept
@@ -108,4 +142,6 @@ Every stretch logs one line (`stretch: s, windows, max, p90, fired, …`) for di
 - voicemode-switch and upstream's update_config write voicemode.env without the native switch's lock.
 - On a machine with both installs, voice-mode's walk-up from FELIX's runtime folder reaches the user's
   profile, so a personal `~/.voicemode/voicemode.env` would be read by FELIX's voice (FELIX-voice's finding).
-  Our native launcher starts voice-mode in its runtime folder for this reason.
+  Our native launcher starts voice-mode in its runtime folder for this reason. Correction (reported by
+  FELIX-voice, 2026-11-10, not re-run here): FELIX already stops that walk-up with
+  `<runtime>\home\.voicemode.env` and its working folder, so this gap does not apply to FELIX today.

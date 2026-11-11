@@ -45,12 +45,12 @@ import numpy as np
 try:
     from voice_mode.voice_pill_state import (  # noqa: F401  (re-exported for callers)
         _exchange, _retrying, _status, barge_control, control_socket_path, is_paused,
-        barge_state, capture_backend, read_env_file, record_interruption, voicemode_base)
+        barge_mode, barge_state, capture_backend, read_env_file, record_interruption, voicemode_base)
 except ImportError:  # run straight from the repo, not the installed package
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from voice_pill_state import (  # noqa: F401
         _exchange, _retrying, _status, barge_control, control_socket_path, is_paused,
-        barge_state, capture_backend, read_env_file, record_interruption, voicemode_base)
+        barge_mode, barge_state, capture_backend, read_env_file, record_interruption, voicemode_base)
 
 logger = logging.getLogger("voicemode.voice_barge")
 
@@ -334,6 +334,101 @@ def _input_stream_count(lib, device: int):
     return None if status != 0 else int(size.value) // 4   # one AudioStreamID each
 
 
+# -- Windows: the default playback endpoint's form factor (Core Audio) --------
+# Measured 2026-11-10 on Robert's laptop (one read per device): Jabra Engage 75 = 5
+# (Headset, USB); Realtek "Speakers" = 1 (INTELAUDIO); VB-Audio cables = 2 (LineLevel,
+# ROOT). A read took 2.15 ms (C#). Many laptop drivers expose the headphone jack and the
+# speakers as one "Speakers" endpoint: that reads speakers even with headphones plugged in,
+# the safe direction (auto stays off, it can never cut itself off).
+_WIN_HEADPHONES = {3, 5, 6}        # Headphones, Headset, Handset
+_WIN_SPEAKERS = {1, 9}             # Speakers, DigitalAudioDisplayDevice (HDMI/DP)
+_WIN_BLUETOOTH = ("BTHENUM", "BTHHFENUM", "BTHLEDEVICE", "BTHLE")
+
+
+def windows_route(form_factor, enumerator) -> str:
+    """Classify a Windows playback endpoint. Bluetooth is headphones, as on macOS."""
+    if isinstance(enumerator, str) and enumerator.upper().startswith(_WIN_BLUETOOTH):
+        return "headphones"
+    if form_factor in _WIN_HEADPHONES:
+        return "headphones"
+    if form_factor in _WIN_SPEAKERS:
+        return "speakers"
+    return "unknown"
+
+
+def _windows_default_endpoint():
+    """(form factor, enumerator name) of the default console playback endpoint, or None.
+    Plain ctypes COM: IMMDeviceEnumerator -> IMMDevice -> IPropertyStore, by vtable slot."""
+    import ctypes
+    from ctypes import wintypes
+
+    class GUID(ctypes.Structure):
+        _fields_ = [("d1", ctypes.c_uint32), ("d2", ctypes.c_uint16), ("d3", ctypes.c_uint16),
+                    ("d4", ctypes.c_ubyte * 8)]
+
+    def guid(text):
+        g = GUID()
+        if ctypes.oledll.ole32.CLSIDFromString(ctypes.c_wchar_p("{" + text + "}"), ctypes.byref(g)):
+            raise OSError("bad GUID")
+        return g
+
+    class PROPERTYKEY(ctypes.Structure):
+        _fields_ = [("fmtid", GUID), ("pid", wintypes.DWORD)]
+
+    class PROPVARIANT(ctypes.Structure):
+        _fields_ = [("vt", ctypes.c_ushort), ("r1", ctypes.c_ushort), ("r2", ctypes.c_ushort),
+                    ("r3", ctypes.c_ushort), ("val", ctypes.c_uint64), ("pad", ctypes.c_uint64)]
+
+    ole32 = ctypes.windll.ole32
+    ole32.CoInitializeEx(None, 0)   # COINIT_MULTITHREADED; an existing apartment is fine
+
+    def call(obj, slot, *argtypes_and_args):
+        argtypes = [t for t, _ in argtypes_and_args]
+        args = [a for _, a in argtypes_and_args]
+        vtbl = ctypes.cast(obj, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p))).contents
+        fn = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, *argtypes)(vtbl[slot])
+        return fn(obj, *args)
+
+    def release(obj):
+        if obj:
+            call(obj, 2)
+
+    enum = ctypes.c_void_p()
+    if ole32.CoCreateInstance(ctypes.byref(guid("BCDE0395-E52F-467C-8E3D-C4579291692E")), None, 1,
+                              ctypes.byref(guid("A95664D2-9614-4F35-A746-DE8DB63617E6")),
+                              ctypes.byref(enum)):
+        return None
+    device, store = ctypes.c_void_p(), ctypes.c_void_p()
+    try:
+        # GetDefaultAudioEndpoint(eRender=0, eConsole=0): what PortAudio's default plays to.
+        if call(enum, 4, (ctypes.c_int, 0), (ctypes.c_int, 0), (ctypes.c_void_p, ctypes.byref(device))):
+            return None
+        if call(device, 4, (wintypes.DWORD, 0), (ctypes.c_void_p, ctypes.byref(store))):  # OpenPropertyStore(STGM_READ)
+            return None
+
+        def value(fmtid, pid):
+            key = PROPERTYKEY(guid(fmtid), pid)
+            pv = PROPVARIANT()
+            if call(store, 5, (ctypes.c_void_p, ctypes.byref(key)), (ctypes.c_void_p, ctypes.byref(pv))):
+                return None
+            try:
+                if pv.vt == 19:        # VT_UI4
+                    return int(pv.val & 0xFFFFFFFF)
+                if pv.vt == 31 and pv.val:   # VT_LPWSTR
+                    return ctypes.wstring_at(pv.val)
+                return None
+            finally:
+                ole32.PropVariantClear(ctypes.byref(pv))
+
+        form = value("1DA5D803-D492-4EDD-8C23-E0C0FFEE7F0E", 0)        # PKEY_AudioEndpoint_FormFactor
+        enumerator = value("A45C254E-DF1C-4EFD-8020-67D146A850E0", 24)  # PKEY_Device_EnumeratorName
+        return form, enumerator
+    finally:
+        release(store)
+        release(device)
+        release(enum)
+
+
 def output_route(platform=None, lib=None) -> str:
     """Where the default output plays: "headphones", "speakers" or "unknown".
 
@@ -348,9 +443,17 @@ def output_route(platform=None, lib=None) -> str:
     - HDMI, DisplayPort, AirPlay ('hdmi', 'dprt', 'airp'): speakers.
     - anything else (USB, virtual, ...): headphones if the output device also has input
       streams (a headset), speakers if none, unknown if unreadable.
-    Off macOS, or when CoreAudio does not answer: unknown. At most three property reads,
+    On Windows: the default playback endpoint's form factor (windows_route).
+    Elsewhere, or when the OS does not answer: unknown. At most three property reads,
     no subprocess."""
-    if (platform or _platform()) != "darwin":
+    plat = platform or _platform()
+    if plat == "win32":
+        try:
+            read = lib() if callable(lib) else _windows_default_endpoint()
+        except Exception:  # noqa: BLE001 - a route we cannot read is unknown, never a crash
+            return "unknown"
+        return "unknown" if read is None else windows_route(*read)
+    if plat != "darwin":
         return "unknown"
     lib = lib if lib is not None else _coreaudio()
     if lib is None:
@@ -1191,13 +1294,43 @@ CANNOT_RUN = ("cannot run: voice barge-in needs a mic reader, parec (PulseAudio 
               "or the sounddevice package, and this machine has neither")
 
 
+def auto_line(route: str) -> str:
+    """auto (on: headphones), auto (off: speakers), auto (off: unknown)."""
+    return f"auto ({'on' if route == 'headphones' else 'off'}: {route})"
+
+
+class RouteGate:
+    """auto: the mic may open only while the output route is headphones. The route is read
+    at most once per ``every_s`` (a Windows read took ~7 ms, the first 41 ms; 2026-11-10,
+    n=3), and each change is logged once."""
+
+    def __init__(self, route=None, clock=time.monotonic, every_s: float = 1.0):
+        self._route_fn = route or output_route
+        self._clock, self._every = clock, every_s
+        self._at, self._route = None, None
+
+    def route(self) -> str:
+        now = self._clock()
+        if self._at is None or now - self._at >= self._every:
+            route = self._route_fn()
+            if route != self._route:
+                logger.info("auto: route %s, barge-in %s", route,
+                            "listening" if route == "headphones" else "off")
+            self._at, self._route = now, route
+        return self._route
+
+    def closed(self) -> bool:
+        return self.route() != "headphones"
+
+
 def status_line() -> str:
-    """on, off or cannot run: <reason>. What FELIX reads at voice start. On macOS, when
-    it can run, a second line: ``route: <route>, capture: <capture or refused>``."""
-    state = barge_state()
-    if state is None:
+    """on, off, auto (<on|off>: <route>) or cannot run: <reason>. What FELIX reads at
+    voice start. On macOS, when it can run, a second line:
+    ``route: <route>, capture: <capture or refused>``."""
+    mode = barge_mode()
+    if mode is None:
         return CANNOT_RUN
-    first = "on" if state else "off"
+    first = auto_line(output_route()) if mode == "auto" else mode
     if _platform() != "darwin":
         return first
     route, capture = mac_capture_choice(echo_mode(trigger_settings().get(ECHO_SETTING)))
@@ -1273,6 +1406,9 @@ def main() -> int:
     logger.info("started: gate=%.1f dBFS need=%d windows device=%s mic=%s warm=%s socket=%s",
                 gate_db, need, device, backend, "on" if warm else "off", path)
     phase = PhaseTracker(lambda: _status(path), warm=warm)
+    gate = RouteGate() if barge_mode() == "auto" else None
+    if gate is not None:
+        logger.info("auto: listening only while the output route is headphones (now %s)", gate.route())
     run(
         poll_phase=lambda: None if stop.is_set() else phase(),
         open_capture=lambda: open_capture(backend, device, echo=echo, vp_probe=vp_probe),
@@ -1281,7 +1417,7 @@ def main() -> int:
         send_barge=lambda: send_barge_in(path),
         poll_listen_started=lambda: _status(path).get("listen_started_at"),
         preroll_sink=lambda samples, start_t: write_preroll(preroll_path(), samples, start_t),
-        is_paused=is_paused,
+        is_paused=(lambda: is_paused() or gate.closed()) if gate is not None else is_paused,
         on_fire=lambda: record_interruption(time.time()),
     )
     logger.info("stopped")

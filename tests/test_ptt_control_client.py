@@ -264,6 +264,11 @@ def test_warm_loads_what_the_first_press_needs(client_mod, monkeypatch):
     import socket as socket_mod
     monkeypatch.setattr(client_mod, "_STATE", None)
     monkeypatch.setattr(client_mod, "_TRANSPORT", None)
+    # An earlier test may have imported the installed voice_mode: the client would use its
+    # modules and never load the files beside it. Failed on 962589c in a full run too.
+    import sys as sys_mod
+    for name in ("voice_mode.voice_pill_state", "voice_mode.control_transport"):
+        monkeypatch.delitem(sys_mod.modules, name, raising=False)
     monkeypatch.delattr(socket_mod, "AF_UNIX")  # as on Windows: the pipe transport is used
     monkeypatch.setattr(client_mod, "deliver", lambda command: pytest.fail("warm must send nothing"))
     out = io.StringIO()

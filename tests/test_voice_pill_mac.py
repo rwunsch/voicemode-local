@@ -185,9 +185,9 @@ def test_window_pattern_table():
         assert _grep(regex, line) == want, line
 
 
-def test_launcher_uses_the_same_pattern_as_pill_off():
-    regex = _script_regex("voicemode-switch", "PILL_WINDOW_RE")
-    assert f"pgrep -f '{regex}'" in (REPO / "voicemode-mcp").read_text()
+def test_launcher_no_longer_starts_the_mac_window():
+    """The voice server starts it (pill_autostart, 2026-11-10)."""
+    assert "voice_pill_mac.py" not in (REPO / "voicemode-mcp").read_text()
 
 
 def test_backend_pattern_table():
@@ -608,3 +608,13 @@ def test_pill_page_has_one_main_button_and_no_skip():
     assert 'id="interrupt"' not in page and "\u23ED" not in page and "&#x23ED;" not in page
     assert "<svg" in page  # the line-art sunrise
     assert page.index('id="main"') < page.index('id="pause"')
+
+
+def test_backend_done_closes_the_window_for_good():
+    d = m.on_backend_exit(3, 7, True, 120, 1, True)
+    assert (d.action, d.exit_code) == ("exit", 0)
+
+
+def test_backend_done_matches_the_backend():
+    backend = Path(__file__).resolve().parent.parent / "patches" / "voice_pill.py"
+    assert f"EXIT_DONE = {m.BACKEND_DONE}\n" in backend.read_text()
