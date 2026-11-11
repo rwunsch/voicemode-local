@@ -83,7 +83,21 @@ Validated live on WSL (2026-11-11, n=1 each step, real converse turns after `/mc
   stopped with code 0. The marker and `backend.json` were removed.
 - A fresh start reopened the window: launch 11:38:49, backend up 11:38:56, about 7 s.
 
-Not yet run: native Windows (including whether a host's Job Object allows breakaway) and macOS.
+Validated natively on Windows (2026-11-11, n=1 each). Setup: the native runtime's Python,
+running a patched copy of its `voice_mode` from `C:\Temp\vml-autostart`, with private base and
+data folders. `ensure()` was called directly, not through a converse turn.
+- **Plain start.** The starting process exited at once, and the window kept running. The
+  backend was up after 3.5 s. With no session, it exited with code 3 at about 30 s (the start
+  grace), the window stopped with code 0, and `backend.json` was removed.
+- **Inside a Job Object with `BREAKAWAY_OK` and `KILL_ON_JOB_CLOSE`.** Breakaway worked: the
+  backend was still alive 3 s after the job closed, and it later quit with code 3.
+- **Inside a strict job (`KILL_ON_JOB_CLOSE`, no breakaway).** `autostart.log` shows `breakaway
+  refused ([WinError 5] Access is denied); starting inside the job`. The window started, and
+  then died with the job, as designed. It is started again on the next turn of a server
+  outside that job.
+
+Whether the Copilot app or FELIX hosts use such a job is FELIX-voice's measurement. Not yet
+run: a native converse turn through Claude Code, and macOS.
 
 ## How it works
 

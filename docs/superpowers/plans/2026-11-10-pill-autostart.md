@@ -2,7 +2,8 @@
 
 Status: built, 2026-11-11. Branch `feature/pill-autostart`. Target tag v1.1.1.
 Validated live on WSL (2026-11-11, n=1 per step): start on a turn, sticky ✕, quit with code 3,
-and reopening on a fresh start. Native Windows and macOS runs are still to do.
+and reopening on a fresh start. Native Windows ensure() validated 2026-11-11 (plain start, a job
+with breakaway, a strict job with the fallback; n=1 each). macOS and a FELIX run are still to do.
 
 ## Decisions
 
