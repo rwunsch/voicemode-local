@@ -154,13 +154,27 @@ def _log_file(base):
     return open(st._base(base) / "autostart.log", "ab")
 
 
+def mac_window_log() -> Path:
+    """The Mac window's own log, where voicemode-mcp used to send it."""
+    return st.upstream_home() / "logs" / "pill-window.log"
+
+
 def spawn(command: list[str], kind: str, base=None):
     """Start the window detached. On Windows, break away from the server's Job Object
     where the job allows it, so the window outlives this server; else start it plainly
-    (it then lives as long as the job, and the next turn of another session restarts it)."""
+    (it then lives as long as the job, and the next turn of another session restarts it).
+    The start is logged in autostart.log. The Mac window writes its own log to stderr,
+    which goes to mac_window_log(); the Windows window keeps its log in its data folder."""
     with _log_file(base) as log:
         log.write(f"{time.strftime('%Y-%m-%dT%H:%M:%S')} start: {json.dumps(command)}\n".encode())
         log.flush()
+        if kind == "macos":
+            path = mac_window_log()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            log.write(f"window log: {path}\n".encode())
+            with open(path, "ab") as out:
+                return subprocess.Popen(command, start_new_session=True, stdin=subprocess.DEVNULL,
+                                        stdout=out, stderr=out, close_fds=True)
         common = dict(stdin=subprocess.DEVNULL, stdout=log, stderr=log, close_fds=True)
         if kind == "windows":
             flags = CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP

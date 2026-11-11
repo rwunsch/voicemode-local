@@ -161,10 +161,20 @@ def test_wsl_command_goes_through_start_process(env, monkeypatch):
 
 def test_spawn_detaches_and_logs(tmp_path):
     base = tmp_path / "pill"
-    p = pa.spawn([sys.executable, "-c", "import os; print(os.getsid(0) == os.getpid())"], "macos", base)
+    p = pa.spawn([sys.executable, "-c", "import os; print(os.getsid(0) == os.getpid())"], "wsl", base)
     p.wait(10)
     log = (st._base(base) / "autostart.log").read_text()
     assert "start:" in log and "True" in log   # its own session: not killed with the server's group
+
+
+def test_mac_window_logs_to_pill_window_log(tmp_path, monkeypatch):
+    base = tmp_path / "pill"
+    monkeypatch.setattr(st, "upstream_home", lambda: tmp_path / "home" / ".voicemode")
+    p = pa.spawn([sys.executable, "-c", "import sys; print('hb' + ' line', file=sys.stderr)"], "macos", base)
+    p.wait(10)
+    assert "hb line" in (tmp_path / "home" / ".voicemode" / "logs" / "pill-window.log").read_text()
+    log = (st._base(base) / "autostart.log").read_text()
+    assert "start:" in log and "hb line" not in log
 
 
 # -- wiring -------------------------------------------------------------------

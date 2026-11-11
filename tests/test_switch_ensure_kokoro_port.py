@@ -145,6 +145,7 @@ def _run_pill(tmp_path: Path, action: str, env_text: str = "", wsl: bool = True,
     # `window` is what the launcher prints: "running", or the wrapper's exit code.
     _stub(bin_dir / "powershell.exe", f'echo "powershell.exe $*" >> "{calls}"; printf "{window}\\r\\n"')
     _stub(bin_dir / "pgrep", "exit 1")
+    _stub(bin_dir / "uname", 'echo Linux')   # these tests are Linux/WSL; on a Mac "Darwin" took the Mac path
     _stub(bin_dir / "wslpath", 'echo "\\\\\\\\wsl.localhost\\\\Ubuntu\\\\app\\\\pill-windows.ps1"')
     env_file = home / ".voicemode/voicemode.env"
     env_file.write_text(env_text)
