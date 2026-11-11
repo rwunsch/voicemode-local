@@ -7,7 +7,9 @@
     "core.py",
     "control_socket.py",
     "streaming.py",
-    "conch_notify.py"
+    "conch_notify.py",
+    "conch_queue.py",
+    "conch.py"
   ],
   "steps": [
     {"patch": "patch_listen_overrun.py", "targets": ["tools/converse.py"],
@@ -58,6 +60,6 @@
     {"copy": "voice_barge_tool.py", "to": "tools/voice_barge_tool.py",
      "why": "MCP tool for switching voice barge-in"},
     {"copy": "conch_wakers.py", "to": "conch_wakers.py", "why": "per-harness wakers for the conch queue's callback mode"},
-    {"patch": "patch_conch_wakers.py", "targets": ["tools/converse.py", "conch_notify.py"], "why": "callback is served as wait where no waker can reach the session; wakers before upstream's tmux push"}
+    {"patch": "patch_conch_wakers.py", "targets": ["tools/converse.py", "conch_notify.py", "conch_queue.py", "conch.py"], "why": "callback is served as wait where no waker can reach the session; wakers before upstream's tmux push"}
   ]
 }

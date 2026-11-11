@@ -186,11 +186,24 @@ def _run_command(command, session_id, voice_pid) -> Optional[int]:
     return done.returncode
 
 
-def deliver(entry, state_dir=None) -> bool:
+_AUTO = object()
+
+
+def _conch_dir():
+    """The conch's folder inside the voice_mode package (where wake counts live), else None."""
+    if __package__ != "voice_mode":
+        return None
+    from voice_mode.conch import Conch
+    return Conch.LOCK_FILE.parent
+
+
+def deliver(entry, state_dir=_AUTO) -> bool:
     """Wake a callback grantee with our wakers. True if one delivered; False leaves it
     to upstream's own route (tmux). With state_dir, at most max_wakes() per queued turn.
     Never raises."""
     try:
+        if state_dir is _AUTO:
+            state_dir = _conch_dir()
         pid = getattr(entry, "pid", None)
         session_id = getattr(entry, "session_id", None)
         if state_dir is not None and not take_wake(state_dir, session_id, getattr(entry, "seq", None)):
@@ -215,7 +228,7 @@ def deliver(entry, state_dir=None) -> bool:
     return False
 
 
-def deliver_then(entry, fallback, state_dir=None) -> None:
+def deliver_then(entry, fallback, state_dir=_AUTO) -> None:
     """deliver(), and upstream's local route when ours did not reach a local grantee."""
     if not deliver(entry, state_dir) and getattr(entry, "pid", None) is not None:
         try:

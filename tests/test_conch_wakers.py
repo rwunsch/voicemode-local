@@ -351,3 +351,151 @@ def test_the_conch_message_lets_the_session_stay_silent():
     text = sw.MESSAGES["conch"]
     assert "nothing" in text and "converse" in text and "\n" not in text
     assert len(text.encode()) <= sw.MAX_MESSAGE_BYTES
+
+
+# -- upstream insertions in conch_queue.py / conch.py (plan Task 2) ---------------------------
+# A real voice_mode package in tmp_path: pristine 8.12.0 conch.py, conch_queue.py,
+# conch_notify.py, file_lock.py, patched; our conch_wakers.py; stubs for config,
+# the event logger and session_wake (which records each wake).
+
+_STUB_WAKE = '''
+WAKES = []
+def enabled(home=None):
+    return True
+def claude_pid_for(voice_pid, cdir=None, parent=None):
+    return 77
+def wake(target_claude_pid=None, reason="ptt", **kw):
+    WAKES.append((target_claude_pid, reason))
+    return True, "sent"
+'''
+
+
+@pytest.fixture
+def queue(tmp_path, monkeypatch):
+    raw = os.environ.get("VM812_SRC")
+    if not raw:
+        pytest.skip("VM812_SRC not set (dir holding pristine 8.12.0 sources)")
+    pkg = tmp_path / "pkg" / "voice_mode"
+    (pkg / "utils").mkdir(parents=True)
+    for name in ("conch.py", "conch_queue.py", "conch_notify.py", "file_lock.py"):
+        shutil.copyfile(Path(raw) / name, pkg / name)
+        if name != "file_lock.py":
+            assert _apply(pkg / name).returncode == 0, name
+    shutil.copyfile(PATCHES / "conch_wakers.py", pkg / "conch_wakers.py")
+    (pkg / "__init__.py").write_text("")
+    (pkg / "utils" / "__init__.py").write_text("")
+    (pkg / "utils" / "event_logger.py").write_text("def get_event_logger():\n    return None\n")
+    (pkg / "config.py").write_text("CONCH_LOCK_EXPIRY = 120\nCONCH_HOLD_EXPIRY = 10\nCONCH_GRANT_TTL = 30.0\n")
+    (pkg / "session_wake.py").write_text(_STUB_WAKE)
+    saved = {k: v for k, v in sys.modules.items() if k == "voice_mode" or k.startswith("voice_mode.")}
+    for k in saved:
+        del sys.modules[k]
+    sys.path.insert(0, str(pkg.parent))
+    monkeypatch.delenv(cw.COMMAND_SETTING, raising=False)
+    monkeypatch.delenv(cw.GRACE_SETTING, raising=False)
+    monkeypatch.delenv(cw.MAX_WAKES_SETTING, raising=False)
+    try:
+        import voice_mode.conch as conch
+        import voice_mode.conch_queue as cq
+        import voice_mode.session_wake as stub
+        monkeypatch.setattr(conch.Conch, "LOCK_FILE", tmp_path / "home" / "conch")
+        (tmp_path / "home").mkdir()
+        yield types.SimpleNamespace(Conch=conch.Conch, Q=cq.ConchQueue, wakes=stub.WAKES,
+                                    grant_file=lambda: cq.ConchQueue._grant_file())
+    finally:
+        sys.path.remove(str(pkg.parent))
+        for k in [k for k in sys.modules if k == "voice_mode" or k.startswith("voice_mode.")]:
+            del sys.modules[k]
+        sys.modules.update(saved)
+
+
+def _age_grant(q, seconds):
+    g = json.loads(q.grant_file().read_text())
+    from datetime import datetime as _dt, timedelta as _td
+    g["granted_at"] = (_dt.now() - _td(seconds=seconds)).isoformat()
+    q.grant_file().write_text(json.dumps(g))
+
+
+def test_a_lone_callback_grantee_is_pinged_on_grant(queue):
+    queue.Q.register("A", mode="callback", pid=os.getpid())
+    assert queue.Q.grant_next().session_id == "A"
+    assert queue.wakes == [(77, "conch")]
+
+
+def test_a_late_wait_waiter_passes_an_absent_callback_grant(queue):
+    queue.Q.register("A", mode="callback", pid=os.getpid())
+    queue.Q.grant_next()
+    seq_a = [e.seq for e in queue.Q.list() if e.session_id == "A"][0]
+    _age_grant(queue, 11)
+    queue.Q.register("B", mode="wait", pid=os.getpid())
+    assert queue.Q.granted_to() == "B"
+    assert [e.seq for e in queue.Q.list() if e.session_id == "A"] == [seq_a]
+    import time as _time
+    deadline = _time.monotonic() + 3      # the re-ping runs on upstream's daemon thread (block=False)
+    while len(queue.wakes) < 2 and _time.monotonic() < deadline:
+        _time.sleep(0.01)
+    assert len(queue.wakes) == 2          # A pinged again
+
+
+def test_within_the_grace_the_woken_session_keeps_its_turn(queue):
+    queue.Q.register("A", mode="callback", pid=os.getpid())
+    queue.Q.grant_next()
+    _age_grant(queue, 9)
+    queue.Q.register("B", mode="wait", pid=os.getpid())
+    assert queue.Q.granted_to() == "A"
+
+
+def test_a_free_mic_is_served_past_an_absent_callback_grant(queue):
+    queue.Q.register("A", mode="callback", pid=os.getpid())
+    queue.Q.grant_next()
+    _age_grant(queue, 11)
+    c = queue.Conch(agent_name="c", session_id="C")
+    try:
+        assert c.try_acquire() is True
+    finally:
+        c.release()
+
+
+def test_a_fresh_callback_grant_still_blocks_a_free_mic(queue):
+    queue.Q.register("A", mode="callback", pid=os.getpid())
+    queue.Q.grant_next()
+    c = queue.Conch(agent_name="c", session_id="C")
+    assert c.try_acquire() is False
+
+
+def test_a_give_to_a_callback_session_holds_for_the_ttl(queue):
+    queue.Q.register("A", mode="callback", pid=os.getpid())
+    queue.Q.register("B", mode="wait", pid=os.getpid())
+    assert queue.Q.grant("A") is True
+    assert json.loads(queue.grant_file().read_text()).get("given") is True
+    _age_grant(queue, 20)
+    assert queue.Q.granted_to() == "A"
+    _age_grant(queue, 31)
+    assert queue.Q.granted_to() == "B"
+
+
+def test_the_sixth_grant_event_sends_no_wake(queue):
+    queue.Q.register("A", mode="callback", pid=os.getpid())
+    for _ in range(6):   # six grant events: each time someone else had the floor in between
+        queue.Q.clear_grant()
+        queue.Q.grant_next()
+    assert len(queue.wakes) == 5
+
+
+def test_unpatched_grant_file_is_read_as_not_given_and_never_absent(queue):
+    queue.Q.register("A", mode="callback", pid=os.getpid())
+    seq = queue.Q.list()[0].seq
+    queue.grant_file().write_text(json.dumps({"session_id": "A", "seq": seq}))
+    queue.Q.register("B", mode="wait", pid=os.getpid())
+    assert queue.Q.granted_to() == "A"
+    assert queue.Conch(agent_name="c", session_id="C").try_acquire() is False
+
+
+@pytest.mark.parametrize("rel", ["conch_queue.py", "conch.py"])
+def test_queue_patches_are_idempotent_and_keep_crlf(tmp_path, rel):
+    target = _pristine(tmp_path, rel)
+    target.write_bytes(target.read_bytes().replace(b"\r\n", b"\n").replace(b"\n", b"\r\n"))
+    assert _apply(target).returncode == 0
+    once = target.read_bytes()
+    assert patcher.MARKER.encode() in once
+    assert _apply(target).returncode == 0 and target.read_bytes() == once

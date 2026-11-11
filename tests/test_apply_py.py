@@ -36,6 +36,8 @@ SOURCES = {
     "server.py": "server.py",
     "tools/converse.py": "converse.py",
     "conch_notify.py": "conch_notify.py",
+    "conch_queue.py": "conch_queue.py",
+    "conch.py": "conch.py",
 }
 
 
@@ -95,7 +97,7 @@ def current_modules(old):
 # never loosen the comparison.
 INTENDED_SINCE_BASELINE = [
     ("patch_ptt_instant.py", ["control_channel.py", "control_socket.py", "tools/converse.py"]),
-    ("patch_conch_wakers.py", ["tools/converse.py", "conch_notify.py"]),   # 2026-11-11
+    ("patch_conch_wakers.py", ["tools/converse.py", "conch_notify.py", "conch_queue.py", "conch.py"]),   # 2026-11-11
     ("patch_session_name.py", ["tools/converse.py"]),   # 2026-11-11: adds the Copilot chat title step
 ]
 # Modules added as "copy" steps since the baseline (2026-11-07: session_wake.py).

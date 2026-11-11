@@ -42,6 +42,8 @@ SOURCES = {
     "server.py": "server.py",
     "tools/converse.py": "converse.py",
     "conch_notify.py": "conch_notify.py",
+    "conch_queue.py": "conch_queue.py",
+    "conch.py": "conch.py",
 }
 
 # felix-framework aea841ffd, plugins/voicemode/dependencies.json "patches", in order.
