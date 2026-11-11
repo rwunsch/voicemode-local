@@ -14,8 +14,29 @@ status` polled every ~2 s. n=1 per row:
 | 3 | session busy at release | `16:44:05 ok=False detail=busy` | place kept; it took its own turn ~1 min later |
 | 4 | session busy; a free-mic caller after 24 s unclaimed | `16:49:19` and `16:49:51 ok=False detail=busy` | the caller spoke past the grant; at its release the grant came back with a fresh clock and the session was woken again |
 
-Not tested live: the 5-wake cap, `conch give`, a wait waiter passing an absent
-grant (round 4 used a free-mic caller), any harness other than Claude Code on WSL.
+Silent live rounds, 2026-11-11 19:08-19:11, WSL. A script played the other
+sessions through `Conch`/`ConchQueue` from the voice server's venv. The real
+callback waiter was this Claude Code session, kept busy throughout. Source: the
+script's output plus `session-wake.log`. n=1 per row:
+
+| Case | Result |
+|---|---|
+| 5-wake cap, 6 grant events | 5 `ok=False detail=busy` lines (19:08:35-19:09:24), then "woken 5 times for this turn; not again"; `conch.wakes.json` count 6 for seq 61 |
+| present caller passes an absent grant | 6 of 6 cycles got the mic (12 s after each grant, past the grace) |
+| `conch give`, present caller | held off 30.3 s (grant TTL), then served |
+| wait waiter queued 1 s after a callback grant (gap 1) | got the mic 10.3 s after the grant (grace) |
+
+Defects found by these rounds, not yet fixed:
+- **A give is sticky.** The re-stamp in `grant_next` rewrites the whole grant file, so
+  `"given": true` survives every later release, and each cycle holds for 30 s instead
+  of the 10 s grace. In the first run, phase C waited 30.4 s behind a give left over
+  from phase B.
+- **Double ping on a pass.** `_current_grant`'s present-beats-absent branch pings the
+  callback session when a wait waiter takes its grant (19:11:32.98), and the waiter's
+  release pings it again (19:11:33.00). The first ping says "your turn" while
+  another session is about to speak, and it uses up one of the 5 wakes.
+
+Not tested live: any harness other than Claude Code on WSL.
 Seen during the test: `conch status` still says "Every other waiter is blocked
 behind this grant" past the grace (deferred minor).
 
