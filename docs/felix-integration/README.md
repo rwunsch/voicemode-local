@@ -56,11 +56,20 @@ Agreed with FELIX-voice on 2026-11-10. Robert's decisions are in
     - Callback is served as wait wherever no waker can reach the chat, which is FELIX today.
     - Where a waker exists, the granted chat is woken. The wakers, in order: the
       `VOICEMODE_CONCH_WAKE_COMMAND` environment setting (a JSON list, run with the
-      session id and voice server pid appended; exit 0 = delivered), then Claude Code's
-      session socket (POSIX), then tmux.
-  - **For FELIX later:** an in-chat Copilot extension (`session.send`) could become that
-    command, which would turn real callbacks on. Unproven (n=0).
-  - The manifests add `conch_notify.py` to `unshare`.
+      session id and voice server pid appended; exit 0 = delivered, exit 75 = busy, it
+      keeps its place), then Claude Code's session socket (POSIX), then tmux.
+    - A woken chat has 10 s (`VOICEMODE_CONCH_CALLBACK_GRACE`) to come back. After that,
+      a session that is present may speak past it; the absent chat keeps its place and is
+      woken again at the next release, at most 5 times per queued turn
+      (`VOICEMODE_CONCH_MAX_WAKES`). These clocks never run while someone holds the mic.
+    - Validated live on WSL with two Claude Code sessions, 2026-11-11 (n=1 each): two
+      delivered wakes, two busy skips with the place kept, one pass of an absent grant.
+  - **For FELIX later:** the wake path for Copilot is open. A spike (FELIX-voice,
+    2026-11-11) is checking for a generic route through MCP first, and an in-chat
+    extension (`session.send`) behind `VOICEMODE_CONCH_WAKE_COMMAND` as the fallback.
+    Neither is proven yet (n=0).
+  - Patch targets: `tools/converse.py`, `conch_notify.py`, `conch_queue.py`, `conch.py`.
+    The manifests add `conch_notify.py`, `conch_queue.py` and `conch.py` to `unshare`.
 - **Manifests copy files from outside `patches/`.** The copy sources are `../pill-windows.ps1`
   and `../ui/pill/*`, copied to `pill-windows.ps1` and `ui/pill/*` in the package.
   `apply.py` now creates the parent folders. A vendored copy needs those files beside

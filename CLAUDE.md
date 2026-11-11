@@ -68,7 +68,9 @@ Three things to know when using `mcp__voicemode__converse`:
    (2026-11-11) wakes per harness: `VOICEMODE_CONCH_WAKE_COMMAND`, Claude Code's
    session socket (`session_wake.py`, POSIX), or upstream's tmux. **Where none
    can reach the session, callback is served as wait** (FELIX/Copilot today), so
-   an unwoken callback can no longer block the queue. Never downgrade a queued
+   an unwoken callback can no longer block the queue. A woken session that stays
+   away past 10 s may be passed and keeps its place; a busy one is skipped and
+   re-woken (max 5). Validated live on WSL with Claude Code, 2026-11-11 (n=1 per case). Never downgrade a queued
    question to text, and never give up.
 3. **`hold_conch=true`** keeps the floor *across turns* — use it when your next
    converse call continues the same thread (asking a question you will answer,

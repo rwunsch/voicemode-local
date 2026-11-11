@@ -1,7 +1,27 @@
 # Design: a real voice-queue callback on every harness
 
 Status: approved in principle by Robert, 2026-11-11 (by voice); final read pending. Branch `feature/pill-autostart` (target v1.1.1),
-on top of 33b9658 (`patches/conch_wakers.py`).
+on top of 33b9658 (`patches/conch_wakers.py`). Built in e5a2a65, e4a4902 and fb1a053.
+
+Live result, 2026-11-11, WSL, two interactive Claude Code sessions (voicemode-local
+and FELIX-voice). Source: `~/.voicemode/logs/session-wake.log` and `voicemode conch
+status` polled every ~2 s. n=1 per row:
+
+| Round | Case | Log (local time) | Result |
+|---|---|---|---|
+| 1 | callback queued behind a speaker, session idle at release | `16:40:13 reason=conch ok=True detail=sent` | woken, spoke |
+| 2 | same | `16:43:13 ok=True detail=sent` | woken, spoke |
+| 3 | session busy at release | `16:44:05 ok=False detail=busy` | place kept; it took its own turn ~1 min later |
+| 4 | session busy; a free-mic caller after 24 s unclaimed | `16:49:19` and `16:49:51 ok=False detail=busy` | the caller spoke past the grant; at its release the grant came back with a fresh clock and the session was woken again |
+
+Not tested live: the 5-wake cap, `conch give`, a wait waiter passing an absent
+grant (round 4 used a free-mic caller), any harness other than Claude Code on WSL.
+Seen during the test: `conch status` still says "Every other waiter is blocked
+behind this grant" past the grace (deferred minor).
+
+Open (Robert, 2026-11-11): a generic wake path through MCP that works for Copilot,
+Claude Code and others. It would be added beside the Claude Code waker and would not
+replace it. FELIX-voice is running the spike.
 
 ## Intent (Robert, 2026-11-11, by voice)
 
