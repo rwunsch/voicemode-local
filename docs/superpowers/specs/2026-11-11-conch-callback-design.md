@@ -21,7 +21,22 @@ behind this grant" past the grace (deferred minor).
 
 Open (Robert, 2026-11-11): a generic wake path through MCP that works for Copilot,
 Claude Code and others. It would be added beside the Claude Code waker and would not
-replace it. FELIX-voice is running the spike.
+replace it. Spike report from FELIX-voice, 2026-11-11 (evidence: its agent's runs, n=1
+each, not re-run here; Copilot CLI 1.0.107, Claude Code 2.1.322):
+- **No standard MCP message from a stdio server started a model turn**, during or
+  after a tool call. That covers sampling, elicitation, logging, resources/updated,
+  tools/list_changed and progress. Sampling in Copilot is a separate model call that
+  does not include the chat's history.
+- Claude Code `notifications/claude/channel` exists (research preview; needs a flag
+  and, for Team/Enterprise, `channelsEnabled`). Nothing arrived in print mode (n=2),
+  cause unknown. Copilot has no counterpart.
+- Copilot app: extension `session.send` (enqueue/immediate) exists and FELIX already
+  uses it. Whether it wakes an **idle** chat is unmeasured (n=0). The app unloads
+  idle chats after about 10 min (read in FELIX research).
+- Proposed next measurement: does `session.send` from the chat's FELIX extension
+  wake an idle chat, and what happens after the unload. If it does, the route is:
+  voice server → `VOICEMODE_CONCH_WAKE_COMMAND` → loopback → that chat's extension →
+  `session.send`. Until then, callback stays served as wait in Copilot.
 
 ## Intent (Robert, 2026-11-11, by voice)
 
