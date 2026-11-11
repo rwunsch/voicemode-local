@@ -41,6 +41,7 @@ SOURCES = {
     "streaming.py": "streaming.py",
     "server.py": "server.py",
     "tools/converse.py": "converse.py",
+    "conch_notify.py": "conch_notify.py",
 }
 
 # felix-framework aea841ffd, plugins/voicemode/dependencies.json "patches", in order.

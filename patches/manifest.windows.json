@@ -7,7 +7,8 @@
     "core.py",
     "control_socket.py",
     "streaming.py",
-    "server.py"
+    "server.py",
+    "conch_notify.py"
   ],
   "steps": [
     {"patch": "patch_listen_overrun.py", "targets": ["tools/converse.py"], "why": "never cut active speech at listen_duration_max"},
@@ -43,6 +44,8 @@
     {"patch": "patch_ptt_instant.py", "targets": ["control_channel.py", "control_socket.py", "tools/converse.py"], "why": "push-to-talk cuts TTS generation, records at once, a stop clears the hold; needs hold, barge and pill"},
     {"patch": "patch_control_transport.py", "targets": ["control_socket.py"], "why": "named-pipe control channel where AF_UNIX is missing; needs control_transport.py"},
     {"copy": "voice_barge_tool.py", "to": "tools/voice_barge_tool.py", "why": "MCP tool for switching voice barge-in"},
+    {"copy": "conch_wakers.py", "to": "conch_wakers.py", "why": "per-harness wakers for the conch queue's callback mode"},
+    {"patch": "patch_conch_wakers.py", "targets": ["tools/converse.py", "conch_notify.py"], "why": "callback is served as wait where no waker can reach the session; wakers before upstream's tmux push"},
     {"patch": "patch_windows_tempfile.py", "targets": ["core.py", "streaming.py"], "why": "close temp audio files before deleting them; Windows refuses to delete an open file (WinError 32)"},
     {"patch": "patch_native_client_folder.py", "targets": ["tools/converse.py"], "why": "the session label uses the client's folder; voice-mode itself runs in the runtime folder"}
   ]

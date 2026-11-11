@@ -408,7 +408,7 @@ def test_wake_idle_session_never_raises(client_mod, monkeypatch):
 
 def test_the_real_session_wake_module_loads_beside_the_client(client_mod):
     mod = client_mod._session_wake()
-    assert set(mod.MESSAGES) == {"ptt", "wake"}
+    assert set(mod.MESSAGES) == {"ptt", "wake", "conch"}
 
 
 # --- an idle hold only wakes: nothing to end (2026-11-07, option 1) ----------

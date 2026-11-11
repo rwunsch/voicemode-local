@@ -6,7 +6,8 @@
     "control_channel.py",
     "core.py",
     "control_socket.py",
-    "streaming.py"
+    "streaming.py",
+    "conch_notify.py"
   ],
   "steps": [
     {"patch": "patch_listen_overrun.py", "targets": ["tools/converse.py"],
@@ -55,6 +56,8 @@
     {"patch": "patch_control_transport.py", "targets": ["control_socket.py"],
      "why": "named-pipe control channel where AF_UNIX is missing; needs control_transport.py"},
     {"copy": "voice_barge_tool.py", "to": "tools/voice_barge_tool.py",
-     "why": "MCP tool for switching voice barge-in"}
+     "why": "MCP tool for switching voice barge-in"},
+    {"copy": "conch_wakers.py", "to": "conch_wakers.py", "why": "per-harness wakers for the conch queue's callback mode"},
+    {"patch": "patch_conch_wakers.py", "targets": ["tools/converse.py", "conch_notify.py"], "why": "callback is served as wait where no waker can reach the session; wakers before upstream's tmux push"}
   ]
 }

@@ -35,6 +35,7 @@ SOURCES = {
     "streaming.py": "streaming.py",
     "server.py": "server.py",
     "tools/converse.py": "converse.py",
+    "conch_notify.py": "conch_notify.py",
 }
 
 
@@ -94,6 +95,7 @@ def current_modules(old):
 # never loosen the comparison.
 INTENDED_SINCE_BASELINE = [
     ("patch_ptt_instant.py", ["control_channel.py", "control_socket.py", "tools/converse.py"]),
+    ("patch_conch_wakers.py", ["tools/converse.py", "conch_notify.py"]),   # 2026-11-11
 ]
 # Modules added as "copy" steps since the baseline (2026-11-07: session_wake.py).
 INTENDED_COPIES_SINCE_BASELINE = ["session_wake.py"]
@@ -101,6 +103,7 @@ INTENDED_COPIES_SINCE_BASELINE = ["session_wake.py"]
 INTENDED_COPIES_SINCE_BASELINE += ["pill_autostart.py", "pill-windows.ps1", "voice_pill_mac.py",
                                    "ui/pill/index.html", "ui/pill/app.js", "ui/pill/model.js",
                                    "ui/pill/pill.css"]
+INTENDED_COPIES_SINCE_BASELINE += ["conch_wakers.py"]   # 2026-11-11
 
 
 def apply_intended(pkg: Path) -> None:

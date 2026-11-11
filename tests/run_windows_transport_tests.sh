@@ -55,10 +55,10 @@ done
 APPLY_ENV=""
 if [ -n "${VM812_SRC:-}" ]; then
     mkdir -p "$DIR/vm812" "$DIR/expected/voice_mode/tools"
-    for f in control_channel.py control_socket.py core.py simple_failover.py streaming.py converse.py; do
+    for f in control_channel.py control_socket.py core.py simple_failover.py streaming.py converse.py conch_notify.py; do
         cp "$VM812_SRC/$f" "$DIR/vm812/$f"
     done
-    for f in control_channel.py control_socket.py core.py simple_failover.py streaming.py; do
+    for f in control_channel.py control_socket.py core.py simple_failover.py streaming.py conch_notify.py; do
         cp "$DIR/vm812/$f" "$DIR/expected/voice_mode/$f"
     done
     cp "$DIR/vm812/converse.py" "$DIR/expected/voice_mode/tools/converse.py"

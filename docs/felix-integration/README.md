@@ -49,6 +49,18 @@ Agreed with FELIX-voice on 2026-11-10. Robert's decisions are in
 - **Barge `auto`.** `VOICEMODE_VOICE_BARGE=auto` listens only while output goes to headphones.
   `VOICEMODE_BARGE_CONTROL_COMMAND` may now receive `auto` as its appended action, besides
   `on`, `off` and `status`.
+- **Conch callback (found in FELIX Windows test 3, 2026-11-11).**
+  - **What happened:** a chat queued with `conch_mode="callback"`. Upstream wakes such a
+    chat only through tmux, and never expires its grant, so the queue stood still.
+  - **Fix:** `conch_wakers.py` + `patch_conch_wakers.py`.
+    - Callback is served as wait wherever no waker can reach the chat, which is FELIX today.
+    - Where a waker exists, the granted chat is woken. The wakers, in order: the
+      `VOICEMODE_CONCH_WAKE_COMMAND` environment setting (a JSON list, run with the
+      session id and voice server pid appended; exit 0 = delivered), then Claude Code's
+      session socket (POSIX), then tmux.
+  - **For FELIX later:** an in-chat Copilot extension (`session.send`) could become that
+    command, which would turn real callbacks on. Unproven (n=0).
+  - The manifests add `conch_notify.py` to `unshare`.
 - **Manifests copy files from outside `patches/`.** The copy sources are `../pill-windows.ps1`
   and `../ui/pill/*`, copied to `pill-windows.ps1` and `ui/pill/*` in the package.
   `apply.py` now creates the parent folders. A vendored copy needs those files beside

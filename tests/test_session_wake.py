@@ -138,7 +138,7 @@ def test_wake_sends_exactly_auth_then_user(sw, world, reason, caplog):
 
 
 def test_messages_are_fixed_and_short(sw):
-    assert set(sw.MESSAGES) == {"ptt", "wake"}
+    assert set(sw.MESSAGES) == {"ptt", "wake", "conch"}   # conch: conch_wakers (2026-11-11)
     # The woken session SPEAKS "Listening." (a silent wake was heard live, 2026-11-07), so no skip_tts.
     for key in ("ptt", "wake"):
         text = sw.MESSAGES[key]
