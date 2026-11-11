@@ -111,9 +111,10 @@ wait".
 1. **A woken session may say nothing.** The `conch` wake text is reworded, from "say your
    queued message" to "your turn has come: speak if you still have something to say, else
    do nothing". It is our own message, so rewording it is fine. A session that stays silent
-   keeps its place, and because of the gap 1 fix it blocks nobody. Pings are capped: one when
-   granted, and at most one more per grant (on the next grant event). No endless re-pings.
-   (Robert, 2026-11-11: agreed.)
+   keeps its place, and because of the gap 1 fix it blocks nobody. Pings are capped at **5
+   per grant** (`VOICEMODE_CONCH_MAX_WAKES`, default 5): one when granted, then one per
+   later grant event. No endless re-pings. (Robert, 2026-11-11: silence is fine; two wakes
+   are not enough, five.)
 2. **"Present beats absent."** Generalising gap 1: a grant that names a callback session
    which has not come back does not block anyone who actually calls converse now. Among
    present callers, queue order holds. A caller with `wait_for_conch=false` and a free mic
