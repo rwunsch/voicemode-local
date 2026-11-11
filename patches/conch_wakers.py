@@ -95,28 +95,88 @@ def grant_is_absent(grant: dict, entry, now: Optional[datetime] = None, ttl: flo
         return False
 
 
-def take_wake(state_dir, session_id, seq) -> bool:
-    """Count one wake for this queued turn; True while the count is within max_wakes()."""
-    path = Path(state_dir) / WAKES_FILE
+WAKES_KEEP_S = 24 * 3600   # a wake count older than a day belongs to no live queued turn
+
+
+def _file_lock():
+    """(lock_exclusive, unlock) from upstream's file_lock, or a local equivalent."""
     try:
-        data = json.loads(path.read_text())
-        if not isinstance(data, dict):
-            data = {}
-    except (OSError, ValueError):
-        data = {}
-    key = str(session_id)
-    rec = data.get(key) if isinstance(data.get(key), dict) else {}
-    count = (rec.get("count", 0) if rec.get("seq") == seq else 0) + 1
-    data[key] = {"seq": seq, "count": count}
+        if __package__ == "voice_mode":
+            from voice_mode.file_lock import lock_exclusive, unlock
+            return lock_exclusive, unlock
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        import fcntl
+        return (lambda fd, blocking=False: fcntl.flock(fd, fcntl.LOCK_EX),
+                lambda fd: fcntl.flock(fd, fcntl.LOCK_UN))
+    except ImportError:  # Windows outside the package: no lock, as before
+        return (lambda fd, blocking=False: None, lambda fd: None)
+
+
+def _replace(src, dst, tries: int = 5) -> None:
+    """os.replace, retried briefly: on Windows it fails while a reader has dst open."""
+    import time as _time
+    for i in range(tries):
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError:
+            if i == tries - 1:
+                raise
+            _time.sleep(0.02 * (i + 1))
+
+
+def take_wake(state_dir, session_id, seq) -> bool:
+    """Count one wake for this queued turn; True while the count is within max_wakes().
+    Locked across processes; counts older than a day are dropped on each write."""
+    import time as _time
+    path = Path(state_dir) / WAKES_FILE
+    lock_exclusive, unlock = _file_lock()
+    lock_fd = None
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".wakes-")
-        with os.fdopen(fd, "w") as f:
-            json.dump(data, f)
-        os.replace(tmp, path)
+        lock_fd = os.open(str(path.parent / ".wakes.lock"), os.O_RDWR | os.O_CREAT, 0o600)
+        lock_exclusive(lock_fd, blocking=True)
     except OSError:
-        logger.debug("conch wake count not saved", exc_info=True)
-    return count <= max_wakes()
+        logger.debug("conch wake count lock unavailable", exc_info=True)
+    try:
+        try:
+            data = json.loads(path.read_text())
+            if not isinstance(data, dict):
+                data = {}
+        except (OSError, ValueError):
+            data = {}
+        now = _time.time()
+        key = str(session_id)
+        rec = data.get(key) if isinstance(data.get(key), dict) else {}
+        count = (rec.get("count", 0) if rec.get("seq") == seq else 0) + 1
+        data = {k: v for k, v in data.items()
+                if k != key and isinstance(v, dict) and now - (v.get("at") or 0) < WAKES_KEEP_S}
+        data[key] = {"seq": seq, "count": count, "at": now}
+        tmp = None
+        try:
+            fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".wakes-")
+            with os.fdopen(fd, "w") as f:
+                json.dump(data, f)
+            _replace(tmp, path)
+            tmp = None
+        except OSError:
+            logger.debug("conch wake count not saved", exc_info=True)
+        finally:
+            if tmp is not None:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+        return count <= max_wakes()
+    finally:
+        if lock_fd is not None:
+            try:
+                unlock(lock_fd)
+            except OSError:
+                pass
+            os.close(lock_fd)
 
 
 def _session_wake():
