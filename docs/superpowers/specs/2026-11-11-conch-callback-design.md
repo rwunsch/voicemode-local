@@ -36,6 +36,17 @@ Defects found by these rounds, not yet fixed:
   release pings it again (19:11:33.00). The first ping says "your turn" while
   another session is about to speak, and it uses up one of the 5 wakes.
 
+Both fixed in 2abfeff. Re-run 19:47-19:49 (n=1): the wait waiter passed at 10.1 s
+after a spent give, and the pass sent no ping.
+
+Fair holds and progress (2e515a5), live on WSL with Claude Code, 2026-11-11 20:06
+(n=1 each; source: `~/voicemode_debug.log` and a watcher script):
+- Claude Code sends a progress token: "progress heartbeat: every 30s, client token present".
+- A `hold_conch=true` turn with no reply, while a test session waited: "hold released,
+  no reply this turn and someone is waiting". The waiter got the mic at once, and no
+  held marker appeared.
+- Not live yet: the 3-turn cap (needs 4 spoken replies); progress in Copilot.
+
 Not tested live: any harness other than Claude Code on WSL.
 Seen during the test: `conch status` still says "Every other waiter is blocked
 behind this grant" past the grace (deferred minor).
