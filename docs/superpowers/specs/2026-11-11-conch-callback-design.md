@@ -52,6 +52,17 @@ Fair holds and progress (2e515a5), live on WSL with Claude Code, 2026-11-11 20:0
 - No-reply release seen 3 times (20:06, 21:02 twice).
 - Not live yet: progress in Copilot.
 
+Copilot wake measurement (evidence: FELIX-voice's runs on Robert's laptop, Copilot app
+runtime 1.0.106-8, a test extension calling `session.send`; n=1 each, not re-run here):
+- Idle chat (~1.5 min): woken, turn started +7.4 s after the send.
+- Idle 12 min 18 s: not unloaded, woken +14 s. The only unload seen was ~37 min after
+  load (idle time unknown).
+- Busy chat or open question: the send is accepted and queued and runs after the turn
+  ends. It never reports busy, so the bridge must return 75 itself, from the
+  extension's `session.idle` events, and keep at most one pending wake per chat.
+So the Copilot route (wake command → loopback → extension → `session.send`) is viable;
+the bridge is FELIX's to build.
+
 Not tested live: any harness other than Claude Code on WSL.
 Seen during the test: `conch status` still says "Every other waiter is blocked
 behind this grant" past the grace (deferred minor).
