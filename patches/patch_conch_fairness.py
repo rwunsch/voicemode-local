@@ -22,11 +22,18 @@ PAIRS = [
     ("            held_seconds = conch.release(hold=hold_conch)\n",
      "            try:  # " + MARKER + ": a hold does not starve a waiting session\n"
      "                from voice_mode import conch_hold as _vml_ch\n"
-     "                _vml_replied = _vml_ch.is_reply(locals().get(\"response_text\")) or bool(locals().get(\"n_answered\"))\n"
-     "                _vml_hold = _vml_ch.effective_hold(hold_conch, conch.session_id, replied=_vml_replied)\n"
+     "                _vml_speak_only = \"turn_results\" in locals() or (not turns and not wait_for_response)\n"
+     "                _vml_replied = _vml_speak_only or _vml_ch.is_reply(locals().get(\"response_text\")) \\\n"
+     "                    or bool(locals().get(\"n_answered\"))\n"
+     "                _vml_at = conch._acquire_time.timestamp() if conch._acquire_time else None\n"
+     "                _vml_hold = _vml_ch.effective_hold(hold_conch, conch.session_id, replied=_vml_replied,\n"
+     "                                                   acquired_at=_vml_at,\n"
+     "                                                   expiry_s=float(conch.hold_timeout or 10.0))\n"
      "            except Exception:\n"
      "                _vml_hold = hold_conch\n"
      "            held_seconds = conch.release(hold=_vml_hold)\n"),
+    ("                    \"hold_active\": bool(hold_conch)\n",
+     "                    \"hold_active\": bool(_vml_hold)  # " + MARKER + ": the hold applied\n"),
     ("                while not conch.try_acquire() and waited < conch_wait_timeout:\n"
      "                    await asyncio.sleep(CONCH_CHECK_INTERVAL)\n"
      "                    waited += CONCH_CHECK_INTERVAL\n",

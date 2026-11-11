@@ -143,8 +143,9 @@ rule: a busy session is skipped and answers only when it has something to say. W
 fixed, a refused wake can no longer block anyone: the grant stays on the busy session only
 while nobody else waits, and the session claims it the next time it calls converse. A
 session that **finishes work and goes idle** without calling converse has missed its ping.
-It must be pinged again: at the latest on the next grant event (`grant_next` re-pings
-skipped callback waiters), and, while the grant still names it, again when its Claude Code
+It must be pinged again: at the latest on the next grant event that grants it (amended
+2026-11-11, 2abfeff: a waiter that is skipped is no longer pinged, because our wake says
+"your turn has come"; it is woken when a grant names it), and, while the grant still names it, again when its Claude Code
 status turns `idle` (cheap: re-try on the waiter's own heartbeat, rate-limited by
 `session_wake`'s 5 s limit).
 
@@ -168,7 +169,11 @@ wait".
 
 - tmux as a requirement.
 - A Copilot waker inside voicemode-local (that's FELIX's extension; we provide the seam).
-- Changing how wait mode, hold, or names work.
+- Changing how wait mode or names work. (Hold was a non-goal; amended 2026-11-11 at
+  Robert's request, 2e515a5: while another session is **blocked waiting** (wait mode), a
+  held turn with no reply releases and at most 3 held turns in a row keep the mic. A
+  speak-only held turn counts toward the 3 but is not "no reply". A busy callback
+  session does not count as waiting: it keeps working.)
 - Native Windows Claude Code waking, until `session_wake`'s named-pipe path is verified
   (separate check).
 

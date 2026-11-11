@@ -231,3 +231,64 @@ def test_drift_fails_and_writes_nothing(pristine_converse):
 ])
 def test_only_words_count_as_a_reply(text, want):
     assert ch.is_reply(text) is want
+
+
+# ---- final review 2026-11-11 ----
+
+class E:
+    def __init__(self, sid, mode):
+        self.session_id, self.mode = sid, mode
+
+
+def test_only_a_blocked_waiter_counts_as_waiting():
+    # Important 2: a busy callback session keeps working; counting it cut every hold short
+    # and added ~10 s of dead air per turn.
+    assert ch.blocked_waiters([E("A", "callback")], "S") == []
+    assert [e.session_id for e in ch.blocked_waiters([E("A", "callback"), E("W", "wait")], "S")] == ["W"]
+    assert ch.blocked_waiters([E("S", "wait")], "S") == []
+
+
+def test_a_lapsed_hold_starts_the_count_again():
+    # Minor 1: the count survived a hold that lapsed by its TTL, so the next hold got fewer turns.
+    assert ch.effective_hold(True, "S", replied=True, waiting=True, acquired_at=0.0, now=1.0)
+    assert ch.effective_hold(True, "S", replied=True, waiting=True, acquired_at=2.0, now=3.0)
+    # 20 s later: the hold kept at 3.0 lapsed at 13.0; this acquire is a fresh floor
+    got = [ch.effective_hold(True, "S", replied=True, waiting=True, acquired_at=t, now=t + 1)
+           for t in (20.0, 22.0, 24.0, 26.0)]
+    assert got == [True, True, True, False]
+
+
+def test_a_resumed_hold_keeps_counting():
+    for t in (0.0, 2.0, 4.0):
+        assert ch.effective_hold(True, "S", replied=True, waiting=True, acquired_at=t, now=t + 1)
+    assert ch.effective_hold(True, "S", replied=True, waiting=True, acquired_at=6.0, now=7.0) is False
+
+
+def test_an_outer_cancel_during_cleanup_is_not_swallowed():
+    # Minor 2: suppress(CancelledError) around `await task` also ate the caller's cancel.
+    class Lingering:
+        async def report_progress(self, progress, total=None, message=None):
+            try:
+                await asyncio.sleep(0.3)
+            except asyncio.CancelledError:
+                await asyncio.sleep(0.3)     # a slow send that outlives the first cancel
+
+    async def body():
+        async with mp.heartbeat(ctx_getter=lambda: Lingering(), interval=0.01):
+            await asyncio.sleep(0.05)        # a beat is in flight when the call ends
+
+    async def go():
+        t = asyncio.get_running_loop().create_task(body())
+        await asyncio.sleep(0.1)             # body done; cleanup awaits the lingering beat
+        t.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await t
+    _run(go())
+
+
+def test_the_patch_logs_the_hold_it_applied_and_exempts_speak_only_turns(pristine_converse):
+    assert _apply(pristine_converse).returncode == 0
+    text = pristine_converse.read_text()
+    assert '"hold_active": bool(_vml_hold)' in text
+    assert '"turn_results" in locals()' in text and "not wait_for_response" in text
+    assert "acquired_at=" in text

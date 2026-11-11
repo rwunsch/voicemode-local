@@ -144,7 +144,7 @@ CONCH_PAIRS = [
      "                for _e in ConchQueue.list():\n"
      "                    if _g and _e.session_id == _g.get(\"session_id\") and \\\n"
      "                            _vml_cw.grant_is_absent(_g, _e, ttl=_vml_ttl()):\n"
-     "                        if _g.pop(\"given\", None):  # a give that has yielded is an ordinary grant\n"
+     "                        if not Conch.is_active() and _g.pop(\"given\", None):  # a give that has yielded (the clocks never run while the mic is held)\n"
      "                            ConchQueue._atomic_write_json(ConchQueue._grant_file(), _g)\n"
      "                        return False\n"
      "            except Exception:\n"

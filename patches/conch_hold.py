@@ -12,6 +12,7 @@ With nobody waiting, a hold behaves exactly as upstream. Never raises.
 """
 import logging
 import os
+import time
 from typing import Optional
 
 logger = logging.getLogger("voicemode.conch_hold")
@@ -20,10 +21,12 @@ MAX_TURNS_SETTING = "VOICEMODE_CONCH_HOLD_MAX_TURNS"
 DEFAULT_MAX_TURNS = 3
 
 _held: dict = {}  # session -> held turns in a row while someone waited
+_kept_at: dict = {}  # session -> when its last hold was kept (epoch s)
 
 
 def reset() -> None:
     _held.clear()
+    _kept_at.clear()
 
 
 def max_turns() -> int:
@@ -40,22 +43,38 @@ def is_reply(text) -> bool:
     return isinstance(text, str) and any(ch.isalnum() for ch in text)
 
 
+def blocked_waiters(entries, session_id) -> list:
+    """Waiters that are blocked on the mic: wait mode, not this session. A callback
+    session keeps working while queued, so a hold cannot starve it (final review
+    2026-11-11: counting it cut every hold short and added ~10 s of dead air)."""
+    return [e for e in entries
+            if getattr(e, "mode", "wait") == "wait" and e.session_id != session_id]
+
+
 def others_waiting(session_id) -> bool:
-    """Is anyone but this session in the conch queue? False when it cannot be read."""
+    """Is another session blocked waiting for the mic? False when it cannot be read."""
     if __package__ != "voice_mode":
         return False
     try:
         from voice_mode.conch_queue import ConchQueue
-        return any(e.session_id != session_id for e in ConchQueue.list())
+        return bool(blocked_waiters(ConchQueue.list(), session_id))
     except Exception:  # noqa: BLE001 - unknown means upstream behaviour
         logger.debug("conch queue unreadable", exc_info=True)
         return False
 
 
-def effective_hold(hold, session_id, replied: bool, waiting: Optional[bool] = None) -> bool:
-    """The hold to release with: the caller's, unless it would starve a waiting session."""
+def effective_hold(hold, session_id, replied: bool, waiting: Optional[bool] = None,
+                   acquired_at: Optional[float] = None, expiry_s: float = 10.0,
+                   now: Optional[float] = None) -> bool:
+    """The hold to release with: the caller's, unless it would starve a waiting session.
+    acquired_at (epoch seconds) is when this turn took the mic: later than the last kept
+    hold plus its expiry means that hold lapsed, so the count starts again."""
     try:
         key = str(session_id)
+        now = time.time() if now is None else now
+        kept = _kept_at.pop(key, None)
+        if kept is not None and acquired_at is not None and acquired_at > kept + expiry_s:
+            _held.pop(key, None)
         if not hold:
             _held.pop(key, None)
             return False
@@ -63,6 +82,7 @@ def effective_hold(hold, session_id, replied: bool, waiting: Optional[bool] = No
             waiting = others_waiting(session_id)
         if not waiting:
             _held.pop(key, None)
+            _kept_at[key] = now
             return True
         if not replied:
             _held.pop(key, None)
@@ -74,6 +94,7 @@ def effective_hold(hold, session_id, replied: bool, waiting: Optional[bool] = No
             logger.info("conch: hold released after %d held turns, someone is waiting", max_turns())
             return False
         _held[key] = count
+        _kept_at[key] = now
         return True
     except Exception:  # noqa: BLE001 - never break a release
         return bool(hold)

@@ -643,3 +643,20 @@ def test_a_skipped_callback_waiter_is_not_told_its_turn_has_come(queue):
     h.release()
     assert queue.Q.granted_to() == "W"
     assert not _wait_for(lambda: len(queue.wakes) > 0, timeout=0.5)
+
+
+def test_a_wait_poll_while_the_mic_is_held_keeps_the_give(queue):
+    # Final review 2026-11-11 (Important 1): W's poll during H's long turn stripped the give,
+    # so after H's release it held 10 s instead of 30 s.
+    h = queue.Conch(agent_name="h", session_id="H")
+    assert h.try_acquire() is True
+    queue.Q.register("A", mode="callback", pid=os.getpid())
+    queue.Q.register("W", mode="wait", pid=os.getpid())
+    assert queue.Q.grant("A") is True
+    _age_grant(queue, 35)                    # H has spoken 35 s since the give
+    w = queue.Conch(agent_name="w", session_id="W")
+    assert w.try_acquire() is False          # W's poll while H speaks
+    assert json.loads(queue.grant_file().read_text()).get("given") is True
+    h.release()
+    _age_grant(queue, 11)                    # past the grace, short of the give TTL
+    assert queue.Q.granted_to() == "A"

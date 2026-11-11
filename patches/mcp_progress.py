@@ -68,5 +68,11 @@ async def heartbeat(ctx_getter=None, interval=None):
     finally:
         if task is not None:
             task.cancel()
-            with contextlib.suppress(asyncio.CancelledError, Exception):
+            try:
                 await task
+            except asyncio.CancelledError:
+                me = asyncio.current_task()
+                if me is not None and me.cancelling():  # the caller's own cancel: pass it on
+                    raise
+            except Exception:  # noqa: BLE001
+                pass
