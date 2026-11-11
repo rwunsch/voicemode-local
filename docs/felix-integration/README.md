@@ -147,6 +147,12 @@ Every stretch logs one line (`stretch: s, windows, max, p90, fired, …`) for di
 
 ## 6. Known gaps
 
+- **One queue per voice-mode home.** Chats share a queue only if they share
+  `VOICEMODE_BASE_DIR`. A WSL voicemode-local install never shares one with FELIX on
+  Windows (see `docs/windows-native/README.md`, Gotchas). FELIX itself split its queue
+  across runtime rebuilds; FELIX-voice reported this on 2026-11-11 and is fixing it in
+  FELIX #1743 with one stable home across runtimes.
+
 - **Session wake: FELIX should not use it** (set `VOICEMODE_SESSION_WAKE=off`).
   `patches/session_wake.py` messages an idle Claude Code session over Claude Code's internal
   peer socket. That protocol is undocumented (read from the binary's strings), validated

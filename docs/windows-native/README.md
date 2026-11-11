@@ -298,6 +298,14 @@ VML_MODEL_SOURCE='C:\path\to\<sha256>\<file> folder' VM812_SRC=<pristine 8.12.0>
 
 ## Gotchas
 
+- **WSL and native Windows keep separate voice queues, by design.** The conch is a file
+  lock under each install's voice-mode home: `~/.voicemode` in WSL, the runtime's or the
+  user's home on Windows. A WSL session and a native or FELIX chat cannot see each other,
+  so they can speak at the same time, and each install shows its own pill. Seen on Robert's
+  laptop on 2026-11-11 (n=1, reported by FELIX-voice): a WSL pill next to FELIX's pill.
+  To avoid it, run voice from one side at a time. A shared queue across the WSL boundary
+  is not built.
+
 - **voice-mode runs in the runtime folder, not the client's.** Upstream loads every
   `.voicemode/voicemode.env` it finds walking up from its working folder. Started from a WSL
   checkout (`\\wsl.localhost\Ubuntu\home\...`), native voice-mode read the WSL setup's file on
