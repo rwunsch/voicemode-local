@@ -200,6 +200,21 @@ def _conch_dir():
 DELIVERED, REFUSED, UNREACHABLE = "delivered", "refused", "unreachable"
 
 
+def grant_names(entry) -> Optional[bool]:
+    """Does the grant file name this waiter? None when unknown (outside the package).
+    Upstream also pings callback waiters it skips; our wake says "your turn has come"."""
+    if __package__ != "voice_mode":
+        return None
+    try:
+        from voice_mode.conch_queue import ConchQueue
+        grant = json.loads(ConchQueue._grant_file().read_text())
+    except FileNotFoundError:
+        return False
+    except Exception:  # noqa: BLE001 - unknown: wake as before
+        return None
+    return grant.get("session_id") == getattr(entry, "session_id", None)
+
+
 def outcome(entry, state_dir=_AUTO) -> str:
     """Wake a callback grantee with our wakers. DELIVERED; REFUSED (capped, busy, or our
     waker declined: nobody else may nudge it, it keeps its place); or UNREACHABLE (none of
@@ -209,6 +224,9 @@ def outcome(entry, state_dir=_AUTO) -> str:
             state_dir = _conch_dir()
         pid = getattr(entry, "pid", None)
         session_id = getattr(entry, "session_id", None)
+        if grant_names(entry) is False:
+            logger.debug("conch: session %s is not granted; no wake", session_id)
+            return REFUSED
         if state_dir is not None and not take_wake(state_dir, session_id, getattr(entry, "seq", None)):
             logger.info("conch: session %s was woken %d times for this turn; not again",
                         session_id, max_wakes())

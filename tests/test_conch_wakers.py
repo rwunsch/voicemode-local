@@ -439,11 +439,9 @@ def test_a_late_wait_waiter_passes_an_absent_callback_grant(queue):
     queue.Q.register("B", mode="wait", pid=os.getpid())
     assert queue.Q.granted_to() == "B"
     assert [e.seq for e in queue.Q.list() if e.session_id == "A"] == [seq_a]
-    import time as _time
-    deadline = _time.monotonic() + 3      # the re-ping runs on upstream's daemon thread (block=False)
-    while len(queue.wakes) < 2 and _time.monotonic() < deadline:
-        _time.sleep(0.01)
-    assert len(queue.wakes) == 2          # A pinged again
+    # No ping on the pass (live 2026-11-11: it said "your turn" while B was about to speak);
+    # A is woken at B's release, see test_a_wait_waiter_taking_an_absent_grant_wakes_nobody.
+    assert not _wait_for(lambda: len(queue.wakes) > 1, timeout=0.5)
 
 
 def test_within_the_grace_the_woken_session_keeps_its_turn(queue):
@@ -599,3 +597,49 @@ def test_a_give_counts_from_the_release(queue):
     assert queue.Q.granted_to() == "A"
     _age_grant(queue, 31)
     assert queue.Q.granted_to() == "W"
+
+
+def test_a_give_that_has_yielded_is_an_ordinary_grant(queue):
+    # Live 2026-11-11 19:10: a give survived every later re-stamp, so each cycle held
+    # present callers off for the 30 s TTL instead of the 10 s grace.
+    queue.Q.register("A", mode="callback", pid=os.getpid())
+    assert queue.Q.grant("A") is True
+    _age_grant(queue, 31)                     # the give has run out
+    c = queue.Conch(agent_name="c", session_id="C")
+    assert c.try_acquire() is True            # a present caller passes it
+    c.release()                               # the grant comes back to A, re-stamped
+    g = json.loads(queue.grant_file().read_text())
+    assert g["session_id"] == "A"
+    assert "given" not in g
+    _age_grant(queue, 11)                     # past the grace, well short of the TTL
+    d = queue.Conch(agent_name="d", session_id="D")
+    assert d.try_acquire() is True
+    d.release()
+
+
+def test_a_wait_waiter_taking_an_absent_grant_wakes_nobody(queue):
+    # Live 2026-11-11 19:11:32: A was pinged when W took its grant and again 24 ms later at
+    # W's release. Only the second is A's turn.
+    queue.Q.register("A", mode="callback", pid=os.getpid())
+    queue.Q.grant_next(notify_block=False)
+    assert _wait_for(lambda: len(queue.wakes) == 1)
+    _age_grant(queue, 11)
+    queue.Q.register("W", mode="wait", pid=os.getpid())
+    assert queue.Q.granted_to() == "W"
+    assert not _wait_for(lambda: len(queue.wakes) > 1, timeout=0.5)
+    w = queue.Conch(agent_name="w", session_id="W")
+    assert w.try_acquire() is True
+    w.release()                               # now it is A's turn
+    assert _wait_for(lambda: len(queue.wakes) == 2)
+
+
+def test_a_skipped_callback_waiter_is_not_told_its_turn_has_come(queue):
+    # Upstream pings callback waiters it skips for a wait waiter; through our wakers that
+    # ping says "your turn has come", which it has not.
+    h = queue.Conch(agent_name="h", session_id="H")
+    assert h.try_acquire() is True
+    queue.Q.register("A", mode="callback", pid=os.getpid())
+    queue.Q.register("W", mode="wait", pid=os.getpid())
+    h.release()
+    assert queue.Q.granted_to() == "W"
+    assert not _wait_for(lambda: len(queue.wakes) > 0, timeout=0.5)

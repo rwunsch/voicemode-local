@@ -90,8 +90,7 @@ QUEUE_PAIRS = [
      "                            _vml_g = {\"session_id\": _vml_next.session_id, \"seq\": _vml_next.seq,\n"
      "                                      \"granted_at\": datetime.now().isoformat()}\n"
      "                            cls._atomic_write_json(gf, _vml_g)\n"
-     "                            cls._notify_callback(e, block=False)\n"
-     "                            return _vml_g\n"
+     "                            return _vml_g  # no ping: its turn comes at W's release\n"
      "                except Exception:\n"
      "                    pass\n"
      "                return g\n"),
@@ -145,6 +144,8 @@ CONCH_PAIRS = [
      "                for _e in ConchQueue.list():\n"
      "                    if _g and _e.session_id == _g.get(\"session_id\") and \\\n"
      "                            _vml_cw.grant_is_absent(_g, _e, ttl=_vml_ttl()):\n"
+     "                        if _g.pop(\"given\", None):  # a give that has yielded is an ordinary grant\n"
+     "                            ConchQueue._atomic_write_json(ConchQueue._grant_file(), _g)\n"
      "                        return False\n"
      "            except Exception:\n"
      "                pass\n"
