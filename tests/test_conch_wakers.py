@@ -130,7 +130,7 @@ def test_a_failing_command_falls_through_to_claude_code(clean, tmp_path):
 def test_a_refused_claude_code_wake_is_not_delivered(clean):
     clean.setattr(cw, "claude_pid", lambda pid: 77)
     clean.setattr(sw, "wake", lambda pid, reason: (False, "refused: busy"))
-    assert cw.deliver(Entry(pid=321, session_id="chat-1")) is False
+    assert cw.outcome(Entry(pid=321, session_id="chat-1")) == cw.REFUSED   # settled: upstream must not nudge
 
 
 def test_deliver_never_raises(clean):
@@ -332,8 +332,8 @@ def test_deliver_stops_at_the_cap(clean, policy_env, tmp_path):
     calls = []
     clean.setattr(sw, "wake", lambda pid, reason: calls.append(pid) or (True, "sent"))
     e = Entry(pid=321, session_id="A", seq=4)
-    assert cw.deliver(e, tmp_path) is True
-    assert cw.deliver(e, tmp_path) is False
+    assert cw.outcome(e, tmp_path) == cw.DELIVERED
+    assert cw.outcome(e, tmp_path) == cw.REFUSED
     assert calls == [77]
 
 
@@ -343,7 +343,7 @@ def test_a_busy_command_does_not_fall_through(clean, tmp_path):
     clean.setattr(cw, "claude_pid", lambda pid: 77)
     calls = []
     clean.setattr(sw, "wake", lambda pid, reason: calls.append(pid) or (True, "sent"))
-    assert cw.deliver(Entry(pid=321, session_id="A", seq=4)) is False
+    assert cw.outcome(Entry(pid=321, session_id="A", seq=4)) == cw.REFUSED
     assert calls == []
 
 
@@ -409,6 +409,14 @@ def queue(tmp_path, monkeypatch):
         sys.modules.update(saved)
 
 
+def _wait_for(pred, timeout=3.0):
+    import time as _time
+    deadline = _time.monotonic() + timeout
+    while not pred() and _time.monotonic() < deadline:
+        _time.sleep(0.01)
+    return pred()
+
+
 def _age_grant(q, seconds):
     g = json.loads(q.grant_file().read_text())
     from datetime import datetime as _dt, timedelta as _td
@@ -418,13 +426,14 @@ def _age_grant(q, seconds):
 
 def test_a_lone_callback_grantee_is_pinged_on_grant(queue):
     queue.Q.register("A", mode="callback", pid=os.getpid())
-    assert queue.Q.grant_next().session_id == "A"
-    assert queue.wakes == [(77, "conch")]
+    assert queue.Q.grant_next(notify_block=False).session_id == "A"   # the release path
+    assert _wait_for(lambda: queue.wakes == [(77, "conch")])
 
 
 def test_a_late_wait_waiter_passes_an_absent_callback_grant(queue):
     queue.Q.register("A", mode="callback", pid=os.getpid())
-    queue.Q.grant_next()
+    queue.Q.grant_next(notify_block=False)
+    assert _wait_for(lambda: len(queue.wakes) == 1)
     seq_a = [e.seq for e in queue.Q.list() if e.session_id == "A"][0]
     _age_grant(queue, 11)
     queue.Q.register("B", mode="wait", pid=os.getpid())
@@ -478,7 +487,10 @@ def test_the_sixth_grant_event_sends_no_wake(queue):
     queue.Q.register("A", mode="callback", pid=os.getpid())
     for _ in range(6):   # six grant events: each time someone else had the floor in between
         queue.Q.clear_grant()
-        queue.Q.grant_next()
+        queue.Q.grant_next(notify_block=False)
+        _wait_for(lambda: False, timeout=0.05)
+    _wait_for(lambda: len(queue.wakes) >= 5)
+    _wait_for(lambda: False, timeout=0.3)
     assert len(queue.wakes) == 5
 
 
@@ -499,3 +511,91 @@ def test_queue_patches_are_idempotent_and_keep_crlf(tmp_path, rel):
     once = target.read_bytes()
     assert patcher.MARKER.encode() in once
     assert _apply(target).returncode == 0 and target.read_bytes() == once
+
+
+# -- final review fixes (Important 1-5) ----------------------------------------------------
+
+
+def test_a_returning_grantee_past_the_grace_takes_its_turn(queue):
+    # Important 1: A comes back at 11 s while W waits; A is present and first: A talks.
+    queue.Q.register("A", mode="callback", pid=os.getpid())
+    queue.Q.grant_next(notify_block=False)
+    _age_grant(queue, 11)
+    queue.Q.register("W", mode="wait", pid=os.getpid())
+    a = queue.Conch(agent_name="a", session_id="A")
+    try:
+        assert a.try_acquire() is True
+    finally:
+        a.release()
+
+
+def test_the_cap_also_stops_upstreams_tmux_nudge(queue, monkeypatch):
+    # Important 2: with no waker of ours, upstream's tmux route is capped too.
+    import voice_mode.session_wake as stub
+    import voice_mode.conch_notify as cn
+    monkeypatch.setattr(stub, "claude_pid_for", lambda *a, **k: None)
+    nudges = []
+    monkeypatch.setattr(cn, "_session_send", lambda target: nudges.append(target) or True)
+    queue.Q.register("A", mode="callback", pid=os.getpid())
+    for _ in range(7):
+        queue.Q.clear_grant()
+        queue.Q.grant_next(notify_block=False)
+        _wait_for(lambda: False, timeout=0.05)
+    _wait_for(lambda: len(nudges) >= 5)
+    _wait_for(lambda: False, timeout=0.3)
+    assert len(nudges) == 5
+
+
+def test_a_refused_wake_does_not_fall_back_to_tmux(queue, monkeypatch):
+    # Important 2: busy means refused: the session keeps its place, nobody else nudges it.
+    import voice_mode.session_wake as stub
+    import voice_mode.conch_notify as cn
+    monkeypatch.setattr(stub, "wake", lambda *a, **k: (False, "refused: busy"))
+    nudges = []
+    monkeypatch.setattr(cn, "_session_send", lambda target: nudges.append(target) or True)
+    queue.Q.register("A", mode="callback", pid=os.getpid())
+    queue.Q.grant_next(notify_block=False)
+    _wait_for(lambda: False, timeout=0.3)
+    assert nudges == []
+
+
+def test_bump_wakes_a_callback_head_once(queue):
+    # Important 3: `conch bump` calls grant_next() (blocking) and then pings itself.
+    queue.Q.register("A", mode="callback", pid=os.getpid())
+    queue.Q.grant_next()
+    assert queue.wakes == []
+    queue.Q.clear_grant()
+    queue.Q.grant_next(notify_block=False)
+    assert _wait_for(lambda: len(queue.wakes) == 1)
+
+
+def test_a_kept_callback_grant_is_restamped_and_pinged_on_release(queue):
+    # Important 4: C (not queued) passes A's absent grant and releases: A is woken again,
+    # and its grace runs from this release.
+    queue.Q.register("A", mode="callback", pid=os.getpid())
+    queue.Q.grant_next(notify_block=False)
+    assert _wait_for(lambda: len(queue.wakes) == 1)
+    _age_grant(queue, 11)
+    c = queue.Conch(agent_name="c", session_id="C")
+    assert c.try_acquire() is True
+    c.release()
+    assert _wait_for(lambda: len(queue.wakes) == 2)
+    g = json.loads(queue.grant_file().read_text())
+    assert g["session_id"] == "A"
+    assert cw._age_s(g, None) < 3
+
+
+def test_a_give_counts_from_the_release(queue):
+    # Important 5: a give made while H speaks for 35 s holds through the speech (W polling
+    # does not move it) and for 30 s after H releases.
+    h = queue.Conch(agent_name="h", session_id="H")
+    assert h.try_acquire() is True
+    queue.Q.register("A", mode="callback", pid=os.getpid())
+    queue.Q.register("W", mode="wait", pid=os.getpid())
+    assert queue.Q.grant("A") is True
+    _age_grant(queue, 35)                     # H has spoken for 35 s since the give
+    assert queue.Q.granted_to() == "A"        # W's poll: nothing moves while the mic is held
+    h.release()                               # the clock starts now
+    assert queue.Q.granted_to() == "A"
+    _age_grant(queue, 31)
+    assert queue.Q.granted_to() == "W"

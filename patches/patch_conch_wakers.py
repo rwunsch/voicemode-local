@@ -65,8 +65,8 @@ QUEUE_PAIRS = [
      '                "granted_at": datetime.now().isoformat(),\n'
      "            },\n"
      "        )\n"
-     "        if getattr(target, \"mode\", \"wait\") == \"callback\":  # " + MARKER + "\n"
-     "            cls._notify_callback(target, block=notify_block)  # upstream pings only skipped callbacks\n"
+     "        if getattr(target, \"mode\", \"wait\") == \"callback\" and not notify_block:  # " + MARKER + "\n"
+     "            cls._notify_callback(target, block=False)  # upstream pings only skipped callbacks; bump pings itself\n"
      "        return target\n"),
     ("                        # VM-1967 safety net -- see grant_next().\n"
      '                        "granted_at": datetime.now().isoformat(),\n',
@@ -84,7 +84,7 @@ QUEUE_PAIRS = [
      "                    return cls._current_grant()\n"
      "                try:  # VML: present beats absent: a woken callback waiter past its grace\n"
      "                    from voice_mode import conch_wakers as _vml_cw\n"
-     "                    if _vml_cw.grant_is_absent(g, e, ttl=_get_grant_ttl()):\n"
+     "                    if not Conch.is_active() and _vml_cw.grant_is_absent(g, e, ttl=_get_grant_ttl()):\n"
      "                        _vml_next = next((w for w in cls._scan(clean=True) if w.mode == \"wait\"), None)\n"
      "                        if _vml_next is not None:  # it keeps its place; the wait waiter talks\n"
      "                            _vml_g = {\"session_id\": _vml_next.session_id, \"seq\": _vml_next.seq,\n"
@@ -97,9 +97,45 @@ QUEUE_PAIRS = [
      "                return g\n"),
 ]
 
-# conch.py: a free mic is served past an absent callback grant (nobody present is in wait
-# mode, else _current_grant above has already moved the grant to them).
+QUEUE_PAIRS += [
+    ("        existing = cls.granted_to()  # validates liveness; clears a stale grant\n"
+     "        if existing is not None:\n"
+     "            for e in cls.list():\n"
+     "                if e.session_id == existing:\n"
+     "                    return e  # explicit give stands -- do not clobber\n",
+     "        _vml_kept = None\n"
+     "        try:  # VML: a kept callback grant's clocks (grace, give) run from this release\n"
+     "            _vml_g = json.loads(cls._grant_file().read_text())\n"
+     "            for _vml_w in cls._scan(clean=True):\n"
+     "                if _vml_w.session_id == _vml_g.get(\"session_id\") and _vml_w.mode == \"callback\":\n"
+     "                    _vml_g[\"granted_at\"] = datetime.now().isoformat()\n"
+     "                    cls._atomic_write_json(cls._grant_file(), _vml_g)\n"
+     "                    _vml_kept = _vml_w.session_id\n"
+     "                    break\n"
+     "        except Exception:\n"
+     "            pass\n"
+     "        existing = cls.granted_to()  # validates liveness; clears a stale grant\n"
+     "        if existing is not None:\n"
+     "            for e in cls.list():\n"
+     "                if e.session_id == existing:\n"
+     "                    if existing == _vml_kept and not notify_block:\n"
+     "                        cls._notify_callback(e, block=False)  # VML: wake it again (capped)\n"
+     "                    return e  # explicit give stands -- do not clobber\n"),
+]
+
+# conch.py: 1) the grantee is never blocked by its own grant, even past its grace (read
+# before granted_to(), which could move it away); 2) a free mic is served past an absent
+# callback grant (nobody present is in wait mode, else _current_grant has moved it to them).
 CONCH_PAIRS = [
+    ("        try:\n"
+     "            grantee = ConchQueue.granted_to()\n",
+     "        try:  # VML: a returning grantee takes its own turn, past its grace too\n"
+     "            if json.loads(ConchQueue._grant_file().read_text()).get(\"session_id\") == self.session_id:\n"
+     "                return False\n"
+     "        except Exception:\n"
+     "            pass\n"
+     "        try:\n"
+     "            grantee = ConchQueue.granted_to()\n"),
     ("        return grantee is not None and grantee != self.session_id\n",
      "        if grantee is not None and grantee != self.session_id:\n"
      "            try:  # " + MARKER + "\n"

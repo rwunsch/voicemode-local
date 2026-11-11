@@ -197,10 +197,13 @@ def _conch_dir():
     return Conch.LOCK_FILE.parent
 
 
-def deliver(entry, state_dir=_AUTO) -> bool:
-    """Wake a callback grantee with our wakers. True if one delivered; False leaves it
-    to upstream's own route (tmux). With state_dir, at most max_wakes() per queued turn.
-    Never raises."""
+DELIVERED, REFUSED, UNREACHABLE = "delivered", "refused", "unreachable"
+
+
+def outcome(entry, state_dir=_AUTO) -> str:
+    """Wake a callback grantee with our wakers. DELIVERED; REFUSED (capped, busy, or our
+    waker declined: nobody else may nudge it, it keeps its place); or UNREACHABLE (none of
+    ours can reach it: upstream's own route may try, within the same cap). Never raises."""
     try:
         if state_dir is _AUTO:
             state_dir = _conch_dir()
@@ -209,23 +212,29 @@ def deliver(entry, state_dir=_AUTO) -> bool:
         if state_dir is not None and not take_wake(state_dir, session_id, getattr(entry, "seq", None)):
             logger.info("conch: session %s was woken %d times for this turn; not again",
                         session_id, max_wakes())
-            return False
+            return REFUSED
         command = wake_command()
         code = _run_command(command, session_id, pid) if command else None
         if code == 0:
             logger.info("conch: woke session %s through the harness command", session_id)
-            return True
+            return DELIVERED
         if code == EXIT_BUSY:
             logger.info("conch: session %s is busy (harness command); it keeps its place", session_id)
-            return False
+            return REFUSED
         target = claude_pid(pid)
         if target:
             ok, detail = _session_wake().wake(target, reason="conch")
             logger.info("conch: Claude Code wake for session %s: %s", session_id, detail)
-            return bool(ok)
+            return DELIVERED if ok else REFUSED
     except Exception:  # noqa: BLE001 - a push must never break a grant site
         logger.debug("conch wake failed", exc_info=True)
-    return False
+    return UNREACHABLE
+
+
+def deliver(entry, state_dir=_AUTO) -> bool:
+    """True when the wake is settled here (delivered or refused): upstream must not nudge.
+    False only when none of our wakers can reach the session."""
+    return outcome(entry, state_dir) != UNREACHABLE
 
 
 def deliver_then(entry, fallback, state_dir=_AUTO) -> None:
