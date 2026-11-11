@@ -660,3 +660,72 @@ def test_a_wait_poll_while_the_mic_is_held_keeps_the_give(queue):
     h.release()
     _age_grant(queue, 11)                    # past the grace, short of the give TTL
     assert queue.Q.granted_to() == "A"
+
+
+# ---- v1.1.2: take_wake minors from the v1.1.1 final review ----
+
+def test_concurrent_wakes_never_exceed_the_cap(policy_env, tmp_path, monkeypatch):
+    # The read-modify-write had no lock: concurrent pings could let the cap run over.
+    real_dump = cw.json.dump
+
+    def slow_dump(*a, **k):
+        import time as _t
+        _t.sleep(0.005)                       # widen the race window
+        return real_dump(*a, **k)
+    monkeypatch.setattr(cw.json, "dump", slow_dump)
+    results = []
+    threads = [threading.Thread(target=lambda: results.append(cw.take_wake(tmp_path, "A", 1)))
+               for _ in range(20)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert results.count(True) == 5
+
+
+def test_old_wake_counts_are_pruned(policy_env, tmp_path):
+    # conch.wakes.json kept one key per session id forever.
+    old = {"S%d" % i: {"seq": 1, "count": 1, "at": 0} for i in range(50)}
+    old["legacy"] = {"seq": 1, "count": 2}                # written before "at" existed
+    (tmp_path / cw.WAKES_FILE).write_text(json.dumps(old))
+    assert cw.take_wake(tmp_path, "A", 1) is True
+    data = json.loads((tmp_path / cw.WAKES_FILE).read_text())
+    assert set(data) == {"A"}
+    assert data["A"]["count"] == 1 and data["A"]["at"] > 0
+
+
+def test_a_recent_count_survives_pruning(policy_env, tmp_path):
+    for _ in range(3):
+        cw.take_wake(tmp_path, "B", 7)
+    cw.take_wake(tmp_path, "A", 1)
+    assert json.loads((tmp_path / cw.WAKES_FILE).read_text())["B"]["count"] == 3
+
+
+def test_a_replace_refused_once_is_retried(policy_env, tmp_path, monkeypatch):
+    # Windows: os.replace fails while another process has the file open; the count was lost.
+    real, calls = os.replace, []
+
+    def flaky(src, dst):
+        calls.append(1)
+        if len(calls) == 1:
+            raise PermissionError(13, "Access is denied")
+        return real(src, dst)
+    monkeypatch.setattr(cw.os, "replace", flaky)
+    cw.take_wake(tmp_path, "A", 1)
+    assert json.loads((tmp_path / cw.WAKES_FILE).read_text())["A"]["count"] == 1
+    assert not list(tmp_path.glob(".wakes-*"))           # no temp file left behind
+
+
+def test_a_free_mic_reserved_for_a_turn_is_named(queue):
+    # Within the grace a caller was told "unknown holds the voice channel": the mic was
+    # free, reserved for a woken session.
+    import voice_mode.conch_wakers as pkg_cw
+    queue.Q.register("A", agent="voicemode", mode="callback", pid=os.getpid())
+    queue.Q.grant_next()
+    label = pkg_cw.reserved_label()
+    assert label is not None and "voicemode" in label and "reserved" in label
+
+
+def test_no_reservation_no_label(queue):
+    import voice_mode.conch_wakers as pkg_cw
+    assert pkg_cw.reserved_label() is None

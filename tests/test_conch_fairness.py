@@ -292,3 +292,30 @@ def test_the_patch_logs_the_hold_it_applied_and_exempts_speak_only_turns(pristin
     assert '"hold_active": bool(_vml_hold)' in text
     assert '"turn_results" in locals()' in text and "not wait_for_response" in text
     assert "acquired_at=" in text
+
+
+def test_the_patch_names_a_reserved_free_mic(pristine_converse):
+    assert _apply(pristine_converse).returncode == 0
+    assert "_vml_cw.reserved_label()" in pristine_converse.read_text()
+
+
+@pytest.mark.parametrize("script,name,marker", [
+    ("patch_conch_fairness.py", "converse.py", "VML: CONCH FAIRNESS"),
+    ("patch_conch_wakers.py", "conch_queue.py", "VML: CONCH WAKERS"),
+])
+def test_an_older_patch_text_is_reported_not_silently_kept(tmp_path, script, name, marker):
+    # v1.1.1 final review minor: the marker alone decided "applied", so a venv patched with
+    # an older text silently kept it. It still is not re-patched, but it says so.
+    target = tmp_path / name
+    body = f"# {marker}: an older version of this patch\nx = 1\n"
+    target.write_text(body)
+    done = subprocess.run([sys.executable, str(PATCHES / script), str(target)], capture_output=True, text=True)
+    assert done.returncode == 0
+    assert "older version" in done.stderr and "reinstall" in done.stderr
+    assert target.read_text() == body
+
+
+def test_a_current_patch_is_quiet_on_the_second_pass(pristine_converse):
+    assert _apply(pristine_converse).returncode == 0
+    again = _apply(pristine_converse)
+    assert again.returncode == 0 and again.stderr == ""

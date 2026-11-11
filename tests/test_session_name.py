@@ -367,3 +367,25 @@ def test_a_venv_patched_before_the_copilot_step_gets_it(tmp_path, src_dir):
                        capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
     assert target.read_text().count(mod.COPILOT_NAME_MARKER) == 1
+
+
+@pytest.mark.parametrize("yaml_text,want", [
+    ('name: |\n  Voice test\n', "Voice test"),                          # block scalar
+    ('name: >\n  Voice\n  test\n', "Voice test"),                       # folded block
+    ('name: "Robert\'s \\"voice\\" test"\n', 'Robert\'s "voice" test'),  # escaped quotes
+    ("name: 'Robert''s test'\n", "Robert's test"),                       # YAML '' escape
+    ('name: |\n  line one\n  line two\n', "line one line two"),        # no newline in a label
+])
+def test_copilot_titles_are_read_as_yaml(resolver, monkeypatch, clean_env, no_copilot, tmp_path, yaml_text, want):
+    # v1.1.1 final review minor: block scalars and escaped quotes were taken literally.
+    monkeypatch.setenv("HOME", str(tmp_path))
+    ws = _copilot_chat(tmp_path, monkeypatch)
+    (ws / "workspace.yaml").write_text(yaml_text, encoding="utf-8")
+    assert resolver() == want
+
+
+def test_unparsable_yaml_falls_back_to_the_name_line(resolver, monkeypatch, clean_env, no_copilot, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    ws = _copilot_chat(tmp_path, monkeypatch)
+    (ws / "workspace.yaml").write_text('name: Voice test\nbad: [unclosed\n', encoding="utf-8")
+    assert resolver() == "Voice test"

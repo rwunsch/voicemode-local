@@ -49,6 +49,14 @@ PAIRS = [
      "                            \"result\": \"cancelled\"\n"
      "                        })\n"
      "                    raise\n"),
+    ("                holder_agent = holder.get('agent', 'unknown') if holder else 'unknown'\n",
+     "                holder_agent = holder.get('agent', 'unknown') if holder else 'unknown'\n"
+     "                if holder is None:  # " + MARKER + ": a free mic reserved for a queued turn\n"
+     "                    try:\n"
+     "                        from voice_mode import conch_wakers as _vml_cw\n"
+     "                        holder_agent = _vml_cw.reserved_label() or holder_agent\n"
+     "                    except Exception:\n"
+     "                        pass\n"),
     ("    result = await _converse_core(\n",
      "    try:  # " + MARKER + ": progress every 30 s so a 180 s client timeout does not cancel us\n"
      "        from voice_mode.mcp_progress import heartbeat as _vml_heartbeat\n"
@@ -71,17 +79,22 @@ def _write(target, text, ending):
 
 def apply(target):
     source, ending = _read(target)
-    if MARKER in source:
-        return 0
     if target.name != "converse.py":
         print(f"[patch_conch_fairness] {target}: only tools/converse.py is patched", file=sys.stderr)
         return 1
-    for anchor, _ in PAIRS:
+    pairs = PAIRS
+    if MARKER in source:
+        if any(r not in source for _, r in pairs):
+            print(f"[{Path(__file__).name}] {target}: carries an older version of this patch; "
+                  "it is kept. To get the new text, reinstall voice-mode and apply again "
+                  "(docs/patching/README.md).", file=sys.stderr)
+        return 0
+    for anchor, _ in pairs:
         if source.count(anchor) != 1:
             print(f"[patch_conch_fairness] {target}: an anchor was found {source.count(anchor)} times, not once",
                   file=sys.stderr)
             return 1
-    for anchor, replacement in PAIRS:
+    for anchor, replacement in pairs:
         source = source.replace(anchor, replacement)
     compile(source, str(target), "exec")
     _write(target, source, ending)
