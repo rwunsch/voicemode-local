@@ -152,3 +152,11 @@ def test_replayed_keys_map_like_every_other_listener(tmp_path, keys, expected):
     assert done.returncode == 0, done.stdout + done.stderr
     sent = re.findall(r"replay (\w+) sent=", log.read_text(encoding="utf-8-sig"))
     assert sent == expected
+
+
+def test_the_focus_pattern_is_a_parameter_with_todays_default():
+    # FELIX 2026-11-11: the Copilot app is github.exe, so push-to-talk never fired there.
+    text = TEXT
+    assert "[string]$FocusPattern = 'WindowsTerminal|powershell|pwsh|wsl|conhost|cmd|alacritty|wezterm|Code'" in text
+    assert "$p.ProcessName -match $FocusPattern" in text
+    assert "$TerminalProcessPattern" not in text
