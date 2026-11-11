@@ -142,10 +142,10 @@ def test_deliver_never_raises(clean):
 
 def test_deliver_then_uses_upstream_only_when_ours_failed(clean):
     used = []
-    clean.setattr(cw, "deliver", lambda e: False)
+    clean.setattr(cw, "deliver", lambda e, state_dir=None: False)
     cw.deliver_then(Entry(pid=5, session_id="s"), used.append)
     cw.deliver_then(Entry(pid=None, session_id="s"), used.append)   # remote: upstream has no local route
-    clean.setattr(cw, "deliver", lambda e: True)
+    clean.setattr(cw, "deliver", lambda e, state_dir=None: True)
     cw.deliver_then(Entry(pid=6, session_id="s"), used.append)
     assert [e.pid for e in used] == [5]
 
@@ -258,3 +258,96 @@ def test_patch_stops_on_a_missing_anchor(tmp_path):
     target.write_text("def notify_granted(entry):\n    pass\n")
     done = _apply(target)
     assert done.returncode == 1 and "voice-mode has changed" in done.stderr
+
+
+# -- policy: grace, wake cap, busy exit (plan 2026-11-11-conch-callback, Task 1) -----------
+
+from datetime import datetime, timedelta
+
+
+def _grant(age_s, given=False, now=None):
+    now = now or datetime(2026, 11, 11, 15, 0, 0)
+    g = {"session_id": "A", "seq": 4, "granted_at": (now - timedelta(seconds=age_s)).isoformat()}
+    if given:
+        g["given"] = True
+    return g, now
+
+
+@pytest.fixture
+def policy_env(monkeypatch):
+    monkeypatch.delenv(cw.GRACE_SETTING, raising=False)
+    monkeypatch.delenv(cw.MAX_WAKES_SETTING, raising=False)
+    return monkeypatch
+
+
+def test_grant_is_absent_after_the_grace_only_for_callback(policy_env):
+    g, now = _grant(11)
+    assert cw.grant_is_absent(g, Entry(mode="callback"), now=now) is True
+    g, now = _grant(9)
+    assert cw.grant_is_absent(g, Entry(mode="callback"), now=now) is False
+    g, now = _grant(60)
+    assert cw.grant_is_absent(g, Entry(mode="wait"), now=now) is False
+
+
+def test_a_given_grant_holds_until_the_ttl(policy_env):
+    g, now = _grant(20, given=True)
+    assert cw.grant_is_absent(g, Entry(mode="callback"), now=now, ttl=30.0) is False
+    g, now = _grant(31, given=True)
+    assert cw.grant_is_absent(g, Entry(mode="callback"), now=now, ttl=30.0) is True
+
+
+def test_a_grant_without_granted_at_is_never_absent(policy_env):
+    assert cw.grant_is_absent({"session_id": "A", "seq": 4}, Entry(mode="callback")) is False
+    assert cw.grant_is_absent({"session_id": "A", "granted_at": "garbage"}, Entry(mode="callback")) is False
+
+
+@pytest.mark.parametrize("raw,expected", [("4", 4.0), ("x", 10.0), ("-1", 10.0), (None, 10.0)])
+def test_grace_setting(policy_env, raw, expected):
+    if raw is not None:
+        policy_env.setenv(cw.GRACE_SETTING, raw)
+    assert cw.grace_s() == expected
+
+
+@pytest.mark.parametrize("raw,expected", [("2", 2), ("0", 0), ("x", 5), (None, 5)])
+def test_max_wakes_setting(policy_env, raw, expected):
+    if raw is not None:
+        policy_env.setenv(cw.MAX_WAKES_SETTING, raw)
+    assert cw.max_wakes() == expected
+
+
+def test_take_wake_caps_per_queued_turn(policy_env, tmp_path):
+    assert [cw.take_wake(tmp_path, "A", 4) for _ in range(6)] == [True] * 5 + [False]
+    assert cw.take_wake(tmp_path, "A", 9) is True        # a new queued turn starts again
+    assert cw.take_wake(tmp_path, "B", 4) is True        # another session has its own count
+
+
+def test_take_wake_survives_a_broken_state_file(policy_env, tmp_path):
+    (tmp_path / "conch.wakes.json").write_text("{not json")
+    assert cw.take_wake(tmp_path, "A", 4) is True
+
+
+def test_deliver_stops_at_the_cap(clean, policy_env, tmp_path):
+    policy_env.setenv(cw.MAX_WAKES_SETTING, "1")
+    clean.setattr(cw, "claude_pid", lambda pid: 77)
+    calls = []
+    clean.setattr(sw, "wake", lambda pid, reason: calls.append(pid) or (True, "sent"))
+    e = Entry(pid=321, session_id="A", seq=4)
+    assert cw.deliver(e, tmp_path) is True
+    assert cw.deliver(e, tmp_path) is False
+    assert calls == [77]
+
+
+def test_a_busy_command_does_not_fall_through(clean, tmp_path):
+    command, _ = _recording_command(tmp_path, code=cw.EXIT_BUSY)
+    clean.setenv(cw.COMMAND_SETTING, json.dumps(command))
+    clean.setattr(cw, "claude_pid", lambda pid: 77)
+    calls = []
+    clean.setattr(sw, "wake", lambda pid, reason: calls.append(pid) or (True, "sent"))
+    assert cw.deliver(Entry(pid=321, session_id="A", seq=4)) is False
+    assert calls == []
+
+
+def test_the_conch_message_lets_the_session_stay_silent():
+    text = sw.MESSAGES["conch"]
+    assert "nothing" in text and "converse" in text and "\n" not in text
+    assert len(text.encode()) <= sw.MAX_MESSAGE_BYTES

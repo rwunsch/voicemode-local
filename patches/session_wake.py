@@ -98,9 +98,9 @@ MESSAGES = {
              'conversation going.'),
     # conch_wakers: a session that queued with conch_mode="callback" has been granted the
     # floor. Its queued message was not spoken; the model still has it in context.
-    "conch": ('Voice queue: your turn on the voice channel has come. Call the voicemode '
-              'converse tool now with the message you queued (it was not spoken), and '
-              'wait_for_response as you intended.'),
+    "conch": ('Voice queue: your turn on the voice channel has come. If you still have something '
+              'to say, call the voicemode converse tool now (your queued message was not spoken). '
+              'If not, do nothing: you keep your place.'),
 }
 REASON_ALIASES = {"play": "wake"}   # the pill's old Play command
 
