@@ -99,6 +99,7 @@ INTENDED_SINCE_BASELINE = [
     ("patch_ptt_instant.py", ["control_channel.py", "control_socket.py", "tools/converse.py"]),
     ("patch_conch_wakers.py", ["tools/converse.py", "conch_notify.py", "conch_queue.py", "conch.py"]),   # 2026-11-11
     ("patch_session_name.py", ["tools/converse.py"]),   # 2026-11-11: adds the Copilot chat title step
+    ("patch_conch_fairness.py", ["tools/converse.py"]),   # 2026-11-11: fair holds, progress
 ]
 # Modules added as "copy" steps since the baseline (2026-11-07: session_wake.py).
 INTENDED_COPIES_SINCE_BASELINE = ["session_wake.py"]
@@ -107,6 +108,7 @@ INTENDED_COPIES_SINCE_BASELINE += ["pill_autostart.py", "pill-windows.ps1", "voi
                                    "ui/pill/index.html", "ui/pill/app.js", "ui/pill/model.js",
                                    "ui/pill/pill.css"]
 INTENDED_COPIES_SINCE_BASELINE += ["conch_wakers.py"]   # 2026-11-11
+INTENDED_COPIES_SINCE_BASELINE += ["conch_hold.py", "mcp_progress.py"]   # 2026-11-11
 
 
 def apply_intended(pkg: Path) -> None:

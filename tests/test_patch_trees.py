@@ -184,7 +184,7 @@ EXPECTED_MARKERS = {
         "simple_failover.py": ["NO SILENT SWAP (voicemode-local)"],
         "tools/converse.py": ["voicemode-local listen overrun", "voicemode-local turns playback stop",
                               "voicemode-local session name", HOLD, "LANGUAGE-LOCKED VOICES",
-                              BARGE, PILL, INSTANT],
+                              BARGE, PILL, INSTANT, "VML: CONCH WAKERS", "VML: CONCH FAIRNESS"],
     },
 }
 

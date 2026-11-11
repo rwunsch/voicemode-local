@@ -48,6 +48,9 @@
     {"copy": "voice_barge_tool.py", "to": "tools/voice_barge_tool.py", "why": "MCP tool for switching voice barge-in"},
     {"copy": "conch_wakers.py", "to": "conch_wakers.py", "why": "per-harness wakers for the conch queue's callback mode"},
     {"patch": "patch_conch_wakers.py", "targets": ["tools/converse.py", "conch_notify.py", "conch_queue.py", "conch.py"], "why": "callback is served as wait where no waker can reach the session; wakers before upstream's tmux push"},
+    {"copy": "conch_hold.py", "to": "conch_hold.py", "why": "fair holds: a hold does not starve a waiting session"},
+    {"copy": "mcp_progress.py", "to": "mcp_progress.py", "why": "MCP progress heartbeat so a 180 s client timeout does not cancel converse"},
+    {"patch": "patch_conch_fairness.py", "targets": ["tools/converse.py"], "why": "fair holds, progress heartbeat, a cancelled wait is logged; needs conch_hold.py and mcp_progress.py"},
     {"patch": "patch_windows_tempfile.py", "targets": ["core.py", "streaming.py"], "why": "close temp audio files before deleting them; Windows refuses to delete an open file (WinError 32)"},
     {"patch": "patch_native_client_folder.py", "targets": ["tools/converse.py"], "why": "the session label uses the client's folder; voice-mode itself runs in the runtime folder"}
   ]

@@ -114,10 +114,16 @@ INTENDED_COPIES += ["pill_autostart.py", "pill-windows.ps1", "voice_pill_mac.py"
                     "ui/pill/index.html", "ui/pill/app.js", "ui/pill/model.js", "ui/pill/pill.css"]
 # 2026-11-11: per-harness conch wakers (callback is served as wait where none can reach).
 INTENDED_STEP_LINES.append(b'    {"copy": "conch_wakers.py", "to": "conch_wakers.py", "why": "per-harness wakers for the conch queue\'s callback mode"},\n')
-INTENDED_STEP_LINES.append(b'    {"patch": "patch_conch_wakers.py", "targets": ["tools/converse.py", "conch_notify.py", "conch_queue.py", "conch.py"], "why": "callback is served as wait where no waker can reach the session; wakers before upstream\'s tmux push"}\n')
+INTENDED_STEP_LINES.append(b'    {"patch": "patch_conch_wakers.py", "targets": ["tools/converse.py", "conch_notify.py", "conch_queue.py", "conch.py"], "why": "callback is served as wait where no waker can reach the session; wakers before upstream\'s tmux push"},\n')
 INTENDED_PATCHES.append(("patch_conch_wakers.py", ["tools/converse.py", "conch_notify.py", "conch_queue.py", "conch.py"]))
 INTENDED_PATCHES.append(("patch_session_name.py", ["tools/converse.py"]))   # 2026-11-11: Copilot chat title step
 INTENDED_COPIES += ["conch_wakers.py"]
+# 2026-11-11: fair holds, MCP progress heartbeat, a cancelled wait is logged.
+INTENDED_STEP_LINES.append(b'    {"copy": "conch_hold.py", "to": "conch_hold.py", "why": "fair holds: a hold does not starve a waiting session"},\n')
+INTENDED_STEP_LINES.append(b'    {"copy": "mcp_progress.py", "to": "mcp_progress.py", "why": "MCP progress heartbeat so a 180 s client timeout does not cancel converse"},\n')
+INTENDED_STEP_LINES.append(b'    {"patch": "patch_conch_fairness.py", "targets": ["tools/converse.py"], "why": "fair holds, progress heartbeat, a cancelled wait is logged; needs conch_hold.py and mcp_progress.py"}\n')
+INTENDED_PATCHES.append(("patch_conch_fairness.py", ["tools/converse.py"]))
+INTENDED_COPIES += ["conch_hold.py", "mcp_progress.py"]
 # Text edits those additions force on lines that were already there: (now, before).
 INTENDED_EDITS = [
     (b'    "streaming.py",\n    "conch_notify.py",\n    "conch_queue.py",\n    "conch.py"\n', b'    "streaming.py"\n'),

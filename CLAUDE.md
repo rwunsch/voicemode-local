@@ -77,6 +77,14 @@ Three things to know when using `mcp__voicemode__converse`:
    or speaking across several turns) so another agent cannot cut in mid-thought.
    It is a short, refreshed TTL (10s idle, re-stamped each turn); override per
    call with `conch_hold_timeout`. Release by simply not passing it next turn.
+   **While another session waits, a hold is limited** (`patches/conch_hold.py`,
+   2026-11-11): a held turn that got no reply releases the mic, and at most 3 held
+   turns in a row keep it (`VOICEMODE_CONCH_HOLD_MAX_TURNS`).
+
+Long waits and listens send MCP progress every 30 s (`patches/mcp_progress.py`,
+`VOICEMODE_PROGRESS_INTERVAL`, 0 = off), so a client with a 180 s tool timeout
+(Copilot CLI) does not cancel converse. It is sent only when the client asks for
+progress; the voice server logs "client token present/absent" per call.
 
 There is no `end_burst` and no `ticket` any more — those were our queue's API.
 Handing the mic on is now the *default*: the floor releases at the end of your
