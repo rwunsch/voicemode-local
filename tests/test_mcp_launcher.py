@@ -115,13 +115,14 @@ def _start_with(launcher_dir, extra):
     p.stdout.close(); p.stderr.close()
 
 
-def test_wsl_session_start_brings_up_the_pill_when_it_is_on(launcher, tmp_path):
-    """Robert 2026-11-09: on WSL the pill only started on `voicemode-switch pill on`;
-    after a reboot nothing brought it back. macOS and native Windows start it per session."""
+def test_wsl_session_start_leaves_the_pill_to_the_voice_server(launcher, tmp_path):
+    """Robert 2026-11-10: the voice server opens the pill itself (pill_autostart) at a
+    session's first voice turn, on every OS. The launcher no longer starts it."""
     launcher  # builds the launcher and its fakes in tmp_path
     extra, calls = _wsl_launcher_env(tmp_path, "true")
     _start_with(tmp_path, extra)
-    assert calls.exists() and "pill ensure" in calls.read_text()
+    assert not calls.exists() or "pill" not in calls.read_text()
+    assert "ensure_pill_window" not in (REPO / "voicemode-mcp").read_text()
 
 
 def test_wsl_session_start_leaves_the_pill_alone_when_it_is_off(launcher, tmp_path):
@@ -129,3 +130,43 @@ def test_wsl_session_start_leaves_the_pill_alone_when_it_is_off(launcher, tmp_pa
     extra, calls = _wsl_launcher_env(tmp_path, "false")
     _start_with(tmp_path, extra)
     assert not calls.exists() or "pill" not in calls.read_text()
+
+
+def _tools_seen(tmp_path, env_file_text=None, **env_extra):
+    """Run voicemode-mcp with a fake voice-mode that prints the tool list it was given."""
+    script = tmp_path / "voicemode-mcp"
+    shutil.copy(REPO / "voicemode-mcp", script)
+    (tmp_path / "voicemode-switch").write_text("#!/usr/bin/env bash\nexit 0\n")
+    (tmp_path / "voicemode-switch").chmod(0o755)
+    server = tmp_path / ".venv" / "bin" / "voice-mode"
+    server.parent.mkdir(parents=True)
+    server.write_text("#!/usr/bin/env bash\necho \"tools=${VOICEMODE_TOOLS_ENABLED-unset}\"\n")
+    server.chmod(0o755)
+    if env_file_text is not None:
+        (tmp_path / ".voicemode").mkdir(exist_ok=True)
+        (tmp_path / ".voicemode" / "voicemode.env").write_text(env_file_text)
+    env = {k: v for k, v in os.environ.items() if not k.startswith("VOICEMODE_TOOLS")}
+    env.update(HOME=str(tmp_path), **env_extra)
+    env.pop("CLAUDE_CODE_SESSION_ID", None)
+    done = subprocess.run([str(script)], env=env, capture_output=True, text=True, timeout=30)
+    return done.stdout.strip().splitlines()[-1]
+
+
+def test_no_tool_setting_gets_voice_stop_and_barge(tmp_path):
+    # Seen on the Mac 2026-11-11: no list, so upstream offered only converse and service.
+    assert _tools_seen(tmp_path) == "tools=converse,service,voice_barge_tool"
+
+
+@pytest.mark.parametrize("line", ["VOICEMODE_TOOLS_ENABLED=converse\n",
+                                  "export VOICEMODE_TOOLS_DISABLED=service\n",
+                                  "VOICEMODE_TOOLS=converse\n"])
+def test_a_tool_setting_in_voicemode_env_is_left_alone(tmp_path, line):
+    assert _tools_seen(tmp_path, line) == "tools=unset"
+
+
+def test_a_tool_setting_in_the_environment_is_left_alone(tmp_path):
+    assert _tools_seen(tmp_path, VOICEMODE_TOOLS_ENABLED="converse") == "tools=converse"
+    (tmp_path / "b").mkdir()
+    assert _tools_seen(tmp_path / "b", VOICEMODE_TOOLS_DISABLED="x") == "tools=unset"
+    (tmp_path / "c").mkdir()   # empty counts as unset, as upstream strips it
+    assert _tools_seen(tmp_path / "c", VOICEMODE_TOOLS_ENABLED="") == "tools=converse,service,voice_barge_tool"

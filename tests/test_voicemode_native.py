@@ -290,12 +290,15 @@ def test_start_order(vn, home, tmp_path, monkeypatch, enabled):
     monkeypatch.setattr(vn, "optional_services", lambda: list(enabled))
     assert vn.launch(root) == 0
     assert "NO-LEASE" not in world.events          # the lease exists before anything starts
-    expected = (["watchdog", "spawn:tts", "spawn:stt"] + [f"spawn:{k}" for k in enabled]
+    # The pill is the voice server's to open (pill_autostart, 2026-11-10), never the launcher's.
+    started = [k for k in enabled if k != "pill"]
+    expected = (["watchdog", "spawn:tts", "spawn:stt"] + [f"spawn:{k}" for k in started]
                 + ["ready:tts", "ready:stt", "spawn:voice-mode"])
     assert _non_events(world.events)[:len(expected)] == expected
+    assert "spawn:pill" not in world.events
     # The last connector left: every service it started is stopped, the lease is gone.
     stops = [e for e in world.events if e.startswith("kill:")]
-    assert sorted(stops) == sorted(["kill:tts", "kill:stt"] + [f"kill:{k}" for k in enabled])
+    assert sorted(stops) == sorted(["kill:tts", "kill:stt"] + [f"kill:{k}" for k in started])
     assert not list((root / "run" / "clients").iterdir())
 
 
@@ -1015,9 +1018,11 @@ def test_launcher_env_reaches_voice_mode_and_the_pill_backend(vn, home, tmp_path
     monkeypatch.setattr(vn, "check_models", lambda runtime: None)
     monkeypatch.setattr(vn, "optional_services", lambda: ["pill"])
     assert vn.launch(root) == 0
-    for kind in ("voice-mode", "pill"):
-        command = json.loads(envs[kind]["VOICEMODE_BARGE_CONTROL_COMMAND"])
-        assert command[1:] == [str(vn.SCRIPT), "barge"]
+    # The pill window is now started by voice-mode itself (pill_autostart), so its backend
+    # inherits voice-mode's environment: reaching voice-mode is reaching the pill.
+    assert "pill" not in envs
+    command = json.loads(envs["voice-mode"]["VOICEMODE_BARGE_CONTROL_COMMAND"])
+    assert command[1:] == [str(vn.SCRIPT), "barge"]
     assert envs["voice-mode"]["VOICEMODE_TOOLS_ENABLED"] == "converse,service,voice_barge_tool"
 
 

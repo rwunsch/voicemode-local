@@ -20,7 +20,8 @@ async def voice_barge(action: str = "status") -> str:
     Use when the user asks to enable, disable or check interrupting by voice.
 
     Args:
-        action: "on", "off" or "status".
+        action: "on", "off", "auto" or "status". auto listens only while the sound plays
+            to headphones or a headset, decided at each reply.
     """
     return await asyncio.to_thread(barge_control, action)
 

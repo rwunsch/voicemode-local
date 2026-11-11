@@ -147,23 +147,66 @@ def test_visible_with_session_or_recent_ptt():
     assert snap(ptt=True)["visible"] is True
 
 
-def test_dismiss_hides_until_new_session():
-    old = [sess(1, started_at=5.0)]
-    dismissed = vp.session_keys(old)
-    assert snap(sessions=old, dismissed=dismissed)["visible"] is False
-    assert snap(sessions=old, ptt=True, dismissed=dismissed)["visible"] is False
-    # the same pid registering again (new started_at) is a new session
-    assert snap(sessions=[sess(1, started_at=9.0)], dismissed=dismissed)["visible"] is True
-    assert snap(sessions=old + [sess(2)], dismissed=dismissed)["visible"] is True
+def test_closed_hides_even_new_sessions_and_ptt():
+    # (Robert, 2026-11-10) a user close sticks until voice restarts from scratch
+    assert snap(sessions=[sess(1)], closed=True)["visible"] is False
+    assert snap(sessions=[sess(1), sess(2)], ptt=True, closed=True)["visible"] is False
+    assert snap(sessions=[sess(1)], closed=False)["visible"] is True
 
 
-def test_dismiss_command_then_new_session_shows_again(ctx, child):
+def test_dismiss_writes_the_closed_marker_and_a_new_session_does_not_lift_it(ctx, child):
     st.register_session(os.getpid(), "a", None, ctx.base)
     assert vp.gather(ctx)["visible"] is True
     vp.handle_command({"cmd": "dismiss"}, ctx)
+    assert st.pill_closed(ctx.base)
     assert vp.gather(ctx)["visible"] is False
     st.register_session(child.pid, "b", None, ctx.base)
-    assert vp.gather(ctx)["visible"] is True
+    assert vp.gather(ctx)["visible"] is False
+
+
+def _run(ctx, monkeypatch, start_grace, quit_grace, keep_open_s=None):
+    """Run run_stdio with an open stdin; return (exit value, lines written)."""
+    import io
+    monkeypatch.setattr(vp, "START_GRACE_S", start_grace)
+    monkeypatch.setattr(vp, "QUIT_GRACE_S", quit_grace)
+    monkeypatch.setattr(vp, "IDLE_INTERVAL_S", 0.05)
+    r, w = os.pipe()
+    out = io.StringIO()
+    result = {}
+    t = threading.Thread(target=lambda: result.update(v=vp.run_stdio(ctx, stdin_fd=r, out=out)),
+                         daemon=True)
+    t.start()
+    t.join(keep_open_s if keep_open_s is not None else 5)
+    alive = t.is_alive()
+    os.close(w)
+    t.join(5)
+    os.close(r)
+    return (None if alive else result.get("v")), [json.loads(x) for x in out.getvalue().splitlines()]
+
+
+def test_backend_quits_once_no_session_is_left(ctx, monkeypatch):
+    st.set_pill_closed(True, ctx.base)
+    value, lines = _run(ctx, monkeypatch, start_grace=0.0, quit_grace=0.2)
+    assert value == vp.EXIT_DONE
+    assert lines[-1] == {"quit": True}
+    assert not st.pill_closed(ctx.base)   # nobody left: voice restarts from scratch
+
+
+def test_backend_stays_while_a_session_is_live(ctx, monkeypatch):
+    st.register_session(os.getpid(), "a", None, ctx.base)
+    value, lines = _run(ctx, monkeypatch, start_grace=0.0, quit_grace=0.2, keep_open_s=1.0)
+    assert value is None and {"quit": True} not in lines
+
+
+def test_backend_never_quits_inside_its_start_grace(ctx, monkeypatch):
+    value, lines = _run(ctx, monkeypatch, start_grace=30.0, quit_grace=0.0, keep_open_s=1.0)
+    assert value is None and {"quit": True} not in lines
+
+
+def test_main_exits_with_exit_done_when_it_quits(ctx, monkeypatch):
+    monkeypatch.setattr(vp, "Context", lambda: ctx)
+    monkeypatch.setattr(vp, "run_stdio", lambda c: vp.EXIT_DONE)
+    assert vp.main([]) == vp.EXIT_DONE
 
 
 def test_floor_follows_conch_holder_and_sessions_get_states():
@@ -535,7 +578,7 @@ def test_state_socket_helpers(sock_dir, monkeypatch):
 
 
 def test_barge_control_lives_in_state_and_rejects_bad_action():
-    assert "must be on, off or status" in st.barge_control("on; rm -rf /")
+    assert "must be on, off, auto or status" in st.barge_control("on; rm -rf /")
 
 
 # -- exit while paused: the server-side pause must be released too -----------

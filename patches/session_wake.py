@@ -96,6 +96,11 @@ MESSAGES = {
     "wake": ('Voice pill Wake: the user wants to talk. Call the voicemode converse tool now '
              'with message="Listening." and wait_for_response=true, then keep the voice '
              'conversation going.'),
+    # conch_wakers: a session that queued with conch_mode="callback" has been granted the
+    # floor. Its queued message was not spoken; the model still has it in context.
+    "conch": ('Voice queue: your turn on the voice channel has come. If you still have something '
+              'to say, call the voicemode converse tool now (your queued message was not spoken). '
+              'If not, do nothing: you keep your place.'),
 }
 REASON_ALIASES = {"play": "wake"}   # the pill's old Play command
 

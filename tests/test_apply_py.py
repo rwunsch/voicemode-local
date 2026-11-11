@@ -35,6 +35,9 @@ SOURCES = {
     "streaming.py": "streaming.py",
     "server.py": "server.py",
     "tools/converse.py": "converse.py",
+    "conch_notify.py": "conch_notify.py",
+    "conch_queue.py": "conch_queue.py",
+    "conch.py": "conch.py",
 }
 
 
@@ -84,6 +87,7 @@ def current_modules(old):
     (main's 5a6cb8d changed voice_pill_state.py) and is covered by its own tests."""
     steps = json.loads((PATCHES / "manifest.json").read_text(encoding="utf-8"))["steps"]
     for name in {s["copy"] for s in steps if "copy" in s}:
+        (old / name).parent.mkdir(parents=True, exist_ok=True)  # "../ui/pill/..." leave patches/
         shutil.copyfile(PATCHES / name, old / name)
     return old
 
@@ -93,14 +97,26 @@ def current_modules(old):
 # never loosen the comparison.
 INTENDED_SINCE_BASELINE = [
     ("patch_ptt_instant.py", ["control_channel.py", "control_socket.py", "tools/converse.py"]),
+    ("patch_conch_wakers.py", ["tools/converse.py", "conch_notify.py", "conch_queue.py", "conch.py"]),   # 2026-11-11
+    ("patch_session_name.py", ["tools/converse.py"]),   # 2026-11-11: adds the Copilot chat title step
+    ("patch_conch_fairness.py", ["tools/converse.py"]),   # 2026-11-11: fair holds, progress
 ]
 # Modules added as "copy" steps since the baseline (2026-11-07: session_wake.py).
 INTENDED_COPIES_SINCE_BASELINE = ["session_wake.py"]
+# 2026-11-10: the voice server starts the pill window itself (pill_autostart).
+INTENDED_COPIES_SINCE_BASELINE += ["pill_autostart.py", "pill-windows.ps1", "voice_pill_mac.py",
+                                   "ui/pill/index.html", "ui/pill/app.js", "ui/pill/model.js",
+                                   "ui/pill/pill.css"]
+INTENDED_COPIES_SINCE_BASELINE += ["conch_wakers.py"]   # 2026-11-11
+INTENDED_COPIES_SINCE_BASELINE += ["conch_hold.py", "mcp_progress.py"]   # 2026-11-11
 
 
 def apply_intended(pkg: Path) -> None:
+    sources = {s["to"]: s["copy"] for s in json.loads(
+        (PATCHES / "manifest.json").read_text(encoding="utf-8"))["steps"] if "copy" in s}
     for name in INTENDED_COPIES_SINCE_BASELINE:
-        shutil.copy(PATCHES / name, pkg / name)
+        (pkg / name).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(PATCHES / sources[name], pkg / name)
     for script, targets in INTENDED_SINCE_BASELINE:
         for rel in targets:
             r = subprocess.run([sys.executable, str(PATCHES / script), str(pkg / rel)],

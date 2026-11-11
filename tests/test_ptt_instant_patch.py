@@ -32,7 +32,8 @@ PATCHES = REPO / "patches"
 MARKER = "voicemode-local ptt instant"
 SOURCES = {"control_channel.py": "control_channel.py", "control_socket.py": "control_socket.py",
            "core.py": "core.py", "simple_failover.py": "simple_failover.py",
-           "streaming.py": "streaming.py", "server.py": "server.py", "tools/converse.py": "converse.py"}
+           "streaming.py": "streaming.py", "server.py": "server.py", "tools/converse.py": "converse.py",
+           "conch_notify.py": "conch_notify.py", "conch_queue.py": "conch_queue.py", "conch.py": "conch.py"}
 
 
 def _src() -> Path:

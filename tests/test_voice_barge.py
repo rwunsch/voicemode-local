@@ -318,6 +318,9 @@ class TestBargeControl:
     def test_passes_the_action_to_voicemode_switch(self, tmp_path):
         assert voice_barge.barge_control("off", self._switch(tmp_path)) == "barge off"
 
+    def test_passes_auto_through(self, tmp_path):
+        assert voice_barge.barge_control("auto", self._switch(tmp_path)) == "barge auto"
+
     @pytest.mark.parametrize("action", ["ON", " on ", "Status"])
     def test_action_is_forgiving_about_case_and_spaces(self, tmp_path, action):
         assert voice_barge.barge_control(action, self._switch(tmp_path)) == f"barge {action.strip().lower()}"
@@ -326,7 +329,7 @@ class TestBargeControl:
     def test_rejects_anything_else_without_running_it(self, tmp_path, action):
         marker = tmp_path / "ran"
         switch = self._switch(tmp_path, f'touch "{marker}"')
-        assert "must be on, off or status" in voice_barge.barge_control(action, switch)
+        assert "must be on, off, auto or status" in voice_barge.barge_control(action, switch)
         assert not marker.exists()
 
     def test_strips_terminal_colours(self, tmp_path):
@@ -348,10 +351,13 @@ def test_tool_file_registers_a_voice_barge_mcp_tool():
 
 class TestStatusCommand:
     """`python -m voice_mode.voice_barge status`: FELIX reads it at voice start (FELIX-voice,
-    2026-11-05). One line, exactly on / off / cannot run: <reason>, exit 0."""
+    2026-11-05). One line, exactly on / off / auto (<on|off>: <route>) / cannot run:
+    <reason>, exit 0."""
 
     def _run(self, monkeypatch, capsys, state):
         monkeypatch.setattr(voice_barge, "barge_state", lambda home=None: state)
+        mode = None if state is None else ("on" if state else "off")
+        monkeypatch.setattr(voice_barge, "barge_mode", lambda home=None: mode)
         monkeypatch.setattr(sys, "argv", ["voice_barge", "status"])
         code = voice_barge.main()
         return code, capsys.readouterr().out

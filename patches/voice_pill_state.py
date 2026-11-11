@@ -558,8 +558,10 @@ def capture_backend() -> str | None:
     return None
 
 
-def barge_state(home=None) -> bool | None:
-    """Whether interrupt by voice is on, or None where it cannot run (no mic reader).
+def barge_mode(home=None) -> str | None:
+    """"on", "off" or "auto" for interrupt by voice, or None where it cannot run (no mic
+    reader). auto (Robert, 2026-11-10): the trigger runs, and listens only while the
+    output route is headphones (voice_barge.output_route), decided at each stretch.
 
     voicemode.env wins when it sets VOICEMODE_VOICE_BARGE: the switch writes it while the
     server runs, and the server's environment is from start-up. Without the key, the
@@ -570,7 +572,14 @@ def barge_state(home=None) -> bool | None:
     value = settings.get("VOICEMODE_VOICE_BARGE")
     if value is None:
         value = os.environ.get("VOICEMODE_VOICE_BARGE", "")
-    return value.strip().strip('"').lower() == "true"
+    value = value.strip().strip('"').lower()
+    return {"true": "on", "auto": "auto"}.get(value, "off")
+
+
+def barge_state(home=None) -> bool | None:
+    """Whether the trigger should run (on or auto), or None where it cannot run."""
+    mode = barge_mode(home)
+    return None if mode is None else mode in ("on", "auto")
 
 
 def _barge_note_once(pid: int, base) -> str:
@@ -602,6 +611,43 @@ STOPPED_MESSAGE = ("Voice was stopped from the pill. "
                    "Continue in text unless the user asks for voice again.")
 
 
+# -- closed marker: the user's close sticks until voice restarts from scratch --
+# (Robert, 2026-11-10) The pill opens with the first voice session and closes with the
+# last; closed by the user, it stays closed until no voice session is left and a new one
+# starts. "From scratch" = no other live registered session when one enters its first turn.
+
+def _closed_path(base) -> Path:
+    return _base(base) / "closed"
+
+
+def pill_closed(base=None) -> bool:
+    return _closed_path(base).exists()
+
+
+def set_pill_closed(closed: bool, base=None) -> None:
+    if closed:
+        _write_atomic(_closed_path(base), str(time.time()))
+    else:
+        _unlink(_closed_path(base))
+
+
+# Set by the server (pill_autostart): called with the base after a session has entered a
+# turn, to bring the window up when it should be up. Never allowed to cost the turn.
+autostart_hook = None
+
+
+def _default_autostart():
+    """pill_autostart.ensure inside the installed voice_mode package; None anywhere else
+    (this module loaded on its own, as in tests, must never start a real window)."""
+    if __package__ != "voice_mode":
+        return None
+    try:
+        from voice_mode import pill_autostart
+    except ImportError:
+        return None
+    return pill_autostart.ensure
+
+
 async def enter(pid: int, label: str, voice: str | None, base=None) -> str | None:
     """Runs before the conch is taken: a waiting session must not hold the floor.
 
@@ -610,8 +656,17 @@ async def enter(pid: int, label: str, voice: str | None, base=None) -> str | Non
     voice = effective_voice(pid, voice, base)
     current = _read_json(_session_path(pid, base))
     if not current or current.get("start") != process_start(pid):
+        # Before registering: is anyone else still here? If not, voice restarts from scratch.
+        if not any(s["pid"] != pid for s in live_sessions(base)):
+            set_pill_closed(False, base)
         register_session(pid, label, voice, base)
     touch_session(pid, voice, base, label=label)
+    hook = autostart_hook if autostart_hook is not None else _default_autostart()
+    if hook is not None:
+        try:
+            hook(base)
+        except Exception as e:
+            _warn_once(f"voice pill autostart failed: {e}")
     await wait_while_paused(base=base)
     if take_stop(pid, base):
         mark_stopped(pid, True, base)
@@ -916,8 +971,8 @@ def barge_control(action: str, switch=None) -> str:
     list and the command comes from the environment or the caller only, so
     model output never reaches the command line."""
     action = (action or "").strip().lower()
-    if action not in ("on", "off", "status"):
-        return "action must be on, off or status"
+    if action not in ("on", "off", "auto", "status"):
+        return "action must be on, off, auto or status"
     argv, error = barge_command(switch)
     if error:
         return error

@@ -25,6 +25,81 @@ another session (FELIX-MAC, FELIX-voice) and not re-run here; **inferred** = rea
 | Native install without WSL/Docker/admin | n/a | install.ps1 -Mode windows-native | install-mac.sh (v1.0.0) + `--barge` |
 | Live on/off switch | voicemode-switch | voicemode_native.py barge/pill on/off/status | voicemode-switch |
 
+## What v1.1.1 changes (tagged 2026-11-11, merged to main from feature/pill-autostart)
+
+Agreed with FELIX-voice on 2026-11-10. Robert's decisions are in
+`docs/superpowers/plans/2026-11-10-pill-autostart.md`.
+
+- **The voice server starts the pill itself.** Section 4's pill line is replaced: FELIX no
+  longer starts or stops a pill window.
+  - It opens on the first voice turn and closes (backend exit code 3) about 20 s after the
+    last voice session ends.
+  - A ✕ close stays closed until voice starts again from scratch.
+  - See `docs/voice-pill/README.md`, "Who starts and stops the window".
+- **New settings** (environment first):
+
+  | Setting | FELIX value |
+  |---|---|
+  | `VOICEMODE_PILL` | `true` to have a pill |
+  | `VOICEMODE_PILL_AUTOSTART` | leave unset (`off` = the server never starts a window) |
+  | `VOICEMODE_PILL_DATA_DIR` | FELIX's pill window folder, e.g. `<voice root>\pill-window`, with WebView2 pre-installed |
+  | `VOICEMODE_PILL_PYTHON` | macOS: the pill venv's python. Windows: optional, default is the server's own interpreter |
+  | `VOICEMODE_CONTROL_CHANNEL_ENABLED` | still `true` for live state |
+
+- **Barge `auto`.** `VOICEMODE_VOICE_BARGE=auto` listens only while output goes to headphones.
+  `VOICEMODE_BARGE_CONTROL_COMMAND` may now receive `auto` as its appended action, besides
+  `on`, `off` and `status`.
+- **Conch callback (found in FELIX Windows test 3, 2026-11-11).**
+  - **What happened:** a chat queued with `conch_mode="callback"`. Upstream wakes such a
+    chat only through tmux, and never expires its grant, so the queue stood still.
+  - **Fix:** `conch_wakers.py` + `patch_conch_wakers.py`.
+    - Callback is served as wait wherever no waker can reach the chat, which is FELIX today.
+    - Where a waker exists, the granted chat is woken. The wakers, in order: the
+      `VOICEMODE_CONCH_WAKE_COMMAND` environment setting (a JSON list, run with the
+      session id and voice server pid appended; exit 0 = delivered, exit 75 = busy, it
+      keeps its place), then Claude Code's session socket (POSIX), then tmux.
+    - A woken chat has 10 s (`VOICEMODE_CONCH_CALLBACK_GRACE`) to come back. After that,
+      a session that is present may speak past it; the absent chat keeps its place and is
+      woken again at the next release, at most 5 times per queued turn
+      (`VOICEMODE_CONCH_MAX_WAKES`). These clocks never run while someone holds the mic.
+    - Validated live on WSL with two Claude Code sessions, 2026-11-11 (n=1 each): two
+      delivered wakes, two busy skips with the place kept, one pass of an absent grant.
+  - **For FELIX later: the Copilot wake path.** No standard MCP message starts a model
+    turn (spike, reported). An in-chat extension's `session.send` does wake an idle chat
+    (reported: idle 1.5 min woken in +7.4 s, idle 12 min 18 s woken in +14 s, n=1 each).
+    A send to a busy chat queues and never reports busy. So the bridge behind
+    `VOICEMODE_CONCH_WAKE_COMMAND` must return 75 itself, using the extension's
+    `session.idle` events, and keep at most one pending wake per chat. FELIX builds it.
+  - **Only a grant that names a chat wakes it.** Upstream's ping to a callback waiter
+    that it skips no longer wakes anyone, because our wake text says "your turn has
+    come". A spent `conch give` becomes an ordinary grant.
+  - Patch targets: `tools/converse.py`, `conch_notify.py`, `conch_queue.py`, `conch.py`.
+    The manifests add `conch_notify.py`, `conch_queue.py` and `conch.py` to `unshare`.
+- **Fair holds (`conch_hold.py`, `patch_conch_fairness.py`).** While another chat is
+  blocked waiting (wait mode), a `hold_conch` turn with no reply releases the mic, and at
+  most 3 held turns in a row keep it (`VOICEMODE_CONCH_HOLD_MAX_TURNS`). A speak-only
+  held turn counts toward the 3. A busy callback chat does not count as waiting.
+  Validated on WSL with Claude Code (no-reply release n=3, the 3-turn cap n=1).
+- **MCP progress heartbeat (`mcp_progress.py`).** Copilot CLI cancels a tool call after
+  180 s unless progress arrives (reported, CLI 1.0.107). converse now sends progress every
+  30 s (`VOICEMODE_PROGRESS_INTERVAL`, 0 = off), but only when the client sent a progress
+  token. Each call logs "progress heartbeat: … client token present/absent"; with
+  `VOICEMODE_DEBUG=true` that line is in `%USERPROFILE%\voicemode_debug.log`. Claude
+  Code: token present (validated, n=3). Copilot: unmeasured. Keep `"timeout": 960000`
+  on the connector either way. A cancelled conch wait now logs
+  `CONCH_WAIT_END result=cancelled`.
+- **Push-to-talk focus (`ptt-listener-windows.ps1 -FocusPattern`).** The default is
+  unchanged (terminals and VS Code). FELIX passes `'^github$'` for the Copilot app.
+- **Manifests copy files from outside `patches/`.** The copy sources are `../pill-windows.ps1`
+  and `../ui/pill/*`, copied to `pill-windows.ps1` and `ui/pill/*` in the package.
+  `apply.py` now creates the parent folders. A vendored copy needs those files beside
+  `patches/`.
+- **Open for FELIX.**
+  - Whether the Copilot app's Job Object allows breakaway (FELIX-voice is measuring). If it
+    doesn't, the window lives as long as the chat that started it, and the next turn of
+    another chat restarts it.
+  - Native Windows and macOS live runs are still to do. WSL is validated (n=1 per step).
+
 ## 1. Patches
 
 - `patches/manifest.json`: the list for WSL/Linux/macOS (21 steps at 7c81771). Its output is kept
@@ -92,6 +167,12 @@ Every stretch logs one line (`stretch: s, windows, max, p90, fired, …`) for di
 
 ## 6. Known gaps
 
+- **One queue per voice-mode home.** Chats share a queue only if they share
+  `VOICEMODE_BASE_DIR`. A WSL voicemode-local install never shares one with FELIX on
+  Windows (see `docs/windows-native/README.md`, Gotchas). FELIX itself split its queue
+  across runtime rebuilds; FELIX-voice reported this on 2026-11-11 and is fixing it in
+  FELIX #1743 with one stable home across runtimes.
+
 - **Session wake: FELIX should not use it** (set `VOICEMODE_SESSION_WAKE=off`).
   `patches/session_wake.py` messages an idle Claude Code session over Claude Code's internal
   peer socket. That protocol is undocumented (read from the binary's strings), validated
@@ -108,4 +189,6 @@ Every stretch logs one line (`stretch: s, windows, max, p90, fired, …`) for di
 - voicemode-switch and upstream's update_config write voicemode.env without the native switch's lock.
 - On a machine with both installs, voice-mode's walk-up from FELIX's runtime folder reaches the user's
   profile, so a personal `~/.voicemode/voicemode.env` would be read by FELIX's voice (FELIX-voice's finding).
-  Our native launcher starts voice-mode in its runtime folder for this reason.
+  Our native launcher starts voice-mode in its runtime folder for this reason. Correction (reported by
+  FELIX-voice, 2026-11-10, not re-run here): FELIX already stops that walk-up with
+  `<runtime>\home\.voicemode.env` and its working folder, so this gap does not apply to FELIX today.

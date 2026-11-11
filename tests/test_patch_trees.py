@@ -41,6 +41,9 @@ SOURCES = {
     "streaming.py": "streaming.py",
     "server.py": "server.py",
     "tools/converse.py": "converse.py",
+    "conch_notify.py": "conch_notify.py",
+    "conch_queue.py": "conch_queue.py",
+    "conch.py": "conch.py",
 }
 
 # felix-framework aea841ffd, plugins/voicemode/dependencies.json "patches", in order.
@@ -181,7 +184,7 @@ EXPECTED_MARKERS = {
         "simple_failover.py": ["NO SILENT SWAP (voicemode-local)"],
         "tools/converse.py": ["voicemode-local listen overrun", "voicemode-local turns playback stop",
                               "voicemode-local session name", HOLD, "LANGUAGE-LOCKED VOICES",
-                              BARGE, PILL, INSTANT],
+                              BARGE, PILL, INSTANT, "VML: CONCH WAKERS", "VML: CONCH FAIRNESS"],
     },
 }
 

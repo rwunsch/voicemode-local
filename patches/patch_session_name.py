@@ -28,8 +28,9 @@ Resolve a real label, in priority order:
   3. ``~/.voicemode/session_names/<CLAUDE_CODE_SESSION_ID>.txt`` -- the label the
      agent writes at voice-mode start. The MCP server inherits the same session
      id at spawn, so it keys on its own environment with no plumbing.
-  4. The current directory's basename -- a decent default (the repo name).
-  5. ``"converse"`` -- upstream's value, if even the cwd is unavailable.
+  4. A GitHub Copilot app chat's title (``workspace.yaml`` ``name:``), else its chat folder.
+  5. The current directory's basename -- a decent default (the repo name).
+  6. ``"converse"`` -- upstream's value, if even the cwd is unavailable.
 
 Every step is best-effort and can never raise into the voice path: a bad label
 must not cost you a turn.
@@ -87,6 +88,38 @@ R_CLAUDE_NAME = (
     "        except Exception:  # noqa: BLE001\n"
     "            pass\n"
     "        if sid:\n"
+)
+# Fourth step: a GitHub Copilot app chat's title (2026-11-11, Robert: yes). Copilot gives each
+# MCP connector COPILOT_AGENT_SESSION_ID (its session-state/<id> folder) and
+# COPILOT_SESSION_CWD (<COPILOT_HOME>/chats/<date>/<slug>); the title is `name:` in
+# session-state/<id>/workspace.yaml, re-read on every call because Copilot renames chats.
+# Else the chat folder's slug. Reported by FELIX-voice from Robert's laptop (n=2 chats).
+COPILOT_NAME_MARKER = "voicemode-local copilot chat name"
+A_COPILOT_NAME = (
+    "        cwd = _Path(_os.getcwd()).name\n"
+)
+R_COPILOT_NAME = (
+    "        try:  # voicemode-local copilot chat name\n"
+    "            _chat = _os.getenv(\"COPILOT_SESSION_CWD\")\n"
+    "            _csid = _os.getenv(\"COPILOT_AGENT_SESSION_ID\") or \"\"\n"
+    "            _home = _os.getenv(\"COPILOT_HOME\") or (str(_Path(_chat).parents[2]) if _chat else \"\")\n"
+    "            if _home and _csid and _Path(_csid).name == _csid and _csid not in (\".\", \"..\"):\n"
+    "                _ws = _Path(_home) / \"session-state\" / _csid / \"workspace.yaml\"\n"
+    "                try:\n"
+    "                    _lines = _ws.read_text(encoding=\"utf-8\").splitlines()\n"
+    "                except (OSError, ValueError):\n"
+    "                    _lines = []\n"
+    "                for _line in _lines:\n"
+    "                    if _line.startswith(\"name:\"):\n"
+    "                        _title = _line[5:].strip().strip(\"\\\"'\").strip()\n"
+    "                        if _title:\n"
+    "                            return _title[:64]\n"
+    "                        break\n"
+    "            if _chat and _Path(_chat).name:\n"
+    "                return _Path(_chat).name[:64]\n"
+    "        except Exception:  # noqa: BLE001\n"
+    "            pass\n"
+    "        cwd = _Path(_os.getcwd()).name\n"
 )
 A_QUEUE = (
     "                        queue_session_id,\n"
@@ -171,7 +204,7 @@ def _write(target: Path, text: str, crlf: bool) -> None:
 
 def apply(target: Path) -> int:
     src, crlf = _read(target)
-    if MARKER in src and QUEUE_MARKER in src and CLAUDE_NAME_MARKER in src:
+    if MARKER in src and QUEUE_MARKER in src and CLAUDE_NAME_MARKER in src and COPILOT_NAME_MARKER in src:
         print(f"  already patched: {target}")
         return 0
 
@@ -225,6 +258,17 @@ def apply(target: Path) -> int:
             )
             return 1
         out = out.replace(A_CLAUDE_NAME, R_CLAUDE_NAME, 1)
+
+    if COPILOT_NAME_MARKER not in out and "\ndef _vml_session_name() -> str:" in out:
+        count = out.count(A_COPILOT_NAME)
+        if count != 1:
+            print(
+                f"ANCHOR DRIFT: 'copilot chat name' matched {count} times (expected 1) in "
+                f"{target}. Update patches/patch_session_name.py.",
+                file=sys.stderr,
+            )
+            return 1
+        out = out.replace(A_COPILOT_NAME, R_COPILOT_NAME, 1)
 
     compile(out, str(target), "exec")  # syntax safety net before writing
     _write(target, out, crlf)

@@ -58,6 +58,13 @@ except ImportError:  # POSIX
 
 IDLE_INTERVAL_S = 1.0
 TURN_INTERVAL_S = 0.25
+# (Robert, 2026-11-10) The pill closes with the last voice session: once no session (and
+# no recent push-to-talk) has been seen for QUIT_GRACE_S, the backend prints {"quit": true}
+# and exits EXIT_DONE; the window closes on that and does not restart it. Never in the
+# first START_GRACE_S, so a window started just before its session registers survives.
+START_GRACE_S = 30.0
+QUIT_GRACE_S = 20.0
+EXIT_DONE = 3
 # Windows byte-range locks are mandatory: lock a byte far past any content.
 # Kept under 2**31 in case the CRT treats the offset as 32-bit (not checked).
 LOCK_OFFSET = 1 << 30
@@ -66,11 +73,10 @@ LOCK_OFFSET = 1 << 30
 class Context:
     """Paths left unset are resolved on every access, so they follow the base dir."""
 
-    def __init__(self, base=None, home=None, sock=None, switch=None, dismissed=None,
-                 barge_thread=None):
+    def __init__(self, base=None, home=None, sock=None, switch=None, barge_thread=None):
         self.base, self.home, self.sock = base, home, sock
         self.switch = switch              # barge command: None = the setting, else voicemode-switch
-        self.dismissed = dismissed        # session keys hidden by Dismiss
+        self.alive = False                # the last gather saw a session or a recent push-to-talk
         self.barge_thread = barge_thread
         self.wake = None                  # the last Wake: label, ok, detail, at, claude_pid
 
@@ -169,13 +175,12 @@ def _floor_voice(floor, is_holder, sessions, conch, overrides):
     return ov.get("voice") or own.get("voice") or held
 
 
-def build_snapshot(status, sessions, conch, *, paused=False, ptt=False, dismissed=None,
+def build_snapshot(status, sessions, conch, *, paused=False, ptt=False, closed=False,
                    last_floor=None, overrides=None, barge=None, ui=None, platform=None, beeps=False,
                    default_voice=st.FALLBACK_VOICE, play=None, wake=None) -> dict:
     overrides = overrides or {}
     floor, is_holder = _floor(sessions, conch, last_floor)
-    new = session_keys(sessions) - (dismissed or frozenset())
-    visible = bool(new) if dismissed is not None else bool(sessions or ptt)
+    visible = bool(sessions or ptt) and not closed
     if paused:
         phase = "paused"
     elif status.get("holding"):
@@ -219,7 +224,7 @@ def build_snapshot(status, sessions, conch, *, paused=False, ptt=False, dismisse
 
 def _barge_enabled(home) -> bool:
     # The toggle (voicemode-switch barge) writes voicemode.env: read it from there first.
-    return (st.file_first_setting("VOICEMODE_VOICE_BARGE", "", home) or "").strip() == "true"
+    return (st.file_first_setting("VOICEMODE_VOICE_BARGE", "", home) or "").strip() in ("true", "auto")
 
 
 def _beeps_on(ctx) -> bool:
@@ -307,13 +312,15 @@ def wake_view(ctx, now=None):
 
 def gather(ctx) -> dict:
     sessions = st.live_sessions(ctx.base)
+    ptt = st.ptt_recent(base=ctx.base)
+    ctx.alive = bool(sessions or ptt)
     play = _play_target(ctx, sessions)
     conch = read_conch(ctx.home)
     barge = {"enabled": _barge_enabled(ctx.home), "available": st.barge_available(),
              "count": st.interruptions_since(_midnight(), ctx.base)}
     return build_snapshot(
         st._status(ctx.sock), sessions, conch, paused=st.is_paused(ctx.base),
-        ptt=st.ptt_recent(base=ctx.base), dismissed=ctx.dismissed,
+        ptt=ptt, closed=st.pill_closed(ctx.base),
         last_floor=_remember_floor(ctx, conch),
         overrides={s["pid"]: st.get_override(s["pid"], ctx.base) for s in sessions},
         barge=barge, ui=st.load_ui(ctx.base), beeps=_beeps_on(ctx),
@@ -358,7 +365,7 @@ def handle_command(msg, ctx=None) -> None:
             if not (is_holder and st.send_control(ctx.sock, "stop")):
                 st.request_stop(floor["pid"], ctx.base)
     elif cmd == "dismiss":
-        ctx.dismissed = session_keys(st.live_sessions(ctx.base))
+        st.set_pill_closed(True, ctx.base)  # sticks until voice restarts from scratch
     elif cmd == "set_barge" and isinstance(msg.get("on"), bool):
         if ctx.barge_thread is None or not ctx.barge_thread.is_alive():
             # `on` can download a model: never block the snapshot loop on it.
@@ -474,17 +481,34 @@ def _input_source(fd):
     return ThreadInput(fd) if st._on_windows() else SelectInput(fd)
 
 
-def run_stdio(ctx, stdin_fd=0, out=None) -> None:
+def _quit(ctx, out) -> int:
+    """No voice session left: close the window for good and lift a user's close with it."""
+    st.set_pill_closed(False, ctx.base)
+    out.write(json.dumps({"quit": True}) + "\n")
+    out.flush()
+    return EXIT_DONE
+
+
+def run_stdio(ctx, stdin_fd=0, out=None):
+    """Returns None when stdin closes (the window is gone), EXIT_DONE when the last
+    voice session has left."""
     out = out or sys.stdout
     source = _input_source(stdin_fd)
+    started = time.monotonic()
     buf, interval = b"", _emit(ctx, out)
+    last_alive = started
     next_at = time.monotonic() + interval
     while True:
+        now = time.monotonic()
+        if ctx.alive:
+            last_alive = now
+        elif now - started >= START_GRACE_S and now - last_alive >= QUIT_GRACE_S:
+            return _quit(ctx, out)
         chunk = source.wait(max(0.0, next_at - time.monotonic()))
         sent = False
         if chunk is not None:
             if not chunk:
-                return
+                return None
             buf += chunk
             while b"\n" in buf:
                 line, buf = buf.split(b"\n", 1)
@@ -527,8 +551,11 @@ def main(argv=None) -> int:
         return 1
     st.enable_backend_mode()  # this process may sleep on a busy file; the server may not
     _install_stop_signals()
+    alive_file = ctx.base / "backend.json"  # pill_autostart: a window is already up
+    st._write_json(alive_file, {"pid": os.getpid(), "start": st.process_start(os.getpid())})
+    code = 0
     try:
-        run_stdio(ctx)
+        code = run_stdio(ctx) or 0
     except (BrokenPipeError, KeyboardInterrupt):
         pass
     except OSError as e:
@@ -537,8 +564,9 @@ def main(argv=None) -> int:
             raise
     finally:
         _release_pause(ctx)
+        st._unlink(alive_file)
         release_lock(lock)
-    return 0
+    return code
 
 
 if __name__ == "__main__":

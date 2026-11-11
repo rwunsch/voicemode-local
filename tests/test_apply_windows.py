@@ -22,6 +22,9 @@ SOURCES = {
     "simple_failover.py": "simple_failover.py",
     "streaming.py": "streaming.py",
     "tools/converse.py": "converse.py",
+    "conch_notify.py": "conch_notify.py",
+    "conch_queue.py": "conch_queue.py",
+    "conch.py": "conch.py",
 }
 
 

@@ -95,6 +95,7 @@ def run(pkg: Path, manifest: dict, python: str = sys.executable, out=None,
                     return r.returncode
         else:
             dest = pkg / step["to"]
+            dest.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy(patches / step["copy"], dest)
             _say(out, f"[patches] installed {step['to']}")
     _say(out, "[patches] Done. Restart Claude Code for changes to take effect.")

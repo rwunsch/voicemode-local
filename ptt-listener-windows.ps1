@@ -91,7 +91,10 @@ param(
     [string]$SenderArgs = "-m voice_mode.ptt_control_client --stdin",
     [string]$LogPath = "",
     [string[]]$SendAction = @(),
-    [string]$ReplayKeys = ""
+    [string]$ReplayKeys = "",
+    # Foreground processes that count as "the voice window". FELIX passes '^github$'
+    # (the Copilot app is github.exe). Default: terminals and VS Code.
+    [string]$FocusPattern = 'WindowsTerminal|powershell|pwsh|wsl|conhost|cmd|alacritty|wezterm|Code'
 )
 
 # A release sooner than this is a tap: a full stop, back to text mode. Later is a
@@ -168,12 +171,12 @@ try {
 # app sets -- Claude Code puts the session name there, so this box shows
 # "Voicemode", which no sane title pattern would have matched. Process names are
 # stable.
-$TerminalProcessPattern = 'WindowsTerminal|powershell|pwsh|wsl|conhost|cmd|alacritty|wezterm|Code'
+# The pattern is the -FocusPattern parameter.
 
 function Test-TerminalFocused {
     try {
         $p = Get-Process -Id ([VmlKey]::ForegroundPid()) -ErrorAction Stop
-        return $p.ProcessName -match $TerminalProcessPattern
+        return $p.ProcessName -match $FocusPattern
     } catch { return $false }
 }
 

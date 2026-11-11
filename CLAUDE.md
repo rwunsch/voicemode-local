@@ -61,15 +61,30 @@ Three things to know when using `mcp__voicemode__converse`:
    waiter queue — you then appear in `voicemode conch status`. It fast-fails if
    the holder dies, so you cannot be stuck behind a corpse.
 2. **`conch_mode`** decides how you are served once queued. `"wait"` (the
-   default) blocks until the floor is granted to you. `"callback"` returns
-   immediately and pings you when your turn comes — your message is **not**
-   spoken at call time; you take the floor by calling converse again when
-   notified. Never downgrade a queued question to text, and never give up.
+   default) blocks until the floor is granted to you; prefer it. `"callback"`
+   returns immediately — your message is **not** spoken at call time — and you
+   are woken when your turn comes, then take the floor by calling converse
+   again. Upstream can only wake through tmux, so `patches/conch_wakers.py`
+   (2026-11-11) wakes per harness: `VOICEMODE_CONCH_WAKE_COMMAND`, Claude Code's
+   session socket (`session_wake.py`, POSIX), or upstream's tmux. **Where none
+   can reach the session, callback is served as wait** (FELIX/Copilot today), so
+   an unwoken callback can no longer block the queue. A woken session that stays
+   away past 10 s may be passed and keeps its place; a busy one is skipped and
+   re-woken (max 5). Validated live on WSL with Claude Code, 2026-11-11 (n=1 per case). Never downgrade a queued
+   question to text, and never give up.
 3. **`hold_conch=true`** keeps the floor *across turns* — use it when your next
    converse call continues the same thread (asking a question you will answer,
    or speaking across several turns) so another agent cannot cut in mid-thought.
    It is a short, refreshed TTL (10s idle, re-stamped each turn); override per
    call with `conch_hold_timeout`. Release by simply not passing it next turn.
+   **While another session waits, a hold is limited** (`patches/conch_hold.py`,
+   2026-11-11): a held turn that got no reply releases the mic, and at most 3 held
+   turns in a row keep it (`VOICEMODE_CONCH_HOLD_MAX_TURNS`).
+
+Long waits and listens send MCP progress every 30 s (`patches/mcp_progress.py`,
+`VOICEMODE_PROGRESS_INTERVAL`, 0 = off), so a client with a 180 s tool timeout
+(Copilot CLI) does not cancel converse. It is sent only when the client asks for
+progress; the voice server logs "client token present/absent" per call.
 
 There is no `end_burst` and no `ticket` any more — those were our queue's API.
 Handing the mic on is now the *default*: the floor releases at the end of your

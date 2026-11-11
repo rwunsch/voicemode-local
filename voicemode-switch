@@ -439,7 +439,7 @@ cmd_ensure() {
 voice_barge_enabled() {
     local env_file="$HOME/.voicemode/voicemode.env" value=""
     [ -f "$env_file" ] && value="$(sed -n 's/^VOICEMODE_VOICE_BARGE=//p' "$env_file" | tail -1)"
-    [ "$value" = "true" ]
+    [ "$value" = "true" ] || [ "$value" = "auto" ]
 }
 
 # A tool whitelist would hide the voice_barge MCP tool. Never create a whitelist:
@@ -488,15 +488,16 @@ fetch_silero_model() {
 
 cmd_barge() {
     case "${1:-status}" in
-        on)
+        on|auto)
             fetch_silero_model || return 1
-            set_voice_barge true
+            set_voice_barge "$([ "$1" = auto ] && echo auto || echo true)"
             # The trigger's barge_in travels over the control channel (upstream default: off).
             # `barge off` leaves it on: the pill and push-to-talk use it too.
             set_env_value VOICEMODE_CONTROL_CHANNEL_ENABLED true
             stop_voice_barge
             cmd_ensure --quiet
-            ok "Voice barge-in on. New voice sessions need /mcp reconnect to pick up the patch."
+            if [ "$1" = auto ]; then ok "Voice barge-in auto: listens only while sound plays to headphones. New voice sessions need /mcp reconnect to pick up the patch."
+            else ok "Voice barge-in on. New voice sessions need /mcp reconnect to pick up the patch."; fi
             ;;
         off)
             set_voice_barge false
@@ -504,7 +505,8 @@ cmd_barge() {
             ok "Voice barge-in off"
             ;;
         status)
-            if voice_barge_enabled; then echo "Voice barge-in: enabled"; else echo "Voice barge-in: disabled"; fi
+            if [ "$(env_value VOICEMODE_VOICE_BARGE)" = "auto" ]; then echo "Voice barge-in: auto (listens only on headphones)"
+            elif voice_barge_enabled; then echo "Voice barge-in: enabled"; else echo "Voice barge-in: disabled"; fi
             if [ "$(env_value VOICEMODE_CONTROL_CHANNEL_ENABLED)" = "true" ]; then
                 echo "Control channel: enabled"
             else
@@ -521,7 +523,7 @@ cmd_barge() {
                 "$VENV_PY" -m voice_mode.voice_barge status 2>/dev/null | sed -n '2,$p'
             fi
             ;;
-        *) echo "usage: voicemode-switch barge [on|off|status]"; return 2 ;;
+        *) echo "usage: voicemode-switch barge [on|off|auto|status]"; return 2 ;;
     esac
 }
 

@@ -196,6 +196,9 @@ def to_cocoa(rect, full_h):
     return (x, full_h - y - h, w, h)
 
 
+BACKEND_DONE = 3  # voice_pill.EXIT_DONE: no voice session is left
+
+
 @dataclass
 class Decision:
     action: str          # 'retry' | 'exit' | 'stay'
@@ -207,6 +210,9 @@ class Decision:
 def on_backend_exit(code, lines, had_output, ran_s, backoff, flag_on):
     """What to do when the backend ends. Same policy as pill-windows.ps1."""
     if not flag_on:
+        return Decision("exit")
+    if code == BACKEND_DONE:
+        # The last voice session has left (voice_pill.EXIT_DONE): close, and stay closed.
         return Decision("exit")
     if code == 1 and lines == 0:
         # A second instance, or a failed import: retrying helps neither.
@@ -241,7 +247,10 @@ new ResizeObserver(function(){if(c.offsetHeight)window.pillTransport.send(JSON.s
 
 
 def ui_dir():
-    return HERE.parent / "ui" / "pill"
+    """Beside this file inside the voice_mode package (pill_autostart); the repo's ui/pill
+    when run from patches/."""
+    packaged = HERE / "ui" / "pill"
+    return packaged if (packaged / "index.html").exists() else HERE.parent / "ui" / "pill"
 
 
 def ui_file_url():

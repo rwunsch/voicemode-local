@@ -271,3 +271,99 @@ def test_a_venv_patched_before_the_session_name_lookup_gets_it(tmp_path, src_dir
     r = subprocess.run([sys.executable, str(PATCHES / "patch_session_name.py"), str(target)],
                        capture_output=True, text=True)
     assert "already patched" in r.stdout
+
+
+# --- the Copilot chat's title (2026-11-11, Robert: yes) -----------------------
+# The Copilot app gives each MCP connector COPILOT_AGENT_SESSION_ID (= its
+# session-state/<id> folder) and COPILOT_SESSION_CWD (= <COPILOT_HOME>/chats/<date>/<slug>);
+# the chat's title is `name:` in session-state/<id>/workspace.yaml (FELIX-voice, read on
+# Robert's laptop 2026-11-11, n=2 chats). Copilot renames chats, so it is read on every call.
+
+def _copilot_chat(tmp_path, monkeypatch, sid="90cbe34e", name="Voicemode test session a",
+                  slug="jubilant-barnacle-90cbe34e", set_home=True):
+    home = tmp_path / "copilot"
+    ws = home / "session-state" / sid
+    ws.mkdir(parents=True)
+    if name is not None:
+        (ws / "workspace.yaml").write_text(f"id: {sid}\nname: {name}\ncwd: x\n", encoding="utf-8")
+    chat_dir = home / "chats" / "2026-11-11" / slug
+    chat_dir.mkdir(parents=True)
+    monkeypatch.setenv("COPILOT_AGENT_SESSION_ID", sid)
+    monkeypatch.setenv("COPILOT_SESSION_CWD", str(chat_dir))
+    if set_home:
+        monkeypatch.setenv("COPILOT_HOME", str(home))
+    else:
+        monkeypatch.delenv("COPILOT_HOME", raising=False)
+    return ws
+
+
+@pytest.fixture
+def no_copilot(monkeypatch):
+    for k in ("COPILOT_AGENT_SESSION_ID", "COPILOT_SESSION_CWD", "COPILOT_HOME"):
+        monkeypatch.delenv(k, raising=False)
+
+
+def test_a_copilot_chat_is_named_by_its_title(resolver, monkeypatch, clean_env, no_copilot, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    _copilot_chat(tmp_path, monkeypatch)
+    monkeypatch.chdir(tmp_path)
+    assert resolver() == "Voicemode test session a"
+
+
+def test_a_renamed_copilot_chat_is_read_again(resolver, monkeypatch, clean_env, no_copilot, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    ws = _copilot_chat(tmp_path, monkeypatch)
+    assert resolver() == "Voicemode test session a"
+    (ws / "workspace.yaml").write_text('name: "Voice test session"\n', encoding="utf-8")
+    assert resolver() == "Voice test session"
+
+
+def test_copilot_home_is_derived_from_the_chat_folder(resolver, monkeypatch, clean_env, no_copilot, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    _copilot_chat(tmp_path, monkeypatch, set_home=False)
+    assert resolver() == "Voicemode test session a"
+
+
+def test_without_a_title_the_chat_slug_is_used(resolver, monkeypatch, clean_env, no_copilot, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    _copilot_chat(tmp_path, monkeypatch, name=None)
+    assert resolver() == "jubilant-barnacle-90cbe34e"
+
+
+def test_a_session_id_with_a_path_in_it_is_not_followed(resolver, monkeypatch, clean_env, no_copilot, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    _copilot_chat(tmp_path, monkeypatch)
+    monkeypatch.setenv("COPILOT_AGENT_SESSION_ID", "../../etc")
+    assert resolver() == "jubilant-barnacle-90cbe34e"
+
+
+def test_the_env_override_still_wins_over_copilot(resolver, monkeypatch, clean_env, no_copilot, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    _copilot_chat(tmp_path, monkeypatch)
+    monkeypatch.setenv("VOICEMODE_SESSION_NAME", "explicit")
+    assert resolver() == "explicit"
+
+
+def test_outside_copilot_nothing_changes(resolver, monkeypatch, clean_env, no_copilot, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.chdir(tmp_path)
+    assert resolver() == tmp_path.name
+
+
+def test_a_venv_patched_before_the_copilot_step_gets_it(tmp_path, src_dir):
+    sys.path.insert(0, str(PATCHES))
+    try:
+        import importlib
+        mod = importlib.reload(importlib.import_module("patch_session_name"))
+    finally:
+        sys.path.remove(str(PATCHES))
+    target = tmp_path / "converse.py"
+    shutil.copy(src_dir / "converse.py", target)
+    assert subprocess.run([sys.executable, str(PATCHES / "patch_session_name.py"), str(target)],
+                          capture_output=True).returncode == 0
+    target.write_text(target.read_text().replace(mod.R_COPILOT_NAME, mod.A_COPILOT_NAME))
+    assert mod.COPILOT_NAME_MARKER not in target.read_text()
+    r = subprocess.run([sys.executable, str(PATCHES / "patch_session_name.py"), str(target)],
+                       capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert target.read_text().count(mod.COPILOT_NAME_MARKER) == 1

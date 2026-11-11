@@ -27,7 +27,8 @@ NATIVE_OURS = ["patch_windows_tempfile.py", "patch_native_client_folder.py"]
 SOURCES = {
     "control_channel.py": "control_channel.py", "control_socket.py": "control_socket.py",
     "core.py": "core.py", "simple_failover.py": "simple_failover.py", "streaming.py": "streaming.py",
-    "server.py": "server.py", "tools/converse.py": "converse.py",
+    "server.py": "server.py", "tools/converse.py": "converse.py", "conch_notify.py": "conch_notify.py",
+    "conch_queue.py": "conch_queue.py", "conch.py": "conch.py",
 }
 
 
@@ -77,6 +78,7 @@ def current_modules(old):
     (main's 5a6cb8d changed voice_pill_state.py) and is covered by its own tests."""
     steps = json.loads((PATCHES / "manifest.json").read_text(encoding="utf-8"))["steps"]
     for name in {s["copy"] for s in steps if "copy" in s}:
+        (old / name).parent.mkdir(parents=True, exist_ok=True)  # "../ui/pill/..." leave patches/
         shutil.copyfile(PATCHES / name, old / name)
     return old
 
@@ -100,6 +102,33 @@ INTENDED_STEP_LINES.append(
     b'    {"copy": "session_wake.py", "to": "session_wake.py", "why": "wake an idle Claude Code '
     b'session: push-to-talk hold and the pill\'s Play"},\n')
 INTENDED_COPIES = ["session_wake.py"]
+# 2026-11-10: the voice server starts the pill window itself (pill_autostart).
+INTENDED_STEP_LINES.append(b'    {"copy": "pill_autostart.py", "to": "pill_autostart.py", "why": "the voice server starts the pill window itself"},\n')
+INTENDED_STEP_LINES.append(b'    {"copy": "../pill-windows.ps1", "to": "pill-windows.ps1", "why": "the Windows pill window, for pill_autostart"},\n')
+INTENDED_STEP_LINES.append(b'    {"copy": "voice_pill_mac.py", "to": "voice_pill_mac.py", "why": "the macOS pill window, for pill_autostart"},\n')
+INTENDED_STEP_LINES.append(b'    {"copy": "../ui/pill/index.html", "to": "ui/pill/index.html"},\n')
+INTENDED_STEP_LINES.append(b'    {"copy": "../ui/pill/app.js", "to": "ui/pill/app.js"},\n')
+INTENDED_STEP_LINES.append(b'    {"copy": "../ui/pill/model.js", "to": "ui/pill/model.js"},\n')
+INTENDED_STEP_LINES.append(b'    {"copy": "../ui/pill/pill.css", "to": "ui/pill/pill.css"},\n')
+INTENDED_COPIES += ["pill_autostart.py", "pill-windows.ps1", "voice_pill_mac.py",
+                    "ui/pill/index.html", "ui/pill/app.js", "ui/pill/model.js", "ui/pill/pill.css"]
+# 2026-11-11: per-harness conch wakers (callback is served as wait where none can reach).
+INTENDED_STEP_LINES.append(b'    {"copy": "conch_wakers.py", "to": "conch_wakers.py", "why": "per-harness wakers for the conch queue\'s callback mode"},\n')
+INTENDED_STEP_LINES.append(b'    {"patch": "patch_conch_wakers.py", "targets": ["tools/converse.py", "conch_notify.py", "conch_queue.py", "conch.py"], "why": "callback is served as wait where no waker can reach the session; wakers before upstream\'s tmux push"},\n')
+INTENDED_PATCHES.append(("patch_conch_wakers.py", ["tools/converse.py", "conch_notify.py", "conch_queue.py", "conch.py"]))
+INTENDED_PATCHES.append(("patch_session_name.py", ["tools/converse.py"]))   # 2026-11-11: Copilot chat title step
+INTENDED_COPIES += ["conch_wakers.py"]
+# 2026-11-11: fair holds, MCP progress heartbeat, a cancelled wait is logged.
+INTENDED_STEP_LINES.append(b'    {"copy": "conch_hold.py", "to": "conch_hold.py", "why": "fair holds: a hold does not starve a waiting session"},\n')
+INTENDED_STEP_LINES.append(b'    {"copy": "mcp_progress.py", "to": "mcp_progress.py", "why": "MCP progress heartbeat so a 180 s client timeout does not cancel converse"},\n')
+INTENDED_STEP_LINES.append(b'    {"patch": "patch_conch_fairness.py", "targets": ["tools/converse.py"], "why": "fair holds, progress heartbeat, a cancelled wait is logged; needs conch_hold.py and mcp_progress.py"}\n')
+INTENDED_PATCHES.append(("patch_conch_fairness.py", ["tools/converse.py"]))
+INTENDED_COPIES += ["conch_hold.py", "mcp_progress.py"]
+# Text edits those additions force on lines that were already there: (now, before).
+INTENDED_EDITS = [
+    (b'    "streaming.py",\n    "conch_notify.py",\n    "conch_queue.py",\n    "conch.py"\n', b'    "streaming.py"\n'),
+    (b'"why": "MCP tool for switching voice barge-in"},\n', b'"why": "MCP tool for switching voice barge-in"}\n'),
+]
 
 
 def test_default_manifest_file_is_unchanged():
@@ -109,6 +138,9 @@ def test_default_manifest_file_is_unchanged():
     for lines in INTENDED_STEP_LINES:
         assert now.count(lines) == 1
         now = now.replace(lines, b"")
+    for after, before in INTENDED_EDITS:
+        assert now.count(after) == 1
+        now = now.replace(after, before)
     assert now == old
 
 
@@ -121,8 +153,10 @@ def test_default_output_is_byte_identical_to_before(tmp_path):
             r = subprocess.run([sys.executable, str(PATCHES / script), str(before / rel)],
                                capture_output=True, text=True, env=dict(os.environ, PYTHONUTF8="1"))
             assert r.returncode == 0, r.stdout + r.stderr
+    sources = {s["to"]: s["copy"] for s in _steps("manifest.json") if "copy" in s}
     for name in INTENDED_COPIES:
-        shutil.copy(PATCHES / name, before / name)
+        (before / name).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(PATCHES / sources[name], before / name)
     _apply(PATCHES / "apply.py", now)
     assert _files(now) == _files(before)
     assert "FELIX: NO FFMPEG" not in (now / "tools/converse.py").read_text(encoding="utf-8")

@@ -50,8 +50,8 @@ where it came from.
   `whisper-proxy.py` already had one (commit 951d46e), and a test now pins its default.
   Natively, STT is whisper-server itself, so the proxy is not used.
 - **Launcher** (`launch`, the MCP command). It writes the lease, starts the watchdog, then the
-  TTS and STT services, then the pill (`VOICEMODE_PILL=true`) and the voice barge-in trigger
-  (`VOICEMODE_VOICE_BARGE=true`; `python -m voice_mode.voice_barge <silero>`, hearing the mic through
+  TTS and STT services, then the voice barge-in trigger
+  (`VOICEMODE_VOICE_BARGE=true` or `auto`; `python -m voice_mode.voice_barge <silero>`, hearing the mic through
   sounddevice), and the push-to-talk listener (`VOICEMODE_PTT_ENABLED=true`; native mode, see
   below). Each is one per install, under the same lease and watchdog. It waits until TTS and STT answer and checks that the process
   answering is the one it started. Then it runs voice-mode with stdin, stdout and stderr passed
@@ -86,7 +86,9 @@ where it came from.
   turns a skip caused by a missing `VM812_SRC` into a failure under `VOICEMODE_RELEASE_CHECK=1`,
   and prints a loud warning otherwise.
 
-The launcher starts the pill and push-to-talk only when enabled.
+The launcher starts push-to-talk only when enabled. Since v1.1.1 it no longer starts the pill:
+the voice server opens it on the first voice turn and it closes after the last session
+(`docs/voice-pill/README.md`, "Who starts and stops the window"). `pill on` still opens it at once.
 The pill's native tests are `tests/test_pill_windows_native.py` (Linux: static checks, and
 the name derivation compared with PowerShell's through `powershell.exe`) and
 `tests/test_pill_windows_native_windows.py` (Windows, 9 tests). MCP registration and `install.ps1` belong to
@@ -295,6 +297,14 @@ VML_MODEL_SOURCE='C:\path\to\<sha256>\<file> folder' VM812_SRC=<pristine 8.12.0>
 ```
 
 ## Gotchas
+
+- **WSL and native Windows keep separate voice queues, by design.** The conch is a file
+  lock under each install's voice-mode home: `~/.voicemode` in WSL, the runtime's or the
+  user's home on Windows. A WSL session and a native or FELIX chat cannot see each other,
+  so they can speak at the same time, and each install shows its own pill. Seen on Robert's
+  laptop on 2026-11-11 (n=1, reported by FELIX-voice): a WSL pill next to FELIX's pill.
+  To avoid it, run voice from one side at a time. A shared queue across the WSL boundary
+  is not built.
 
 - **voice-mode runs in the runtime folder, not the client's.** Upstream loads every
   `.voicemode/voicemode.env` it finds walking up from its working folder. Started from a WSL
