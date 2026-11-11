@@ -96,6 +96,7 @@ def current_modules(old):
 INTENDED_SINCE_BASELINE = [
     ("patch_ptt_instant.py", ["control_channel.py", "control_socket.py", "tools/converse.py"]),
     ("patch_conch_wakers.py", ["tools/converse.py", "conch_notify.py"]),   # 2026-11-11
+    ("patch_session_name.py", ["tools/converse.py"]),   # 2026-11-11: adds the Copilot chat title step
 ]
 # Modules added as "copy" steps since the baseline (2026-11-07: session_wake.py).
 INTENDED_COPIES_SINCE_BASELINE = ["session_wake.py"]
