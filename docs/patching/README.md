@@ -101,6 +101,10 @@ uv pip install --python .venv/bin/python3 --reinstall-package voice-mode "voice-
 ./patches/apply.sh
 ```
 
+Since v1.1.2, `patch_conch_wakers.py` and `patch_conch_fairness.py` say so on stderr when
+a file carries their marker but not their current text ("carries an older version of
+this patch; it is kept"). They still exit 0 and change nothing.
+
 You can also delete the venv and run `install.sh` again. Plain `install.sh` on an
 existing venv does not reinstall voice-mode, so the old text stays. FELIX rebuilds its
 runtime whenever a listed input changes, so it picks up new text by itself.

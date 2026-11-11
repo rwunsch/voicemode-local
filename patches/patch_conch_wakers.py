@@ -169,8 +169,6 @@ def _fail(target, what):
 
 def apply(target):
     source, ending = _read(target)
-    if MARKER in source:
-        return 0
     if target.name == "converse.py":
         pairs = [(CONVERSE_ANCHOR, CONVERSE_ANCHOR + CONVERSE_ADD)]
     elif target.name == "conch_notify.py":
@@ -181,6 +179,12 @@ def apply(target):
         pairs = CONCH_PAIRS
     else:
         return _fail(target, "only tools/converse.py, conch_notify.py, conch_queue.py and conch.py are patched")
+    if MARKER in source:
+        if any(r not in source for _, r in pairs):
+            print(f"[{Path(__file__).name}] {target}: carries an older version of this patch; "
+                  "it is kept. To get the new text, reinstall voice-mode and apply again "
+                  "(docs/patching/README.md).", file=sys.stderr)
+        return 0
     for anchor, _ in pairs:
         if source.count(anchor) != 1:
             return _fail(target, f"an anchor was found {source.count(anchor)} times, not once")
