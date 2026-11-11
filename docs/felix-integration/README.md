@@ -25,7 +25,7 @@ another session (FELIX-MAC, FELIX-voice) and not re-run here; **inferred** = rea
 | Native install without WSL/Docker/admin | n/a | install.ps1 -Mode windows-native | install-mac.sh (v1.0.0) + `--barge` |
 | Live on/off switch | voicemode-switch | voicemode_native.py barge/pill on/off/status | voicemode-switch |
 
-## What v1.1.1 changes (2026-11-11, branch feature/pill-autostart, not tagged yet)
+## What v1.1.1 changes (tagged 2026-11-11, merged to main from feature/pill-autostart)
 
 Agreed with FELIX-voice on 2026-11-10. Robert's decisions are in
 `docs/superpowers/plans/2026-11-10-pill-autostart.md`.
@@ -64,12 +64,32 @@ Agreed with FELIX-voice on 2026-11-10. Robert's decisions are in
       (`VOICEMODE_CONCH_MAX_WAKES`). These clocks never run while someone holds the mic.
     - Validated live on WSL with two Claude Code sessions, 2026-11-11 (n=1 each): two
       delivered wakes, two busy skips with the place kept, one pass of an absent grant.
-  - **For FELIX later:** the wake path for Copilot is open. A spike (FELIX-voice,
-    2026-11-11) is checking for a generic route through MCP first, and an in-chat
-    extension (`session.send`) behind `VOICEMODE_CONCH_WAKE_COMMAND` as the fallback.
-    Neither is proven yet (n=0).
+  - **For FELIX later: the Copilot wake path.** No standard MCP message starts a model
+    turn (spike, reported). An in-chat extension's `session.send` does wake an idle chat
+    (reported: idle 1.5 min woken in +7.4 s, idle 12 min 18 s woken in +14 s, n=1 each).
+    A send to a busy chat queues and never reports busy. So the bridge behind
+    `VOICEMODE_CONCH_WAKE_COMMAND` must return 75 itself, using the extension's
+    `session.idle` events, and keep at most one pending wake per chat. FELIX builds it.
+  - **Only a grant that names a chat wakes it.** Upstream's ping to a callback waiter
+    that it skips no longer wakes anyone, because our wake text says "your turn has
+    come". A spent `conch give` becomes an ordinary grant.
   - Patch targets: `tools/converse.py`, `conch_notify.py`, `conch_queue.py`, `conch.py`.
     The manifests add `conch_notify.py`, `conch_queue.py` and `conch.py` to `unshare`.
+- **Fair holds (`conch_hold.py`, `patch_conch_fairness.py`).** While another chat is
+  blocked waiting (wait mode), a `hold_conch` turn with no reply releases the mic, and at
+  most 3 held turns in a row keep it (`VOICEMODE_CONCH_HOLD_MAX_TURNS`). A speak-only
+  held turn counts toward the 3. A busy callback chat does not count as waiting.
+  Validated on WSL with Claude Code (no-reply release n=3, the 3-turn cap n=1).
+- **MCP progress heartbeat (`mcp_progress.py`).** Copilot CLI cancels a tool call after
+  180 s unless progress arrives (reported, CLI 1.0.107). converse now sends progress every
+  30 s (`VOICEMODE_PROGRESS_INTERVAL`, 0 = off), but only when the client sent a progress
+  token. Each call logs "progress heartbeat: … client token present/absent"; with
+  `VOICEMODE_DEBUG=true` that line is in `%USERPROFILE%\voicemode_debug.log`. Claude
+  Code: token present (validated, n=3). Copilot: unmeasured. Keep `"timeout": 960000`
+  on the connector either way. A cancelled conch wait now logs
+  `CONCH_WAIT_END result=cancelled`.
+- **Push-to-talk focus (`ptt-listener-windows.ps1 -FocusPattern`).** The default is
+  unchanged (terminals and VS Code). FELIX passes `'^github$'` for the Copilot app.
 - **Manifests copy files from outside `patches/`.** The copy sources are `../pill-windows.ps1`
   and `../ui/pill/*`, copied to `pill-windows.ps1` and `ui/pill/*` in the package.
   `apply.py` now creates the parent folders. A vendored copy needs those files beside
