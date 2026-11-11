@@ -100,6 +100,24 @@ ensure_ptt_listener
 # patches/pill_autostart.py opens it at a session's first voice turn when
 # VOICEMODE_PILL=true (macOS, WSL and native Windows alike); the launcher no longer does.
 
+# --- Our tools: voice_stop and voice_barge -----------------------------------
+# With no tool setting, upstream 8.12 loads only converse and service
+# (tools/__init__.py), which hides voice_stop and voice_barge. voice_stop is how a
+# session leaves the pill at once (else only when this server exits). Same rule as
+# the native launcher (voicemode_native.tool_selection): with no tool setting in the
+# environment or ~/.voicemode/voicemode.env, give upstream's default plus ours; a
+# setting the user made is left alone.
+default_tool_selection() {
+    local name
+    for name in VOICEMODE_TOOLS_ENABLED VOICEMODE_TOOLS_DISABLED VOICEMODE_TOOLS; do
+        [ -n "$(printenv "$name" 2>/dev/null)" ] && return 0   # upstream treats empty as unset
+    done
+    grep -qE '^[[:space:]]*(export[[:space:]]+)?VOICEMODE_TOOLS(_ENABLED|_DISABLED)?=' \
+        "$HOME/.voicemode/voicemode.env" 2>/dev/null && return 0
+    export VOICEMODE_TOOLS_ENABLED="converse,service,voice_barge_tool"
+}
+default_tool_selection
+
 # Best-effort: never let proxy startup block or fail the MCP launch.
 "$SCRIPT_DIR/voicemode-switch" ensure --quiet >> "$LOG_DIR/ensure.log" 2>&1 || true
 

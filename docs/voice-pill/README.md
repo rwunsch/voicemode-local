@@ -67,6 +67,9 @@ window. No launcher starts it any more.
   live session and no push-to-talk for 20 s, it prints `{"quit": true}` and exits with code 3.
   Both windows close on code 3 and do not restart. `voice_stop` removes the session at once,
   and a dead server's session is pruned by pid.
+  `voice_stop` is in `voice_barge_tool`, which upstream hides unless a tool list names it:
+  `voicemode-mcp` (and the native launcher) set `converse,service,voice_barge_tool` when no
+  tool setting exists. FELIX must include `voice_barge_tool` in any list it passes.
 - **Settings.**
   - `VOICEMODE_PILL_DATA_DIR`: the Windows folder. Default `<VOICEMODE_NATIVE_ROOT>\pill`,
     else `<base>/pill/window`. WSL passes none and keeps `%LOCALAPPDATA%\voicemode-local`.
