@@ -1200,7 +1200,10 @@ def test_route_gate_opens_only_on_headphones_and_caches():
 @pytest.mark.parametrize("value,mode", [("true", "on"), ("auto", "auto"), (" AUTO ", "auto"),
                                         ("false", "off"), ("", "off"), ("maybe", "off")])
 def test_barge_mode_reads_auto(monkeypatch, tmp_path, value, mode):
-    st = sys.modules.get("voice_pill_state") or __import__("voice_pill_state")
+    sp = importlib.util.spec_from_file_location("voice_pill_state_barge_mode",
+                                                MODULE.parent / "voice_pill_state.py")
+    st = importlib.util.module_from_spec(sp)
+    sp.loader.exec_module(st)   # its own copy: no reliance on another file's sys.path
     monkeypatch.setattr(st, "capture_backend", lambda: "sounddevice")
     monkeypatch.setattr(st, "read_env_file", lambda home=None: {})
     monkeypatch.setenv("VOICEMODE_VOICE_BARGE", value)
