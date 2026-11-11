@@ -222,3 +222,12 @@ def test_drift_fails_and_writes_nothing(pristine_converse):
     pristine_converse.write_text(text)
     assert _apply(pristine_converse).returncode != 0
     assert pristine_converse.read_text() == text
+
+
+@pytest.mark.parametrize("text,want", [
+    ("yes", True), ("Yes again.", True), ("ja", True),
+    (".\n.\n.\n.\n.", False),          # live 2026-11-11 21:29: whisper's output for silence
+    ("", False), (None, False), ("  ...  ", False), ("-", False),
+])
+def test_only_words_count_as_a_reply(text, want):
+    assert ch.is_reply(text) is want

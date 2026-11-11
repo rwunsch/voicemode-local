@@ -22,7 +22,7 @@ PAIRS = [
     ("            held_seconds = conch.release(hold=hold_conch)\n",
      "            try:  # " + MARKER + ": a hold does not starve a waiting session\n"
      "                from voice_mode import conch_hold as _vml_ch\n"
-     "                _vml_replied = bool(locals().get(\"response_text\")) or bool(locals().get(\"n_answered\"))\n"
+     "                _vml_replied = _vml_ch.is_reply(locals().get(\"response_text\")) or bool(locals().get(\"n_answered\"))\n"
      "                _vml_hold = _vml_ch.effective_hold(hold_conch, conch.session_id, replied=_vml_replied)\n"
      "            except Exception:\n"
      "                _vml_hold = hold_conch\n"

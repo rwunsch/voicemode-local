@@ -34,6 +34,12 @@ def max_turns() -> int:
     return value if value >= 0 else DEFAULT_MAX_TURNS
 
 
+def is_reply(text) -> bool:
+    """A transcript counts as a reply only if it has a letter or digit: whisper turns
+    silence into dots (live 2026-11-11 21:29, ".\\n.\\n.\\n.\\n.")."""
+    return isinstance(text, str) and any(ch.isalnum() for ch in text)
+
+
 def others_waiting(session_id) -> bool:
     """Is anyone but this session in the conch queue? False when it cannot be read."""
     if __package__ != "voice_mode":

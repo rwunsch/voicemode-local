@@ -45,7 +45,12 @@ Fair holds and progress (2e515a5), live on WSL with Claude Code, 2026-11-11 20:0
 - A `hold_conch=true` turn with no reply, while a test session waited: "hold released,
   no reply this turn and someone is waiting". The waiter got the mic at once, and no
   held marker appeared.
-- Not live yet: the 3-turn cap (needs 4 spoken replies); progress in Copilot.
+- 3-turn cap, 21:28-21:31 with Robert answering: held after turns 1-3, then "hold released
+  after 3 held turns, someone is waiting" and the test session got the mic (n=1).
+  Turn 3's transcript was only dots and was counted as a reply; fixed afterwards: only
+  a transcript with a letter or digit counts (`conch_hold.is_reply`).
+- No-reply release seen 3 times (20:06, 21:02 twice).
+- Not live yet: progress in Copilot.
 
 Not tested live: any harness other than Claude Code on WSL.
 Seen during the test: `conch status` still says "Every other waiter is blocked
