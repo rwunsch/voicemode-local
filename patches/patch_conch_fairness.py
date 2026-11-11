@@ -49,6 +49,14 @@ PAIRS = [
      "                            \"result\": \"cancelled\"\n"
      "                        })\n"
      "                    raise\n"),
+    ("                holder_agent = holder.get('agent', 'unknown') if holder else 'unknown'\n",
+     "                holder_agent = holder.get('agent', 'unknown') if holder else 'unknown'\n"
+     "                if holder is None:  # " + MARKER + ": a free mic reserved for a queued turn\n"
+     "                    try:\n"
+     "                        from voice_mode import conch_wakers as _vml_cw\n"
+     "                        holder_agent = _vml_cw.reserved_label() or holder_agent\n"
+     "                    except Exception:\n"
+     "                        pass\n"),
     ("    result = await _converse_core(\n",
      "    try:  # " + MARKER + ": progress every 30 s so a 180 s client timeout does not cancel us\n"
      "        from voice_mode.mcp_progress import heartbeat as _vml_heartbeat\n"

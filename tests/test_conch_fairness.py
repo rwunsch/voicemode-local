@@ -292,3 +292,8 @@ def test_the_patch_logs_the_hold_it_applied_and_exempts_speak_only_turns(pristin
     assert '"hold_active": bool(_vml_hold)' in text
     assert '"turn_results" in locals()' in text and "not wait_for_response" in text
     assert "acquired_at=" in text
+
+
+def test_the_patch_names_a_reserved_free_mic(pristine_converse):
+    assert _apply(pristine_converse).returncode == 0
+    assert "_vml_cw.reserved_label()" in pristine_converse.read_text()

@@ -179,6 +179,25 @@ def take_wake(state_dir, session_id, seq) -> bool:
             os.close(lock_fd)
 
 
+def reserved_label() -> Optional[str]:
+    """When the mic is free but a grant reserves it for a queued session's turn: a label
+    naming that session, for converse's "who holds the voice channel" text. Else None."""
+    if __package__ != "voice_mode":
+        return None
+    try:
+        from voice_mode.conch_queue import ConchQueue
+        grant = ConchQueue._current_grant()
+        if not grant:
+            return None
+        for e in ConchQueue.list():
+            if e.session_id == grant.get("session_id"):
+                name = e.agent or str(e.session_id)[:8]
+                return f"{name} (reserved for its queued turn; nobody is speaking yet)"
+    except Exception:  # noqa: BLE001 - the label is cosmetic
+        logger.debug("reserved label failed", exc_info=True)
+    return None
+
+
 def _session_wake():
     if __package__ == "voice_mode":
         from voice_mode import session_wake

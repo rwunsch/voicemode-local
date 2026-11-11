@@ -714,3 +714,18 @@ def test_a_replace_refused_once_is_retried(policy_env, tmp_path, monkeypatch):
     cw.take_wake(tmp_path, "A", 1)
     assert json.loads((tmp_path / cw.WAKES_FILE).read_text())["A"]["count"] == 1
     assert not list(tmp_path.glob(".wakes-*"))           # no temp file left behind
+
+
+def test_a_free_mic_reserved_for_a_turn_is_named(queue):
+    # Within the grace a caller was told "unknown holds the voice channel": the mic was
+    # free, reserved for a woken session.
+    import voice_mode.conch_wakers as pkg_cw
+    queue.Q.register("A", agent="voicemode", mode="callback", pid=os.getpid())
+    queue.Q.grant_next()
+    label = pkg_cw.reserved_label()
+    assert label is not None and "voicemode" in label and "reserved" in label
+
+
+def test_no_reservation_no_label(queue):
+    import voice_mode.conch_wakers as pkg_cw
+    assert pkg_cw.reserved_label() is None
