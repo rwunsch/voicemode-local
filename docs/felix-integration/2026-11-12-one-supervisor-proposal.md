@@ -14,12 +14,15 @@ Decisions needed:
   `plugins/voicemode/scripts/voice.py`. voicemode-local copied it into
   `scripts/windows/voicemode_native.py` at FELIX commit aea841ffd (that file's own header,
   lines 4-10) and added Job Objects, the pill and push-to-talk.
-- **Both files are now drifted copies of that code.** Measured 2026-11-12 (n=1 snapshot,
-  difflib per function):
-  - 46 of voice.py's 57 functions share a name with the voicemode-local file, holding 770 of
-    its 854 lines.
-  - 16 are near-identical and 10 similar.
-  - 20 have diverged, among them `setup` (similarity 0.10), `ensure_services` and `watch`.
+- **Both files are now drifted copies of that code.** Measured 2026-11-12, top-level
+  functions, difflib per function, n=1 each.
+  - FELIX's `voice.py` at #1743 b36f288ce against voicemode-local's `voicemode_native.py` at
+    13a26ae: 78 against 101 functions, 46 shared, 32 FELIX-only.
+  - Of the 46 shared: 13 near-identical (≥0.95) in both measurements. FELIX-voice's split of
+    the rest is 13 similar and 20 diverged; mine is 10 similar and 23 diverged. difflib's
+    ratio depends on argument order.
+  - Among the diverged: `setup` 0.17-0.18, `runtime_environment` 0.20, `launch` 0.23-0.30,
+    `ensure_services` 0.40-0.47.
   - Some of FELIX's versions are newer fixes, not gaps.
 - **The scope differs.** voicemode-local's copy is Windows-only (`check_machine`, line 506);
   voicemode-local runs on the Mac through `voicemode-switch` (bash). FELIX's voice.py runs the
@@ -43,7 +46,9 @@ voicemode-local copy in `voicemode_native.py` retires into it. Two parts:
 1. **Runtime builder.** Download and verify; hash-locked `uv sync`; model links; the
    whisper.cpp zip; atomic publish only after a speech check; completeness and repair check;
    the setup deadline (exit 75). The profile supplies the policy: lock file, model list, extra
-   files, digest inputs.
+   files, digest inputs. The builder computes the runtime digest **with FELIX's formula**
+   from the profile's inputs, so FELIX's JS `manifestSha` keeps matching. Otherwise a FELIX
+   machine would rebuild, or skip a repair, wrongly.
 2. **Supervisor.**
    - **Windows design:** one host process started **outside every chat** via
      `Win32_Process.Create` (as FELIX's installer already does). It owns the speech services,
@@ -81,6 +86,15 @@ Also made options of voicemode-local's own files, so FELIX vendors them unchange
 - a setting turns off the config search up the folder tree;
 - beeps missing by default (cause unknown);
 - the pill label lagging the speaker.
+
+## How we keep it one copy
+
+- FELIX vendors only tagged voicemode-local releases, byte-identical, and never patches a
+  vendored file locally.
+- A FELIX need goes to voicemode-local as a change request and comes back in a tag.
+- FELIX's parity tests run against each vendored tag in FELIX's suite.
+- voicemode-local keeps the profile interface stable within a minor version and lists breaking
+  changes in its release notes.
 
 ## FELIX's conditions, and how they are met
 
@@ -138,9 +152,10 @@ Also made options of voicemode-local's own files, so FELIX vendors them unchange
 
 - Approve the split above?
 - Route i (recommended) or route ii?
-- Talos reviewed 27 of today's 34 findings in FELIX's vendored files. Should FELIX's
-  repository exclude `plugins/voicemode/vendor/**` from Talos, since voicemode-local reviews
-  those files itself? That is a repository setting, so it's your call.
+- 27 of Talos's 34 findings today were on vendored files. Should FELIX's repository exclude
+  `plugins/voicemode/vendor/**` from Talos? Doing so removes one independent reviewer.
+  voicemode-local has no Talos: its reviews are fresh-reviewer passes by Claude sessions.
+  The trade-off is a repository setting and your call.
 
 ## Not known yet
 
