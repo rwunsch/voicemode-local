@@ -259,3 +259,11 @@ def test_relay_mode_finds_the_wsl_home_instead_of_one_machines_path():
     assert "wslpath -w" in TEXT
     body = TEXT.split("function Get-WslHome", 1)[1].split("\nfunction ", 1)[0]
     assert "WaitForExit(" in body and "ReadToEnd()" not in body   # a stalled WSL cannot hang it
+
+
+def test_a_wsl_home_not_found_at_start_is_looked_up_again():
+    # Final review I1: on a cold WSL boot the 10 s lookup can fail once, and the token path
+    # stayed empty until the listener restarted: push-to-talk dead after login.
+    body = TEXT.split("function Get-RelayToken", 1)[1].split("\nfunction ", 1)[0]
+    assert "Get-WslHome" in body and "WslHomeTried" in body and "-ge 30" in body
+    assert "$script:TokenPath = Join-Path" in body

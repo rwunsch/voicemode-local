@@ -134,9 +134,11 @@ function Get-WslHome {
         $psi.UseShellExecute = $false
         $psi.RedirectStandardOutput = $true
         $psi.CreateNoWindow = $true
+        $psi.StandardOutputEncoding = [System.Text.Encoding]::UTF8   # wslpath prints UTF-8
         $p = [System.Diagnostics.Process]::Start($psi)
         $out = $p.StandardOutput.ReadToEndAsync()
         if (-not $p.WaitForExit(10000)) { try { $p.Kill() } catch { }; return "" }
+        if (-not $out.Wait(2000)) { return "" }   # a child still holding stdout
         $found = $out.Result.Trim()
         if ($p.ExitCode -eq 0 -and $found.StartsWith("\\")) { return $found }
     } catch { }
@@ -220,6 +222,19 @@ $script:TokenProblemLogged = $false
 # and that is logged once, not on every key.
 function Get-RelayToken {
     if ($script:RelayToken) { return $script:RelayToken }
+    # No WSL home at start (a cold WSL boot can outlast the 10 s): look again, at most
+    # every 30 s, so push-to-talk starts working once WSL is up.
+    if (-not $script:TokenPath -and ((-not $script:WslHomeTried) -or
+            ((Get-Date) - $script:WslHomeTried).TotalSeconds -ge 30)) {
+        $script:WslHomeTried = Get-Date
+        $found = Get-WslHome
+        if ($found) {
+            $script:WslHome = $found
+            $script:TokenPath = Join-Path $found ".voicemode\ptt-relay.token"
+            if (-not $LogPath) { $script:LogFile = Join-Path $found ".voicemode\logs\ptt-listener.log" }
+        }
+    }
+    if (-not $script:TokenPath) { return "" }
     try {
         $text = ([System.IO.File]::ReadAllText($TokenPath)).Trim()
         if ($text -notmatch '^[0-9a-f]{64}$') { throw "it does not hold a token" }
@@ -444,8 +459,12 @@ if (-not $Native) {
 if (Send-Action "press") {
     Log "relay reachable; watching for Ctrl+Space" "Green"
 } else {
+    if (-not $script:RelayToken) {
+        Write-Host "  relay token not found yet (see the message above); push-to-talk sends nothing until it is" -ForegroundColor Yellow
+    } else {
     Write-Host "  relay NOT reachable at $RelayHost`:$Port" -ForegroundColor Yellow
     Write-Host "  In WSL run:  VOICEMODE_PTT_HOST=0.0.0.0 ~/git/voicemode-local/.venv/bin/python -m voice_mode.ptt_relay" -ForegroundColor Yellow
+    }
 }
 } else {
     Log "native: sending through $SenderExe; watching for Ctrl+Space" "Green"

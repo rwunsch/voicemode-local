@@ -136,6 +136,9 @@ SETTING_TABLE = [
     # voice_pill_state._parse_env (and upstream's config) keep an inline comment in the
     # value, so Python reads this as off; the window must agree with the backend.
     ("VOICEMODE_PILL=true # on\n", 0),
+    # Final review I3: autostart (pill_enabled) ignores case, so the window must too.
+    ("VOICEMODE_PILL=True\n", 1),
+    ("VOICEMODE_PILL=TRUE\r\n", 1),
 ]
 
 
@@ -143,7 +146,7 @@ SETTING_TABLE = [
 def test_python_reads_the_table_the_same_way(text, want):
     sys.path.insert(0, str(REPO / "patches"))
     import voice_pill_state as st
-    got = 1 if st._parse_env(text.lstrip("\ufeff")).get("VOICEMODE_PILL", "").strip() == "true" else 0
+    got = 1 if st._parse_env(text.lstrip("\ufeff")).get("VOICEMODE_PILL", "").strip().lower() == "true" else 0
     assert got == want
 
 
@@ -168,7 +171,7 @@ def test_pill_enabled_agrees_with_python_on_this_distro(tmp_path):
     home = Path.home() / ".voicemode"
     path = next((p for p in (home / "voicemode.env", home / ".voicemode.env") if p.exists()), None)
     text = path.read_text(encoding="utf-8-sig") if path else ""
-    want = 1 if st._parse_env(text).get("VOICEMODE_PILL", "").strip() == "true" else 0
+    want = 1 if st._parse_env(text).get("VOICEMODE_PILL", "").strip().lower() == "true" else 0
     lines = run_csharp(tmp_path, ["public static int PillEnabled(", "public static int WslPillSetting(",
                                   "public static int PillSettingIn(", "public static string Output("],
                        f"$T::PillEnabled('{os.environ['WSL_DISTRO_NAME']}')")

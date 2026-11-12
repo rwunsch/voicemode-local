@@ -351,7 +351,7 @@ document.addEventListener('DOMContentLoaded',function(){
             try { text = File.ReadAllText(path, new UTF8Encoding(false)); } catch (Exception) { return -1; }
             return PillSettingIn(text);
         }
-        return v.Trim() == "true" ? 1 : 0;
+        return string.Equals(v.Trim(), "true", StringComparison.OrdinalIgnoreCase) ? 1 : 0;
     }
 
     // 1 when the last VOICEMODE_PILL in this env-file text is "true", by the rules of
@@ -369,7 +369,7 @@ document.addEventListener('DOMContentLoaded',function(){
                 value = value.Substring(1, value.Length - 2);
             if (key == "VOICEMODE_PILL") v = value;  // the last one wins
         }
-        return v.Trim() == "true" ? 1 : 0;
+        return string.Equals(v.Trim(), "true", StringComparison.OrdinalIgnoreCase) ? 1 : 0;
     }
 
     int Enabled() { return native ? NativePillEnabled() : PillEnabled(distro); }
