@@ -50,6 +50,7 @@ import glob
 import json
 import logging
 import os
+import signal
 import subprocess
 import threading
 import time
@@ -216,6 +217,17 @@ class MacHotkey:
         else:
             self._send(action)
 
+    def release_held(self, ts: float) -> None:
+        """The listener is stopping. If a hold is active, send hold_release at
+        once (no tail: the process is exiting) so the server's hold is not left
+        latched with the mic open. Otherwise nothing."""
+        self._idle_down = None
+        if not self._held:
+            return
+        self._held = False
+        self._state.on_release(ts)
+        self._emit("hold_release")
+
     def _send(self, action) -> None:
         if action is not None:
             logger.info("PTT %s", action.value)
@@ -236,6 +248,23 @@ def modifier_groups(spec: str, keyboard) -> list:
             groups.append({getattr(keyboard.Key, n) for n in names[part]
                            if hasattr(keyboard.Key, n)})
     return groups
+
+
+def _interrupt(signum, frame):
+    raise KeyboardInterrupt
+
+
+def install_stop_signals() -> None:
+    """SIGTERM and SIGHUP stop the listener the way Ctrl-C does, so its finally
+    runs and an active hold is released. Main thread only; elsewhere a no-op."""
+    for name in ("SIGTERM", "SIGHUP"):
+        sig = getattr(signal, name, None)
+        if sig is None:
+            continue
+        try:
+            signal.signal(sig, _interrupt)
+        except ValueError:  # not the main thread
+            pass
 
 
 def run_listener() -> None:
@@ -312,6 +341,7 @@ def run_listener() -> None:
             ptt_control_client.send("stop")
         return None
 
+    install_stop_signals()
     listener = keyboard.Listener(on_press=on_press, on_release=on_release,
                                  darwin_intercept=intercept)
     listener.start()
@@ -323,6 +353,7 @@ def run_listener() -> None:
         pass
     finally:
         listener.stop()
+        hotkey.release_held(time.monotonic())
 
 
 if __name__ == "__main__":

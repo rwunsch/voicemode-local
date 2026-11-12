@@ -153,3 +153,101 @@ def test_space_without_ctrl_or_focus_does_nothing(listener):
 def test_the_listener_no_longer_polls_a_threshold(listener):
     src = (REPO / "patches" / "ptt_listener_linux.py").read_text()
     assert "poll_hold" not in src and "HOLD_THRESHOLD" not in src
+
+
+# --- Talos review 2026-11-12: two Ctrl keys, and stopping mid-hold ------------
+
+def test_releasing_one_of_two_ctrl_keys_keeps_the_hotkey(listener):
+    """Both Ctrl keys down, one let go: Ctrl is still down, so Ctrl-Space works.
+    One Boolean for both keys used to drop the hotkey here."""
+    key, sent = _hotkey(listener)
+    key.ctrl(True, "ctrl_l")
+    key.ctrl(True, "ctrl_r")
+    key.ctrl(False, "ctrl_l")
+    key.space(True, 10.0)
+    key.space(False, 11.2)
+    assert sent == ["hold_start", "hold_release"]
+
+
+def test_releasing_both_ctrl_keys_drops_the_hotkey(listener):
+    key, sent = _hotkey(listener)
+    key.ctrl(True, "ctrl_l")
+    key.ctrl(True, "ctrl_r")
+    key.ctrl(False, "ctrl_l")
+    key.ctrl(False, "ctrl_r")
+    key.space(True, 10.0)
+    assert sent == []
+
+
+def _run_with_fake_keyboard(listener, monkeypatch, during_join):
+    """Run run_listener with fake pynput and voice_mode modules. ``during_join``
+    gets the fake listener (its on_press/on_release) and raises to end the run."""
+    import sys
+    import types
+
+    sent, signals = [], {}
+    Key = types.SimpleNamespace(ctrl_l="ctrl_l", ctrl_r="ctrl_r", space="space")
+
+    class FakeListener:
+        def __init__(self, on_press, on_release, **_):
+            self.on_press, self.on_release = on_press, on_release
+
+        def start(self):
+            pass
+
+        def join(self):
+            during_join(self)
+
+        def stop(self):
+            pass
+
+    keyboard = types.SimpleNamespace(Key=Key, Listener=FakeListener)
+    pynput = types.ModuleType("pynput")
+    pynput.keyboard = keyboard
+    client = types.SimpleNamespace(available=lambda: True, socket_path=lambda: "/x",
+                                   on_action=sent.append)
+    vm = types.ModuleType("voice_mode")
+    vm.ptt_core, vm.ptt_control_client = _core(), client
+    for name, mod in (("pynput", pynput), ("pynput.keyboard", keyboard), ("voice_mode", vm),
+                      ("voice_mode.ptt_core", vm.ptt_core),
+                      ("voice_mode.ptt_control_client", client)):
+        monkeypatch.setitem(sys.modules, name, mod)
+    monkeypatch.setattr(listener, "resolve_terminal_pid", lambda pid=None: 4242)
+    monkeypatch.setattr(listener, "is_focused_terminal", lambda pid: True)
+    import signal
+    monkeypatch.setattr(signal, "signal", lambda sig, fn: signals.__setitem__(sig, fn))
+    listener.run_listener()
+    return sent, signals
+
+
+def test_stopping_mid_hold_sends_hold_release(listener, monkeypatch):
+    """Killing the listener while Space is held must not leave the server's
+    hold latched (mic open): the finally sends hold_release."""
+    def during_join(fake):
+        fake.on_press("ctrl_l")
+        fake.on_press("space")
+        raise KeyboardInterrupt
+
+    sent, _ = _run_with_fake_keyboard(listener, monkeypatch, during_join)
+    assert sent == ["hold_start", "hold_release"]
+
+
+def test_stopping_with_no_hold_sends_nothing(listener, monkeypatch):
+    def during_join(fake):
+        fake.on_press("ctrl_l")
+        raise KeyboardInterrupt
+
+    sent, _ = _run_with_fake_keyboard(listener, monkeypatch, during_join)
+    assert sent == []
+
+
+def test_sigterm_and_sighup_stop_the_listener_like_ctrl_c(listener, monkeypatch):
+    import signal
+
+    def during_join(fake):
+        raise KeyboardInterrupt
+
+    _, signals = _run_with_fake_keyboard(listener, monkeypatch, during_join)
+    assert {signal.SIGTERM, signal.SIGHUP} <= set(signals)
+    with pytest.raises(KeyboardInterrupt):
+        signals[signal.SIGTERM](signal.SIGTERM, None)
