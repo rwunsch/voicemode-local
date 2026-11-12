@@ -7,15 +7,34 @@ sessions, revision 3. Robert's decisions:
    follows as its own PRs.
 3. Talos keeps reviewing `plugins/voicemode/vendor/**`: no exclusion.
 
-**PAUSED by Robert, 2026-11-12 (later the same day).** The move (step 2) stopped after Plan A's
-Tasks 1-3: the package skeleton, process and port primitives, and state/lock/leases. They are
-reviewed but unused, on the unmerged branch `feature/shared-supervisor`. Why: the urgent problem
-(multi-chat voice dying in FELIX) is fixed by FELIX's own host fix (route i), and the move's
-benefit, one copy instead of two, is unmeasured against the risk of rewriting working code.
-Until resumed:
-- FELIX keeps its `voice.py`, and voicemode-local keeps `voicemode_native.py`.
-- Resume when the duplication actually costs something: a fix needed twice, or one copy broken
-  on something the other already fixed.
+**RESUMED by Robert, 2026-11-12 (evening),** after a short pause. Robert's framing: the core
+controller for Windows and Mac lives in voicemode; voicemode extends it for Claude Code, and FELIX
+extends it for FELIX / Copilot.
+
+**Extension pattern (approved by Robert): core, profile and named hooks.**
+- **The core** (`vml_supervisor/`) does the lifecycle and returns `Result(code, detail)`. It
+  prints no message and reads no harness settings.
+- **The profile** is a JSON file (folders, ports, commands, environment, timeouts) with a
+  `schema_version`. The Windows host loads it, because the host inherits no environment.
+- **Hooks** are named in the profile as Python entry points (`"module:function"`) and loaded
+  by the core in whichever process needs them:
+  - `environment`: before anything starts;
+  - `pre_start`: before the services (FELIX: the microphone check);
+  - `read_mode`: polled by the host (FELIX: the `voice.barge` preference; Claude: the barge
+    setting in voicemode.env);
+  - `on_result`: after every start or failure (FELIX: `last-start.json` and FE wording).
+- **The contract:**
+  - hooks get plain data and return plain data;
+  - every hook is optional and has a defined default;
+  - a failing hook is a recorded `Result`;
+  - the hook interface is stable within a minor version, and breaking changes go in the
+    release notes.
+- **Where the code lives:** voicemode-local owns `vml_profiles/claude.py`; FELIX owns
+  `felix_voice_profile.py`.
+- **Ruled out:**
+  - subclassing, which ties FELIX to core internals and doesn't cross into the host process;
+  - data only, which can't express FELIX's checks and wording, so they would drift back into a
+    FELIX copy.
 
 ## The problem
 
