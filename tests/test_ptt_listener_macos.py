@@ -197,3 +197,15 @@ def test_sigterm_and_sighup_stop_the_listener_like_ctrl_c(monkeypatch):
     assert {signal.SIGTERM, signal.SIGHUP} <= set(signals)
     with pytest.raises(KeyboardInterrupt):
         signals[signal.SIGHUP](signal.SIGHUP, None)
+
+
+def test_stopping_during_the_release_tail_still_sends_hold_release_once():
+    # Final review minor: the release waits a short tail; stopping in that window lost it,
+    # and the server's hold stayed latched with the mic open.
+    rig = Rig()
+    rig.press(5.0, 7.0)                       # a hold: its release waits for the tail timer
+    assert rig.sent == ["hold_start"] and len(rig.timers) == 1
+    rig.key.release_held(7.1)                 # the listener stops inside the tail
+    assert rig.sent == ["hold_start", "hold_release"]
+    rig.flush()                               # the timer fires late: nothing more
+    assert rig.sent == ["hold_start", "hold_release"]
