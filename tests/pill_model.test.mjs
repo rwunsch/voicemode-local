@@ -275,7 +275,7 @@ test("German and its voices are dropped when the backend says German is unavaila
   assert.ok(!vm.voices.some((v) => GERMAN_VOICES.includes(v)));
   const de = viewModel(snap({ german_available: false, voice: "af_sky", language: "German" }), 0, 0);
   assert.deepEqual(de.voices, VOICES); // never the German list
-  assert.deepEqual(de.languages, ["English"]);
+  assert.deepEqual(de.languages, ["English", "German"]); // its own value stays listed (final review)
 });
 
 test("German stays offered when available, or when an older backend does not say", () => {
@@ -312,8 +312,8 @@ test("incoming messages are told apart: restore, dropped, other window message, 
 // Final review minor: a session already in German, with German not available, showed a
 // select whose value was not in its own list. Keep German listed while it is the value.
 test("German stays listed while it is the session's language, even when not available", () => {
-  const vm = viewModel(snap({ language: "German", german_available: false }), Date.now());
+  const vm = viewModel(snap({ language: "German", german_available: false }), 0, 0);
   assert.ok(vm.languages.includes("German"));
-  const en = viewModel(snap({ language: "English", german_available: false }), Date.now());
+  const en = viewModel(snap({ language: "English", german_available: false }), 0, 0);
   assert.deepEqual(en.languages, ["English"]);
 });
