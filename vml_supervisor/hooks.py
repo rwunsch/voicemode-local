@@ -14,6 +14,11 @@ Hook contract
 - A hook that raises or calls sys.exit gives Result("hook_failed") and the
   default; KeyboardInterrupt still propagates. A return of the wrong shape gives
   Result("hook_bad_return") and the default.
+- service_command returns [argv, marker]. The core owns a service only while its command line
+  holds the marker and `--port N` (procs.owned), so the marker must be non-empty and appear in
+  argv, and argv must hold "--port" followed by str(port) as two separate arguments (not
+  "--port=N", not "-p N"). Otherwise ensure_services refuses to start it:
+  Result("service_command_bad") for an empty marker, Result("service_command_unowned") for the rest.
 - A pre_start hook that raises does NOT block the start: run_pre_start returns
   the hook_failed Result and the caller passes it to on_result. Only returned
   refusal text blocks, as Result("pre_start_refused").

@@ -1,8 +1,16 @@
 """vml_supervisor.services: ensure, release and stop the shared TTS and STT services.
 
-Ported from FELIX b36f288ce tests/repo/test_voicemode_setup.py (the `services` fixture and its
+Ported from FELIX 454f20d0e tests/repo/test_voicemode_setup.py (the `services` fixture and its
 generic lifecycle tests). The fake world: real loopback HTTP processes standing in for Kokoro and
 whisper.cpp on free ports, and a stand-in connector whose command carries the lease marker.
+
+Renamed from FELIX (FELIX name -> ours):
+  test_a_taken_felix_port_is_left_alone_and_the_next_one_is_used
+      -> test_a_taken_port_is_left_alone_and_the_next_one_is_used
+  test_stop_never_signals_a_process_that_is_not_felix_voice
+      -> test_stop_never_signals_a_process_that_is_not_ours
+  test_launch_stops_a_voice_server_that_ignores_the_stop_request (its services half only; launch is not here)
+      -> test_stop_ends_a_service_that_ignores_the_stop_request
 """
 import contextlib
 import dataclasses
@@ -134,8 +142,9 @@ def world(tmp_path):
                               started=started, fake=fake, tmp=tmp_path)
         state = read_state(profile) if (profile.run_dir / "state.json").exists() else {}
         watch = profile.run_dir / "watch.pid"
-        pids = [e["pid"] for e in state.values() if isinstance(e, dict)] + started
-        if watch.exists():
+        pids = [e["pid"] for e in state.values() if isinstance(e, dict) and isinstance(e.get("pid"), int)
+                and e["pid"] > 2] + started
+        if watch.is_file():
             pids.append(int(watch.read_text()))
         for pid in pids:
             with contextlib.suppress(ProcessLookupError):
@@ -512,11 +521,12 @@ def test_children_start_in_the_profiles_working_dir_not_the_callers(world, monke
     tools.mkdir()
     dump = world.tmp / "stt-env.json"
     real = tools / "whisper-server"
-    real.write_text(f"#!/bin/sh\nexec '{sys.executable}' '{world.fake}' stt --dump '{dump}' \"$@\"\n")
+    real.write_text(f"#!{sys.executable}\n" + FAKE_SERVICE)
     real.chmod(0o755)
     # A relative PATH entry is searched from the child's working folder, as Windows searches the
     # current folder first: started from the caller's folder, the planted program would run.
-    spec = dataclasses.replace(world.profile.services["stt"], argv=["whisper-server", "--port", "{port}"])
+    spec = dataclasses.replace(world.profile.services["stt"], marker="whisper-server",
+                               argv=["whisper-server", "--dump", str(dump), "--port", "{port}"])
     profile = dataclasses.replace(world.profile, env={"PATH": os.pathsep.join([".", str(tools)])},
                                   services={**world.profile.services, "stt": spec})
     monkeypatch.chdir(caller)
@@ -613,3 +623,100 @@ def test_wait_until_ready_waits_for_a_service_another_process_is_starting(world)
     ready, results = services.wait_until_ready(profile, kinds=["tts"])
     writer.join()
     assert ready == {"tts": port} and results == []
+
+
+# ----- fix round 1: markers, the watchdog record, Windows env keys, odd ports, owned commands ----
+
+
+def _command_hook(argv_for, marker):
+    return Hooks({"service_command": lambda p, kind, runtime, port: [argv_for(kind, port), marker(kind)]})
+
+
+def test_an_empty_marker_from_the_command_hook_starts_nothing(world, monkeypatch):
+    spawned = []
+    monkeypatch.setattr(services, "spawn", lambda *a, **k: spawned.append(a))
+    hooks = _command_hook(lambda kind, port: [sys.executable, str(world.fake), kind, "--port", str(port)],
+                          lambda kind: "")
+    chosen, results = ensure_services(world.profile, world.connector.pid, hooks)
+    assert chosen == {} and spawned == []
+    assert codes(results) == ["service_command_bad", "service_command_bad"]
+    release(world.profile, world.connector.pid)
+
+
+@pytest.mark.parametrize("style", ["--port=N", "-p N", "marker missing"])
+def test_a_command_that_owned_could_never_match_starts_nothing(world, monkeypatch, style):
+    spawned = []
+    monkeypatch.setattr(services, "spawn", lambda *a, **k: spawned.append(a))
+
+    def argv(kind, port):
+        base = [sys.executable, str(world.fake), kind]
+        if style == "--port=N":
+            return base + [f"--port={port}"]
+        if style == "-p N":
+            return base + ["-p", str(port)]
+        return [sys.executable, "elsewhere.py", "--port", str(port)]
+
+    hooks = _command_hook(argv, lambda kind: f"{world.fake} {kind}")
+    chosen, results = ensure_services(world.profile, world.connector.pid, hooks)
+    assert chosen == {} and spawned == []
+    assert codes(results) == ["service_command_unowned", "service_command_unowned"]
+    release(world.profile, world.connector.pid)
+
+
+def test_an_empty_watch_marker_is_a_result_not_a_match_for_any_process(world):
+    profile = dataclasses.replace(world.profile, watch_marker="")
+    stranger = sleeper()
+    world.started.append(stranger.pid)
+    profile.run_dir.mkdir(parents=True)
+    (profile.run_dir / "watch.pid").write_text(str(stranger.pid))
+    chosen, results = ensure_services(profile, world.connector.pid)
+    assert "watch_marker_empty" in codes(results)
+    assert set(chosen) == {"tts", "stt"}
+    release(profile, world.connector.pid)
+
+
+def test_a_watchdog_that_cannot_be_recorded_is_stopped(world, monkeypatch):
+    profile = world.profile
+    real_popen = subprocess.Popen
+    launched = []
+
+    def popen(*args, **kwargs):
+        process = real_popen(*args, **kwargs)
+        launched.append(process)
+        return process
+
+    monkeypatch.setattr(services.subprocess, "Popen", popen)
+    profile.run_dir.mkdir(parents=True)
+    (profile.run_dir / "watch.pid").mkdir()  # writing the pid file fails
+    chosen, results = ensure_services(profile, world.connector.pid)
+    assert "watchdog_start_failed" in codes(results)
+    watchdogs = [p for p in launched if profile.watch_marker in p.args]
+    assert len(watchdogs) == 1 and watchdogs[0].wait(timeout=10) is not None
+    release(profile, world.connector.pid)
+
+
+def test_on_windows_a_hook_key_replaces_the_os_key_whatever_its_case(monkeypatch):
+    monkeypatch.setattr(services, "WINDOWS", True)
+    monkeypatch.setattr(services.os, "environ", {"Path": "C:/Windows", "SystemRoot": "C:/Windows",
+                                                 "SECRET": "x"})
+    env = services.service_environment({"PATH": "C:/runtime", "no_proxy": "example"})
+    assert [k for k in env if k.upper() == "PATH"] == ["PATH"] and env["PATH"] == "C:/runtime"
+    assert [k for k in env if k.upper() == "NO_PROXY"] == ["no_proxy"] and env["no_proxy"] == "example"
+    assert env["SYSTEMROOT"] == "C:/Windows" and "SECRET" not in env
+
+
+def test_on_windows_the_proxy_exemption_is_one_key(monkeypatch):
+    monkeypatch.setattr(services, "WINDOWS", True)
+    monkeypatch.setattr(services.os, "environ", {"PATH": "C:/Windows"})
+    env = services.service_environment({})
+    assert [k for k in env if k.upper() == "NO_PROXY"] == ["NO_PROXY"]
+
+
+def test_a_recorded_port_that_is_not_a_number_is_not_a_crash(world):
+    profile = world.profile
+    profile.run_dir.mkdir(parents=True)
+    (profile.run_dir / "state.json").write_text(json.dumps(
+        {"old": {"pid": 1, "port": [1]}, "other": {"pid": 2, "port": {"a": 1}}, "flag": {"port": True}}))
+    chosen, results = ensure_services(profile, world.connector.pid)
+    assert results == [] and set(chosen) == {"tts", "stt"}
+    release(profile, world.connector.pid)

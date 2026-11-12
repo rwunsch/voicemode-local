@@ -15,9 +15,12 @@ Result codes
   runtime_incomplete (runtime/.complete.json is gone: nothing is started), host_required
   (Windows, until Task 7 fills the ensure_host seam: nothing is started), lease_write_failed
   (nothing is started), working_dir_unavailable (nothing is started), job_unavailable (Windows:
-  services start without the job), watchdog_not_configured, watchdog_start_failed (POSIX),
+  services start without the job), watchdog_not_configured, watch_marker_empty,
+  watchdog_start_failed (POSIX; a watchdog whose pid could not be recorded is stopped),
   state_corrupt (read as empty, under the lock), port_override_invalid, unknown_service,
-  no_free_port, breakaway_refused, job_assign_failed, resume_failed, service_start_failed,
+  no_free_port, service_command_bad (empty marker: not started), service_command_unowned (the
+  marker or `--port N` is missing from the command, so it could never be owned: not started),
+  breakaway_refused, job_assign_failed, resume_failed, service_start_failed,
   state_write_failed (the new service was killed), kill_incomplete, service_exited,
   service_not_ready, owner_other (another process answers on the port), owner_unknown (the
   answer came, but no listener could be found to prove it is ours).
@@ -174,10 +177,17 @@ def service_environment(env: dict) -> dict:
     operating system needs. Nothing else of this process's environment travels."""
     keep = _WINDOWS_KEEP if WINDOWS else _OS_KEEP
     if WINDOWS:
+        # Windows names are case-insensitive: one key per name, and a hook's key replaces the
+        # OS key whatever its case (a hook's "Path" must not become a second PATH).
         upper = {key.upper(): value for key, value in os.environ.items()}
         base = {key: upper[key] for key in keep if key in upper}
-    else:
-        base = {key: os.environ[key] for key in keep if key in os.environ}
+        base["NO_PROXY"] = LOCAL_HOSTS
+        for key, value in env.items():
+            for old in [k for k in base if k.upper() == key.upper()]:
+                del base[old]
+            base[key] = value
+        return base
+    base = {key: os.environ[key] for key in keep if key in os.environ}
     base.setdefault("NO_PROXY", LOCAL_HOSTS)
     base.setdefault("no_proxy", LOCAL_HOSTS)
     base.update(env)
@@ -192,6 +202,11 @@ def _start_watchdog(profile: HostProfile, working_dir: Path, results: list) -> N
     if not profile.watch_command:
         results.append(Result("watchdog_not_configured", "the profile names no watch_command"))
         return
+    if not profile.watch_marker:
+        # An empty marker is in every command line: any live process at watch.pid would count.
+        results.append(Result("watch_marker_empty", "the profile's watch_marker is empty; no watchdog "
+                              "was started"))
+        return
     pid_file = Path(profile.run_dir) / "watch.pid"
     with contextlib.suppress(ValueError, OSError):
         command = process_command(int(pid_file.read_text()))
@@ -201,9 +216,18 @@ def _start_watchdog(profile: HostProfile, working_dir: Path, results: list) -> N
         process = subprocess.Popen(list(profile.watch_command), cwd=str(working_dir), env=dict(os.environ),
                                    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                                    stderr=subprocess.DEVNULL, **background_options())
-        pid_file.write_text(str(process.pid))
     except OSError as error:
         results.append(Result("watchdog_start_failed", f"{profile.watch_command}: {error}"))
+        return
+    try:
+        pid_file.write_text(str(process.pid))
+    except OSError as error:
+        # Untracked, it would run beside the next connector's watchdog: stop it.
+        failed = kill_tree(process.pid, profile.stop_timeout)
+        if failed is not None:
+            results.append(failed)
+        results.append(Result("watchdog_start_failed", f"{pid_file}: {error}; watchdog {process.pid} "
+                              "was stopped", {"pid": process.pid}))
 
 
 def _choose(profile: HostProfile, kind: str, state: dict, results: list) -> int | None:
@@ -213,12 +237,26 @@ def _choose(profile: HostProfile, kind: str, state: dict, results: list) -> int 
     if not candidates:
         return None
     # A service still loading has not bound its port yet: never pick it twice.
-    taken = {entry.get("port") for entry in state.values() if isinstance(entry, dict) and entry.get("port")}
+    taken = {entry["port"] for entry in state.values() if isinstance(entry, dict)
+             and isinstance(entry.get("port"), int) and not isinstance(entry["port"], bool)}
     port = choose_port(profile, kind, taken)
     if port is None:
         results.append(Result("no_free_port", f"{kind}: tried {candidates[0]} to {candidates[-1]}",
                               {"service": kind, "first": candidates[0], "last": candidates[-1]}))
     return port
+
+
+def _unownable(command: list, marker: str, port: int):
+    """(code, detail) when procs.owned could never match this service, or could match any process:
+    the marker must be non-empty and in the command, and the command must hold `--port N` as two
+    arguments. None when it is fine."""
+    if not marker:
+        return "service_command_bad", "the marker is empty, which would match any process"
+    if marker not in " ".join(command):
+        return "service_command_unowned", f"the marker {marker!r} is not in the command"
+    if not any(a == "--port" and b == str(port) for a, b in zip(command, command[1:])):
+        return "service_command_unowned", f"the command does not hold '--port {port}' as two arguments"
+    return None
 
 
 def _start(profile, hooks, kind, port, runtime, env, working_dir, job, state, results):
@@ -227,6 +265,10 @@ def _start(profile, hooks, kind, port, runtime, env, working_dir, job, state, re
     (command, marker), problem = hook_calls.service_command(hooks, profile, kind, runtime, port)
     if problem is not None:
         results.append(problem)
+    unusable = _unownable(command, marker, port)
+    if unusable is not None:
+        results.append(Result(*unusable, {"service": kind, "command": list(command), "marker": marker}))
+        return None
     log = run_dir / f"{kind}.log"
     extra = {} if WINDOWS else {"preexec_fn": unblock_stop_signals}
     with stop_signals_held():
