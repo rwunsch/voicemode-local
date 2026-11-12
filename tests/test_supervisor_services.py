@@ -587,7 +587,7 @@ def test_on_windows_a_connector_starts_the_host_not_the_services(world, monkeypa
     monkeypatch.setattr(services, "WINDOWS", True)
     monkeypatch.setattr(services, "require_psutil", lambda: None)
     hosts, started = [], []
-    monkeypatch.setattr(services, "ensure_host", lambda p, h: hosts.append(p))
+    monkeypatch.setattr(services, "ensure_host", lambda p, h, results: hosts.append(p) or True)
     monkeypatch.setattr(services, "start_missing_services", lambda *a: started.append(a))
     monkeypatch.setattr(services, "wait_until_ready", lambda p, started=None, kinds=None: ({"tts": 1, "stt": 2}, []))
     assert ensure_services(profile, world.connector.pid) == ({"tts": 1, "stt": 2}, [])
@@ -596,13 +596,15 @@ def test_on_windows_a_connector_starts_the_host_not_the_services(world, monkeypa
     assert not (profile.run_dir / "watch.pid").exists()  # the host, not a watchdog, supervises
 
 
-def test_until_the_host_is_moved_in_windows_starts_nothing_and_says_so(world, monkeypatch):
+def test_on_windows_a_host_that_cannot_start_starts_nothing_and_says_so(world, monkeypatch):
     profile = world.profile
     monkeypatch.setattr(services, "WINDOWS", True)
     monkeypatch.setattr(services, "require_psutil", lambda: None)
     monkeypatch.setattr(services, "start_missing_services", lambda *a: pytest.fail("started services"))
+    monkeypatch.setattr(services, "ensure_host", lambda p, h, results: results.append(
+        services.Result("host_start_refused", "9 0")) and False)
     chosen, results = ensure_services(profile, world.connector.pid)
-    assert chosen == {} and codes(results) == ["host_required"]
+    assert chosen == {} and codes(results) == ["host_start_refused"]
 
 
 def test_wait_until_ready_waits_for_a_service_another_process_is_starting(world):

@@ -3,7 +3,7 @@ with the last one.
 
 Moved from FELIX voice.py (454f20d0e: ensure_services, start_missing_services, wait_until_ready,
 release, stop, stop_recorded, stop_entry, check_service, valid_response and its proxy-free opener;
-the Windows host itself is Task 7, behind the ensure_host seam), with voicemode_native.py's additions
+the Windows host itself is in host.py, reached through ensure_host), with voicemode_native.py's additions
 merged in: the runtime/.complete.json guard, the isinstance guard on the ports already taken, the
 services' Job Object, and the command and runtime kept in each record.
 
@@ -12,10 +12,13 @@ Nothing here raises for an expected failure; each one is a Result in the returne
 Result codes
 - from ensure_services: hook_failed, hook_bad_return (a hook; its default was used),
   psutil_missing (Windows), runtime_not_current (resolve_runtime said so; services still start),
-  runtime_incomplete (runtime/.complete.json is gone: nothing is started), host_required
-  (Windows, until Task 7 fills the ensure_host seam: nothing is started), lease_write_failed
-  (nothing is started), working_dir_unavailable (nothing is started), job_unavailable (Windows:
-  services start without the job), watchdog_not_configured, watch_marker_empty,
+  runtime_incomplete (runtime/.complete.json is gone: nothing is started), on Windows the host's
+  codes from host.ensure_host (host_started; host_not_configured, host_marker_empty,
+  host_command_bad, host_command_unowned, host_profile_write_failed, host_start_refused,
+  host_pid_write_failed, host_requires_psutil: nothing is started and nothing is waited for),
+  lease_write_failed (nothing is started), working_dir_unavailable (nothing is started),
+  job_unavailable (Windows: services start without the job), watchdog_not_configured,
+  watch_marker_empty,
   watchdog_start_failed (POSIX; a watchdog whose pid could not be recorded is stopped),
   state_corrupt (read as empty, under the lock), port_override_invalid, unknown_service,
   no_free_port, service_command_bad (empty marker: not started), service_command_unowned (the
@@ -26,8 +29,9 @@ Result codes
   answer came, but no listener could be found to prove it is ours).
 - from release: lease_remove_failed, state_corrupt, kill_incomplete, psutil_missing,
   state_write_failed.
-- from stop: the same as release, then services_stopped (data: the services that were running,
-  and how many connectors still hold a lease).
+- from stop: host_marker_empty (run/host.pid is left alone), kill_incomplete (the host would not
+  die: run/host.pid is kept), the same as release, then services_stopped (data: the services that
+  were running, whether a host was, and how many connectors still hold a lease).
 """
 from __future__ import annotations
 
@@ -54,6 +58,7 @@ from .winjob import SpawnError, services_job, spawn
 # Readiness checks talk to loopback only: never through a proxy from the environment.
 _local_opener = build_opener(ProxyHandler({}))
 READY_POLL = 0.5
+HOST_PID = "host.pid"   # in run_dir: the Windows host's process id, written under the service lock
 
 # The operating system's own variables a service needs; everything else comes from the profile.
 _OS_KEEP = ("PATH", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR", "TZ")
@@ -137,19 +142,46 @@ def release(profile: HostProfile, connector_pid: int) -> list[Result]:
     return results
 
 
+def _stop_host(profile: HostProfile, results: list) -> bool:
+    """Stop the Windows host recorded in run/host.pid (owned through profile.host_marker) and drop
+    the record; True when a host was running. The caller holds the lock. Kept when it would not die,
+    so a later stop tries again."""
+    pid_file = Path(profile.run_dir) / HOST_PID
+    try:
+        pid = int(pid_file.read_text())
+    except (OSError, ValueError):
+        return False
+    if not profile.host_marker:
+        # An empty marker is in every command line: whatever now has that pid would be killed.
+        results.append(Result("host_marker_empty", f"the profile's host_marker is empty; {pid_file} "
+                              "was left alone"))
+        return False
+    entry = {"pid": pid, "port": None, "marker": profile.host_marker}
+    running = owned(entry)
+    failed = stop_entry(profile, entry)
+    if failed is not None:
+        results.append(failed)
+        return running
+    with contextlib.suppress(OSError):
+        pid_file.unlink(missing_ok=True)
+    return running
+
+
 def stop(profile: HostProfile) -> list[Result]:
-    """Stop every recorded service, whatever leases remain."""
+    """Stop the host first (it would start the services again), then every recorded service and
+    helper, whatever leases remain."""
     results: list[Result] = []
     missing = require_psutil()
     if missing is not None:
         results.append(missing)
     with service_lock(profile.run_dir):
+        host = _stop_host(profile, results)
         others = live_leases(profile)
         state = read_state(profile, results)
         running = [kind for kind in state if owned(state[kind])]
         results.extend(stop_recorded(profile, state))
     results.append(Result("services_stopped", ", ".join(running),
-                          {"services": running, "connectors": len(others)}))
+                          {"services": running, "host": host, "connectors": len(others)}))
     return results
 
 
@@ -180,7 +212,7 @@ def service_environment(env: dict) -> dict:
 
 def _start_watchdog(profile: HostProfile, working_dir: Path, results: list) -> None:
     """POSIX: start (once) the process that stops the services when every connector is gone. On
-    Windows the host (Task 7) holds that role."""
+    Windows the host (host.py) holds that role."""
     if WINDOWS:
         return
     if not profile.watch_command:
@@ -379,12 +411,13 @@ def wait_until_ready(profile: HostProfile, started: dict | None = None, deadline
     return ready, results
 
 
-def ensure_host(profile: HostProfile, hooks: Hooks) -> Result | None:
-    """Seam for Task 7. On Windows the services belong to a host started outside every chat (FELIX
-    454f20d0e ensure_host): the app ends a chat's processes with its job. Until the host is moved in,
-    this returns Result("host_required") and ensure_services starts nothing on Windows. Called under
-    the service lock, after the lease is written; None means the host runs."""
-    return Result("host_required", "the Windows host is not part of this package yet (Task 7)")
+def ensure_host(profile: HostProfile, hooks: Hooks, results: list) -> bool:
+    """Windows: the services belong to a host started outside every chat (FELIX 454f20d0e
+    ensure_host), because the app ends a chat's processes with its job. host.ensure_host starts it
+    unless run/host.pid is a live host. Called under the service lock, after the lease is written;
+    True when the host runs, its Results in `results`."""
+    from . import host   # host imports this module
+    return host.ensure_host(profile, results)
 
 
 def ensure_services(profile: HostProfile, connector_pid: int,
@@ -392,7 +425,7 @@ def ensure_services(profile: HostProfile, connector_pid: int,
     """Register this connector's lease and make sure the profile's services run; wait until they
     answer. Returns the ports of the services that are ready and ours, and every problem met.
 
-    On Windows the services belong to the host (ensure_host, Task 7); elsewhere a new session
+    On Windows the services belong to the host (ensure_host, host.py); elsewhere a new session
     already outlives the chat, so this connector starts them, with a watchdog."""
     results: list[Result] = []
     if hooks is None:
@@ -421,9 +454,7 @@ def ensure_services(profile: HostProfile, connector_pid: int,
                                   "or never finished", {"runtime": runtime}))
             return {}, results
         if WINDOWS:
-            host = ensure_host(profile, hooks)
-            if host is not None:
-                results.append(host)
+            if not ensure_host(profile, hooks, results):
                 return {}, results
         else:
             try:

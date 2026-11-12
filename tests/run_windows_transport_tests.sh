@@ -15,6 +15,9 @@
 #                                            pipe; no keys are pressed or synthesised
 #   tests/test_supervisor_winjob_windows.py  vml_supervisor.winjob: a child spawned with
 #                                            breakaway leaves its parent's Job Object
+#   tests/test_supervisor_host_windows.py    vml_supervisor.host: a host started through
+#                                            Win32_Process.Create outlives the caller's job
+#                                            (the full host test needs psutil, else it skips)
 #
 # Copies the modules they load and the test files into a fresh folder under the
 # Windows temp dir (same patches/ + tests/ layout as the repo), runs pytest there
@@ -73,7 +76,8 @@ fi
 TESTS_WIN=""
 for t in test_control_transport_windows.py test_voice_pill_windows.py test_apply_windows.py \
          test_voicemode_native_windows.py test_pill_windows_native_windows.py \
-         test_ptt_listener_windows_native_windows.py test_supervisor_winjob_windows.py; do
+         test_ptt_listener_windows_native_windows.py test_supervisor_winjob_windows.py \
+         test_supervisor_host_windows.py; do
     cp "$REPO/tests/$t" "$DIR/tests/"
     TESTS_WIN="$TESTS_WIN '$(wslpath -w "$DIR/tests/$t")'"
 done
