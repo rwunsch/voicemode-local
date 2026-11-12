@@ -16,7 +16,7 @@ PKG = REPO / "vml_supervisor"
 
 def make_profile(**over):
     from vml_supervisor.profile import (
-        HelperSpec, HostProfile, ModeSource, PortOverride, ServiceSpec,
+        HelperSpec, HostProfile, PortOverride, ServiceSpec,
     )
     base = dict(
         name="test",
@@ -52,7 +52,8 @@ def make_profile(**over):
         watch_marker="watch.py",
         job_name="vml-job",
         host_start_grace=60.0,
-        mode_source=ModeSource("json", Path("/r/mode.json"), "mode"),
+        hooks={"read_mode": "mymod:read_mode"},
+        hook_paths=(Path("/r/hooks"),),
     )
     base.update(over)
     return HostProfile(**base)
@@ -145,3 +146,56 @@ def test_the_package_imports_only_the_stdlib():
                 if n == "vml_supervisor" or n in stdlib:
                     continue
                 assert n == "psutil" and id(node) in guarded, f"{f}: non-stdlib import {n}"
+
+
+def test_profile_round_trip_keeps_hooks_and_version(tmp_path):
+    from vml_supervisor.profile import HostProfile
+    p = make_profile(schema_version=1)
+    f = tmp_path / "p.json"
+    p.to_file(f)
+    q = HostProfile.from_file(f)
+    assert q.hooks == {"read_mode": "mymod:read_mode"}
+    assert q.hook_paths == (Path("/r/hooks"),)
+    assert q.schema_version == 1
+    assert not hasattr(q, "mode_source")
+
+
+def test_a_newer_schema_is_refused_with_a_result(tmp_path):
+    from vml_supervisor.profile import load_profile
+    p = make_profile()
+    f = tmp_path / "p.json"
+    p.to_file(f)
+    d = json.loads(f.read_text())
+    d["schema_version"] = 2
+    f.write_text(json.dumps(d))
+    prof, results = load_profile(f)
+    assert prof is None
+    assert [r.code for r in results] == ["profile_schema_unsupported"]
+
+
+def test_load_profile_returns_profile_and_no_results_when_fine(tmp_path):
+    from vml_supervisor.profile import load_profile
+    p = make_profile()
+    f = tmp_path / "p.json"
+    p.to_file(f)
+    prof, results = load_profile(f)
+    assert prof == p and results == []
+
+
+def test_load_profile_turns_a_malformed_file_into_a_result(tmp_path):
+    from vml_supervisor.profile import load_profile
+    f = tmp_path / "p.json"
+    f.write_text("{not json")
+    prof, results = load_profile(f)
+    assert prof is None and results[0].code == "profile_malformed"
+    prof, results = load_profile(tmp_path / "missing.json")
+    assert prof is None and results[0].code == "profile_malformed"
+    f.write_text("[1]")
+    assert load_profile(f)[0] is None
+    f.write_text('{"name": "x"}')
+    assert load_profile(f)[1][0].code == "profile_malformed"
+
+
+def test_validate_flags_an_unknown_hook_name():
+    p = make_profile(hooks={"bogus": "m:f", "on_result": "m:g"})
+    assert [(r.code, r.detail) for r in p.validate()] == [("hook_unknown", "bogus")]

@@ -12,6 +12,12 @@ from .result import Result
 # Ports the local voice stack owns regardless of profile.
 BASE_RESERVED_PORTS = (8880, 8881, 8882, 2022, 9000)
 
+# Profile file format version this package understands (a newer one is refused).
+SCHEMA_VERSION = 1
+# The hooks a profile may name (each a plain-data function, see hooks.py).
+HOOK_NAMES = ("resolve_runtime", "environment", "service_command", "prepare_home",
+              "pre_start", "read_mode", "on_result")
+
 
 @dataclass(frozen=True)
 class ServiceSpec:
@@ -39,13 +45,6 @@ class PortOverride:
 
 
 @dataclass(frozen=True)
-class ModeSource:
-    kind: str  # "json" | "env_file" | "none"
-    path: Path | None = None
-    key: str = ""
-
-
-@dataclass(frozen=True)
 class HostProfile:
     name: str
     root: Path
@@ -70,7 +69,10 @@ class HostProfile:
     watch_marker: str
     job_name: str
     host_start_grace: float = 60.0
-    mode_source: ModeSource = field(default_factory=lambda: ModeSource("none"))
+    schema_version: int = SCHEMA_VERSION
+    # hook name -> "module:function"; see vml_supervisor.hooks
+    hooks: dict[str, str] = field(default_factory=dict)
+    hook_paths: tuple[Path, ...] = ()
 
     # -- serialisation -------------------------------------------------
     def to_dict(self) -> dict:
@@ -120,10 +122,13 @@ class HostProfile:
                     out.append(Result("port_ranges_overlap",
                                       f"{a} {alo}-{ahi} overlaps {b} {blo}-{bhi}",
                                       {"services": [a, b]}))
+        for name in sorted(self.hooks):
+            if name not in HOOK_NAMES:
+                out.append(Result("hook_unknown", name, {"hook": name}))
         return out
 
 
-_DATACLASSES = {c.__name__: c for c in (ServiceSpec, HelperSpec, PortOverride, ModeSource)}
+_DATACLASSES = {c.__name__: c for c in (ServiceSpec, HelperSpec, PortOverride)}
 
 
 def _encode(v):
@@ -152,16 +157,39 @@ def _decode(cls, d: dict):
         v = d[name]
         if v is None:
             kw[name] = None
+        elif t.startswith("tuple[Path"):
+            kw[name] = tuple(Path(x) for x in v)
         elif "Path" in t and "dict" not in t:
             kw[name] = Path(v)
         elif t.startswith("dict[str, ServiceSpec"):
             kw[name] = {k: _decode(ServiceSpec, x) for k, x in v.items()}
         elif t.startswith("dict[str, HelperSpec"):
             kw[name] = {k: _decode(HelperSpec, x) for k, x in v.items()}
-        elif t in ("PortOverride", "ModeSource"):
+        elif t == "PortOverride":
             kw[name] = _decode(_DATACLASSES[t], v)
         elif t.startswith("tuple"):
             kw[name] = _tup(v)
         else:
             kw[name] = v
     return cls(**kw)
+
+
+def load_profile(path: Path) -> tuple[HostProfile | None, list[Result]]:
+    """Read a profile file without raising: (profile, []) or (None, [Result])."""
+    try:
+        d = json.loads(Path(path).read_text())
+    except (OSError, ValueError) as exc:
+        return None, [Result("profile_malformed", f"{path}: {exc!r}")]
+    if not isinstance(d, dict):
+        return None, [Result("profile_malformed", f"{path}: not a JSON object")]
+    version = d.get("schema_version", 1)
+    if isinstance(version, bool) or not isinstance(version, int):
+        return None, [Result("profile_malformed", f"{path}: schema_version {version!r}")]
+    if version > SCHEMA_VERSION:
+        return None, [Result("profile_schema_unsupported",
+                             f"{path}: schema_version {version} > supported {SCHEMA_VERSION}",
+                             {"found": version, "supported": SCHEMA_VERSION})]
+    try:
+        return HostProfile.from_dict(d), []
+    except (TypeError, ValueError, KeyError, AttributeError) as exc:
+        return None, [Result("profile_malformed", f"{path}: {exc!r}")]
