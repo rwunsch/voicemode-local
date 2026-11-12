@@ -1,0 +1,147 @@
+"""Tests for vml_supervisor: HostProfile, Result, package hygiene."""
+import ast
+import dataclasses
+import json
+import sys
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parent.parent
+if str(REPO) not in sys.path:
+    sys.path.insert(0, str(REPO))
+
+import pytest  # noqa: E402
+
+PKG = REPO / "vml_supervisor"
+
+
+def make_profile(**over):
+    from vml_supervisor.profile import (
+        HelperSpec, HostProfile, ModeSource, PortOverride, ServiceSpec,
+    )
+    base = dict(
+        name="test",
+        root=Path("/r"),
+        run_dir=Path("/r/run"),
+        runtime_dir=Path("/r/runtime"),
+        python=Path("/r/.venv/bin/python"),
+        working_dir=Path("/r"),
+        env={"A": "1"},
+        services={
+            "tts": ServiceSpec(["python", "tts.py", "--port", "{port}"], "tts.py",
+                               (8890, 8899), "/health", "kokoro"),
+            "stt": ServiceSpec(["python", "stt.py"], "stt.py",
+                               (9010, 9019), "/", "whisper"),
+        },
+        helpers={
+            "barge": HelperSpec(["python", "barge.py"], "barge.py", "barge.log",
+                                ("linux", "darwin"), True),
+            "ptt": HelperSpec(["python", "ptt.py"], "ptt.py", "ptt.log",
+                              ("win32",), False),
+        },
+        reserved_ports=(1234,),
+        port_override=PortOverride("env", Path("/r/ports.env"), ("TTS_PORT", "STT_PORT")),
+        start_timeout=30.0,
+        stop_timeout=10.0,
+        watch_interval=5.0,
+        restart_limit=(3, 60.0),
+        lease_markers=("lease-a", "lease-b"),
+        voice_server_marker="voice-server",
+        host_command=["python", "host.py"],
+        host_marker="host.py",
+        watch_command=["python", "watch.py"],
+        watch_marker="watch.py",
+        job_name="vml-job",
+        host_start_grace=60.0,
+        mode_source=ModeSource("json", Path("/r/mode.json"), "mode"),
+    )
+    base.update(over)
+    return HostProfile(**base)
+
+
+def test_a_profile_round_trips_through_its_file(tmp_path):
+    from vml_supervisor.profile import HostProfile
+    p = make_profile()
+    f = tmp_path / "profile.json"
+    p.to_file(f)
+    assert json.loads(f.read_text())["root"] == "/r"
+    assert HostProfile.from_file(f) == p
+    assert not list(tmp_path.glob("*.tmp*")) and [x.name for x in tmp_path.iterdir()] == ["profile.json"]
+
+
+def test_profile_is_frozen():
+    p = make_profile()
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        p.name = "x"
+
+
+def test_result_defaults_and_results_list():
+    from vml_supervisor.result import Result, Results
+    r = Result("ok")
+    assert (r.code, r.detail, r.data) == ("ok", "", {})
+    assert isinstance(Results(), list)
+
+
+def test_valid_profile_has_no_results():
+    assert make_profile().validate() == []
+
+
+@pytest.mark.parametrize("port", [8880, 8881, 8882, 2022, 9000, 1234])
+def test_validate_rejects_reserved_and_overlapping_ranges(port):
+    from vml_supervisor.profile import ServiceSpec
+    p = make_profile()
+    tts = ServiceSpec(["x"], "x", (port - 2, port + 2), "/", "kokoro")
+    bad = make_profile(services={"tts": tts, "stt": p.services["stt"]})
+    assert "port_range_reserved" in [r.code for r in bad.validate()]
+
+
+def test_validate_flags_overlapping_ranges():
+    from vml_supervisor.profile import ServiceSpec
+    p = make_profile()
+    stt = ServiceSpec(["x"], "x", (8895, 8905), "/", "whisper")
+    bad = make_profile(services={"tts": p.services["tts"], "stt": stt})
+    assert "port_ranges_overlap" in [r.code for r in bad.validate()]
+
+
+def test_the_package_names_no_provider_key():
+    needles = ["OPENAI" + "_API_KEY", "CARTESIA" + "_API_KEY"]
+    files = list(PKG.rglob("*"))
+    assert files
+    for f in files:
+        if f.is_file() and f.suffix in (".py", ".json", ".md", ".txt"):
+            text = f.read_text()
+            for n in needles:
+                assert n not in text, f"{n} in {f}"
+
+
+def _guarded_import_nodes(tree):
+    guarded = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Try) and any(
+            isinstance(h.type, ast.Name) and h.type.id in ("ImportError", "ModuleNotFoundError")
+            or isinstance(h.type, ast.Tuple)
+            for h in node.handlers
+        ):
+            for sub in node.body:
+                for n in ast.walk(sub):
+                    guarded.add(id(n))
+    return guarded
+
+
+def test_the_package_imports_only_the_stdlib():
+    stdlib = set(sys.stdlib_module_names)
+    for f in PKG.rglob("*.py"):
+        tree = ast.parse(f.read_text())
+        guarded = _guarded_import_nodes(tree)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                names = [a.name.split(".")[0] for a in node.names]
+            elif isinstance(node, ast.ImportFrom):
+                if node.level:
+                    continue
+                names = [(node.module or "").split(".")[0]]
+            else:
+                continue
+            for n in names:
+                if n == "vml_supervisor" or n in stdlib:
+                    continue
+                assert n == "psutil" and id(node) in guarded, f"{f}: non-stdlib import {n}"
