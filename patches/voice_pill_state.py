@@ -977,6 +977,11 @@ def barge_command(switch=None):
 BARGE_PYTHON_SETTING = "VOICEMODE_BARGE_PYTHON"
 BARGE_PROBE_TIMEOUT = 10.0
 BARGE_RETRY_S = 60.0  # a failed probe is asked again after this long; a success is kept
+BARGE_RETRY_MAX_S = 600.0  # each further failure doubles the wait, up to this
+
+
+def barge_retry_interval(failures: int) -> float:
+    return min(BARGE_RETRY_S * (2 ** max(0, failures - 1)), BARGE_RETRY_MAX_S)
 _BARGE_PROBE: dict = {"result": None, "thread": None, "started": False, "at": None}
 _BARGE_PROBE_LOCK = threading.Lock()
 
@@ -1011,11 +1016,12 @@ def _probe_barge() -> None:
         result = False
     _BARGE_PROBE["at"] = time.monotonic()
     _BARGE_PROBE["result"] = result
+    _BARGE_PROBE["fails"] = 0 if result else _BARGE_PROBE.get("fails", 0) + 1
 
 
 def _barge_probe_reset() -> None:
     with _BARGE_PROBE_LOCK:
-        _BARGE_PROBE.update(result=None, thread=None, started=False, at=None)
+        _BARGE_PROBE.update(result=None, thread=None, started=False, at=None, fails=0)
 
 
 def barge_available() -> bool:
@@ -1028,7 +1034,7 @@ def barge_available() -> bool:
     with _BARGE_PROBE_LOCK:
         at = _BARGE_PROBE["at"]
         stale_no = (_BARGE_PROBE["result"] is False and at is not None
-                    and time.monotonic() - at >= BARGE_RETRY_S)
+                    and time.monotonic() - at >= barge_retry_interval(_BARGE_PROBE.get("fails", 1)))
         if not _BARGE_PROBE["started"] or stale_no:
             _BARGE_PROBE["started"] = True
             _BARGE_PROBE["at"] = None  # one retry at a time: set again when it answers

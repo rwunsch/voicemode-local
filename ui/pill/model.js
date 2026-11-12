@@ -53,7 +53,8 @@
     var language = s.language || languageOf(s.voice);
     // German only where a German voice can speak; an older backend that does not say keeps it.
     var german = s.german_available !== false;
-    var languages = german ? LANGUAGES : ["English"];
+    // A session already in German keeps German listed, so the select shows its real value.
+    var languages = german || language === "German" ? LANGUAGES : ["English"];
     var base = german && language === "German" ? GERMAN_VOICES : VOICES;
     var voices = s.voice && base.indexOf(s.voice) < 0 ? base.concat([s.voice]) : base;
     // The main button is Wake between turns (idle, between turns, stopped) when the backend

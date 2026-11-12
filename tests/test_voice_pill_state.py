@@ -612,3 +612,10 @@ def test_an_unknown_process_start_keeps_the_override_file(base, monkeypatch):
     assert (base / f"override-{pid}.json").exists()
     monkeypatch.undo()
     assert st.get_override(pid, base=base) == {"voice": "bf_emma", "language": "German"}
+
+
+def test_failed_barge_probes_back_off_up_to_ten_minutes():
+    # Final review minor: where barge can never run, a probe process every 60 s for the
+    # backend's whole life. Each further failure doubles the wait, capped.
+    assert [st.barge_retry_interval(n) for n in (1, 2, 3, 4, 5, 6, 20)] == \
+        [60.0, 120.0, 240.0, 480.0, 600.0, 600.0, 600.0]

@@ -308,3 +308,12 @@ test("incoming messages are told apart: restore, dropped, other window message, 
   assert.equal(incomingKind(null), "ignore");
   assert.equal(incomingKind("x"), "ignore");
 });
+
+// Final review minor: a session already in German, with German not available, showed a
+// select whose value was not in its own list. Keep German listed while it is the value.
+test("German stays listed while it is the session's language, even when not available", () => {
+  const vm = viewModel(snap({ language: "German", german_available: false }), Date.now());
+  assert.ok(vm.languages.includes("German"));
+  const en = viewModel(snap({ language: "English", german_available: false }), Date.now());
+  assert.deepEqual(en.languages, ["English"]);
+});
