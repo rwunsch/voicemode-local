@@ -25,7 +25,7 @@ another session (FELIX-MAC, FELIX-voice) and not re-run here; **inferred** = rea
 | Native install without WSL/Docker/admin | n/a | install.ps1 -Mode windows-native | install-mac.sh (v1.0.0) + `--barge` |
 | Live on/off switch | voicemode-switch | voicemode_native.py barge/pill on/off/status | voicemode-switch |
 
-## What v1.1.3 changes (fixes from Talos's review of FELIX #1743, 2026-11-12)
+## What v1.1.3 changes (tagged 2026-11-12, merged to main from fix/talos-review; fixes from Talos's review of FELIX #1743)
 
 27 findings on vendored files were checked against the code (all confirmed or partly), then
 fixed test-first, then reviewed again by a fresh reviewer. Highlights, by what FELIX notices:
