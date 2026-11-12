@@ -160,6 +160,27 @@ def test_port_free_and_listener_pids():
     assert port_free(port) is True
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX TIME_WAIT semantics")
+def test_a_port_left_in_time_wait_by_a_dead_service_is_free():
+    """Task 7, 2026-11-13: a service that served a request and was killed leaves its side of the
+    connection in TIME_WAIT for about a minute. The service binds with SO_REUSEADDR (HTTPServer,
+    uvicorn), so it can start there again; port_free must agree, or the watchdog never restarts
+    a dead service on its recorded port."""
+    from vml_supervisor.procs import port_free
+    server = socket.socket()
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server.bind(("127.0.0.1", 0))
+    port = server.getsockname()[1]
+    server.listen()
+    client = socket.create_connection(("127.0.0.1", port))
+    accepted, _ = server.accept()
+    accepted.close()   # the server side closes first: its port is in TIME_WAIT
+    time.sleep(0.1)
+    client.close()
+    server.close()
+    assert port_free(port) is True
+
+
 def test_process_tree_and_kill_tree():
     from vml_supervisor.procs import kill_tree, process_tree
     child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])

@@ -48,6 +48,11 @@ def port_free(port) -> bool:
         if probe.connect_ex((LOOPBACK, port)) == 0:
             return False
     with contextlib.closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as probe:
+        if not WINDOWS:
+            # As the services bind (HTTPServer, uvicorn): a port left in TIME_WAIT by a service that
+            # died is usable, and a listener still refuses the bind. Windows' SO_REUSEADDR would
+            # instead let the probe share a port in use, so it is not set there.
+            probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
             probe.bind((LOOPBACK, port))
         except OSError:
