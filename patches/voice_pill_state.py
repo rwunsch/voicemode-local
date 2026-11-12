@@ -223,7 +223,7 @@ def file_first_setting(name: str, default=None, home=None):
 
 
 def pill_enabled(home=None) -> bool:
-    return (setting("VOICEMODE_PILL", "", home) or "").strip() == "true"
+    return (setting("VOICEMODE_PILL", "", home) or "").strip().lower() == "true"
 
 
 def _base(base) -> Path:

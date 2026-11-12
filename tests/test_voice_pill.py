@@ -919,3 +919,20 @@ def test_ptt_follows_the_setting_else_the_platform(ctx, monkeypatch):
     monkeypatch.setattr(vp, "detect_platform", lambda: "mac")
     monkeypatch.setenv("VOICEMODE_PTT_ENABLED", "true")
     assert vp.gather(ctx)["ptt"] is True
+
+
+def test_mac_keys_follow_a_live_listener(ctx, monkeypatch, tmp_path):
+    # voicemode-mcp starts the Mac listener and records it in run/ptt-listener.pid; FELIX
+    # starts none. Show the keys exactly while one runs.
+    monkeypatch.delenv("VOICEMODE_PTT_ENABLED", raising=False)
+    home = tmp_path / "vm"
+    (home / "run").mkdir(parents=True)
+    monkeypatch.setattr(vp.st, "upstream_home", lambda: home)
+    assert vp.ptt_listening("mac") is False                       # no pid file
+    (home / "run" / "ptt-listener.pid").write_text(str(os.getpid()))
+    assert vp.ptt_listening("mac") is True                        # a live listener
+    (home / "run" / "ptt-listener.pid").write_text("999999999")
+    assert vp.ptt_listening("mac") is False                       # a dead one
+    (home / "run" / "ptt-listener.pid").write_text(str(os.getpid()))
+    monkeypatch.setenv("VOICEMODE_PTT_ENABLED", "false")
+    assert vp.ptt_listening("mac") is False                       # switched off wins

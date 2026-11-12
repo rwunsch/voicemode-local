@@ -592,3 +592,11 @@ def test_an_override_survives_unregister_for_the_same_process(base):
     st.set_override(pid, "bf_emma", "English", base=base)
     st.unregister_session(pid, base=base)
     assert st.get_override(pid, base=base) == {"voice": "bf_emma", "language": "English"}
+
+
+@pytest.mark.parametrize("raw,want", [("true", True), ("True", True), (" TRUE ", True), ("false", False), ("yes", False)])
+def test_pill_enabled_ignores_case_like_the_mac_window(monkeypatch, raw, want):
+    # The Mac wrapper reads VOICEMODE_PILL case-insensitively; autostart must agree, or
+    # VOICEMODE_PILL=True would never start the window.
+    monkeypatch.setenv("VOICEMODE_PILL", raw)
+    assert st.pill_enabled() is want

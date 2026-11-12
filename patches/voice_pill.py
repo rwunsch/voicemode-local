@@ -215,15 +215,23 @@ PTT_SETTING = "VOICEMODE_PTT_ENABLED"
 
 
 def ptt_listening(platform, home=None) -> bool:
-    """Is a push-to-talk listener expected to run? The setting when it says yes or no; else
-    on for Windows and Linux (voicemode-mcp starts one unless it is false), off on a Mac,
-    where nothing in this repo starts one."""
+    """Is a push-to-talk listener running, so its keys may be shown? The setting when it
+    says yes or no. Unset: on a Mac, exactly while voicemode-mcp's listener lives
+    (<upstream home>/run/ptt-listener.pid names a live process; FELIX starts none).
+    Elsewhere on, as before."""
     raw = (st.setting(PTT_SETTING, "", home) or "").strip().strip('"').lower()
-    if raw in ("true", "1", "yes", "on"):
-        return True
     if raw in ("false", "0", "no", "off"):
         return False
-    return platform != "mac"
+    if raw in ("true", "1", "yes", "on"):
+        return True      # said so: e.g. a listener started by hand, without voicemode-mcp
+    if platform == "mac":
+        try:
+            pid = int((st.upstream_home() / "run" / "ptt-listener.pid").read_text().strip())
+            os.kill(pid, 0)
+            return True
+        except (OSError, ValueError):
+            return False
+    return True
 
 
 def _floor_voice(floor, is_holder, sessions, conch, overrides):
