@@ -1,144 +1,150 @@
-# Proposal: one voice supervisor, owned by voicemode-local
+# Proposal: one shared voice supervisor and runtime builder
 
 Status: for Robert's decision. Agreed between the voicemode-local and FELIX-voice sessions,
-2026-11-12. Decision needed: approve the split, and choose the timing (route i or route ii).
+2026-11-12, revision 2 (after FELIX-voice's review).
+
+Decisions needed:
+- approve the split;
+- confirm the timing (route i);
+- answer whether Talos should skip FELIX's vendored folder.
 
 ## The problem
 
-FELIX's `plugins/voicemode/scripts/voice.py` is a drifted copy of voicemode-local's
-`scripts/windows/voicemode_native.py`.
-- **Measured** (2026-11-12, n=1 snapshot of both files, difflib per function):
-  - 46 of FELIX's 57 functions share a name with ours, holding 770 of 854 lines.
+- **The origin.** The runtime, service and lease logic was written in FELIX's
+  `plugins/voicemode/scripts/voice.py`. voicemode-local copied it into
+  `scripts/windows/voicemode_native.py` at FELIX commit aea841ffd (that file's own header,
+  lines 4-10) and added Job Objects, the pill and push-to-talk.
+- **Both files are now drifted copies of that code.** Measured 2026-11-12 (n=1 snapshot,
+  difflib per function):
+  - 46 of voice.py's 57 functions share a name with the voicemode-local file, holding 770 of
+    its 854 lines.
   - 16 are near-identical and 10 similar.
-  - 20 have diverged, among them `setup`, `ensure_services`, `watch` and `launch`.
-- Every fix to how the voice processes run therefore lands twice, Talos reviews both copies,
-  and the copies drift.
-
-The live cost (FELIX-voice, Windows, n=1, reported):
-- The speech services run inside the job of whichever chat started them.
-- When the Copilot app unloads that chat (seen after 12.7 min idle), every other chat loses
-  speech.
-- voicemode-local's supervisor already avoids this. Its services sit in a named, shared Job
-  Object that outlives every connector but the last, and children leave the starting
-  connector's job with `CREATE_BREAKAWAY_FROM_JOB` (read in the code). Unmeasured: whether the
-  Copilot app's job allows that breakaway.
+  - 20 have diverged, among them `setup` (similarity 0.10), `ensure_services` and `watch`.
+  - Some of FELIX's versions are newer fixes, not gaps.
+- **The scope differs.** voicemode-local's copy is Windows-only (`check_machine`, line 506);
+  voicemode-local runs on the Mac through `voicemode-switch` (bash). FELIX's voice.py runs the
+  lifecycle on Windows and on the Mac.
+- **More copies.**
+  - FELIX keeps its own `kokoro_onnx_server.py`: loopback by default, `--model-dir` required,
+    never downloads, no German.
+  - FELIX keeps a hand-kept `patches/manifest.mac.json`.
+- **The live cost** (FELIX-voice, Windows, n=1):
+  - The speech services run inside the job of the chat that started them.
+  - When the Copilot app unloads that chat (seen after 12.7 min idle), every other chat loses
+    speech.
 
 ## The split
 
-**voicemode-local owns (generic, every harness):**
-1. The lifecycle of the speech services, the barge trigger and the push-to-talk listener, on
-   Windows and macOS: the shared job with breakaway, leases, watchdog, status and stop.
-   - It is one code path, driven by a **host profile**: roots, runtime python, service
-     commands, ports, environment, policy hooks.
-   - It is exposed as stable command-line entry points.
-2. The shared fixes FELIX made in its copy. FELIX-voice lists them:
-   - the lease is written before anything starts;
-   - the watchdog starts first;
-   - a port's listener is checked to be our process tree;
-   - a port is never picked twice while a service loads;
-   - stop signals are held until the process is recorded;
-   - proxy-free loopback HTTP;
-   - the repair check;
-   - restarting under the runtime's python;
-   - tree kill;
-   - setup deadline and layout;
-   - "publish only after a speech check".
-3. Fixes for what FELIX works around today:
-   - The conch home follows a setting instead of the home folder fixed at import. Then
-     FELIX's shared-HOME trick becomes the supervisor's job.
-   - A setting turns off the config search up the folder tree, replacing FELIX's stopper file.
-   - Two bugs: beeps missing by default, and the pill label lagging the speaker.
+**One shared Python module in voicemode-local, cross-platform (Windows and macOS).** It is
+built by moving FELIX's code, which already runs on both, and adding voicemode-local's
+Windows parts (Job Objects, the pill, push-to-talk). It is driven by a **host profile**. The
+voicemode-local copy in `voicemode_native.py` retires into it. Two parts:
+
+1. **Runtime builder.** Download and verify; hash-locked `uv sync`; model links; the
+   whisper.cpp zip; atomic publish only after a speech check; completeness and repair check;
+   the setup deadline (exit 75). The profile supplies the policy: lock file, model list, extra
+   files, digest inputs.
+2. **Supervisor.**
+   - **Windows design:** one host process started **outside every chat** via
+     `Win32_Process.Create` (as FELIX's installer already does). It owns the speech services,
+     the barge trigger and the push-to-talk listener, and the named Job Object, as its
+     children. Then a chat's job never holds them, whether or not that job allows breakaway.
+     Breakaway is only an optimisation once measured.
+   - Leases, watchdog (started first), and port checks: the listener must be our process tree,
+     and no port is picked twice while a service loads.
+   - Stop signals are held until a process is recorded. Status and stop.
+   - Every fallback is recorded as a result, never silent.
+
+Also made options of voicemode-local's own files, so FELIX vendors them unchanged:
+- the Kokoro server's flags (loopback default, required `--model-dir`, no download, no German);
+- a patch-list profile in `apply.py` (no provider keys, no ffmpeg), replacing FELIX's
+  hand-kept Mac list.
 
 **FELIX keeps (policy and glue):**
-- install, runtime and repair: digest runtimes, hash locks, offline, whisper.cpp, its own
-  Kokoro server, WebView2, the Mac pill venv;
-- fe-bootstrap;
-- building the environment, as profile values;
-- preferences (`voice.barge`);
-- FE-facing messages;
-- the Copilot-only pieces: the `session.send` wake extension and "FELIX speaks first", neither
-  of which is built yet.
+- what to install, and the digest inputs, mirrored in the JS `manifestSha`;
+- the fe-bootstrap contract: `active.json`, `.complete.json`, `install-state.json`,
+  `last-start.json`;
+- `launch.js`, building the environment, the microphone pre-check;
+- FE-facing text: `record_start`, outdated notice, the skills;
+- the Copilot-only pieces: the `session.send` wake extension and "FELIX speaks first", both
+  not built yet.
 
-`voice.py` keeps its glue and loses about 25 functions: `ensure_services`, the watchdog,
-leases, ports, the tree kill, `start_helper` and `ensure_ptt`.
+**Who decides a switch.**
+- In FELIX's profile, FELIX's preference (`voice.barge` in `preferences.json`) is the source
+  of truth. `VOICEMODE_BARGE_CONTROL_COMMAND` stays FELIX's command: it saves the preference,
+  then calls the supervisor's entry point for the process action only.
+- voicemode-local's switch, which writes voicemode.env, stays for personal installs. voicemode.env
+  is never authoritative for FELIX.
 
-### Also pulled in (from FELIX-voice's full inventory, 2026-11-12)
-
-- **FELIX's own `kokoro_onnx_server.py`** is a second fork. It binds loopback by default
-  (`--host` to change), requires `--model-dir`, treats missing models as an error and never
-  downloads, and has no German model or URLs. These become options of ours, so FELIX vendors
-  ours unchanged.
-- **FELIX's `patches/manifest.mac.json`** is our `manifest.json` minus
-  `patch_env_provider_keys`, plus FELIX's three no-ffmpeg / early-scipy patches, which our
-  `manifest.windows.json` already lists. It becomes an option of our `apply.py` (for example a
-  host profile that leaves out provider keys and ffmpeg) instead of a list kept by hand in
-  FELIX.
-
-### The entry points' inputs (FELIX-voice's list)
-
-| Input | FELIX's value |
-|---|---|
-| root, run dir | `FELIX_VOICE_ROOT` (default `%USERPROFILE%\.felix\voice`); `<root>\run` |
-| runtime and its python | from `active.json`: `<runtime>\.venv\Scripts\python.exe` / `bin/python` |
-| TTS command | runtime python, `<runtime>\services\kokoro_onnx_server.py`, `--port N`, `--host 127.0.0.1`, `--model-dir <runtime>\models\kokoro`; ready on `/v1/models` |
-| STT command | `whisper-server` (bundled on Windows, Homebrew on Mac), `-m <runtime>\models\whisper\ggml-base.bin`, `--host 127.0.0.1`, `--port N`; ready on `/health` |
-| ports | preferred 18880 / 12022, a range after them, an override in `<root>\ports.json` |
-| environment | FELIX's `runtime_environment` output, for services and helpers |
-| barge | mode `auto`/`on`/`off`; silero model path |
-| push-to-talk (Windows) | sender `python -m voice_mode.ptt_control_client --stdin`, `-FocusPattern '^github$'`, log `<run>\ptt-listener.log` |
-| results back | the ports chosen, each part's state, helper problems (for `last-start.json` warnings), and a hard error with a reason and a next step |
-
-### The breakaway measurement
-
-Planned with Robert, as a stand-in for a connector (n=1): from a chat's own PowerShell tool,
-which is a child of the same Copilot runtime as the connectors, start python with
-`CREATE_BREAKAWAY_FROM_JOB`, then read `IsProcessInJob` and the job identity, with a run
-without the flag as a control. A real connector child would need a temporary probe in the
-installed `voice.py`; that comes only if the stand-in is unclear.
+**voicemode-local's other fixes** (FELIX works around them today):
+- the conch home follows a setting instead of the home folder fixed at import;
+- a setting turns off the config search up the folder tree;
+- beeps missing by default (cause unknown);
+- the pill label lagging the speaker.
 
 ## FELIX's conditions, and how they are met
 
 | # | Condition (FELIX-voice) | How |
 |---|---|---|
-| 1 | Vendored byte-identical at a tag, never fetched | The supervisor ships as files at a voicemode-local tag, like the patches. |
-| 2 | No provider key names in vendored text | Checked 2026-11-12: `voicemode_native.py` names none. A test pins it. |
-| 3 | No silent fallbacks: FELIX must see when breakaway was refused | **Change needed:** `spawn()` today quietly retries without breakaway. It will record the outcome in the run state, and the status entry point will report it. |
-| 4 | Stable interface with fe-bootstrap: `active.json`, `.complete.json`, digest inputs, `install-state.json`, `last-start.json`, exit 75 | Those files stay FELIX-written. The supervisor reads what the profile names and never rewrites FELIX's files. |
-| 5 | FE-facing text comes from FELIX | The supervisor returns structured results (code, detail). FELIX words them, through a profile hook. |
-| 6 | No console windows, stdio passes through, FELIX ports 18880/12022 plus `ports.json` | Already no console window (`CREATE_NO_WINDOW`). Port ranges become a profile value; ours stay separate. |
-| 7 | No ffmpeg, hash-locked, offline after setup, loopback only, proxies stripped | The supervisor downloads nothing in FELIX's profile, binds loopback only, and adopts FELIX's proxy-free loopback HTTP. |
+| 1 | Vendored byte-identical at a tag, never fetched | The shared module ships as files at a voicemode-local tag, like the patches. |
+| 2 | No provider key names in vendored text | `voicemode_native.py` names none (checked 2026-11-12). A test pins it for the shared module. |
+| 3 | No silent fallbacks | Every fallback (breakaway refused, a port taken, a helper failing) is recorded as a result FELIX reads. |
+| 4 | Stable interface with fe-bootstrap | FELIX's files stay FELIX-written. The builder publishes what the profile names and never rewrites FELIX's records. |
+| 5 | FE-facing text comes from FELIX | The module returns structured results (code, detail). FELIX words them. |
+| 6 | No console windows; stdio passes through; FELIX's ports | Already `CREATE_NO_WINDOW`. Ports are a profile value (FELIX: 18880 / 12022 plus `ports.json`). |
+| 7 | No ffmpeg, hash-locked, offline after setup, loopback, proxies stripped | Profile values. FELIX's proxy-free loopback HTTP moves into the module. |
 
-## Timing (Robert's call)
+## The entry points' inputs (FELIX-voice's list)
 
-#1743 (FELIX voice) is meant for main soon. The bug above breaks multi-chat voice about 12
-minutes after an idle chat is unloaded.
+| Input | FELIX's value |
+|---|---|
+| root, run dir | `FELIX_VOICE_ROOT` (default `%USERPROFILE%\.felix\voice`); `<root>\run` |
+| runtime and its python | from `active.json` |
+| TTS | runtime python, `kokoro_onnx_server.py --port N --host 127.0.0.1 --model-dir ...`; ready on `/v1/models` |
+| STT | `whisper-server -m ggml-base.bin --host 127.0.0.1 --port N` (bundled on Windows, Homebrew on Mac); ready on `/health` |
+| ports | 18880 / 12022, a range after them, `<root>\ports.json` |
+| environment | FELIX's `runtime_environment` output |
+| barge | mode, silero model path |
+| push-to-talk (Windows) | sender `python -m voice_mode.ptt_control_client --stdin`, `-FocusPattern '^github$'`, log file |
+| results back | ports chosen, each part's state, helper problems, a hard error with reason and next step |
 
-- **Route i (recommended by both sessions):** #1743 ships now with a small, separate fix for
-  that bug, and the migration follows as its own PR.
-  - The fix starts the services and helpers outside the chat's job, via `Win32_Process.Create`.
-    That is proven in FELIX's installer, so it doesn't depend on the unmeasured breakaway.
-  - The migration then replaces it with the shared supervisor, which must be reviewed on its
-    own.
-- **Route ii:** hold #1743 until the migration is done. That's slower, and voice on main stays
-  without the fix for longer.
+## Timing
+
+- **Route i (both sessions recommend it):** #1743 ships now with FELIX's small fix. That fix
+  starts the services and helpers in a process created via `Win32_Process.Create`, outside the
+  chat's job. It is the first step of the supervisor's Windows design above, not a throwaway.
+  The move into the shared module follows as its own reviewed PRs.
+- **Route ii:** hold #1743 until the move is done. Slower, and multi-chat voice stays broken
+  on FELIX's side meanwhile.
 
 ## Order of work after approval
 
-1. FELIX-voice: the small fix for #1743 (route i). It also measures whether the Copilot app's
-   job allows breakaway (one spawn, then `IsProcessInJob`), which decides the supervisor's
-   Windows path.
-2. voicemode-local, test-first:
-   - the host profile and the entry points;
-   - the shared fixes from FELIX's copy;
-   - the recorded breakaway outcome (condition 3);
-   - parity tests built from FELIX's ~90 voice tests;
-   - tag a release.
-3. FELIX-voice: `voice.py` becomes a thin wrapper over those entry points, in one PR, with
-   Talos review.
-4. voicemode-local: the conch home setting, the walk-up setting, beeps, the pill label lag.
+1. **FELIX-voice:** the #1743 fix (route i). Measure, with Robert, whether the Copilot app's
+   job allows breakaway: one spawn from a chat's own PowerShell tool, `IsProcessInJob` plus the
+   job identity, with a control run.
+2. **voicemode-local, test-first:**
+   - Move FELIX's lifecycle and runtime builder into a shared cross-platform module, taking
+     FELIX's newer fixes.
+   - Add the Windows host design and Job Objects, the recorded fallbacks, and the profile.
+   - Build parity tests from FELIX's ~210 voice tests (`tests/repo/test_voicemode_setup.py`,
+     `plugins/fe-bootstrap/tests/test_voice_opt_in.py`).
+   - `voicemode_native.py` becomes a thin personal-install profile over it.
+   - Tag a release.
+3. **FELIX-voice:** voice.py becomes a thin FELIX profile over the vendored module, in one PR.
+4. **voicemode-local:** the Kokoro server options, the `apply.py` patch-list profile, the
+   conch home setting, the walk-up setting, beeps, the pill label.
+
+## Questions for Robert
+
+- Approve the split above?
+- Route i (recommended) or route ii?
+- Talos reviewed 27 of today's 34 findings in FELIX's vendored files. Should FELIX's
+  repository exclude `plugins/voicemode/vendor/**` from Talos, since voicemode-local reviews
+  those files itself? That is a repository setting, so it's your call.
 
 ## Not known yet
 
-- Whether the Copilot app's job allows breakaway (decides the Windows path; measured in step 1).
-- Whether Copilot app requests carry a progress token (the CLI's do; the app's are unmeasured).
-- The cause of the missing beeps (both sessions, unexplained).
+- Whether the Copilot app's job allows breakaway (step 1). The host design does not depend on
+  it.
+- Whether Copilot app requests carry a progress token (the CLI's do).
+- The cause of the missing beeps. FELIX-voice's next live run turns on debug logging.
