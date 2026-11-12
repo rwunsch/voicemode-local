@@ -89,6 +89,14 @@ def write_lease(profile: HostProfile, pid: int, data: dict) -> None:
     atomic_json(Path(profile.run_dir) / "clients" / str(pid), data)
 
 
+def _remove(lease: Path) -> None:
+    """Best effort: a lease held open (Windows) or a directory must not break the caller."""
+    try:
+        lease.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
 def live_leases(profile: HostProfile, command_of=process_command) -> list[int]:
     """Leases whose launcher, or the voice server it started, still runs; remove the rest."""
     clients = Path(profile.run_dir) / "clients"
@@ -100,7 +108,7 @@ def live_leases(profile: HostProfile, command_of=process_command) -> list[int]:
         try:
             pid = int(lease.name)
         except ValueError:
-            lease.unlink(missing_ok=True)
+            _remove(lease)
             continue
         command = command_of(pid)
         record, _ = read_json(lease, {})
@@ -110,5 +118,5 @@ def live_leases(profile: HostProfile, command_of=process_command) -> list[int]:
                 child_command and profile.voice_server_marker in child_command):
             alive.append(pid)
         else:
-            lease.unlink(missing_ok=True)
+            _remove(lease)
     return alive

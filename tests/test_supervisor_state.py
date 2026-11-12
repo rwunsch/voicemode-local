@@ -76,3 +76,60 @@ def test_a_dead_empty_lease_is_removed(tmp_path):
     assert live_leases(profile, command_of=lambda pid: None) == []
     assert not (profile.run_dir / "clients" / "77").exists()
     assert not (profile.run_dir / "clients" / "88").exists()
+
+
+def test_a_directory_in_clients_does_not_break_live_leases(tmp_path):
+    profile = make_profile(tmp_path)
+    (profile.run_dir / "clients" / "55").mkdir(parents=True)
+    (profile.run_dir / "clients" / "junk").mkdir()
+    write_lease(profile, 10, {})
+    assert live_leases(profile, command_of={10: "py voice.py launch"}.get) == [10]
+
+
+def test_a_lease_that_cannot_be_removed_is_not_live_and_does_not_raise(tmp_path, monkeypatch):
+    import pathlib
+    profile = make_profile(tmp_path)
+    write_lease(profile, 77, {})
+    write_lease(profile, 10, {})
+
+    def deny(self, missing_ok=False):
+        raise PermissionError("held open")
+
+    monkeypatch.setattr(pathlib.Path, "unlink", deny)
+    assert live_leases(profile, command_of={10: "py voice.py launch"}.get) == [10]
+
+
+def test_atomic_json_retries_a_blocked_replace(tmp_path, monkeypatch):
+    import pathlib
+    from vml_supervisor import state
+    real = pathlib.Path.replace
+    calls = []
+
+    def flaky(self, target):
+        calls.append(1)
+        if len(calls) <= 2:
+            raise PermissionError("reader holds it")
+        return real(self, target)
+
+    monkeypatch.setattr(pathlib.Path, "replace", flaky)
+    monkeypatch.setattr(state.time, "sleep", lambda s: None)
+    atomic_json(tmp_path / "s.json", {"k": 1})
+    assert len(calls) == 3 and read_json(tmp_path / "s.json", None) == ({"k": 1}, None)
+
+
+def test_atomic_json_reraises_after_twenty_blocked_replaces(tmp_path, monkeypatch):
+    import pathlib
+    import pytest
+    from vml_supervisor import state
+    calls = []
+
+    def blocked(self, target):
+        calls.append(1)
+        raise PermissionError("always")
+
+    monkeypatch.setattr(pathlib.Path, "replace", blocked)
+    monkeypatch.setattr(state.time, "sleep", lambda s: None)
+    with pytest.raises(PermissionError):
+        atomic_json(tmp_path / "s.json", {"k": 1})
+    assert len(calls) == 20
+    assert not list(tmp_path.glob(".record-*"))
