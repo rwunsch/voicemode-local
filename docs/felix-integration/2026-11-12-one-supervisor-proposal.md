@@ -62,6 +62,40 @@ The live cost (FELIX-voice, Windows, n=1, reported):
 `voice.py` keeps its glue and loses about 25 functions: `ensure_services`, the watchdog,
 leases, ports, the tree kill, `start_helper` and `ensure_ptt`.
 
+### Also pulled in (from FELIX-voice's full inventory, 2026-11-12)
+
+- **FELIX's own `kokoro_onnx_server.py`** is a second fork. It binds loopback by default
+  (`--host` to change), requires `--model-dir`, treats missing models as an error and never
+  downloads, and has no German model or URLs. These become options of ours, so FELIX vendors
+  ours unchanged.
+- **FELIX's `patches/manifest.mac.json`** is our `manifest.json` minus
+  `patch_env_provider_keys`, plus FELIX's three no-ffmpeg / early-scipy patches, which our
+  `manifest.windows.json` already lists. It becomes an option of our `apply.py` (for example a
+  host profile that leaves out provider keys and ffmpeg) instead of a list kept by hand in
+  FELIX.
+
+### The entry points' inputs (FELIX-voice's list)
+
+| Input | FELIX's value |
+|---|---|
+| root, run dir | `FELIX_VOICE_ROOT` (default `%USERPROFILE%\.felix\voice`); `<root>\run` |
+| runtime and its python | from `active.json`: `<runtime>\.venv\Scripts\python.exe` / `bin/python` |
+| TTS command | runtime python, `<runtime>\services\kokoro_onnx_server.py`, `--port N`, `--host 127.0.0.1`, `--model-dir <runtime>\models\kokoro`; ready on `/v1/models` |
+| STT command | `whisper-server` (bundled on Windows, Homebrew on Mac), `-m <runtime>\models\whisper\ggml-base.bin`, `--host 127.0.0.1`, `--port N`; ready on `/health` |
+| ports | preferred 18880 / 12022, a range after them, an override in `<root>\ports.json` |
+| environment | FELIX's `runtime_environment` output, for services and helpers |
+| barge | mode `auto`/`on`/`off`; silero model path |
+| push-to-talk (Windows) | sender `python -m voice_mode.ptt_control_client --stdin`, `-FocusPattern '^github$'`, log `<run>\ptt-listener.log` |
+| results back | the ports chosen, each part's state, helper problems (for `last-start.json` warnings), and a hard error with a reason and a next step |
+
+### The breakaway measurement
+
+Planned with Robert, as a stand-in for a connector (n=1): from a chat's own PowerShell tool,
+which is a child of the same Copilot runtime as the connectors, start python with
+`CREATE_BREAKAWAY_FROM_JOB`, then read `IsProcessInJob` and the job identity, with a run
+without the flag as a control. A real connector child would need a temporary probe in the
+installed `voice.py`; that comes only if the stand-in is unclear.
+
 ## FELIX's conditions, and how they are met
 
 | # | Condition (FELIX-voice) | How |
