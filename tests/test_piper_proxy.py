@@ -22,7 +22,7 @@ TEST_PORT = 18881
 BASE_URL = f"http://127.0.0.1:{TEST_PORT}"
 
 
-START_TIMEOUT = 5.0
+START_TIMEOUT = 15.0  # 3 s measured at load 20 (2026-11-12); 5 s failed under a busy full suite
 
 
 def _start_proxy():

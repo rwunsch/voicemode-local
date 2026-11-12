@@ -25,6 +25,8 @@ SOURCES = {
     "conch_notify.py": "conch_notify.py",
     "conch_queue.py": "conch_queue.py",
     "conch.py": "conch.py",
+    "config.py": "config.py",
+    "tools/configuration_management.py": "configuration_management.py",
 }
 
 
