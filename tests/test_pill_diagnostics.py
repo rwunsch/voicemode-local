@@ -227,3 +227,97 @@ def test_talkative_backend_is_left_alone(tmp_path, monkeypatch, capsys):
         app.thread.join(5)
     assert "backend silent" not in capsys.readouterr().err
     assert len((d / "runs.log").read_text().splitlines()) == 1
+
+
+# -- a watchdog kill must not lose a pause -------------------------------------
+# A hung backend killed by SIGKILL never runs its finally (_release_pause), so paused.json
+# names a dead owner, is_paused() reads that as not paused, and the mic would reopen.
+
+PAUSED_FAKE = r'''
+import json, os, select, signal, sys, time
+from pathlib import Path
+d = Path(sys.argv[1])
+runs = d / "runs.log"
+n = len(runs.read_text().splitlines()) if runs.exists() else 0
+with runs.open("a") as f:
+    f.write(f"pid={os.getpid()}\n")
+def on_term(sig, frame):
+    with (d / "signals.log").open("a") as f:
+        f.write(f"run{n} TERM\n")
+    if not (d / "ignore_term").exists():
+        sys.exit(143)
+signal.signal(signal.SIGTERM, on_term)
+if n == 0:  # the first backend: one snapshot, then hung (alive, writing nothing)
+    print(json.dumps({"visible": True, "phase": "PHASE"}), flush=True)
+    while True:
+        time.sleep(0.05)
+while True:  # the restarted backend: talkative, and logs what it is sent
+    print(json.dumps({"visible": True, "phase": "listening"}), flush=True)
+    r, _, _ = select.select([0], [], [], 0.2)
+    if r:
+        data = os.read(0, 65536)
+        if not data:
+            sys.exit(0)
+        with (d / "commands.log").open("ab") as f:
+            f.write(data)
+'''
+
+
+def _paused_app(tmp_path, monkeypatch, phase="paused"):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    d = tmp_path / "fake"
+    d.mkdir()
+    script = tmp_path / "paused_fake.py"
+    script.write_text(PAUSED_FAKE.replace("PHASE", phase))
+    monkeypatch.setattr(m, "BACKEND_SILENCE_S", 0.8)
+    monkeypatch.setattr(m, "WATCHDOG_TICK_S", 0.1)
+    monkeypatch.setattr(m, "TERM_GRACE_S", 0.5)
+    return d, m.App(True, [sys.executable, str(script), str(d)])
+
+
+def _run_until(app, cond, limit=15, settle=0.0):
+    try:
+        app.start_backend()
+        deadline = time.monotonic() + limit
+        while time.monotonic() < deadline and not cond():
+            time.sleep(0.1)
+        time.sleep(settle)
+    finally:
+        app.closing = True
+        if app.proc:
+            app.proc.kill()
+        app.thread.join(5)
+
+
+def _commands(d):
+    p = d / "commands.log"
+    return p.read_text().splitlines() if p.exists() else []
+
+
+def _runs(d):
+    p = d / "runs.log"
+    return p.read_text().splitlines() if p.exists() else []
+
+
+def test_watchdog_kill_of_a_paused_backend_pauses_the_new_one(tmp_path, monkeypatch, capsys):
+    d, app = _paused_app(tmp_path, monkeypatch)
+    _run_until(app, lambda: '{"cmd":"pause"}' in _commands(d), settle=1.0)
+    assert _commands(d).count('{"cmd":"pause"}') == 1, _commands(d)  # once, not on every line
+    assert (d / "signals.log").read_text().splitlines() == ["run0 TERM"]  # SIGTERM first
+    assert "backend silent" in capsys.readouterr().err
+
+
+def test_watchdog_sigkills_a_backend_that_ignores_sigterm(tmp_path, monkeypatch):
+    d, app = _paused_app(tmp_path, monkeypatch)
+    (d / "ignore_term").write_text("")
+    _run_until(app, lambda: '{"cmd":"pause"}' in _commands(d))
+    assert (d / "signals.log").read_text().splitlines()[0] == "run0 TERM"
+    assert len(_runs(d)) >= 2  # the one that ignored SIGTERM died anyway
+    assert '{"cmd":"pause"}' in _commands(d)
+
+
+def test_watchdog_kill_of_an_unpaused_backend_sends_no_pause(tmp_path, monkeypatch):
+    d, app = _paused_app(tmp_path, monkeypatch, phase="listening")
+    _run_until(app, lambda: len(_runs(d)) >= 2, limit=10, settle=1.0)
+    assert len(_runs(d)) >= 2
+    assert '{"cmd":"pause"}' not in _commands(d)
