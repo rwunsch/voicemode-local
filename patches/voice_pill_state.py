@@ -413,6 +413,7 @@ def mark_stopped(pid: int, stopped: bool, base=None) -> None:
 
 def unregister_session(pid: int, base=None) -> None:
     _unlink(_session_path(pid, base))
+    _unlink(_barge_told_path(pid, base))  # voice again: say it again, as before
 
 
 def live_sessions(base=None) -> list[dict]:
@@ -433,6 +434,7 @@ def live_sessions(base=None) -> list[dict]:
             if isinstance(pid, int):  # a reused pid must not inherit these
                 set_override(pid, None, None, base)
                 take_stop(pid, base)
+                _unlink(_barge_told_path(pid, base))
             continue
         out.append({k: s.get(k) for k in
                     ("pid", "label", "voice", "started_at", "last_voice_at", "stopped")})
@@ -443,6 +445,11 @@ def live_sessions(base=None) -> list[dict]:
 
 def request_stop(pid: int, base=None) -> None:
     (_sub(base, "stop") / str(int(pid))).touch()
+
+
+def stop_requested(pid: int, base=None) -> bool:
+    """Is a stop waiting for pid? Looks only: take_stop consumes it."""
+    return (_sub(base, "stop") / str(int(pid))).exists()
 
 
 def take_stop(pid: int, base=None) -> bool:
@@ -493,17 +500,32 @@ async def wait_while_paused(until=None, poll: float = 0.25, base=None) -> None:
 
 # -- per-session voice/language override ------------------------------------
 
+def _override_path(pid, base) -> Path:
+    return _base(base) / f"override-{int(pid)}.json"
+
+
 def set_override(pid: int, voice: str | None, language: str | None, base=None) -> None:
-    path = _base(base) / f"override-{int(pid)}.json"
+    """Recorded with the process start, so a reused pid cannot inherit the choice: voice_stop
+    unregisters the session but leaves the override, and the session may come back."""
+    path = _override_path(pid, base)
     data = {k: v for k, v in (("voice", voice), ("language", language)) if v}
     if data:
-        _write_json(path, data)
+        _write_json(path, {**data, "start": process_start(pid)})
     else:
         _unlink(path)
 
 
 def get_override(pid: int, base=None) -> dict:
-    return _read_json(_base(base) / f"override-{int(pid)}.json")
+    """{voice, language} chosen for this process, or {} (and the file removed) when the
+    pid now belongs to another process. A file without a start, from before, is dropped."""
+    path = _override_path(pid, base)
+    data, status = _read_json_state(path)
+    if status != "ok":
+        return {}
+    if "start" not in data or data["start"] != process_start(pid):
+        _unlink(path)
+        return {}
+    return {k: data[k] for k in ("voice", "language") if data.get(k)}
 
 
 def effective_voice(pid: int, voice: str | None, base=None) -> str | None:
@@ -542,6 +564,11 @@ def effective_beeps(enabled: bool | None, base=None) -> bool | None:
 BARGE_ON_NOTE = ("Interrupt by voice is on: the user can talk over you to stop you. Tell them "
                  "once, in a few words, that they can switch it off or on at any time by asking "
                  "(the voice_barge tool) or in the voice pill.")
+# auto listens only while the output route is headphones (voice_barge.output_route).
+BARGE_AUTO_NOTE = ("Interrupt by voice is on while the user listens on headphones: then they "
+                   "can talk over you to stop you; on speakers it does not listen. Tell them "
+                   "once, in a few words, that they can switch it off or on at any time by "
+                   "asking (the voice_barge tool) or in the voice pill.")
 BARGE_OFF_NOTE = ("Interrupt by voice is off. Tell the user once, in a few words, that they can "
                   "switch it on or off at any time by asking (the voice_barge tool) or in the "
                   "voice pill.")
@@ -582,18 +609,32 @@ def barge_state(home=None) -> bool | None:
     return None if mode is None else mode in ("on", "auto")
 
 
+def _barge_told_path(pid, base) -> Path:
+    return _sub(base, "barge_told") / str(int(pid))
+
+
 def _barge_note_once(pid: int, base) -> str:
-    """Said once per session, at its first turn (Robert, 2026-11-05)."""
-    path = _session_path(pid, base)
-    s = _read_json(path)
-    if not s or s.get("barge_told"):
+    """Said once per session, at its first turn (Robert, 2026-11-05).
+
+    That it was said is kept in its own marker file, holding the session's start token,
+    never in the session record: rewriting the record here would wipe a Stop the pill
+    wrote meanwhile. A reused pid has another start token, so it is told again."""
+    s = _read_json(_session_path(pid, base))
+    if not s:
         return ""
-    state = barge_state()
-    if state is None:
+    token = json.dumps(s.get("start"))
+    marker = _barge_told_path(pid, base)
+    try:
+        if _read_policy(marker).decode("utf-8", "replace") == token:
+            return ""
+    except OSError:
+        pass
+    mode = barge_mode()
+    if mode is None:
         return ""
-    s["barge_told"] = True
-    _write_json(path, s)
-    return "\n\n" + (BARGE_ON_NOTE if state else BARGE_OFF_NOTE)
+    _write_atomic(marker, token)
+    note = {"on": BARGE_ON_NOTE, "auto": BARGE_AUTO_NOTE}.get(mode, BARGE_OFF_NOTE)
+    return "\n\n" + note
 
 
 def result_note(pid: int, base=None, already: str = "") -> str:
@@ -667,7 +708,8 @@ async def enter(pid: int, label: str, voice: str | None, base=None) -> str | Non
             hook(base)
         except Exception as e:
             _warn_once(f"voice pill autostart failed: {e}")
-    await wait_while_paused(base=base)
+    # A Stop from the pill must end the wait: it does not lift the pause.
+    await wait_while_paused(until=lambda: stop_requested(pid, base), base=base)
     if take_stop(pid, base):
         mark_stopped(pid, True, base)
         return STOPPED_MESSAGE
@@ -928,7 +970,8 @@ def barge_command(switch=None):
 
 BARGE_PYTHON_SETTING = "VOICEMODE_BARGE_PYTHON"
 BARGE_PROBE_TIMEOUT = 10.0
-_BARGE_PROBE: dict = {"result": None, "thread": None, "started": False}
+BARGE_RETRY_S = 60.0  # a failed probe is asked again after this long; a success is kept
+_BARGE_PROBE: dict = {"result": None, "thread": None, "started": False, "at": None}
 _BARGE_PROBE_LOCK = threading.Lock()
 
 
@@ -960,23 +1003,29 @@ def _probe_barge() -> None:
             result = bool(line) and not line[0].startswith("cannot run")
     except Exception:  # noqa: BLE001 - any failure means we cannot say the mic is reachable
         result = False
+    _BARGE_PROBE["at"] = time.monotonic()
     _BARGE_PROBE["result"] = result
 
 
 def _barge_probe_reset() -> None:
     with _BARGE_PROBE_LOCK:
-        _BARGE_PROBE.update(result=None, thread=None, started=False)
+        _BARGE_PROBE.update(result=None, thread=None, started=False, at=None)
 
 
 def barge_available() -> bool:
     """Can the interpreter that runs the trigger hear the mic? In-process capture_backend()
-    first; otherwise ask the trigger's python once, in a thread, and cache the answer for
-    the process lifetime. Unknown-yet counts as unavailable."""
+    first; otherwise ask the trigger's python, in a thread. Yes is kept for the process
+    lifetime; no is asked again once BARGE_RETRY_S has passed, so one failed probe (a slow
+    start, a busy device) cannot hide the switch for good. Unknown-yet counts as unavailable."""
     if capture_backend() is not None:
         return True
     with _BARGE_PROBE_LOCK:
-        if not _BARGE_PROBE["started"]:
+        at = _BARGE_PROBE["at"]
+        stale_no = (_BARGE_PROBE["result"] is False and at is not None
+                    and time.monotonic() - at >= BARGE_RETRY_S)
+        if not _BARGE_PROBE["started"] or stale_no:
             _BARGE_PROBE["started"] = True
+            _BARGE_PROBE["at"] = None  # one retry at a time: set again when it answers
             t = threading.Thread(target=_probe_barge, daemon=True)
             _BARGE_PROBE["thread"] = t
             t.start()
