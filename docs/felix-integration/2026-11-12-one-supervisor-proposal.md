@@ -1,12 +1,11 @@
 # Proposal: one shared voice supervisor and runtime builder
 
-Status: for Robert's decision. Agreed between the voicemode-local and FELIX-voice sessions,
-2026-11-12, revision 2 (after FELIX-voice's review).
-
-Decisions needed:
-- approve the split;
-- confirm the timing (route i);
-- answer whether Talos should skip FELIX's vendored folder.
+Status: **APPROVED by Robert, 2026-11-12.** Agreed between the voicemode-local and FELIX-voice
+sessions, revision 3. Robert's decisions:
+1. The split: yes.
+2. Timing: route i. #1743 ships with FELIX's host fix now; the move into the shared module
+   follows as its own PRs.
+3. Talos keeps reviewing `plugins/voicemode/vendor/**`: no exclusion.
 
 ## The problem
 
