@@ -19,6 +19,8 @@ so FELIX's `voice.py` and our `voicemode_native.py` both become thin profiles ov
 **Tech Stack:** Python 3.10+ (stdlib, optional psutil, ctypes on Windows), pytest. Windows
 PowerShell 5.1 for `Win32_Process.Create`.
 
+**Base (pinned 2026-11-12):** FELIX #1743 at 454f20d0e (the Windows voice host fix).
+
 **Spec:** `docs/felix-integration/2026-11-12-one-supervisor-proposal.md` (approved by Robert,
 2026-11-12: split yes, route i, Talos keeps reviewing vendor). The research map behind this plan
 is FELIX `voice.py` at b36f288ce / 8c9dce0e2 (identical lifecycle) against our
