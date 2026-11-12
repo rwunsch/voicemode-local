@@ -16,6 +16,8 @@ import subprocess
 import sys
 import time
 
+from .result import Result
+
 WINDOWS = sys.platform == "win32"
 LOOPBACK = "127.0.0.1"
 STOP_SIGNALS = {getattr(signal, name) for name in ("SIGTERM", "SIGINT", "SIGHUP") if hasattr(signal, name)}
@@ -120,14 +122,53 @@ def _alive(pid) -> bool:
         return True
 
 
-def kill_tree(pid, timeout) -> None:
-    """Stop a process and its children. Windows: kill the tree through psutil and wait. POSIX:
-    SIGTERM, then SIGKILL once `timeout` seconds pass."""
+def require_psutil() -> Result | None:
+    """On Windows, Result("psutil_missing") when psutil cannot be imported; None otherwise.
+    Callers check this before relying on listener_pids, process_command or kill_tree."""
+    if WINDOWS and _psutil() is None:
+        return Result("psutil_missing", "psutil is not installed; process lookups and stops "
+                      "need it on Windows")
+    return None
+
+
+def _group_alive(pgid) -> bool:
+    """True when any non-zombie process is in the group (zombies awaiting a reaper do not count)."""
+    try:
+        names = [n for n in os.listdir("/proc") if n.isdigit()]
+    except OSError:
+        try:
+            os.killpg(pgid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        return True
+    for name in names:
+        try:
+            with open(f"/proc/{name}/stat") as fh:
+                fields = fh.read().rsplit(")", 1)[1].split()
+        except (OSError, IndexError):
+            continue
+        if fields[0] != "Z" and int(fields[2]) == pgid:
+            return True
+    return False
+
+
+def kill_tree(pid, timeout) -> Result | None:
+    """Stop a process and its children; None once the tree is confirmed gone.
+
+    Windows: kill the psutil tree and wait. POSIX: children are started with start_new_session,
+    so the pid leads a process group; signal the group (SIGTERM, then SIGKILL once `timeout`
+    seconds pass), or just the pid when it is not a group leader. Returns Result("kill_incomplete")
+    when something is still alive afterwards, Result("psutil_missing") on Windows without psutil."""
     if WINDOWS:
+        missing = require_psutil()
+        if missing is not None:
+            return missing
         psutil = _psutil()
         process = _psutil_process(pid)
-        if psutil is None or process is None:
-            return
+        if process is None:
+            return None
         try:
             members = [*process.children(recursive=True), process]
         except psutil.Error:
@@ -135,17 +176,42 @@ def kill_tree(pid, timeout) -> None:
         for member in members:
             with contextlib.suppress(psutil.Error):
                 member.kill()
-        psutil.wait_procs(members, timeout=timeout)
-        return
-    with contextlib.suppress(ProcessLookupError, PermissionError):
-        os.kill(pid, signal.SIGTERM)
+        _, alive = psutil.wait_procs(members, timeout=timeout)
+        if alive:
+            return Result("kill_incomplete", f"still alive after kill: {sorted(p.pid for p in alive)}",
+                          {"pids": sorted(p.pid for p in alive)})
+        return None
+    try:
+        group = os.getpgid(pid)
+    except ProcessLookupError:
+        return None
+    except PermissionError:
+        group = None
+    leader = group == pid
+
+    def send(sig):
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            if leader:
+                os.killpg(group, sig)
+            else:
+                os.kill(pid, sig)
+
+    def alive():
+        return _group_alive(group) if leader else _alive(pid)
+
+    send(signal.SIGTERM)
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        if not _alive(pid):
-            return
+        if not alive():
+            return None
         time.sleep(0.05)
-    with contextlib.suppress(ProcessLookupError, PermissionError):
-        os.kill(pid, signal.SIGKILL)
+    send(signal.SIGKILL)
+    deadline = time.monotonic() + min(max(timeout, 0.5), 5)
+    while time.monotonic() < deadline:
+        if not alive():
+            return None
+        time.sleep(0.05)
+    return Result("kill_incomplete", f"process {pid} is still alive after SIGKILL", {"pids": [pid]})
 
 
 def owned(entry, command_of=process_command) -> bool:

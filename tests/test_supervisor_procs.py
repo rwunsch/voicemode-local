@@ -206,3 +206,92 @@ def test_the_package_imports_without_psutil(monkeypatch):
     from vml_supervisor import procs
     importlib.reload(procs)
     assert callable(procs.process_command)
+
+
+def _gone(pid):
+    from vml_supervisor import procs
+    return not procs._alive(pid)
+
+
+@posix_only
+def test_kill_tree_takes_the_grandchildren_too(tmp_path):
+    from vml_supervisor.procs import kill_tree
+    marker = tmp_path / "pids"
+    child = subprocess.Popen(
+        ["sh", "-c", f"sleep 60 & echo $! > {marker}; sleep 60"], start_new_session=True)
+    for _ in range(100):
+        if marker.exists() and marker.read_text().strip():
+            break
+        time.sleep(0.05)
+    grandchild = int(marker.read_text())
+    try:
+        assert kill_tree(child.pid, 5) is None
+        child.wait(timeout=5)
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and not _gone(grandchild):
+            time.sleep(0.05)
+        assert _gone(grandchild) and _gone(child.pid)
+    finally:
+        for pid in (grandchild, child.pid):
+            with contextlib.suppress(OSError):
+                os.kill(pid, signal.SIGKILL)
+
+
+@posix_only
+def test_kill_tree_of_a_non_leader_signals_only_that_pid():
+    from vml_supervisor.procs import kill_tree
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])  # shares our group
+    try:
+        assert kill_tree(child.pid, 5) is None
+        child.wait(timeout=5)
+        assert os.getpgid(0) == os.getpgrp()  # we were not signalled
+    finally:
+        if child.poll() is None:
+            child.kill()
+
+
+@posix_only
+def test_kill_tree_reports_what_survives(monkeypatch):
+    from vml_supervisor import procs
+    child = subprocess.Popen(
+        [sys.executable, "-c", "import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)"],
+        start_new_session=True)
+    time.sleep(0.3)
+    real_kill, real_killpg = os.kill, os.killpg
+
+    def no_sigkill(pid, sig):
+        if sig != signal.SIGKILL:
+            real_kill(pid, sig)
+
+    def no_sigkillpg(pg, sig):
+        if sig != signal.SIGKILL:
+            real_killpg(pg, sig)
+
+    monkeypatch.setattr(procs.os, "kill", no_sigkill)
+    monkeypatch.setattr(procs.os, "killpg", no_sigkillpg)
+    try:
+        result = procs.kill_tree(child.pid, 0.3)
+        assert result is not None and result.code == "kill_incomplete"
+    finally:
+        monkeypatch.undo()
+        child.kill()
+        child.wait()
+
+
+def test_require_psutil_on_windows_without_psutil(monkeypatch):
+    from vml_supervisor import procs
+    monkeypatch.setattr(procs, "WINDOWS", True)
+    monkeypatch.setattr(procs, "_psutil", lambda: None)
+    result = procs.require_psutil()
+    assert result is not None and result.code == "psutil_missing"
+    kill = procs.kill_tree(12345, 1)
+    assert kill is not None and kill.code == "psutil_missing"
+    monkeypatch.setattr(procs, "_psutil", lambda: object())
+    assert procs.require_psutil() is None
+
+
+def test_require_psutil_is_none_off_windows(monkeypatch):
+    from vml_supervisor import procs
+    monkeypatch.setattr(procs, "WINDOWS", False)
+    monkeypatch.setattr(procs, "_psutil", lambda: None)
+    assert procs.require_psutil() is None
