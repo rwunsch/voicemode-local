@@ -35,6 +35,8 @@ class HelperSpec:
     log: str
     platforms: tuple[str, ...]
     needs_mode: bool
+    # Optional: the command that prints the helper's own status line (FELIX-voice point 8).
+    status_argv: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)

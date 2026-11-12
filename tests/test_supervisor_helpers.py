@@ -53,16 +53,23 @@ def make_profile(root: Path, **helper_over) -> HostProfile:
         watch_command=[], watch_marker="", job_name="vml-test-job")
 
 
-def _helper_world(tmp_path, monkeypatch, *, exits=None, running=(), **helper_over):
+def _helper_world(tmp_path, monkeypatch, *, exits=None, running=(), stubborn=(), **helper_over):
     """A voice folder, a fake process table and a Popen that starts nothing."""
     root = tmp_path / "voice"
     (root / "run").mkdir(parents=True)
     stopped, started = [], []
     monkeypatch.setattr(helpers, "background_options", lambda: {})
     monkeypatch.setattr(helpers, "HELPER_START_CHECK", 0.05)
-    monkeypatch.setattr(helpers, "running_commands", lambda: list(running))
-    monkeypatch.setattr(helpers, "stop_entry", lambda profile, entry: stopped.append(entry["pid"]))
-    monkeypatch.setattr(helpers, "owned", lambda entry: entry is not None and entry.get("pid") not in stopped)
+    monkeypatch.setattr(helpers, "running_commands", lambda: (list(running), None))
+
+    def stop_entry(profile, entry):
+        if entry["pid"] in stubborn:   # a process that survives SIGKILL
+            return helpers.Result("kill_incomplete", f"process {entry['pid']} is still alive", {"pids": [entry["pid"]]})
+        stopped.append(entry["pid"])
+        return None
+
+    monkeypatch.setattr(helpers, "stop_entry", stop_entry)
+    monkeypatch.setattr(helpers, "owned", lambda entry: isinstance(entry, dict) and entry.get("pid") not in stopped)
     options = []
 
     def popen(args, **kw):
@@ -237,10 +244,12 @@ def test_a_real_helper_starts_in_the_working_dir_and_stops(tmp_path, monkeypatch
     root = tmp_path / "voice"
     script = "import os, time; print(os.getcwd(), flush=True); time.sleep(60)"
     marker = "vml-helper-test-" + str(os.getpid())
+    status = [sys.executable, "-c", "import os, sys; print(); print('mode', sys.argv[1], os.getcwd())", "{mode}"]
     profile = make_profile(root, barge=HelperSpec([sys.executable, "-c", script, marker, str(root)], marker,
-                                                  "barge.log", (), True))
+                                                  "barge.log", (), True, status_argv=status))
     result = helpers.start_helper(profile, "barge", "auto")
     assert result.code == "helper_started", result
+    assert result.detail == f"mode auto {profile.working_dir}" and result.data["results"] == []
     pid = result.data["pid"]
     try:
         deadline = time.monotonic() + 5
@@ -251,8 +260,132 @@ def test_a_real_helper_starts_in_the_working_dir_and_stops(tmp_path, monkeypatch
         assert helpers.start_helper(profile, "barge", "auto").code == "helper_running"
     finally:
         stopped = helpers.stop_helper(profile, "barge")
-    assert stopped.code == "helper_stopped"
+    assert stopped.code == "helper_stopped" and stopped.detail == f"mode auto {profile.working_dir}"
     with contextlib.suppress(ChildProcessError):
         os.waitpid(pid, 0)
     with pytest.raises(ProcessLookupError):
         os.kill(pid, 0)
+
+
+# ----- fix round 1 ----------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(sys.platform == "win32" or os.geteuid() == 0, reason="POSIX permissions, not as root")
+def test_an_unwritable_run_dir_is_a_result_not_a_raise(tmp_path, monkeypatch):
+    """Review, 2026-11-12: with a chmod-555 parent, service_lock raised PermissionError out of both."""
+    world = _helper_world(tmp_path, monkeypatch)
+    locked = tmp_path / "locked"
+    locked.mkdir()
+    profile = make_profile(locked / "voice")
+    locked.chmod(0o555)
+    try:
+        started = helpers.start_helper(profile, "barge", "auto")
+        stopped = helpers.stop_helper(profile, "barge")
+    finally:
+        locked.chmod(0o755)
+    assert started.code == "helper_failed" and "Permission denied" in started.detail
+    assert stopped.code == "state_write_failed" and "Permission denied" in stopped.detail
+    assert world.started == []
+
+
+def test_a_process_list_that_cannot_be_read_is_reported(tmp_path, monkeypatch):
+    """Review, 2026-11-12: a failing instrument looked like a clean sweep."""
+    world = _helper_world(tmp_path, monkeypatch)
+    monkeypatch.undo()   # the real running_commands, with its instrument faked below
+    monkeypatch.setattr(helpers, "WINDOWS", False)
+    monkeypatch.setattr(helpers.subprocess, "run", lambda *a, **k: SimpleNamespace(returncode=1, stdout="",
+                                                                                   stderr="ps: boom"))
+    found, problem = helpers.running_commands()
+    assert found == [] and problem.code == "process_list_unavailable"
+    assert "ps: boom" in problem.detail and "1" in problem.detail
+    assert [r.code for r in helpers.stop_unrecorded(world.profile, "barge")] == ["process_list_unavailable"]
+
+    def missing(*a, **k):
+        raise FileNotFoundError(2, "No such file", "ps")
+    monkeypatch.setattr(helpers.subprocess, "run", missing)
+    found, problem = helpers.running_commands()
+    assert found == [] and problem.code == "process_list_unavailable" and "No such file" in problem.detail
+
+    monkeypatch.setattr(helpers, "WINDOWS", True)
+    monkeypatch.setitem(sys.modules, "psutil", None)   # import psutil raises ImportError
+    found, problem = helpers.running_commands()
+    assert found == [] and problem.code == "psutil_missing"
+
+
+def test_an_old_helper_that_will_not_die_blocks_the_new_one(tmp_path, monkeypatch):
+    """Two key listeners must never run: if the old one (recorded or not) survives, nothing new starts."""
+    world = _helper_world(tmp_path, monkeypatch, stubborn={901})
+    helpers.start_helper(world.profile, "barge", "auto")
+    result = helpers.start_helper(world.profile, "barge", "on")
+    assert result.code == "helper_failed" and len(world.started) == 1
+    assert "kill_incomplete" in [r.code for r in result.data["results"]]
+    assert state_of(world)["barge"]["pid"] == 901                  # kept, so a later stop tries again
+
+    root = tmp_path / "other"
+    running = [(52, f"python -m voice_mode.voice_barge {root / 'voice'}/x.onnx")]
+    other = _helper_world(root, monkeypatch, running=running, stubborn={52})
+    result = helpers.start_helper(other.profile, "barge", "auto")
+    assert result.code == "helper_failed" and other.started == []
+    assert [r.code for r in result.data["results"]] == ["helper_unrecorded_stopped", "kill_incomplete"]
+
+
+def test_a_failed_state_write_after_spawn_stops_the_new_helper(tmp_path, monkeypatch):
+    from vml_supervisor import state as state_module
+    world = _helper_world(tmp_path, monkeypatch)
+
+    def denied(path, value):
+        raise PermissionError(13, "denied")
+    monkeypatch.setattr(state_module, "atomic_json", denied)
+    result = helpers.start_helper(world.profile, "barge", "auto")
+    assert result.code == "helper_failed" and world.stopped == [901]
+    assert "state_write_failed" in [r.code for r in result.data["results"]]
+
+    def interrupted(path, value):
+        raise KeyboardInterrupt
+    monkeypatch.setattr(state_module, "atomic_json", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        helpers.start_helper(world.profile, "barge", "auto")
+    assert world.stopped == [901, 902]                             # stopped before the interrupt went on
+
+
+def test_stop_helper_keeps_the_entry_when_the_kill_is_incomplete(tmp_path, monkeypatch):
+    world = _helper_world(tmp_path, monkeypatch, stubborn={901})
+    helpers.start_helper(world.profile, "barge", "auto")
+    result = helpers.stop_helper(world.profile, "barge")
+    assert result.code == "kill_incomplete" and state_of(world)["barge"]["pid"] == 901
+
+
+def test_the_helpers_own_status_line_is_the_detail(tmp_path, monkeypatch):
+    """FELIX-voice point 8: with status_argv, start and stop report what the helper itself says."""
+    spec = HelperSpec(["python", "barge.py", "--mode={mode}"], "barge.py", "barge.log", (), True,
+                      status_argv=["python", "barge.py", "status", "--mode={mode}"])
+    world = _helper_world(tmp_path, monkeypatch, barge=spec)
+    calls = []
+
+    def run(args, **kw):
+        calls.append((args, kw))
+        return SimpleNamespace(returncode=0, stdout="\n  auto (listening)\nsecond line\n", stderr="")
+    monkeypatch.setattr(helpers.subprocess, "run", run)
+    started = helpers.start_helper(world.profile, "barge", "auto")
+    assert started.code == "helper_started" and started.detail == "auto (listening)"
+    assert calls[0][0] == ["python", "barge.py", "status", "--mode=auto"]
+    assert calls[0][1]["timeout"] == 10 and calls[0][1]["cwd"] == str(world.profile.working_dir)
+    stopped = helpers.stop_helper(world.profile, "barge")
+    assert stopped.code == "helper_stopped" and stopped.detail == "auto (listening)" and len(calls) == 2
+
+
+def test_a_failing_status_command_keeps_the_state_word(tmp_path, monkeypatch):
+    spec = HelperSpec(["python", "barge.py"], "barge.py", "barge.log", (), True,
+                      status_argv=["python", "barge.py", "status"])
+    world = _helper_world(tmp_path, monkeypatch, barge=spec)
+
+    def slow(args, **kw):
+        raise subprocess.TimeoutExpired(args, kw["timeout"])
+    monkeypatch.setattr(helpers.subprocess, "run", slow)
+    started = helpers.start_helper(world.profile, "barge", "auto")
+    assert started.code == "helper_started" and started.detail.startswith("started; log ")
+    assert [r.code for r in started.data["results"]] == ["helper_status_failed"]
+    monkeypatch.setattr(helpers.subprocess, "run", lambda *a, **k: SimpleNamespace(returncode=0, stdout="", stderr=""))
+    stopped = helpers.stop_helper(world.profile, "barge")
+    assert stopped.detail.startswith("stopped; log ")
+    assert [r.code for r in stopped.data["results"]] == ["helper_status_failed"]

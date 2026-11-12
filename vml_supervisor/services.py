@@ -48,7 +48,7 @@ from .procs import (LOOPBACK, WINDOWS, background_options, kill_tree, listener_p
                     unblock_stop_signals)
 from .profile import HostProfile
 from .result import Result
-from .state import atomic_json, live_leases, read_json, service_lock, write_lease
+from .state import atomic_json, live_leases, read_json, read_state, service_lock, write_lease, write_state
 from .winjob import SpawnError, services_job, spawn
 
 # Readiness checks talk to loopback only: never through a proxy from the environment.
@@ -112,24 +112,8 @@ def stop_recorded(profile: HostProfile, state: dict) -> list[Result]:
         failed = stop_entry(profile, state.pop(kind))
         if failed is not None:
             results.append(failed)
-    try:
-        atomic_json(Path(profile.run_dir) / "state.json", state)
-    except OSError as error:
-        results.append(Result("state_write_failed", f"{profile.run_dir / 'state.json'}: {error}"))
+    write_state(profile, state, results)
     return results
-
-
-def _read_state(profile: HostProfile, results: list) -> dict:
-    """state.json under the lock; a corrupt or non-object file is a Result and read as empty."""
-    path = Path(profile.run_dir) / "state.json"
-    state, problem = read_json(path, {})
-    if problem is not None:
-        results.append(problem)
-        return {}
-    if not isinstance(state, dict):
-        results.append(Result("state_corrupt", f"{path}: not a JSON object"))
-        return {}
-    return state
 
 
 def _remove_lease(profile: HostProfile, connector_pid: int, results: list) -> None:
@@ -149,7 +133,7 @@ def release(profile: HostProfile, connector_pid: int) -> list[Result]:
     with service_lock(profile.run_dir):
         _remove_lease(profile, connector_pid, results)
         if not live_leases(profile):
-            results.extend(stop_recorded(profile, _read_state(profile, results)))
+            results.extend(stop_recorded(profile, read_state(profile, results)))
     return results
 
 
@@ -161,7 +145,7 @@ def stop(profile: HostProfile) -> list[Result]:
         results.append(missing)
     with service_lock(profile.run_dir):
         others = live_leases(profile)
-        state = _read_state(profile, results)
+        state = read_state(profile, results)
         running = [kind for kind in state if owned(state[kind])]
         results.extend(stop_recorded(profile, state))
     results.append(Result("services_stopped", ", ".join(running),
@@ -447,7 +431,7 @@ def ensure_services(profile: HostProfile, connector_pid: int,
             except OSError:
                 pass  # start_missing_services records it
             _start_watchdog(profile, Path(profile.working_dir), results)
-            state = _read_state(profile, results)
+            state = read_state(profile, results)
             failed = start_missing_services(profile, hooks, runtime, state, started, results)
     ready, waited = wait_until_ready(profile, started, kinds=[k for k in profile.services if k not in failed])
     return ready, results + waited

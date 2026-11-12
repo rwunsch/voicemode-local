@@ -120,3 +120,29 @@ def live_leases(profile: HostProfile, command_of=process_command) -> list[int]:
         else:
             _remove(lease)
     return alive
+
+
+def read_state(profile: HostProfile, results: list) -> dict:
+    """run_dir/state.json, read under the caller's lock; a corrupt or non-object file is a Result in
+    `results` and read as empty. A missing file is empty."""
+    path = Path(profile.run_dir) / "state.json"
+    state, problem = read_json(path, {})
+    if problem is not None:
+        results.append(problem)
+        return {}
+    if not isinstance(state, dict):
+        results.append(Result("state_corrupt", f"{path}: not a JSON object"))
+        return {}
+    return state
+
+
+def write_state(profile: HostProfile, state: dict, results: list) -> bool:
+    """Write run_dir/state.json whole; an OSError is Result("state_write_failed") in `results` and
+    False. Anything else propagates."""
+    path = Path(profile.run_dir) / "state.json"
+    try:
+        atomic_json(path, state)
+    except OSError as error:
+        results.append(Result("state_write_failed", f"{path}: {error}"))
+        return False
+    return True

@@ -243,3 +243,20 @@ def test_hook_paths_given_as_a_string_is_malformed(tmp_path):
     from vml_supervisor.profile import load_profile
     prof, results = load_profile(_file_with(tmp_path, hook_paths="/r/hooks"))
     assert prof is None and results[0].code == "profile_malformed"
+
+
+def test_a_helpers_status_argv_round_trips_and_is_optional(tmp_path):
+    """FELIX-voice point 8: a helper may name the command that prints its own status line."""
+    from vml_supervisor.profile import HelperSpec, HostProfile, load_profile
+    spec = HelperSpec(["python", "barge.py"], "barge.py", "barge.log", (), True,
+                      status_argv=["python", "barge.py", "status"])
+    p = make_profile(helpers={"barge": spec})
+    f = tmp_path / "profile.json"
+    p.to_file(f)
+    assert HostProfile.from_file(f).helpers["barge"].status_argv == ["python", "barge.py", "status"]
+    data = json.loads(f.read_text())
+    del data["helpers"]["barge"]["status_argv"]
+    assert data["schema_version"] == 1
+    f.write_text(json.dumps(data))
+    loaded, problems = load_profile(f)
+    assert problems == [] and loaded.helpers["barge"].status_argv == []

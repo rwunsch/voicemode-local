@@ -133,3 +133,31 @@ def test_atomic_json_reraises_after_twenty_blocked_replaces(tmp_path, monkeypatc
         atomic_json(tmp_path / "s.json", {"k": 1})
     assert len(calls) == 20
     assert not list(tmp_path.glob(".record-*"))
+
+
+def test_read_state_reports_a_corrupt_or_non_object_file_and_reads_it_as_empty(tmp_path):
+    from vml_supervisor.state import read_state
+    profile = make_profile(tmp_path)
+    results = []
+    assert read_state(profile, results) == {} and results == []          # missing: empty, no problem
+    (tmp_path / "run").mkdir()
+    (tmp_path / "run/state.json").write_text("[1, 2]")
+    assert read_state(profile, results) == {} and [r.code for r in results] == ["state_corrupt"]
+    (tmp_path / "run/state.json").write_text("{not json")
+    assert read_state(profile, results) == {} and [r.code for r in results] == ["state_corrupt"] * 2
+    (tmp_path / "run/state.json").write_text('{"tts": {"pid": 1}}')
+    assert read_state(profile, results) == {"tts": {"pid": 1}} and len(results) == 2
+
+
+def test_write_state_reports_a_failed_write(tmp_path, monkeypatch):
+    from vml_supervisor import state as state_module
+    profile = make_profile(tmp_path)
+    results = []
+    assert state_module.write_state(profile, {"a": 1}, results) is True and results == []
+    assert read_json(tmp_path / "run/state.json") == ({"a": 1}, None)
+
+    def denied(path, value):
+        raise PermissionError(13, "denied")
+    monkeypatch.setattr(state_module, "atomic_json", denied)
+    assert state_module.write_state(profile, {"a": 2}, results) is False
+    assert [r.code for r in results] == ["state_write_failed"] and "denied" in results[0].detail
