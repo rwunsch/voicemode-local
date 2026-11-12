@@ -100,7 +100,16 @@
     return !(snapshotVisible === true && (wasStale || prevVisible === false));
   }
 
-  var api = { nextHidden: nextHidden, viewModel: viewModel, VOICES: VOICES, GERMAN_VOICES: GERMAN_VOICES, LANGUAGES: LANGUAGES, STALE_MS: STALE_MS };
+  // What an incoming message is: the tray's "restore", a command the window could not
+  // deliver ("dropped": the backend is restarting), another window message, or a snapshot.
+  function incomingKind(s) {
+    if (!s || typeof s !== "object") return "ignore";
+    if (s.cmd === "restore") return "restore";
+    if (s.window && typeof s.window === "object") return "dropped" in s.window ? "dropped" : "window";
+    return "snapshot";
+  }
+
+  var api = { incomingKind: incomingKind, nextHidden: nextHidden, viewModel: viewModel, VOICES: VOICES, GERMAN_VOICES: GERMAN_VOICES, LANGUAGES: LANGUAGES, STALE_MS: STALE_MS };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   if (typeof window !== "undefined") window.PillModel = api;
 })();

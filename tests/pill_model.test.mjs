@@ -294,3 +294,17 @@ test("no push-to-talk keys when the backend says no listener runs", () => {
     [{ keys: ["Ctrl", "Space"], text: "tap: stop, hold: talk" }]);
   assert.equal(viewModel(snap({ platform: "mac", ptt: true }), 0, 0).keys.length, 2);
 });
+
+// Talos review 2026-11-12: pill-windows.ps1 posts {"window":{"dropped":cmd}} when a command
+// cannot reach a restarting backend. Treated as a snapshot, it made the page look connected
+// for 3 more seconds; it must mark the page disconnected at once.
+test("incoming messages are told apart: restore, dropped, other window message, snapshot", () => {
+  const { incomingKind } = model;
+  assert.equal(incomingKind({ cmd: "restore" }), "restore");
+  assert.equal(incomingKind({ window: { dropped: "stop" } }), "dropped");
+  assert.equal(incomingKind({ window: { dropped: "" } }), "dropped");
+  assert.equal(incomingKind({ window: { mode: "pill" } }), "window");
+  assert.equal(incomingKind(snap()), "snapshot");
+  assert.equal(incomingKind(null), "ignore");
+  assert.equal(incomingKind("x"), "ignore");
+});

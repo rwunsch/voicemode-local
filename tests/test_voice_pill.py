@@ -936,3 +936,12 @@ def test_mac_keys_follow_a_live_listener(ctx, monkeypatch, tmp_path):
     (home / "run" / "ptt-listener.pid").write_text(str(os.getpid()))
     monkeypatch.setenv("VOICEMODE_PTT_ENABLED", "false")
     assert vp.ptt_listening("mac") is False                       # switched off wins
+
+
+def test_the_page_goes_disconnected_on_a_dropped_command():
+    # app.js must route model.incomingKind's "dropped" to "no snapshot seen", not a snapshot.
+    from pathlib import Path as _P
+    app = (_P(__file__).resolve().parent.parent / "ui" / "pill" / "app.js").read_text()
+    body = app.split("window.pillReceive = function", 1)[1].split("snapshot = s;", 1)[0]
+    assert "M.incomingKind(s)" in body
+    assert 'kind === "dropped"' in body and "lastSeen = null" in body
