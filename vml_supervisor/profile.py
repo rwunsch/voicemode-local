@@ -80,6 +80,9 @@ class HostProfile:
 
     @classmethod
     def from_dict(cls, d: dict) -> "HostProfile":
+        version = d.get("schema_version", 1)
+        if isinstance(version, int) and not isinstance(version, bool) and version > SCHEMA_VERSION:
+            raise ValueError(f"unsupported profile schema_version {version} > {SCHEMA_VERSION}")
         return _decode(cls, d)
 
     def to_file(self, path: Path) -> None:
@@ -185,11 +188,18 @@ def load_profile(path: Path) -> tuple[HostProfile | None, list[Result]]:
     version = d.get("schema_version", 1)
     if isinstance(version, bool) or not isinstance(version, int):
         return None, [Result("profile_malformed", f"{path}: schema_version {version!r}")]
+    if version < 1:
+        return None, [Result("profile_malformed", f"{path}: schema_version {version}")]
     if version > SCHEMA_VERSION:
         return None, [Result("profile_schema_unsupported",
                              f"{path}: schema_version {version} > supported {SCHEMA_VERSION}",
                              {"found": version, "supported": SCHEMA_VERSION})]
+    if "hook_paths" in d and not isinstance(d["hook_paths"], list):
+        return None, [Result("profile_malformed", f"{path}: hook_paths must be a list")]
     try:
-        return HostProfile.from_dict(d), []
+        profile = HostProfile.from_dict(d)
     except (TypeError, ValueError, KeyError, AttributeError) as exc:
         return None, [Result("profile_malformed", f"{path}: {exc!r}")]
+    known = {f.name for f in fields(HostProfile)}
+    return profile, [Result("profile_key_unknown", k, {"key": k})
+                     for k in sorted(d) if k not in known]

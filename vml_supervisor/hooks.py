@@ -5,6 +5,18 @@ them once at start (load_hooks) and keeps running on what it loaded, so an
 updater replacing the hook folder cannot change a running host. Hooks take and
 return plain data. Nothing here raises: a failure is a Result and the default
 for that hook is used.
+
+Hook contract
+- sys.path is restored after loading, so a hook module must import its siblings
+  at module import time, not lazily inside the function.
+- Hook modules are cached in sys.modules under their own names: name them
+  uniquely (for example felix_voice_profile).
+- A hook that raises or calls sys.exit gives Result("hook_failed") and the
+  default; KeyboardInterrupt still propagates. A return of the wrong shape gives
+  Result("hook_bad_return") and the default.
+- A pre_start hook that raises does NOT block the start: run_pre_start returns
+  the hook_failed Result and the caller passes it to on_result. Only returned
+  refusal text blocks, as Result("pre_start_refused").
 """
 from __future__ import annotations
 
@@ -53,20 +65,45 @@ def call_hook(hooks: Hooks, name: str, *args, default: Any = None) -> tuple[Any,
         return default, None
     try:
         return fn(*args), None
-    except Exception as exc:  # noqa: BLE001
+    except (Exception, SystemExit) as exc:  # noqa: BLE001
         return default, Result("hook_failed", f"{name}: {exc!r}", {"hook": name})
 
 
 # -- defaults and typed wrappers (profile in, plain data to the hook) ----------
 
+def _is_str_or_none(v) -> bool:
+    return v is None or isinstance(v, str)
+
+
+def _checked(hooks: Hooks, name: str, args: tuple, ok: Callable[[Any], bool],
+             default: Callable[[], Any]):
+    """call_hook plus a shape check; the default is computed only when needed."""
+    if name not in hooks.funcs:
+        return default(), None
+    val, res = call_hook(hooks, name, *args, default=_MISSING)
+    if res is not None:
+        return default(), res
+    if not ok(val):
+        return default(), Result("hook_bad_return", f"{name}: returned {type(val).__name__}",
+                                 {"hook": name})
+    return val, None
+
+
+_MISSING = object()
+
+
 def resolve_runtime(hooks: Hooks, profile: HostProfile):
-    return call_hook(hooks, "resolve_runtime", profile.to_dict(),
-                     default=[str(profile.runtime_dir), True])
+    return _checked(hooks, "resolve_runtime", (profile.to_dict(),),
+                    lambda v: isinstance(v, list) and len(v) == 2
+                    and isinstance(v[0], str) and isinstance(v[1], bool),
+                    lambda: [str(profile.runtime_dir), True])
 
 
 def environment(hooks: Hooks, profile: HostProfile, runtime: str, ports: dict, modes: dict):
-    return call_hook(hooks, "environment", profile.to_dict(), runtime, ports, modes,
-                     default=dict(profile.env))
+    return _checked(hooks, "environment", (profile.to_dict(), runtime, ports, modes),
+                    lambda v: isinstance(v, dict)
+                    and all(isinstance(k, str) and isinstance(x, str) for k, x in v.items()),
+                    lambda: dict(profile.env))
 
 
 def default_service_command(profile: HostProfile, kind: str, port: int) -> list:
@@ -75,8 +112,10 @@ def default_service_command(profile: HostProfile, kind: str, port: int) -> list:
 
 
 def service_command(hooks: Hooks, profile: HostProfile, kind: str, runtime: str, port: int):
-    return call_hook(hooks, "service_command", profile.to_dict(), kind, runtime, port,
-                     default=default_service_command(profile, kind, port))
+    return _checked(hooks, "service_command", (profile.to_dict(), kind, runtime, port),
+                    lambda v: isinstance(v, list) and len(v) == 2 and isinstance(v[1], str)
+                    and isinstance(v[0], list) and all(isinstance(a, str) for a in v[0]),
+                    lambda: default_service_command(profile, kind, port))
 
 
 def prepare_home(hooks: Hooks, profile: HostProfile, env: dict):
@@ -84,7 +123,7 @@ def prepare_home(hooks: Hooks, profile: HostProfile, env: dict):
 
 
 def read_mode(hooks: Hooks, profile: HostProfile, kind: str):
-    return call_hook(hooks, "read_mode", profile.to_dict(), kind)
+    return _checked(hooks, "read_mode", (profile.to_dict(), kind), _is_str_or_none, lambda: None)
 
 
 def on_result(hooks: Hooks, profile: HostProfile, results: list[dict]):
@@ -92,8 +131,10 @@ def on_result(hooks: Hooks, profile: HostProfile, results: list[dict]):
 
 
 def run_pre_start(hooks: Hooks, profile: HostProfile, runtime: str, env: dict) -> Result | None:
-    """None allows the start; a Result (refused or hook_failed) is for the caller to record."""
-    text, failed = call_hook(hooks, "pre_start", profile.to_dict(), runtime, env)
-    if failed:
-        return failed
+    """None allows the start. hook_failed / hook_bad_return are returned but do not
+    block (the caller records them via on_result); only refusal text blocks."""
+    text, res = _checked(hooks, "pre_start", (profile.to_dict(), runtime, env),
+                         _is_str_or_none, lambda: None)
+    if res:
+        return res
     return Result("pre_start_refused", text) if text else None

@@ -199,3 +199,47 @@ def test_load_profile_turns_a_malformed_file_into_a_result(tmp_path):
 def test_validate_flags_an_unknown_hook_name():
     p = make_profile(hooks={"bogus": "m:f", "on_result": "m:g"})
     assert [(r.code, r.detail) for r in p.validate()] == [("hook_unknown", "bogus")]
+
+
+def test_from_file_and_from_dict_refuse_a_newer_schema(tmp_path):
+    from vml_supervisor.profile import HostProfile
+    f = tmp_path / "p.json"
+    make_profile().to_file(f)
+    d = json.loads(f.read_text())
+    d["schema_version"] = 2
+    f.write_text(json.dumps(d))
+    with pytest.raises(ValueError):
+        HostProfile.from_file(f)
+    with pytest.raises(ValueError):
+        HostProfile.from_dict(d)
+
+
+def _file_with(tmp_path, **over):
+    f = tmp_path / "p.json"
+    make_profile().to_file(f)
+    d = json.loads(f.read_text())
+    d.update(over)
+    f.write_text(json.dumps(d))
+    return f
+
+
+def test_unknown_top_level_keys_are_results_and_the_profile_still_loads(tmp_path):
+    from vml_supervisor.profile import load_profile
+    f = _file_with(tmp_path, mode_source={"kind": "none"}, zzz=1)
+    prof, results = load_profile(f)
+    assert prof == make_profile()
+    assert [(r.code, r.detail) for r in results] == [
+        ("profile_key_unknown", "mode_source"), ("profile_key_unknown", "zzz")]
+
+
+@pytest.mark.parametrize("v", [0, -1])
+def test_schema_version_below_one_is_malformed(tmp_path, v):
+    from vml_supervisor.profile import load_profile
+    prof, results = load_profile(_file_with(tmp_path, schema_version=v))
+    assert prof is None and results[0].code == "profile_malformed"
+
+
+def test_hook_paths_given_as_a_string_is_malformed(tmp_path):
+    from vml_supervisor.profile import load_profile
+    prof, results = load_profile(_file_with(tmp_path, hook_paths="/r/hooks"))
+    assert prof is None and results[0].code == "profile_malformed"

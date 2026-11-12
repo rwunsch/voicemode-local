@@ -20,7 +20,6 @@ def test_a_missing_hook_returns_the_default():
     p = make_profile(hooks={}, hook_paths=())
     h, res = H.load_hooks(p)
     assert res == []
-    d = p.to_dict()
     assert H.call_hook(h, "anything", default="dflt") == ("dflt", None)
     assert H.resolve_runtime(h, p) == ([str(p.runtime_dir), True], None)
     assert H.environment(h, p, "/rt", {}, {}) == ({"A": "1"}, None)
@@ -31,7 +30,6 @@ def test_a_missing_hook_returns_the_default():
     assert H.read_mode(h, p, "tts") == (None, None)
     assert H.on_result(h, p, [{"code": "x"}]) == (None, None)
     assert H.run_pre_start(h, p, "/rt", {}) is None
-    assert d["name"] == "test"
 
 
 def test_a_hook_is_loaded_from_its_entry_point(tmp_path):
@@ -122,3 +120,72 @@ def test_pre_start_empty_or_none_allows_and_failure_is_reported(tmp_path):
         h, _ = H.load_hooks(p)
         r = H.run_pre_start(h, p, "/rt", {})
         assert (r.code if r else None) == code
+
+
+def _mod(tmp_path, name, body):
+    _write(tmp_path, name, body)
+    return tmp_path
+
+
+@pytest.mark.parametrize("hook,call,bad,default", [
+    ("resolve_runtime", lambda H, h, p: H.resolve_runtime(h, p), "42", ["/r/runtime", True]),
+    ("resolve_runtime", lambda H, h, p: H.resolve_runtime(h, p), "['x', 'y']", ["/r/runtime", True]),
+    ("environment", lambda H, h, p: H.environment(h, p, "/rt", {}, {}), "{'a': 1}", {"A": "1"}),
+    ("service_command", lambda H, h, p: H.service_command(h, p, "tts", "/rt", 8891), "[['a', 2], 'm']",
+     [["python", "tts.py", "--port", "8891"], "tts.py"]),
+    ("service_command", lambda H, h, p: H.service_command(h, p, "tts", "/rt", 8891), "'nope'",
+     [["python", "tts.py", "--port", "8891"], "tts.py"]),
+    ("read_mode", lambda H, h, p: H.read_mode(h, p, "tts"), "5", None),
+    ("pre_start", lambda H, h, p: (H.run_pre_start(h, p, "/rt", {}),), "5", None),
+])
+def test_a_wrong_shaped_return_is_a_result_with_the_default(tmp_path, hook, call, bad, default):
+    from vml_supervisor import hooks as H
+    _write(tmp_path, "hk_bad", f"def f(*a):\n    return {bad}\n")
+    p = make_profile(hooks={hook: "hk_bad:f"}, hook_paths=(tmp_path,))
+    h, res = H.load_hooks(p)
+    assert res == []
+    out = call(H, h, p)
+    if hook == "pre_start":
+        assert out[0].code == "hook_bad_return" and hook in out[0].detail
+        return
+    val, r = out
+    assert val == default
+    assert r.code == "hook_bad_return" and r.detail.startswith(f"{hook}: returned ")
+
+
+def test_good_shapes_and_ignored_returns_pass(tmp_path):
+    from vml_supervisor import hooks as H
+    _write(tmp_path, "hk_ok", "def home(*a):\n    return 99\ndef res(*a):\n    return 'x'\n"
+                              "def mode(*a):\n    return None\n")
+    p = make_profile(hooks={"prepare_home": "hk_ok:home", "on_result": "hk_ok:res",
+                            "read_mode": "hk_ok:mode"}, hook_paths=(tmp_path,))
+    h, _ = H.load_hooks(p)
+    assert H.prepare_home(h, p, {}) == (99, None)
+    assert H.on_result(h, p, []) == ("x", None)
+    assert H.read_mode(h, p, "tts") == (None, None)
+
+
+def test_a_hook_calling_sys_exit_is_a_result_but_keyboard_interrupt_passes(tmp_path):
+    from vml_supervisor import hooks as H
+    _write(tmp_path, "hk_exit", "import sys\ndef bye(*a):\n    sys.exit(3)\n"
+                                "def kb(*a):\n    raise KeyboardInterrupt\n")
+    p = make_profile(hooks={"read_mode": "hk_exit:bye", "on_result": "hk_exit:kb"},
+                     hook_paths=(tmp_path,))
+    h, _ = H.load_hooks(p)
+    val, r = H.read_mode(h, p, "tts")
+    assert val is None and r.code == "hook_failed" and "SystemExit" in r.detail
+    with pytest.raises(KeyboardInterrupt):
+        H.on_result(h, p, [])
+
+
+def test_service_command_default_is_lazy_for_an_unknown_kind(tmp_path):
+    from vml_supervisor import hooks as H
+    _write(tmp_path, "hk_lazy", "def svc(pd, kind, runtime, port):\n    return [['x'], 'm']\n"
+                                "def boom(*a):\n    raise RuntimeError('b')\n")
+    p = make_profile(hooks={"service_command": "hk_lazy:svc"}, hook_paths=(tmp_path,))
+    h, _ = H.load_hooks(p)
+    assert H.service_command(h, p, "other", "/rt", 1) == ([["x"], "m"], None)
+    p2 = make_profile(hooks={"service_command": "hk_lazy:boom"}, hook_paths=(tmp_path,))
+    h2, _ = H.load_hooks(p2)
+    with pytest.raises(KeyError):  # default is needed and the kind is unknown
+        H.service_command(h2, p2, "other", "/rt", 1)
