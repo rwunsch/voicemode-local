@@ -10,8 +10,10 @@ ctypes is touched only inside the functions that run on Windows, so the module i
 """
 from __future__ import annotations
 
+import contextlib
 import subprocess
 import sys
+import threading
 
 from .result import Result
 
@@ -78,7 +80,6 @@ class Job:
         import ctypes
         from ctypes import wintypes
 
-        self._ctypes = ctypes
         k = self._kernel = _kernel32()
         k.CreateJobObjectW.restype = wintypes.HANDLE
         k.CreateJobObjectW.argtypes = (wintypes.LPVOID, wintypes.LPCWSTR)
@@ -117,8 +118,17 @@ def _resume_threads(pid) -> None:
 
     k = _kernel32()
     k.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+    k.CreateToolhelp32Snapshot.argtypes = (wintypes.DWORD, wintypes.DWORD)
+    k.Thread32First.restype = wintypes.BOOL
+    k.Thread32First.argtypes = (wintypes.HANDLE, wintypes.LPVOID)
+    k.Thread32Next.restype = wintypes.BOOL
+    k.Thread32Next.argtypes = (wintypes.HANDLE, wintypes.LPVOID)
     k.OpenThread.restype = wintypes.HANDLE
+    k.OpenThread.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+    # DWORD, not the default c_int: the failure value is (DWORD)-1, which a c_int reads as -1.
+    k.ResumeThread.restype = wintypes.DWORD
     k.ResumeThread.argtypes = (wintypes.HANDLE,)
+    k.CloseHandle.restype = wintypes.BOOL
     k.CloseHandle.argtypes = (wintypes.HANDLE,)
 
     class Entry(ctypes.Structure):
@@ -138,7 +148,7 @@ def _resume_threads(pid) -> None:
             if entry.th32OwnerProcessID == pid:
                 thread = k.OpenThread(0x2, False, entry.th32ThreadID)  # THREAD_SUSPEND_RESUME
                 if thread:
-                    if k.ResumeThread(thread) != 0xFFFFFFFF:
+                    if (k.ResumeThread(thread) & 0xFFFFFFFF) != 0xFFFFFFFF:
                         resumed += 1
                     k.CloseHandle(thread)
             more = k.Thread32Next(snapshot, ctypes.byref(entry))
@@ -182,12 +192,25 @@ def spawn(argv, job: Job | None, **popen_kwargs) -> tuple[subprocess.Popen, Resu
         except (OSError, RuntimeError) as error:
             raise SpawnError(Result("resume_failed", f"{error}; process {process.pid} was killed")) from error
     except BaseException:
-        process.kill()
+        _discard(process)
         raise
     return process, result
 
 
+def _discard(process) -> None:
+    """Kill a child that must not run, reap it, and close its pipes."""
+    with contextlib.suppress(OSError):
+        process.kill()
+    with contextlib.suppress(subprocess.TimeoutExpired, OSError):
+        process.wait(timeout=5)
+    for pipe in (process.stdin, process.stdout, process.stderr):
+        if pipe is not None:
+            with contextlib.suppress(OSError):
+                pipe.close()
+
+
 _jobs: dict[str, Job] = {}
+_jobs_lock = threading.Lock()
 
 
 def services_job(profile) -> Job | None:
@@ -195,6 +218,7 @@ def services_job(profile) -> Job | None:
     this process's lifetime. None off Windows."""
     if not WINDOWS:
         return None
-    if profile.job_name not in _jobs:
-        _jobs[profile.job_name] = Job(profile.job_name)
-    return _jobs[profile.job_name]
+    with _jobs_lock:
+        if profile.job_name not in _jobs:
+            _jobs[profile.job_name] = Job(profile.job_name)
+        return _jobs[profile.job_name]

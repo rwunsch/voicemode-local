@@ -25,9 +25,16 @@ class FakeJob:
         self.assigned.append(handle)
 
 
+class FakePipe:
+    closed = False
+
+    def close(self):
+        self.closed = True
+
+
 class FakePopen:
     """Records every creation; raises PermissionError for the flags in `refuse`."""
-    calls, killed, refuse = [], [], 0
+    calls, killed, waited, refuse, last = [], [], [], 0, None
 
     def __init__(self, argv, **kwargs):
         flags = kwargs.get("creationflags", 0)
@@ -35,9 +42,16 @@ class FakePopen:
         if FakePopen.refuse and flags & FakePopen.refuse:
             raise PermissionError(5, "Access is denied")
         self.pid, self._handle = 4242, 7
+        self.stdin, self.stdout, self.stderr = FakePipe(), FakePipe(), None
+        self.pipes = [self.stdin, self.stdout]
+        FakePopen.last = self
 
     def kill(self):
         FakePopen.killed.append(self.pid)
+
+    def wait(self, timeout=None):
+        FakePopen.waited.append((self.pid, timeout))
+        return 1
 
 
 @pytest.fixture
@@ -46,7 +60,7 @@ def windows(monkeypatch):
     monkeypatch.setattr(winjob.subprocess, "Popen", FakePopen)
     resumed = []
     monkeypatch.setattr(winjob, "_resume_threads", resumed.append)
-    FakePopen.calls, FakePopen.killed, FakePopen.refuse = [], [], 0
+    FakePopen.calls, FakePopen.killed, FakePopen.waited, FakePopen.refuse = [], [], [], 0
     return resumed
 
 
@@ -176,3 +190,102 @@ def test_the_module_imports_without_windows_apis():
     import importlib
     assert importlib.reload(winjob) is winjob
     assert winjob.WINDOWS == (sys.platform == "win32")
+
+
+# -- fix round 1 ----------------------------------------------------------------
+
+class FakeThreadKernel:
+    """kernel32 for _resume_threads: one thread owned by `pid`; ResumeThread returns `resume`
+    (with the default c_int restype, Windows' failure value (DWORD)-1 arrives as -1)."""
+
+    def __init__(self, pid, resume):
+        self.pid, self.resume, self.closed = pid, resume, []
+        kernel = self
+
+        class Fn:
+            def __init__(self, impl):
+                self.impl = impl
+
+            def __call__(self, *args):
+                return self.impl(*args)
+
+        def first(snapshot, pointer):
+            pointer._obj.th32OwnerProcessID, pointer._obj.th32ThreadID = kernel.pid, 77
+            return 1
+
+        self.CreateToolhelp32Snapshot = Fn(lambda flags, pid: 99)
+        self.Thread32First = Fn(first)
+        self.Thread32Next = Fn(lambda snapshot, pointer: 0)
+        self.OpenThread = Fn(lambda access, inherit, tid: 55)
+        self.ResumeThread = Fn(lambda thread: kernel.resume)
+        self.CloseHandle = Fn(lambda handle: kernel.closed.append(handle) or 1)
+
+
+@pytest.mark.parametrize("failure", [-1, 0xFFFFFFFF])
+def test_a_failed_resume_thread_is_resume_failed(windows, monkeypatch, failure):
+    kernel = FakeThreadKernel(4242, failure)
+    monkeypatch.setattr(winjob, "_kernel32", lambda: kernel)
+    monkeypatch.setattr(winjob, "_last_error", lambda: OSError("fake"))
+    monkeypatch.setattr(winjob, "_resume_threads", RESUME_THREADS)
+    with pytest.raises(winjob.SpawnError) as caught:
+        winjob.spawn(["x.exe"], FakeJob())
+    assert caught.value.result.code == "resume_failed"
+    assert FakePopen.killed == [4242]
+    assert sorted(kernel.closed) == [55, 99]  # the thread and the snapshot handles
+
+
+def test_resume_threads_declares_every_kernel_signature(monkeypatch):
+    from ctypes import wintypes
+    kernel = FakeThreadKernel(4242, 1)
+    monkeypatch.setattr(winjob, "_kernel32", lambda: kernel)
+    RESUME_THREADS(4242)
+    assert kernel.ResumeThread.restype is wintypes.DWORD
+    assert kernel.CreateToolhelp32Snapshot.restype is wintypes.HANDLE
+    assert kernel.OpenThread.restype is wintypes.HANDLE
+    for name in ("CreateToolhelp32Snapshot", "Thread32First", "Thread32Next", "OpenThread",
+                 "ResumeThread", "CloseHandle"):
+        assert getattr(kernel, name).argtypes, name
+    for name in ("Thread32First", "Thread32Next", "CloseHandle"):
+        assert getattr(kernel, name).restype is wintypes.BOOL, name
+
+
+RESUME_THREADS = winjob._resume_threads
+
+
+def test_services_job_creates_one_job_across_threads(monkeypatch):
+    import threading
+    import time
+    made = []
+
+    def slow_job(name=None, **kw):
+        made.append(name)
+        time.sleep(0.05)  # widen the check-then-create window
+        return object()
+
+    monkeypatch.setattr(winjob, "_jobs", {})
+    monkeypatch.setattr(winjob, "Job", slow_job)
+    monkeypatch.setattr(winjob, "WINDOWS", True)
+    profile, got, gate = make_profile(), [], threading.Barrier(2)
+
+    def call():
+        gate.wait()
+        got.append(winjob.services_job(profile))
+
+    threads = [threading.Thread(target=call) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert len(made) == 1 and got[0] is got[1]
+
+
+def test_a_failed_assign_reaps_the_child_and_closes_its_pipes(windows):
+    with pytest.raises(winjob.SpawnError):
+        winjob.spawn(["x.exe"], FakeJob(fail=True))
+    assert FakePopen.waited == [(4242, 5)]
+    assert all(pipe.closed for pipe in FakePopen.last.pipes)
+
+
+def test_job_keeps_no_dead_ctypes_attribute(monkeypatch):
+    monkeypatch.setattr(winjob, "_kernel32", lambda: FakeKernel())
+    assert not hasattr(winjob.Job(None), "_ctypes")
