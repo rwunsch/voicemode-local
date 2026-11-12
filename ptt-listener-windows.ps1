@@ -124,17 +124,37 @@ if (($Native -and ($PSBoundParameters.ContainsKey("Port") -or $PSBoundParameters
 # readable from WSL, so a silent failure can never look identical to "no keys
 # pressed" again.
 # Native mode has no fixed file: the launcher passes -LogPath.
+# Relay mode: the WSL home of the default distro, as a Windows path, asked once.
+# Bounded: a stalled WSL must not hang the listener (stdout read asynchronously).
+function Get-WslHome {
+    try {
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName = "wsl.exe"
+        $psi.Arguments = '-e sh -c "wslpath -w \"$HOME\""'
+        $psi.UseShellExecute = $false
+        $psi.RedirectStandardOutput = $true
+        $psi.CreateNoWindow = $true
+        $p = [System.Diagnostics.Process]::Start($psi)
+        $out = $p.StandardOutput.ReadToEndAsync()
+        if (-not $p.WaitForExit(10000)) { try { $p.Kill() } catch { }; return "" }
+        $found = $out.Result.Trim()
+        if ($p.ExitCode -eq 0 -and $found.StartsWith("\\")) { return $found }
+    } catch { }
+    return ""
+}
+$WslHome = ""
+if (-not $Native -and (-not $LogPath -or -not $TokenPath)) { $WslHome = Get-WslHome }
 if ($LogPath) {
     $LogFile = $LogPath
-} elseif ($Native) {
+} elseif ($Native -or -not $WslHome) {
     $LogFile = ""
 } else {
-    $LogFile = "\\wsl.localhost\Ubuntu\home\wunsch\.voicemode\logs\ptt-listener.log"
+    $LogFile = Join-Path $WslHome ".voicemode\logs\ptt-listener.log"
 }
-# The relay's shared secret (patches/ptt_relay.py writes it in WSL). Same WSL
-# home as the log file above.
-if (-not $TokenPath) {
-    $TokenPath = "\\wsl.localhost\Ubuntu\home\wunsch\.voicemode\ptt-relay.token"
+# The relay's shared secret (patches/ptt_relay.py writes it in WSL), in the same WSL
+# home. Without it the relay refuses every action; -TokenPath names it explicitly.
+if (-not $TokenPath -and $WslHome) {
+    $TokenPath = Join-Path $WslHome ".voicemode\ptt-relay.token"
 }
 function Log {
     param([string]$Text, [string]$Colour = "Gray")

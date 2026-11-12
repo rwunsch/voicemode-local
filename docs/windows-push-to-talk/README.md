@@ -69,7 +69,7 @@ The key states are polled every 50 ms with `GetAsyncKeyState`; nothing is hooked
 
 **Relay (WSL2).** No `-SenderExe`. Sends `{"action": "..."}` lines over TCP to
 `patches/ptt_relay.py` in WSL (`-RelayHost` 127.0.0.1, `-Port` 8765), probes the relay with
-`press` at start, and logs to `\\wsl.localhost\Ubuntu\home\wunsch\.voicemode\logs\ptt-listener.log`
+`press` at start, and logs to `.voicemode\logs\ptt-listener.log` in the WSL home (the listener asks WSL once: `wslpath -w "$HOME"`, 10 s limit)
 unless `-LogPath` says otherwise.
 
 **The relay needs a token (2026-11-12, Talos review).** Start the relay as before
@@ -81,7 +81,7 @@ forwarded. Without the token, anything that could reach the port could stop spee
 mic open or wake an idle session.
 
 - The listener reads the file over the WSL share, by default
-  `\\wsl.localhost\Ubuntu\home\wunsch\.voicemode\ptt-relay.token`, the same WSL home as its
+  `.voicemode\ptt-relay.token` in the same WSL home as its
   log. Another distro or user: pass `-TokenPath`. `-TokenPath` with `-SenderExe` exits 2.
 - The token is read once, at the first send that finds it, and kept. If the file cannot be
   read, the listener logs `relay token not readable at <path> ...` once and sends nothing

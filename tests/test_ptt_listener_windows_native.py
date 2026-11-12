@@ -32,8 +32,8 @@ def test_relay_mode_keeps_its_defaults_and_wire_format():
     assert re.search(r'\[string\]\$RelayHost = "127\.0\.0\.1"', TEXT)
     # -HoldThresholdMs is still accepted (an old shortcut may pass it) but no longer used.
     assert re.search(r"\[int\]\$HoldThresholdMs = 0\b", TEXT)
-    # The WSL log file stays the default when no -LogPath is given in relay mode.
-    assert '"\\\\wsl.localhost\\Ubuntu\\home\\wunsch\\.voicemode\\logs\\ptt-listener.log"' in TEXT
+    # Relay mode logs into the WSL home when no -LogPath is given (found with wslpath).
+    assert 'Join-Path $WslHome ".voicemode\\logs\\ptt-listener.log"' in TEXT
     # The relay speaks {"action": ...} lines over TCP, as patches/ptt_relay.py reads them.
     assert "('{\"action\": \"' + $Action + '\"}' + \"`n\")" in TEXT
     assert "New-Object System.Net.Sockets.TcpClient" in TEXT
@@ -167,7 +167,7 @@ def test_the_focus_pattern_is_a_parameter_with_todays_default():
 
 def test_relay_mode_reads_the_token_from_the_wsl_home_by_default():
     assert re.search(r"\[string\]\$TokenPath = \"\"", TEXT)
-    assert '"\\\\wsl.localhost\\Ubuntu\\home\\wunsch\\.voicemode\\ptt-relay.token"' in TEXT
+    assert 'Join-Path $WslHome ".voicemode\\ptt-relay.token"' in TEXT
 
 
 def test_relay_mode_sends_the_token_line_first():
@@ -249,3 +249,13 @@ def test_relay_mode_reaches_a_real_relay_with_the_token(tmp_path):
         srv.shutdown()
         srv.server_close()
     assert client.sent == ["short_press", "hold_start"], log.read_text(encoding="utf-8-sig")
+
+
+def test_relay_mode_finds_the_wsl_home_instead_of_one_machines_path():
+    # The token (and the log) defaulted to \\wsl.localhost\Ubuntu\home\wunsch: relay mode
+    # needs the token now, so any other user or distro was broken by default.
+    assert "home\\wunsch" not in TEXT
+    assert "function Get-WslHome" in TEXT
+    assert "wslpath -w" in TEXT
+    body = TEXT.split("function Get-WslHome", 1)[1].split("\nfunction ", 1)[0]
+    assert "WaitForExit(" in body and "ReadToEnd()" not in body   # a stalled WSL cannot hang it
