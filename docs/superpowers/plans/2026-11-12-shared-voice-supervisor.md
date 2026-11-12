@@ -92,7 +92,7 @@ is FELIX `voice.py` at b36f288ce / 8c9dce0e2 (identical lifecycle) against our
     `watch_marker: str`;
   - `job_name: str`;
   - `host_start_grace: float` (60 s);
-  - `mode_source: ModeSource` (`kind: "json" | "env_file" | "none"`, `path`, `key`).
+  - (`mode_source` was here; Task 4b replaced it with the `read_mode` hook.)
 - Produces: `ServiceSpec(argv: list[str], marker: str, port_range: tuple[int, int],
   ready_path: str, ready_kind: "kokoro" | "whisper")`. `argv` may contain the placeholder
   `{port}`.
