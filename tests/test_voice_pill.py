@@ -47,8 +47,11 @@ def ctx(tmp_path, sock_dir, monkeypatch):
     # Settings are read from the environment first. Importing the installed voice_mode
     # elsewhere in the run loads the real voicemode.env into os.environ: keep it out.
     for key in ("VOICEMODE_VOICE_BARGE", "VOICEMODE_AUDIO_FEEDBACK", "VOICEMODE_PILL",
-                "VOICEMODE_BARGE_CONTROL_COMMAND", "VOICEMODE_BASE_DIR"):
+                "VOICEMODE_BARGE_CONTROL_COMMAND", "VOICEMODE_BASE_DIR",
+                "VOICEMODE_PILL_LANGUAGES", "VOICEMODE_PTT_ENABLED"):
         monkeypatch.delenv(key, raising=False)
+    # German follows the models installed: none found here, so it stays offered, as before.
+    monkeypatch.setattr(vp, "_install_dirs", lambda: [])
     return vp.Context(base=tmp_path / "pill", home=tmp_path / "vm",
                       sock=sock_dir / "control.sock", switch=None)
 
@@ -288,7 +291,7 @@ def test_snapshot_shape_and_json_serialisable():
              barge={"enabled": True, "available": False, "count": 2})
     assert json.loads(json.dumps(s)) == s
     assert set(s) == {"visible", "phase", "floor", "sessions", "voice", "language",
-                      "barge", "beeps", "platform", "ui", "play", "wake"}
+                      "barge", "beeps", "platform", "ui", "play", "wake", "german_available", "ptt"}
     assert s["play"] is None and s["wake"] is None
     assert s["platform"] == "mac" and s["ui"] == {"docked": True}
     assert s["barge"] == {"enabled": True, "available": False, "count": 2}
@@ -808,3 +811,111 @@ def test_play_without_session_wake_installed_is_harmless(ctx, monkeypatch):
     vp.handle_command({"cmd": "play"}, ctx)
     s = vp.gather(ctx)
     assert s["play"] is None
+
+
+# Talos review, finding 6: an "off" sent while an earlier "on" still ran was dropped.
+def test_set_barge_off_during_a_running_on_is_applied_after_it(ctx, tmp_path):
+    log = tmp_path / "calls"
+    switch = tmp_path / "voicemode-switch"
+    switch.write_text(f'#!/bin/sh\nsleep 1\necho "$@" >> "{log}"\n')
+    switch.chmod(0o755)
+    ctx.switch = switch
+    vp.handle_command({"cmd": "set_barge", "on": True}, ctx)
+    time.sleep(0.2)
+    vp.handle_command({"cmd": "set_barge", "on": False}, ctx)
+    ctx.barge_thread.join(10)
+    assert not ctx.barge_thread.is_alive()
+    assert log.read_text().split("\n")[:-1] == ["barge on", "barge off"]
+
+
+def test_set_barge_runs_only_the_last_wish_after_the_running_one(ctx, tmp_path):
+    log = tmp_path / "calls"
+    switch = tmp_path / "voicemode-switch"
+    switch.write_text(f'#!/bin/sh\nsleep 1\necho "$@" >> "{log}"\n')
+    switch.chmod(0o755)
+    ctx.switch = switch
+    vp.handle_command({"cmd": "set_barge", "on": True}, ctx)
+    time.sleep(0.2)
+    vp.handle_command({"cmd": "set_barge", "on": False}, ctx)
+    vp.handle_command({"cmd": "set_barge", "on": True}, ctx)  # back to on: nothing more to do
+    ctx.barge_thread.join(10)
+    assert log.read_text().split("\n")[:-1] == ["barge on"]
+
+
+# Talos review, finding 7: German was offered where only English Kokoro is installed (FELIX:
+# the native server answers 400 "dm_martin needs the German model"), breaking TTS.
+
+@pytest.fixture
+def no_german_hints(ctx, monkeypatch):
+    for key in ("VOICEMODE_PILL_LANGUAGES", "VOICEMODE_VOICES", "VOICEMODE_TTS_VOICE",
+                "VOICEMODE_TTS_BASE_URLS"):
+        monkeypatch.delenv(key, raising=False)
+    return ctx
+
+
+def _models(root, german):
+    (root / "models" / "kokoro").mkdir(parents=True)
+    (root / "models" / "kokoro" / "kokoro-v1.0.onnx").write_text("")
+    if german:
+        de = root / "models" / "kokoro-de-martin"
+        de.mkdir()
+        (de / "kokoro-martin.onnx").write_text("")
+        (de / "voices-martin.npz").write_text("")
+
+
+def test_german_follows_the_pill_languages_setting(no_german_hints, monkeypatch):
+    ctx = no_german_hints
+    monkeypatch.setenv("VOICEMODE_PILL_LANGUAGES", "English")
+    assert vp.gather(ctx)["german_available"] is False
+    monkeypatch.setenv("VOICEMODE_PILL_LANGUAGES", "English, German")
+    assert vp.gather(ctx)["german_available"] is True
+
+
+def test_german_is_unavailable_where_only_english_kokoro_is_installed(no_german_hints, monkeypatch, tmp_path):
+    _models(tmp_path / "install", german=False)
+    monkeypatch.setattr(vp, "_install_dirs", lambda: [tmp_path / "install"])
+    assert vp.gather(no_german_hints)["german_available"] is False
+
+
+def test_german_is_available_with_the_german_kokoro_model(no_german_hints, monkeypatch, tmp_path):
+    _models(tmp_path / "install", german=True)
+    monkeypatch.setattr(vp, "_install_dirs", lambda: [tmp_path / "install"])
+    assert vp.gather(no_german_hints)["german_available"] is True
+
+
+def test_german_is_available_with_piper_or_a_configured_german_voice(no_german_hints, monkeypatch, tmp_path):
+    _models(tmp_path / "install", german=False)
+    monkeypatch.setattr(vp, "_install_dirs", lambda: [tmp_path / "install"])
+    monkeypatch.setenv("VOICEMODE_TTS_BASE_URLS", "http://127.0.0.1:8880/v1,http://127.0.0.1:8881/v1")
+    assert vp.gather(no_german_hints)["german_available"] is True
+    monkeypatch.delenv("VOICEMODE_TTS_BASE_URLS")
+    monkeypatch.setenv("VOICEMODE_VOICES", "af_sky,dm_martin")
+    assert vp.gather(no_german_hints)["german_available"] is True
+
+
+def test_german_stays_offered_when_nothing_can_be_found(no_german_hints, monkeypatch):
+    monkeypatch.setattr(vp, "_install_dirs", lambda: [])
+    assert vp.gather(no_german_hints)["german_available"] is True  # unsure: as before
+
+
+def test_set_language_german_is_refused_when_german_is_unavailable(no_german_hints, child, monkeypatch):
+    ctx = no_german_hints
+    monkeypatch.setenv("VOICEMODE_PILL_LANGUAGES", "English")
+    two_sessions(ctx, child)
+    vp.handle_command({"cmd": "set_voice", "voice": "bf_emma"}, ctx)
+    vp.handle_command({"cmd": "set_language", "language": "German"}, ctx)
+    assert st.get_override(child.pid, ctx.base) == {"voice": "bf_emma"}
+
+
+# Talos review, finding 8: push-to-talk keys were shown where no listener runs.
+def test_ptt_follows_the_setting_else_the_platform(ctx, monkeypatch):
+    monkeypatch.delenv("VOICEMODE_PTT_ENABLED", raising=False)
+    for platform, want in (("windows", True), ("linux", True), ("mac", False)):
+        monkeypatch.setattr(vp, "detect_platform", lambda p=platform: p)
+        assert vp.gather(ctx)["ptt"] is want, platform
+    monkeypatch.setattr(vp, "detect_platform", lambda: "windows")
+    monkeypatch.setenv("VOICEMODE_PTT_ENABLED", "false")
+    assert vp.gather(ctx)["ptt"] is False
+    monkeypatch.setattr(vp, "detect_platform", lambda: "mac")
+    monkeypatch.setenv("VOICEMODE_PTT_ENABLED", "true")
+    assert vp.gather(ctx)["ptt"] is True

@@ -51,7 +51,10 @@
     var waiting = (s.sessions || []).filter(function (r) { return r.state === "waiting"; }).length;
     var name = s.floor ? (s.floor.label || "") : "";
     var language = s.language || languageOf(s.voice);
-    var base = language === "German" ? GERMAN_VOICES : VOICES;
+    // German only where a German voice can speak; an older backend that does not say keeps it.
+    var german = s.german_available !== false;
+    var languages = german ? LANGUAGES : ["English"];
+    var base = german && language === "German" ? GERMAN_VOICES : VOICES;
     var voices = s.voice && base.indexOf(s.voice) < 0 ? base.concat([s.voice]) : base;
     // The main button is Wake between turns (idle, between turns, stopped) when the backend
     // can name a session to wake, and Stop otherwise. One button, never both. Pause/Resume
@@ -78,11 +81,11 @@
       }),
       queueMore: rows.length > MAX_ROWS ? "+" + (rows.length - MAX_ROWS) + " more queued" : "",
       voice: s.voice || null, language: language,
-      keys: keysFor(s.platform),
+      keys: s.ptt === false ? [] : keysFor(s.platform), // no listener runs: no shortcut to show
       barge: { visible: !!barge.available, on: !!barge.enabled, enabled: true,
         countText: count + (count === 1 ? " interruption today" : " interruptions today") },
       beeps: { on: !!s.beeps },
-      voices: voices, languages: LANGUAGES,
+      voices: voices, languages: languages,
       session: name,
       stateText: wakeText || LABELS[phase] || LABELS.idle,
       wakeText: wakeText,

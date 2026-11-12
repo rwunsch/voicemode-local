@@ -78,6 +78,9 @@ class Context:
         self.switch = switch              # barge command: None = the setting, else voicemode-switch
         self.alive = False                # the last gather saw a session or a recent push-to-talk
         self.barge_thread = barge_thread
+        self.barge_wanted = None          # the last barge state asked for: "on" or "off"
+        self.barge_running = False        # a worker is applying it (set and cleared under the lock)
+        self.barge_lock = threading.Lock()
         self.wake = None                  # the last Wake: label, ok, detail, at, claude_pid
 
     base = property(lambda self: Path(self._base) if self._base else st.default_base(),
@@ -168,6 +171,61 @@ def voice_language(voice) -> str:
     return "German" if isinstance(voice, str) and voice.startswith(GERMAN_PREFIXES) else "English"
 
 
+LANGUAGES_SETTING = "VOICEMODE_PILL_LANGUAGES"   # e.g. "English" or "English,German"
+PIPER_PORT = ":8881"                             # piper-proxy, which serves p_de_* (voicemode-switch)
+KOKORO_MODEL = Path("models/kokoro/kokoro-v1.0.onnx")
+GERMAN_MODEL = (Path("models/kokoro-de-martin/kokoro-martin.onnx"),   # kokoro-onnx-server.py:
+                Path("models/kokoro-de-martin/voices-martin.npz"))    # <model-dir>-de-martin
+
+
+def _install_dirs():
+    """Folders that may hold models/kokoro: the install this backend runs from (a repo
+    checkout, or a native runtime whose .venv runs it), and the repo beside voicemode-switch."""
+    dirs = [Path(sys.prefix).parent, Path(__file__).resolve().parent.parent,
+            st.default_switch().parent]
+    return list(dict.fromkeys(dirs))
+
+
+def german_available(home=None) -> bool:
+    """Can a German voice speak here? VOICEMODE_PILL_LANGUAGES decides when set. Otherwise yes
+    if a German voice is configured, Piper is in the TTS chain, or the German Kokoro model is
+    installed; no if the English Kokoro model is found without it (FELIX); and yes when
+    nothing can be found, as before, because a wrong no hides a working voice."""
+    raw = (st.setting(LANGUAGES_SETTING, "", home) or "").strip()
+    if raw:
+        return "german" in [x.strip().lower() for x in raw.split(",")]
+    for name in ("VOICEMODE_VOICES", "VOICEMODE_TTS_VOICE"):
+        voices = (st.setting(name, "", home) or "").split(",")
+        if any(voice_language(v.strip()) == "German" for v in voices):
+            return True
+    if PIPER_PORT in (st.setting("VOICEMODE_TTS_BASE_URLS", "", home) or ""):
+        return True
+    found_english = False
+    for d in _install_dirs():
+        try:
+            if all((d / f).is_file() for f in GERMAN_MODEL):
+                return True
+            found_english = found_english or (d / KOKORO_MODEL).is_file()
+        except OSError:
+            continue
+    return not found_english
+
+
+PTT_SETTING = "VOICEMODE_PTT_ENABLED"
+
+
+def ptt_listening(platform, home=None) -> bool:
+    """Is a push-to-talk listener expected to run? The setting when it says yes or no; else
+    on for Windows and Linux (voicemode-mcp starts one unless it is false), off on a Mac,
+    where nothing in this repo starts one."""
+    raw = (st.setting(PTT_SETTING, "", home) or "").strip().strip('"').lower()
+    if raw in ("true", "1", "yes", "on"):
+        return True
+    if raw in ("false", "0", "no", "off"):
+        return False
+    return platform != "mac"
+
+
 def _floor_voice(floor, is_holder, sessions, conch, overrides):
     ov = overrides.get(floor["pid"], {})
     own = next((s for s in sessions if s["pid"] == floor["pid"]), {})
@@ -177,7 +235,8 @@ def _floor_voice(floor, is_holder, sessions, conch, overrides):
 
 def build_snapshot(status, sessions, conch, *, paused=False, ptt=False, closed=False,
                    last_floor=None, overrides=None, barge=None, ui=None, platform=None, beeps=False,
-                   default_voice=st.FALLBACK_VOICE, play=None, wake=None) -> dict:
+                   default_voice=st.FALLBACK_VOICE, play=None, wake=None,
+                   german=True, ptt_listener=None) -> dict:
     overrides = overrides or {}
     floor, is_holder = _floor(sessions, conch, last_floor)
     visible = bool(sessions or ptt) and not closed
@@ -214,12 +273,14 @@ def build_snapshot(status, sessions, conch, *, paused=False, ptt=False, closed=F
         language = overrides.get(floor["pid"], {}).get("language")
     voice = voice or default_voice          # nobody has chosen: the configured default
     language = language or voice_language(voice)
+    platform = platform or detect_platform()
     return {"visible": visible, "phase": phase, "floor": floor, "sessions": rows,
             "voice": voice, "language": language,
             "barge": barge or {"enabled": False, "available": False, "count": 0},
             "beeps": beeps,
-            "platform": platform or detect_platform(), "ui": ui or {},
-            "play": play, "wake": wake}
+            "platform": platform, "ui": ui or {},
+            "play": play, "wake": wake, "german_available": bool(german),
+            "ptt": (platform != "mac") if ptt_listener is None else bool(ptt_listener)}
 
 
 def _barge_enabled(home) -> bool:
@@ -318,6 +379,7 @@ def gather(ctx) -> dict:
     conch = read_conch(ctx.home)
     barge = {"enabled": _barge_enabled(ctx.home), "available": st.barge_available(),
              "count": st.interruptions_since(_midnight(), ctx.base)}
+    platform = detect_platform()
     return build_snapshot(
         st._status(ctx.sock), sessions, conch, paused=st.is_paused(ctx.base),
         ptt=ptt, closed=st.pill_closed(ctx.base),
@@ -325,7 +387,8 @@ def gather(ctx) -> dict:
         overrides={s["pid"]: st.get_override(s["pid"], ctx.base) for s in sessions},
         barge=barge, ui=st.load_ui(ctx.base), beeps=_beeps_on(ctx),
         default_voice=st.default_voice(ctx.home),
-        play={"label": play.label} if play else None, wake=wake_view(ctx))
+        play={"label": play.label} if play else None, wake=wake_view(ctx), platform=platform,
+        german=german_available(ctx.home), ptt_listener=ptt_listening(platform, ctx.home))
 
 
 # -- commands ----------------------------------------------------------------
@@ -338,6 +401,32 @@ def _set_override(ctx, floor, **change):
 
 def _toggle_barge(action, switch):
     print(f"voice barge {action}: {st.barge_control(action, switch)}", file=sys.stderr, flush=True)
+
+
+def _barge_worker(ctx, applied=None):
+    """Apply what is wanted until what was last applied is still what is wanted: a switch
+    sent while an earlier one runs is applied after it, never dropped."""
+    while True:
+        with ctx.barge_lock:
+            wanted = ctx.barge_wanted
+            if wanted == applied:
+                ctx.barge_running = False  # under the lock: a later wish starts a new worker
+                return
+        try:
+            _toggle_barge(wanted, ctx.switch)
+        except Exception as e:  # noqa: BLE001 - the worker must end cleanly, or no switch runs again
+            print(f"voice barge {wanted} failed: {e}", file=sys.stderr, flush=True)
+        applied = wanted
+
+
+def _set_barge(ctx, on: bool) -> None:
+    with ctx.barge_lock:
+        ctx.barge_wanted = "on" if on else "off"
+        if not ctx.barge_running:
+            # `on` can download a model: never block the snapshot loop on it.
+            ctx.barge_running = True
+            ctx.barge_thread = threading.Thread(target=_barge_worker, args=(ctx,), daemon=True)
+            ctx.barge_thread.start()
 
 
 def handle_command(msg, ctx=None) -> None:
@@ -367,17 +456,15 @@ def handle_command(msg, ctx=None) -> None:
     elif cmd == "dismiss":
         st.set_pill_closed(True, ctx.base)  # sticks until voice restarts from scratch
     elif cmd == "set_barge" and isinstance(msg.get("on"), bool):
-        if ctx.barge_thread is None or not ctx.barge_thread.is_alive():
-            # `on` can download a model: never block the snapshot loop on it.
-            ctx.barge_thread = threading.Thread(
-                target=_toggle_barge, args=("on" if msg["on"] else "off", ctx.switch), daemon=True)
-            ctx.barge_thread.start()
+        _set_barge(ctx, msg["on"])
     elif cmd == "set_beeps" and isinstance(msg.get("on"), bool):
         st.set_beeps(msg["on"], ctx.base)
     elif cmd in ("set_voice", "set_language"):
         key = "voice" if cmd == "set_voice" else "language"
         sessions, conch = st.live_sessions(ctx.base), read_conch(ctx.home)
         floor, is_holder = _floor(sessions, conch, st._read_json(ctx.base / "last_floor.json"))
+        if key == "language" and msg.get(key) == "German" and not german_available(ctx.home):
+            return  # no German voice can speak here: the session would lose its TTS
         if floor and isinstance(msg.get(key), str):
             change = {key: msg[key]}
             if key == "language" and msg[key] in ("English", "German"):

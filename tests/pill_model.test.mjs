@@ -267,3 +267,30 @@ test("a Wake result replaces the state text briefly", () => {
   assert.equal(viewModel(snap({ phase: "working", wake: null }), 0, 0).stateText, "Between turns");
   assert.equal(viewModel(snap({ wake: { text: "x" } }), 1000, 5000).wakeText, "");
 });
+
+// Talos review, finding 7: German only where a German voice can speak.
+test("German and its voices are dropped when the backend says German is unavailable", () => {
+  const vm = viewModel(snap({ german_available: false }), 0, 0);
+  assert.deepEqual(vm.languages, ["English"]);
+  assert.ok(!vm.voices.some((v) => GERMAN_VOICES.includes(v)));
+  const de = viewModel(snap({ german_available: false, voice: "af_sky", language: "German" }), 0, 0);
+  assert.deepEqual(de.voices, VOICES); // never the German list
+  assert.deepEqual(de.languages, ["English"]);
+});
+
+test("German stays offered when available, or when an older backend does not say", () => {
+  assert.deepEqual(viewModel(snap({ german_available: true }), 0, 0).languages, ["English", "German"]);
+  assert.deepEqual(viewModel(snap(), 0, 0).languages, LANGUAGES);
+  assert.deepEqual(viewModel(snap({ german_available: true, voice: "dm_martin", language: "German" }), 0, 0).voices,
+    GERMAN_VOICES);
+});
+
+// Talos review, finding 8: no push-to-talk keys where no listener runs.
+test("no push-to-talk keys when the backend says no listener runs", () => {
+  for (const platform of ["windows", "linux", "mac"]) {
+    assert.deepEqual(viewModel(snap({ platform, ptt: false }), 0, 0).keys, [], platform);
+  }
+  assert.deepEqual(viewModel(snap({ platform: "windows", ptt: true }), 0, 0).keys,
+    [{ keys: ["Ctrl", "Space"], text: "tap: stop, hold: talk" }]);
+  assert.equal(viewModel(snap({ platform: "mac", ptt: true }), 0, 0).keys.length, 2);
+});
