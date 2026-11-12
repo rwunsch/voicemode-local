@@ -230,21 +230,42 @@ is FELIX `voice.py` at b36f288ce / 8c9dce0e2 (identical lifecycle) against our
   `Result("profile_schema_unsupported")`), and `HostProfile.hooks: dict[str, str]`. Keys are
   `environment`, `pre_start`, `read_mode` and `on_result`; values are entry points
   `"module:function"`. `mode_source` is removed (it becomes the `read_mode` hook).
-- Produces: `call_hook(profile, name, *args, default=None) -> tuple[Any, Result | None]`.
+- Produces: `HostProfile.hook_paths: tuple[Path, ...]`, the import search path for hook modules.
+  Hook modules must import with the runtime's Python and only the runtime's packages.
+- Produces: `load_hooks(profile) -> tuple[Hooks, list[Result]]`. It imports every named hook
+  once (with `hook_paths` on `sys.path`) and returns a `Hooks` object.
+  - FELIX's updater replaces the hook folder while a host may still run. So the host loads its
+    hooks once at start and keeps running on what it loaded; a new path takes effect at the
+    next host start.
+- Produces: `call_hook(hooks, name, *args, default=None) -> tuple[Any, Result | None]`, which
+  calls an already-loaded hook.
   - It imports `module` (with `profile.hook_paths: tuple[Path, ...]` added to `sys.path`) and
     calls `function(*args)`.
   - No hook named: `(default, None)`.
   - Import or call failure: `(default, Result("hook_failed", f"{name}: {exc!r}"))`. It never
     raises.
-- The hook signatures (plain data in, plain data out):
-  - `environment(profile_dict) -> dict[str, str]`;
-  - `pre_start(profile_dict) -> str | None` (None means fine; a string blocks the start, as
-    `Result("pre_start_refused", text)`);
-  - `read_mode(profile_dict, kind: str) -> str | None`;
-  - `on_result(profile_dict, results: list[dict]) -> None`.
+- The hook signatures (plain data in, plain data out; the default when a hook is absent is
+  in brackets). FELIX-voice's review of 2026-11-12 added the extra inputs and three hooks.
+  - `resolve_runtime(profile_dict) -> [runtime_path: str, current: bool]`
+    [`profile.runtime_dir`, True]. FELIX: `active.json` plus the digest comparison.
+  - `environment(profile_dict, runtime: str, ports: dict, modes: dict) -> dict[str, str]`
+    [`profile.env`].
+  - `service_command(profile_dict, kind: str, runtime: str, port: int) -> [argv: list, marker: str]`
+    [`ServiceSpec.argv` with `{port}` filled in, and `ServiceSpec.marker`]. FELIX: its own
+    kokoro server; the bundled `whisper-server.exe` on Windows and Homebrew's on Mac.
+  - `prepare_home(profile_dict, env: dict) -> None` [nothing]. FELIX: writes the shared HOME's
+    voicemode.env and the walk-up stopper. The core takes this over once the conch-home and
+    walk-up settings exist (Plan C).
+  - `pre_start(profile_dict, runtime: str, env: dict) -> str | None` [None]. A string blocks
+    the start as `Result("pre_start_refused", text)`. FELIX: the microphone check, run with the
+    runtime's python and that env.
+  - `read_mode(profile_dict, kind: str) -> str | None` [None].
+  - `on_result(profile_dict, results: list[dict]) -> None` [nothing].
 
 - [ ] **Step 1: Failing tests:**
-  - `test_a_missing_hook_returns_the_default`;
+  - `test_a_missing_hook_returns_the_default`, for each of the seven hooks;
+  - `test_hooks_are_loaded_once_and_survive_their_module_being_replaced`: load, delete or
+    rewrite the module file, then call again; the original runs;
   - `test_a_hook_is_loaded_from_its_entry_point` (a tmp module on `hook_paths`);
   - `test_a_failing_hook_is_a_result_not_an_exception`;
   - `test_a_newer_schema_is_refused_with_a_result`;
@@ -306,6 +327,9 @@ is FELIX `voice.py` at b36f288ce / 8c9dce0e2 (identical lifecycle) against our
     stop the old one, `stop_unrecorded`, spawn into the services job, and record.
   - Outside the lock: a 3 s liveness check.
   - `OSError` gives `Result("helper_failed")`; it never raises.
+- The `Result` of `start_helper` and `stop_helper` carries the helper's own status line in
+  `detail` (for barge: the trigger's `on` / `off` / `auto (…)` / `cannot run: …`), so a profile
+  owner can print it unchanged. This is FELIX-voice's point 8.
 - Produces: `stop_helper(profile, kind) -> Result`, and
   `stop_unrecorded(profile, kind) -> list[Result]`. The folder boundary is `root + os.sep`,
   case-folded on Windows.
