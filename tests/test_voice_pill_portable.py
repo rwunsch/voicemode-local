@@ -838,9 +838,11 @@ def _upstream_loader():
             pytest.skip("no upstream voice_mode config.py (set VM_UPSTREAM_CONFIG)")
         path = Path(list(spec.submodule_search_locations)[0]) / "config.py"
     tree = ast.parse(path.read_text(encoding="utf-8"))
+    # _vml_env_key_allowed: patch_env_allowlist's helper, present in a patched install.
     funcs = [n for n in tree.body if isinstance(n, ast.FunctionDef)
-             and n.name in ("find_voicemode_env_files", "load_voicemode_env")]
-    assert len(funcs) == 2, f"upstream {path} drifted"
+             and n.name in ("find_voicemode_env_files", "load_voicemode_env", "_vml_env_key_allowed")]
+    names = {n.name for n in funcs}
+    assert {"find_voicemode_env_files", "load_voicemode_env"} <= names, f"upstream {path} drifted"
     ns = {"Path": Path, "os": os}
     exec(compile(ast.Module(body=funcs, type_ignores=[]), str(path), "exec"), ns)
     return ns["load_voicemode_env"]
