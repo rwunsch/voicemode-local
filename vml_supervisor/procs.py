@@ -42,7 +42,11 @@ def _psutil_process(pid):
 
 
 def port_free(port) -> bool:
-    """True only when nothing answers on the port and it can be bound on loopback."""
+    """True only when nothing answers on the port and it can be bound on loopback.
+
+    On POSIX the bind probe sets SO_REUSEADDR, so a port left in TIME_WAIT by a service that died
+    counts as free. That relies on the services binding with SO_REUSEADDR too: true for Python's
+    HTTPServer and uvicorn (Kokoro); the macOS native whisper.cpp server is unverified."""
     with contextlib.closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as probe:
         probe.settimeout(0.5)
         if probe.connect_ex((LOOPBACK, port)) == 0:

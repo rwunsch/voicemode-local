@@ -468,6 +468,7 @@ def test_stop_stops_the_host_before_the_services(tmp_path, monkeypatch):
     profile = make_profile(tmp_path / "voice")
     profile.run_dir.mkdir(parents=True)
     (profile.run_dir / "host.pid").write_text("4242")
+    (profile.run_dir / "host-starts.json").write_text("[1.0, 2.0]")   # a deliberate stop is not a crash
     host.atomic_json(profile.run_dir / "state.json", {"tts": {"pid": 51, "port": 28880, "marker": "tts"}})
     order = []
     monkeypatch.setattr(services, "owned", lambda entry: isinstance(entry, dict))
@@ -475,7 +476,7 @@ def test_stop_stops_the_host_before_the_services(tmp_path, monkeypatch):
     monkeypatch.setattr(services, "live_leases", lambda p: [])
     results = services.stop(profile)
     assert order == [4242, 51]
-    assert not (profile.run_dir / "host.pid").exists()
+    assert not (profile.run_dir / "host.pid").exists() and not (profile.run_dir / "host-starts.json").exists()
     assert results[-1].code == "services_stopped" and results[-1].data["host"] is True
 
 
@@ -498,7 +499,7 @@ def test_elsewhere_ensure_starts_the_services_and_this_platforms_helpers(tmp_pat
     monkeypatch.setattr(host, "WINDOWS", False)
     monkeypatch.setattr(host, "ensure_services", lambda p, pid, hooks=None: ({"tts": 1}, [Result("runtime_not_current")]))
     helper_calls = []
-    monkeypatch.setattr(host, "start_helper", lambda p, kind, hooks=None: helper_calls.append(kind) or Result(
+    monkeypatch.setattr(host, "start_helper", lambda p, kind, mode=None, hooks=None: helper_calls.append(kind) or Result(
         "helper_started", "", {"helper": kind, "results": [Result("kill_incomplete", "old one lives")]}))
     ports, results = host.ensure(profile, 11)
     assert ports == {"tts": 1} and helper_calls == ["barge"]
@@ -508,3 +509,192 @@ def test_elsewhere_ensure_starts_the_services_and_this_platforms_helpers(tmp_pat
 def test_main_needs_a_command_and_a_profile_file(tmp_path):
     assert host.main([]) == 2 and host.main(["host"]) == 2 and host.main(["nope", "x"]) == 2
     assert host.main(["host", str(tmp_path / "missing.json")]) == 2
+
+
+# ----- fix round 1 ------------------------------------------------------------------------------
+
+
+def _leases(monkeypatch, ticks):
+    leases = iter([[11]] * ticks + [[]])
+    monkeypatch.setattr(host, "live_leases", lambda profile: next(leases))
+
+
+def _recording_start_helper(world, code="helper_started"):
+    pids = iter(range(500, 600))
+
+    def start_helper(profile, kind, mode, hooks=None):
+        world.calls.append((kind, mode))
+        if code == "helper_started":
+            state = read_state(profile)
+            pid = next(pids)
+            world.live.add(pid)
+            state[kind] = {"pid": pid, "port": None, "marker": kind, "mode": mode}
+            host.atomic_json(profile.run_dir / "state.json", state)
+        return Result(code, code, {"helper": kind, "results": []})
+
+    return start_helper
+
+
+def test_a_failing_read_mode_hook_leaves_the_helper_alone_and_is_said_once(tmp_path, monkeypatch):
+    """Review, Task 7: a failed read_mode gave None, which is not the running mode, so the host
+    restarted the helper in its default mode and flipped it back on the next good look; and
+    hook_failed went to watch.log every 3 s."""
+    world = _host_world(tmp_path, monkeypatch, helpers={
+        "barge": HelperSpec(["b", "--mode={mode}"], "b", "b.log", (), True)})
+    _leases(monkeypatch, 4)
+    answers = iter(["auto", None, None, "auto"])
+
+    def read_mode(profile, kind, hooks, results):
+        answer = next(answers)
+        if answer is None:
+            results.append(Result("hook_failed", "read_mode: boom", {"hook": "read_mode"}))
+        return answer
+
+    monkeypatch.setattr(host, "read_mode", read_mode)
+    monkeypatch.setattr(host, "start_helper", _recording_start_helper(world))
+    host.host_main(world.file)
+    assert [c for c in world.calls if isinstance(c, tuple)] == [("barge", "auto")]
+    assert log_codes(world.profile).count("hook_failed") == 1
+
+
+def test_read_mode_off_stops_the_helper(tmp_path, monkeypatch):
+    """Ruling, Task 7: "off" from read_mode (any case) means the helper must not run."""
+    world = _host_world(tmp_path, monkeypatch, helpers={
+        "barge": HelperSpec(["b", "--mode={mode}"], "b", "b.log", (), True)})
+    _leases(monkeypatch, 3)
+    answers = iter(["auto", "OFF", "off"])
+    monkeypatch.setattr(host, "read_mode", lambda profile, kind, hooks, results: next(answers))
+    monkeypatch.setattr(host, "start_helper", _recording_start_helper(world))
+    stops = []
+
+    def stop_helper(profile, kind, hooks=None):
+        stops.append(kind)
+        state = read_state(profile)
+        state.pop(kind, None)
+        host.atomic_json(profile.run_dir / "state.json", state)
+        return Result("helper_stopped", "stopped", {"helper": kind, "results": []})
+
+    monkeypatch.setattr(host, "stop_helper", stop_helper)
+    records = []
+    real_atomic = host.atomic_json
+    monkeypatch.setattr(host, "atomic_json", lambda path, value: (
+        records.append(json.loads(json.dumps(value))) if Path(path).name == host.HELPERS_FILE else None,
+        real_atomic(path, value)))
+    host.host_main(world.file)
+    assert [c for c in world.calls if isinstance(c, tuple)] == [("barge", "auto")]
+    assert stops == ["barge"]   # once: the second "off" finds it stopped
+    assert records[-1]["barge"]["state"] == "stopped"
+
+
+def test_elsewhere_ensure_stops_a_helper_whose_mode_is_off(tmp_path, monkeypatch):
+    profile = make_profile(tmp_path / "voice", helpers={"barge": HelperSpec(["b"], "b", "b.log", (), True)})
+    monkeypatch.setattr(host, "WINDOWS", False)
+    monkeypatch.setattr(host, "ensure_services", lambda p, pid, hooks=None: ({}, []))
+    monkeypatch.setattr(host, "read_mode", lambda p, kind, hooks, results: "Off")
+    monkeypatch.setattr(host, "start_helper", lambda *a, **kw: pytest.fail("started"))
+    monkeypatch.setattr(host, "stop_helper", lambda p, kind, hooks=None: Result(
+        "helper_not_running", "", {"helper": kind, "results": []}))
+    assert codes(host.ensure(profile, 11)[1]) == ["helper_not_running"]
+
+
+def test_a_helper_that_exits_at_once_is_retried_within_the_restart_limit(tmp_path, monkeypatch):
+    world = _host_world(tmp_path, monkeypatch, helpers={
+        "ptt": HelperSpec(["p"], "p", "p.log", (), False)}, restart_limit=(3, 300.0))
+    _leases(monkeypatch, 8)
+    monkeypatch.setattr(host, "start_helper", _recording_start_helper(world, code="helper_exited"))
+    records = []
+    real_atomic = host.atomic_json
+    monkeypatch.setattr(host, "atomic_json", lambda path, value: (
+        records.append(json.loads(json.dumps(value))) if Path(path).name == host.HELPERS_FILE else None,
+        real_atomic(path, value)))
+    host.host_main(world.file)
+    assert world.calls.count(("ptt", None)) == 4   # the start and three retries
+    assert log_codes(world.profile).count("helper_restart_limit_reached") == 1
+    assert records[-1]["ptt"]["code"] == "helper_restart_limit_reached"
+    assert records[-1]["ptt"]["state"] == "failed"
+
+
+@POSIX_ONLY
+def test_the_host_profile_file_is_readable_by_the_user_only(tmp_path, monkeypatch):
+    """It holds profile.env."""
+    profile = make_profile(tmp_path / "voice", env={"SECRET": "x"})
+    monkeypatch.setattr(host.subprocess, "run", lambda argv, **kw: SimpleNamespace(stdout="0 5", stderr="", returncode=0))
+    monkeypatch.setattr(host, "background_options", lambda: {})
+    os.umask(0o022)
+    assert host.start_host(profile).code == "host_started"
+    assert (profile.run_dir / host.HOST_PROFILE).stat().st_mode & 0o777 == 0o600
+
+
+def test_a_host_without_psutil_ends_at_once_and_keeps_the_leases(tmp_path, monkeypatch):
+    world = _host_world(tmp_path, monkeypatch)
+    monkeypatch.setattr(host, "require_psutil", lambda: Result("psutil_missing", "no psutil"))
+    monkeypatch.setattr(host, "live_leases", lambda profile: pytest.fail("leases read without psutil"))
+    assert host.host_main(world.file) == 2
+    assert log_codes(world.profile) == ["psutil_missing"]
+
+
+def test_a_host_command_not_run_by_the_profiles_python_is_refused(tmp_path, monkeypatch):
+    monkeypatch.setattr(host.subprocess, "run", lambda *a, **kw: pytest.fail("PowerShell was asked"))
+    profile = make_profile(tmp_path / "voice", host_command=["/other/python", "voice.py", "host"])
+    assert host.start_host(profile).code == "host_command_bad"
+
+
+def test_a_host_started_after_powershell_timed_out_is_found_and_recorded(tmp_path, monkeypatch):
+    profile = make_profile(tmp_path / "voice")
+    monkeypatch.setattr(host, "background_options", lambda: {})
+    monkeypatch.setattr(host, "process_command", lambda pid: None)
+
+    def run(argv, **kw):
+        raise subprocess.TimeoutExpired(argv, kw.get("timeout"))
+
+    monkeypatch.setattr(host.subprocess, "run", run)
+    profile_file = profile.run_dir / host.HOST_PROFILE
+    listing = [(1, "init"), (4321, f"python voice.py host {profile_file}"), (4400, "python voice.py host /other/run/x.json")]
+    monkeypatch.setattr(host, "running_commands", lambda: (listing, None))
+    results = []
+    assert host.ensure_host(profile, results) is True
+    assert codes(results) == ["host_started_late"]
+    assert (profile.run_dir / "host.pid").read_text() == "4321"
+    listing[:] = [(1, "init")]
+    assert host.start_host(profile).code == "host_start_refused"
+
+
+def test_host_failed_removes_helpers_json(tmp_path, monkeypatch):
+    world = _host_world(tmp_path, monkeypatch)
+    _leases(monkeypatch, 3)
+    looks = iter([None, RuntimeError("boom")])
+
+    def services_look(profile, hooks, watch, results):
+        problem = next(looks)
+        if problem:
+            raise problem
+
+    monkeypatch.setattr(host, "_host_services", services_look)
+    assert host.host_main(world.file) == 1
+    assert not (world.root / "run" / host.HELPERS_FILE).exists()
+    assert "host_failed" in log_codes(world.profile)
+
+
+def test_host_starts_are_limited(tmp_path, monkeypatch):
+    """A host that dies at once must not be started by every connector for ever."""
+    profile = make_profile(tmp_path / "voice", restart_limit=(3, 300.0))
+    profile.run_dir.mkdir(parents=True)
+    monkeypatch.setattr(host, "process_command", lambda pid: None)   # each host died at once
+    started = []
+    monkeypatch.setattr(host, "start_host", lambda p: started.append(1) or Result(
+        "host_started", "", {"pid": 900 + len(started)}))
+    outcomes = []
+    for _ in range(4):
+        results = []
+        outcomes.append((host.ensure_host(profile, results), codes(results)))
+    assert len(started) == 3
+    assert outcomes[-1] == (False, ["host_restart_limit"])
+
+
+def test_a_failing_watchdog_says_so(tmp_path, monkeypatch):
+    profile = make_profile(tmp_path / "voice")
+    profile.run_dir.mkdir(parents=True)
+    monkeypatch.setattr(host.time, "sleep", lambda s: None)
+    monkeypatch.setattr(host, "watch_tick", lambda *a: (_ for _ in ()).throw(RuntimeError("boom")))
+    assert host.watch_main(profile) == 1
+    assert log_codes(profile) == ["watch_failed"]

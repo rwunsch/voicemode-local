@@ -59,6 +59,7 @@ from .winjob import SpawnError, services_job, spawn
 _local_opener = build_opener(ProxyHandler({}))
 READY_POLL = 0.5
 HOST_PID = "host.pid"   # in run_dir: the Windows host's process id, written under the service lock
+HOST_STARTS = "host-starts.json"   # in run_dir: recent host starts, for the start limit
 
 # The operating system's own variables a service needs; everything else comes from the profile.
 _OS_KEEP = ("PATH", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR", "TZ")
@@ -164,6 +165,8 @@ def _stop_host(profile: HostProfile, results: list) -> bool:
         return running
     with contextlib.suppress(OSError):
         pid_file.unlink(missing_ok=True)
+        # A deliberate stop is not a crash: it must not count towards the host-start limit.
+        (Path(profile.run_dir) / HOST_STARTS).unlink(missing_ok=True)
     return running
 
 
