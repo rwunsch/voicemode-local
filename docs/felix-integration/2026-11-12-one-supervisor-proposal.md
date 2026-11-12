@@ -7,6 +7,16 @@ sessions, revision 3. Robert's decisions:
    follows as its own PRs.
 3. Talos keeps reviewing `plugins/voicemode/vendor/**`: no exclusion.
 
+**PAUSED by Robert, 2026-11-12 (later the same day).** The move (step 2) stopped after Plan A's
+Tasks 1-3: the package skeleton, process and port primitives, and state/lock/leases. They are
+reviewed but unused, on the unmerged branch `feature/shared-supervisor`. Why: the urgent problem
+(multi-chat voice dying in FELIX) is fixed by FELIX's own host fix (route i), and the move's
+benefit, one copy instead of two, is unmeasured against the risk of rewriting working code.
+Until resumed:
+- FELIX keeps its `voice.py`, and voicemode-local keeps `voicemode_native.py`.
+- Resume when the duplication actually costs something: a fix needed twice, or one copy broken
+  on something the other already fixed.
+
 ## The problem
 
 - **The origin.** The runtime, service and lease logic was written in FELIX's
