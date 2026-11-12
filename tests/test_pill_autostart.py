@@ -181,3 +181,18 @@ def test_mac_window_logs_to_pill_window_log(tmp_path, monkeypatch):
 
 def test_default_hook_is_off_outside_the_package():
     assert st._default_autostart() is None
+
+
+def test_pill_python_from_a_voicemode_env_is_refused(monkeypatch):
+    # Talos 2026-11-12: a model can write voicemode.env (update_config), and the server
+    # copies it into its environment; the pill would launch whatever it names.
+    monkeypatch.setenv(pa.PYTHON_SETTING, "/tmp/evil")
+    monkeypatch.setattr(st, "setting_came_from_a_file", lambda name: name == pa.PYTHON_SETTING)
+    assert pa.backend_python() == sys.executable
+    assert pa.mac_python().endswith(os.path.join("pill-venv", "bin", "python"))
+
+
+def test_pill_python_from_the_environment_is_used(monkeypatch):
+    monkeypatch.setenv(pa.PYTHON_SETTING, "/opt/py")
+    monkeypatch.setattr(st, "setting_came_from_a_file", lambda name: False)
+    assert pa.backend_python() == "/opt/py" and pa.mac_python() == "/opt/py"

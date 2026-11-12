@@ -470,3 +470,23 @@ def test_a_failing_autostart_hook_does_not_cost_the_turn(base):
 def asyncio_run(coro):
     import asyncio
     return asyncio.run(coro)
+
+
+# -- Talos review 2026-11-12: settings that name a program are never read from a file ----
+
+def test_setting_came_from_a_file_reads_every_env_file(monkeypatch, tmp_path):
+    home = tmp_path / "home"
+    (home / ".voicemode").mkdir(parents=True)
+    (home / ".voicemode" / "voicemode.env").write_text("VOICEMODE_X_CMD=/bin/evil\n")
+    monkeypatch.setattr(st, "upstream_home", lambda: home / ".voicemode")
+    monkeypatch.chdir(tmp_path)
+    assert st.setting_came_from_a_file("VOICEMODE_X_CMD") is True
+    assert st.setting_came_from_a_file("VOICEMODE_OTHER") is False
+
+
+def test_trusted_env_refuses_a_value_a_file_supplied(monkeypatch):
+    monkeypatch.setenv("VOICEMODE_X_CMD", "/bin/evil")
+    monkeypatch.setattr(st, "setting_came_from_a_file", lambda name: True)
+    assert st.trusted_env("VOICEMODE_X_CMD") == ""
+    monkeypatch.setattr(st, "setting_came_from_a_file", lambda name: False)
+    assert st.trusted_env("VOICEMODE_X_CMD") == "/bin/evil"

@@ -862,8 +862,26 @@ def _env_files_upstream_loads() -> list:
     return files
 
 
+def setting_came_from_a_file(name: str) -> bool:
+    """True when any voicemode.env file upstream loads holds ``name``. A model can write
+    those files (upstream's update_config takes any key), and the server copies them into
+    os.environ (load_voicemode_env, on start and on config_reload), so a setting that
+    names a program to run is trusted from the real environment only."""
+    return any(name in _read_env_path(f) for f in _env_files_upstream_loads())
+
+
+def trusted_env(name: str) -> str:
+    """``name`` from the environment, or "" (one warning) when a voicemode.env holds it."""
+    raw = (os.environ.get(name) or "").strip()
+    if raw and setting_came_from_a_file(name):
+        _warn_once(f"{name} is set in a voicemode.env file, which a model can write; "
+                   "ignoring it. Pass it in the environment only.")
+        return ""
+    return raw
+
+
 def _command_came_from_a_file() -> bool:
-    return any(BARGE_COMMAND_SETTING in _read_env_path(f) for f in _env_files_upstream_loads())
+    return setting_came_from_a_file(BARGE_COMMAND_SETTING)
 
 
 def barge_command(switch=None):
@@ -917,7 +935,7 @@ _BARGE_PROBE_LOCK = threading.Lock()
 def _python_setting_came_from_a_file() -> bool:
     """Same reasoning as barge_command: a model can write voicemode.env, so an
     interpreter named there is never trusted."""
-    return any(BARGE_PYTHON_SETTING in _read_env_path(f) for f in _env_files_upstream_loads())
+    return setting_came_from_a_file(BARGE_PYTHON_SETTING)
 
 
 def barge_interpreter() -> str | None:
