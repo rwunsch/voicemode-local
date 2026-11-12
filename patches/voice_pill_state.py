@@ -522,7 +522,13 @@ def get_override(pid: int, base=None) -> dict:
     data, status = _read_json_state(path)
     if status != "ok":
         return {}
-    if "start" not in data or data["start"] != process_start(pid):
+    if "start" not in data:
+        _unlink(path)
+        return {}
+    now = process_start(pid)
+    if now is None and data["start"] is not None:   # ps / OpenProcess failed just now:
+        return {}                                    # unknown is not "another process"
+    if data["start"] != now:
         _unlink(path)
         return {}
     return {k: data[k] for k in ("voice", "language") if data.get(k)}

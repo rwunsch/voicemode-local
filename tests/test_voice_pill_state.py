@@ -600,3 +600,15 @@ def test_pill_enabled_ignores_case_like_the_mac_window(monkeypatch, raw, want):
     # VOICEMODE_PILL=True would never start the window.
     monkeypatch.setenv("VOICEMODE_PILL", raw)
     assert st.pill_enabled() is want
+
+
+def test_an_unknown_process_start_keeps_the_override_file(base, monkeypatch):
+    # Final review I2: ps timing out under load (Mac) gave None, and the user's chosen voice
+    # and language were deleted for good. Unknown is not "another process".
+    pid = os.getpid()
+    st.set_override(pid, "bf_emma", "German", base=base)
+    monkeypatch.setattr(st, "process_start", lambda p: None)
+    assert st.get_override(pid, base=base) == {}
+    assert (base / f"override-{pid}.json").exists()
+    monkeypatch.undo()
+    assert st.get_override(pid, base=base) == {"voice": "bf_emma", "language": "German"}
