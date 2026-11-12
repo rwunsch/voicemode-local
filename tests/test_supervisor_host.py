@@ -168,7 +168,7 @@ def _host_world(tmp_path, monkeypatch, **over):
         calls.append("services")
         for kind, pid, port in (("tts", 1, 28880), ("stt", 2, 22022)):
             if kind in profile.services:
-                state[kind] = {"pid": pid, "port": port, "marker": kind, "log": "x",
+                state[kind] = {"pid": pid, "port": port, "marker": kind, "log": str(profile.run_dir / f"{kind}.log"),
                                "command": [kind, "--port", str(port)], "runtime": runtime}
                 live.add(pid)
         host.atomic_json(profile.run_dir / "state.json", state)
@@ -738,7 +738,7 @@ def test_a_failing_read_mode_does_not_start_a_helper_the_user_turned_off(tmp_pat
 
     def stop_helper(profile, kind, hooks=None):
         stops.append(kind)
-        world.live.clear()
+        world.live.difference_update(range(500, 600))   # the helper's pids only, not the services'
         return Result("helper_stopped", "stopped", {"helper": kind, "results": []})
 
     monkeypatch.setattr(host, "stop_helper", stop_helper)
