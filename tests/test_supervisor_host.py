@@ -698,3 +698,67 @@ def test_a_failing_watchdog_says_so(tmp_path, monkeypatch):
     monkeypatch.setattr(host, "watch_tick", lambda *a: (_ for _ in ()).throw(RuntimeError("boom")))
     assert host.watch_main(profile) == 1
     assert log_codes(profile) == ["watch_failed"]
+
+
+# ----- fix round 2 ------------------------------------------------------------------------------
+
+
+def test_clean_host_exits_do_not_count_towards_the_host_start_limit(tmp_path, monkeypatch):
+    """Review, round 2: closing and reopening every chat three times in 300 s must not lock voice
+    out. Only crashes and failed starts count; a host that ended because no connector was left
+    resets the count."""
+    world = _host_world(tmp_path, monkeypatch, restart_limit=(3, 300.0))
+    monkeypatch.setattr(host, "process_command", lambda pid: None)   # the last host has ended
+    started = []
+    monkeypatch.setattr(host, "start_host", lambda p: started.append(1) or Result(
+        "host_started", "", {"pid": 900 + len(started)}))
+    for cycle in range(4):
+        results = []
+        assert host.ensure_host(world.profile, results) is True, (cycle, codes(results))
+        _leases(monkeypatch, 1)
+        assert host.host_main(world.file) == 0   # the chats closed: host_stopped
+    assert len(started) == 4
+
+
+def test_a_failing_read_mode_does_not_start_a_helper_the_user_turned_off(tmp_path, monkeypatch):
+    world = _host_world(tmp_path, monkeypatch, helpers={
+        "barge": HelperSpec(["b", "--mode={mode}"], "b", "b.log", (), True)})
+    _leases(monkeypatch, 4)
+    answers = iter(["auto", "off", None, None])
+
+    def read_mode(profile, kind, hooks, results):
+        answer = next(answers)
+        if answer is None:
+            results.append(Result("hook_failed", "read_mode: boom", {"hook": "read_mode"}))
+        return answer
+
+    monkeypatch.setattr(host, "read_mode", read_mode)
+    monkeypatch.setattr(host, "start_helper", _recording_start_helper(world))
+    stops = []
+
+    def stop_helper(profile, kind, hooks=None):
+        stops.append(kind)
+        world.live.clear()
+        return Result("helper_stopped", "stopped", {"helper": kind, "results": []})
+
+    monkeypatch.setattr(host, "stop_helper", stop_helper)
+    host.host_main(world.file)
+    assert [c for c in world.calls if isinstance(c, tuple)] == [("barge", "auto")]
+    assert stops == ["barge"] and log_codes(world.profile).count("hook_failed") == 1
+
+
+@pytest.mark.parametrize("running", [True, False])
+def test_elsewhere_a_failing_read_mode_leaves_the_helper_as_it_is(tmp_path, monkeypatch, running):
+    """Review, round 2: each connector's ensure restarted a running helper in its default mode when
+    the hook failed (the flip-flop of round 1, once per connector)."""
+    profile = make_profile(tmp_path / "voice", helpers={"barge": HelperSpec(["b"], "b", "b.log", (), True)})
+    profile.run_dir.mkdir(parents=True)
+    host.atomic_json(profile.run_dir / "state.json", {"barge": {"pid": 5, "port": None, "marker": "b", "mode": "on"}})
+    monkeypatch.setattr(host, "WINDOWS", False)
+    monkeypatch.setattr(host, "owned", lambda entry: running and isinstance(entry, dict))
+    monkeypatch.setattr(host, "ensure_services", lambda p, pid, hooks=None: ({}, []))
+    monkeypatch.setattr(host, "read_mode", lambda p, kind, hooks, results: results.append(
+        Result("hook_failed", "read_mode: boom")))
+    monkeypatch.setattr(host, "start_helper", lambda *a, **kw: pytest.fail("started"))
+    monkeypatch.setattr(host, "stop_helper", lambda *a, **kw: pytest.fail("stopped"))
+    assert codes(host.ensure(profile, 11)[1]) == ["hook_failed"]

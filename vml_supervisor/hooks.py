@@ -21,7 +21,7 @@ Hook contract
   Result("service_command_bad") for an empty marker, Result("service_command_unowned") for the rest.
 - read_mode returns the helper's mode (a string) or None (its default). "off", in any case, means
   the helper must not run: the host and host.ensure stop it (stop_helper) instead of starting it.
-  When read_mode fails, the host leaves a running helper as it is and says so once.
+  When read_mode fails, the helper is left as it is, running or not (the host says so once).
 - A pre_start hook that raises does NOT block the start: run_pre_start returns
   the hook_failed Result and the caller passes it to on_result. Only returned
   refusal text blocks, as Result("pre_start_refused").

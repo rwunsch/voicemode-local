@@ -40,8 +40,8 @@ Result codes
   watch_lock_failed, host_failed (an unexpected error ended the host; the next connector starts
   a new one), watch_failed (the same for the watchdog), psutil_missing (the host ends at once,
   leaving the leases alone), helpers_write_failed, job_unavailable, profile_key_unknown,
-  hook_failed (a failing read_mode is said once until it answers again; an owned helper is then
-  left as it is), helper_restart_limit_reached (a helper that keeps stopping is retried at most
+  hook_failed (a failing read_mode is said once until it answers again; the helper is then
+  left as it is, running or not), helper_restart_limit_reached (a helper that keeps stopping is retried at most
   restart_limit[0] times in restart_limit[1] s, said once).
 - read_mode "off" (any case) means the helper must not run: stop_helper, not start_helper.
 - run/helpers.json: {kind: {state: running|stopped|failed, code, detail, results: [{code,
@@ -285,7 +285,7 @@ def _note(kind: str, record: dict, records: dict, results: list) -> None:
 def _host_helpers(profile: HostProfile, hooks: Hooks, watch: WatchState, records: dict, results: list) -> None:
     """Outside the lock (start_helper takes it): bring each helper of this platform to the mode
     read_mode gives now. One running in that mode is left alone; "off" stops it. When read_mode
-    fails, an owned helper is left as it is and the failure is said once. A helper that stopped is
+    fails, the helper is left as it is (running or not) and the failure is said once. A helper that stopped is
     started again at most restart_limit[0] times in restart_limit[1] s."""
     state, _ = read_json(Path(profile.run_dir) / "state.json", {})
     state = state if isinstance(state, dict) else {}
@@ -304,8 +304,9 @@ def _host_helpers(profile: HostProfile, hooks: Hooks, watch: WatchState, records
                 if (kind, "read_mode") not in watch.said:
                     watch.said.add((kind, "read_mode"))
                     results.extend(problems)
-                if running:
-                    continue   # a guess must not restart it in another mode
+                # A guess must neither restart a running helper in another mode nor start one the
+                # user turned off: it stays as recorded until the hook answers again.
+                continue
             else:
                 watch.said.discard((kind, "read_mode"))
         if is_off(mode):
@@ -371,7 +372,8 @@ def host_main(profile_file: Path) -> int:
                         seen = True
                     elif seen or time.monotonic() - began > profile.host_start_grace:
                         results.extend(stop_recorded(profile, read_state(profile, results)))
-                        for name in (HOST_PID, HELPERS_FILE):
+                        # A clean end is not a crash: it does not count towards the host-start limit.
+                        for name in (HOST_PID, HELPERS_FILE, HOST_STARTS):
                             with contextlib.suppress(OSError):
                                 (run_dir / name).unlink(missing_ok=True)
                         results.append(Result("host_stopped", "no connector is left" if seen else
@@ -556,8 +558,8 @@ def ensure(profile: HostProfile, connector_pid: int) -> tuple[dict[str, int], li
     """The connector's entry point. Windows: write the lease, start the host unless it runs, wait
     up to start_timeout for the services it starts (services.ensure_services does all three). The
     host starts the helpers. Elsewhere: ensure_services, then start_helper for each helper of this
-    platform (stop_helper when read_mode says "off"); each helper's secondary results follow its
-    Result."""
+    platform (stop_helper when read_mode says "off"; nothing when read_mode fails); each helper's
+    secondary results follow its Result."""
     hooks, loaded = load_hooks(profile)
     ports, results = ensure_services(profile, connector_pid, hooks)
     results = [*loaded, *results]
@@ -566,7 +568,15 @@ def ensure(profile: HostProfile, connector_pid: int) -> tuple[dict[str, int], li
     for kind, spec in profile.helpers.items():
         if spec.platforms and PLATFORM not in spec.platforms:
             continue
-        mode = read_mode(profile, kind, hooks, results) if spec.needs_mode else None
+        mode = None
+        if spec.needs_mode:
+            problems: list[Result] = []
+            mode = read_mode(profile, kind, hooks, problems)
+            if problems:
+                # As in the host: a guess must not restart a running helper in another mode, nor
+                # start one the user turned off. Left as it is; the problem is said.
+                results.extend(problems)
+                continue
         result = stop_helper(profile, kind, hooks) if is_off(mode) else start_helper(profile, kind, mode, hooks)
         results.append(result)
         results.extend(r for r in result.data.get("results", []) if isinstance(r, Result))
