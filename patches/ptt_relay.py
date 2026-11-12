@@ -61,6 +61,7 @@ DEFAULT_PORT = 8765
 VALID_ACTIONS = {"press", "short_press", "hold_start", "hold_release"}
 MAX_LINE = 1024  # a line is an action name; anything larger is not ours
 MAX_CONNECTIONS = 8  # the listener opens one short connection per action
+AUTH_DEADLINE_S = 2.0   # the token line must arrive within this, however slowly it trickles
 DEFAULT_TOKEN_PATH = Path.home() / ".voicemode" / "ptt-relay.token"
 
 
@@ -86,7 +87,13 @@ def load_or_create_token(path=None) -> str:
         logger.warning("relay token file %s is damaged; writing a new one", path)
         path.unlink()
     token = secrets.token_hex(32)
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:   # another relay created it a moment ago: use that one
+        text = path.read_text(encoding="ascii").strip()
+        if _valid_token(text):
+            return text
+        raise
     with os.fdopen(fd, "w", encoding="ascii") as f:
         f.write(token + "\n")
     return token
@@ -139,6 +146,12 @@ class _Handler(socketserver.StreamRequestHandler):
                 return
             yield raw
 
+    def _cut(self) -> None:
+        try:
+            self.connection.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+
     def _authenticated(self, raw: bytes) -> bool:
         expected = self.server.token
         if expected is None:
@@ -152,7 +165,15 @@ class _Handler(socketserver.StreamRequestHandler):
         try:
             lines = self._lines()
             if self.server.token is not None:
-                first = next(lines, None)
+                # One deadline for the whole token line: the per-read timeout restarts on
+                # every byte, so a trickling client could otherwise hold a slot for good.
+                cut = threading.Timer(AUTH_DEADLINE_S, self._cut)
+                cut.daemon = True
+                cut.start()
+                try:
+                    first = next(lines, None)
+                finally:
+                    cut.cancel()
                 if first is None or not self._authenticated(first):
                     logger.info("relay <- missing or wrong token; closing")
                     return

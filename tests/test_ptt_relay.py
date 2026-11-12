@@ -271,3 +271,45 @@ def test_a_damaged_token_file_is_replaced(relay, tmp_path, damaged):
 
 def test_serve_uses_the_token_file_by_default(relay):
     assert str(relay.DEFAULT_TOKEN_PATH).endswith(os.path.join(".voicemode", "ptt-relay.token"))
+
+
+def test_a_client_that_trickles_bytes_without_a_token_is_closed_after_the_deadline(running, relay, monkeypatch):
+    # Final review I4: the 2 s timeout restarts on every byte, so two tricklers held both
+    # slots and a correct client was refused. The token line now has an overall deadline.
+    monkeypatch.setattr(relay, "AUTH_DEADLINE_S", 0.5)
+    r = running(max_conns=1)
+    s = r.connect()
+    start = time.monotonic()
+    try:
+        closed = False
+        while time.monotonic() - start < 3.0:
+            try:
+                s.sendall(b"t")
+            except OSError:
+                closed = True
+                break
+            s.settimeout(0.2)
+            try:
+                if s.recv(1) == b"":
+                    closed = True
+                    break
+            except socket.timeout:
+                pass
+        assert closed and time.monotonic() - start < 2.0
+    finally:
+        s.close()
+    time.sleep(0.1)
+    r.send("token " + TOKEN, "hold_start")
+    assert r.wait_sent(1) == ["hold_start"]
+
+
+def test_two_relays_creating_the_token_at_once_agree(relay, tmp_path, monkeypatch):
+    # Minor: the loser of the O_EXCL race crashed with FileExistsError.
+    path = tmp_path / "ptt-relay.token"
+    real_open = os.open
+    def racing_open(p, flags, *a):
+        if str(p) == str(path) and flags & os.O_EXCL and not path.exists():
+            path.write_text("cd" * 32 + "\n")        # the other relay won
+        return real_open(p, flags, *a)
+    monkeypatch.setattr(relay.os, "open", racing_open)
+    assert relay.load_or_create_token(path) == "cd" * 32
