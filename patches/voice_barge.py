@@ -1,8 +1,18 @@
 """Stop the assistant talking when you talk over it.
 
-One process per machine. It opens the mic ONLY while voice-mode reports that TTS
-is playing, runs Silero plus a volume gate, and sends ``barge_in`` once. The
-server cuts the utterance and falls into its normal listen turn. ``barge_in`` is
+One process per machine. The mic is open only during a converse turn, at three
+times, and closed otherwise (idle, between replies, while paused):
+
+- "warm": the turn is generating its reply and has neither spoken nor listened
+  yet (PhaseTracker; VOICEMODE_VOICE_BARGE_WARM=off turns it off). This only lets
+  the mic start up before playback; every window read while warm is discarded,
+  never fed to Silero nor kept.
+- "speaking": voice-mode reports that TTS is playing. Silero plus a volume gate
+  run on this audio, and ``barge_in`` is sent once.
+- after a barge: until the server reports it is listening (at most about 3 s),
+  to hand over the words said in between (below). A pause stops it at once.
+
+The server cuts the utterance and falls into its normal listen turn. ``barge_in`` is
 a no-op unless TTS is live (patch_voice_barge.py), so a late detection cannot
 end the turn that follows.
 
@@ -226,7 +236,11 @@ class SoundDeviceCapture:
         self._stream = sd.InputStream(samplerate=SAMPLE_RATE, channels=1, dtype="int16",
                                       blocksize=WINDOW_SAMPLES, device=chosen,
                                       callback=self._on_block)
-        self._stream.start()
+        try:
+            self._stream.start()
+        except Exception:
+            self._stream.close()   # never leave an opened PortAudio stream behind
+            raise
 
     def _on_block(self, block, frames, time_info, status):
         self._queue.put(np.array(block[:, 0], dtype=np.int16))
@@ -1019,10 +1033,22 @@ def send_barge_in(path: Path) -> None:
         logger.debug("barge_in not delivered: %s", e)
 
 
-def _hand_off(capture, held, poll_listen_started, preroll_sink, poll_every_windows, clock) -> None:
-    """Keep capturing until the server is listening, then pass on all of it."""
+def _hand_off(capture, held, poll_listen_started, preroll_sink, poll_every_windows, clock,
+              is_paused=lambda: False, preroll_discard=None) -> None:
+    """Keep capturing until the server is listening, then pass on all of it.
+
+    Pause stops it at once: no further window is read, nothing is handed over, and any
+    earlier preroll file is removed (``preroll_discard``). A sink that fails (Windows:
+    os.replace refused while the server reads the last file) costs this preroll only."""
     last_read = clock()
     for count in range(1, HANDOFF_MAX_WINDOWS + 1):
+        if is_paused():
+            if preroll_discard is not None:
+                try:
+                    preroll_discard()
+                except OSError as e:
+                    logger.debug("stale preroll not removed: %s", e)
+            return
         window = capture.read_window()
         if window is not None:
             held.append(window)
@@ -1030,7 +1056,11 @@ def _hand_off(capture, held, poll_listen_started, preroll_sink, poll_every_windo
         if count % poll_every_windows == 0 and poll_listen_started() is not None:
             break
     samples = np.concatenate(list(held))
-    preroll_sink(samples, last_read - len(samples) / SAMPLE_RATE)
+    try:
+        preroll_sink(samples, last_read - len(samples) / SAMPLE_RATE)
+    except OSError as e:
+        logger.warning("preroll not handed over (%s); the words before listening are lost "
+                       "this time", e)
 
 
 MIC_PHASES = ("warm", "speaking")
@@ -1156,7 +1186,8 @@ def run(poll_speaking=None, open_capture=None, vad=None, detector=None, send_bar
         idle_poll_s=IDLE_POLL_S, poll_listen_started=None, preroll_sink=None,
         clock=time.time, preroll_windows=PREROLL_WINDOWS,
         is_paused=lambda: False, on_fire=None, stretch_clock=time.monotonic,
-        poll_phase=None, warm_poll_every_windows=WARM_POLL_EVERY_WINDOWS) -> None:
+        poll_phase=None, warm_poll_every_windows=WARM_POLL_EVERY_WINDOWS,
+        preroll_discard=None) -> None:
     """Main loop. ``poll_phase`` returns "idle", "warm", "speaking", or None to shut
     down (see PhaseTracker); ``poll_speaking`` (True, False or None) is the older form,
     with no warm phase.
@@ -1165,12 +1196,18 @@ def run(poll_speaking=None, open_capture=None, vad=None, detector=None, send_bar
     they only let the mic start up and spend the warmup before the reply plays. While
     ``is_paused()`` the mic stays closed (an open one closes at the next poll).
     ``on_fire()`` is called once per barge-in sent.
+
+    After a barge the mic keeps reading until the server listens, then hands the audio to
+    ``preroll_sink(samples, start_t)``; a pause in that time drops it and calls
+    ``preroll_discard()``. A mic that fails to open is retried at the next stretch, with
+    one warning per run of consecutive failures.
     """
     if poll_phase is None:
         def poll_phase():
             speaking = poll_speaking()
             return None if speaking is None else ("speaking" if speaking else "idle")
 
+    open_failing = False   # one warning per run of consecutive failed opens
     while True:
         phase = poll_phase()
         if phase is None:
@@ -1180,7 +1217,16 @@ def run(poll_speaking=None, open_capture=None, vad=None, detector=None, send_bar
             continue
 
         opened_at = stretch_clock()
-        capture = open_capture()
+        try:
+            capture = open_capture()
+        except Exception as e:  # noqa: BLE001 - a mic that will not open costs this stretch only
+            if not open_failing:
+                logger.warning("mic did not open (%s: %s); retrying at the next stretch",
+                               type(e).__name__, e)
+            open_failing = True
+            capture = None
+        else:
+            open_failing = False
         if capture is not None:
             logger.debug("capture open: %s id=%#x, phase %s", type(capture).__name__,
                          id(capture), phase)
@@ -1248,7 +1294,7 @@ def run(poll_speaking=None, open_capture=None, vad=None, detector=None, send_bar
                     fired = True
                     if preroll_sink is not None:
                         _hand_off(capture, list(recent), poll_listen_started, preroll_sink,
-                                  poll_every_windows, clock)
+                                  poll_every_windows, clock, is_paused, preroll_discard)
                     break
         finally:
             try:
@@ -1417,6 +1463,7 @@ def main() -> int:
         send_barge=lambda: send_barge_in(path),
         poll_listen_started=lambda: _status(path).get("listen_started_at"),
         preroll_sink=lambda samples, start_t: write_preroll(preroll_path(), samples, start_t),
+        preroll_discard=lambda: preroll_path().unlink(missing_ok=True),
         is_paused=(lambda: is_paused() or gate.closed()) if gate is not None else is_paused,
         on_fire=lambda: record_interruption(time.time()),
     )

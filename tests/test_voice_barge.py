@@ -837,3 +837,125 @@ class TestMainWiring:
         monkeypatch.setattr(builtins, "__import__", no_sd)
         voice_barge._preload_backend("sounddevice")
         voice_barge._preload_backend("parec")
+
+
+# --- the trigger survives its own failures (Talos review, 2026-11-12) ---------------
+
+class CountingCapture(FakeCapture):
+    def __init__(self, frames, vad):
+        super().__init__(frames, vad)
+        self.reads = 0
+
+    def read_window(self):
+        self.reads += 1
+        return super().read_window()
+
+
+class TestTriggerSurvives:
+    def _run(self, speaking, frames, open_capture=None, vad=None, **kw):
+        vad = vad or FakeVad()
+        got = {"opened": [], "barges": 0}
+
+        def default_open():
+            cap = CountingCapture(frames, vad)
+            got["opened"].append(cap)
+            return cap
+
+        def barge():
+            got["barges"] += 1
+
+        speaking = list(speaking)
+        voice_barge.run(
+            poll_speaking=lambda: speaking.pop(0) if speaking else None,
+            open_capture=open_capture or default_open, vad=vad, detector=detector(),
+            send_barge=barge, sleep=lambda _s: None, warmup_windows=0, poll_every_windows=1,
+            **kw)
+        return got, vad
+
+    def test_a_failed_preroll_publish_does_not_stop_the_trigger(self, caplog):
+        sunk = []
+
+        def sink(samples, start):
+            sunk.append(len(samples))
+            if len(sunk) == 1:
+                raise PermissionError(13, "Access is denied")  # Windows os.replace, after retries
+        with caplog.at_level("WARNING", logger="voicemode.voice_barge"):
+            got, _ = self._run([True] * 5 + [False] + [True] * 5 + [False],
+                               [(SPEECH, LOUD)] * 40,
+                               poll_listen_started=lambda: 1000.0, preroll_sink=sink)
+        assert len(got["opened"]) == 2
+        assert got["barges"] == 2
+        assert len(sunk) == 2
+        assert [r for r in caplog.records if r.levelname == "WARNING" and "preroll" in r.getMessage()]
+
+    def test_pause_during_the_hand_off_stops_reading_and_drops_the_preroll(self):
+        paused = {"on": False, "reads_at_flip": None}
+        caps = []
+        vad = FakeVad()
+        frames = [(SPEECH, LOUD)] * 200
+
+        def open_capture():
+            caps.append(CountingCapture(frames, vad))
+            return caps[-1]
+
+        def on_fire():
+            paused["on"] = True
+            paused["reads_at_flip"] = caps[-1].reads
+
+        sunk, discarded = [], []
+        got, _ = self._run([True] * 5 + [False], frames, open_capture=open_capture, vad=vad,
+                           poll_listen_started=lambda: None,   # the server never listens
+                           preroll_sink=lambda s, t: sunk.append(1),
+                           preroll_discard=lambda: discarded.append(1),
+                           is_paused=lambda: paused["on"], on_fire=on_fire)
+        assert got["barges"] == 1
+        assert caps[0].reads - paused["reads_at_flip"] == 0
+        assert sunk == []
+        assert discarded == [1]
+        assert caps[0].closed
+
+    def test_a_failed_mic_open_is_retried_at_the_next_stretch(self, caplog):
+        vad = FakeVad()
+        frames = [(SPEECH, LOUD)] * 20
+        attempts = []
+
+        def open_capture():
+            attempts.append(1)
+            if len(attempts) == 1:
+                raise OSError("PortAudio: device unavailable")
+            return FakeCapture(frames, vad)
+        with caplog.at_level("WARNING", logger="voicemode.voice_barge"):
+            got, _ = self._run([True] * 3 + [False] + [True] * 5 + [False], frames,
+                               open_capture=open_capture, vad=vad)
+        assert len(attempts) == 2
+        assert got["barges"] == 1
+        warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+        assert len(warnings) == 1 and "PortAudio" in warnings[0].getMessage()
+
+    def test_consecutive_failed_opens_log_one_warning(self, caplog):
+        attempts = []
+
+        def open_capture():
+            attempts.append(1)
+            raise OSError("no mic")
+        with caplog.at_level("WARNING", logger="voicemode.voice_barge"):
+            self._run([True, False, True, False, True, False], [], open_capture=open_capture)
+        assert len(attempts) == 3
+        assert len([r for r in caplog.records if r.levelname == "WARNING"]) == 1
+
+    def test_a_stream_that_fails_to_start_is_closed(self, monkeypatch):
+        sd = FakeSoundDevice()
+        real = sd.InputStream
+
+        def stream(**kw):
+            s = real(**kw)
+
+            def boom():
+                raise RuntimeError("PortAudio: Invalid device")
+            s.start = boom
+            return s
+        sd.InputStream = stream
+        monkeypatch.setitem(sys.modules, "sounddevice", sd)
+        with pytest.raises(RuntimeError):
+            voice_barge.SoundDeviceCapture("")
+        assert sd.streams[0].closed
