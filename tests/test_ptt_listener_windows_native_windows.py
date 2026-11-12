@@ -232,7 +232,12 @@ def test_relay_mode_still_sends_actions_over_tcp(tmp_path):
 
         t = threading.Thread(target=serve, daemon=True)
         t.start()
-        done = _listener("-Port", str(port), "-LogPath", str(log), "-SendAction", "short_press,press")
+        token = "ab" * 32  # the relay's shared secret (patches/ptt_relay.py), sent first
+        token_file = tmp_path / "ptt-relay.token"
+        token_file.write_text(token + "\n", encoding="ascii")
+        done = _listener("-Port", str(port), "-LogPath", str(log), "-TokenPath", str(token_file),
+                         "-SendAction", "short_press,press")
         t.join(20)
     assert done.returncode == 0, done.stdout + done.stderr
-    assert received == [b'{"action": "short_press"}\n', b'{"action": "press"}\n'], received
+    first = ("token " + token + "\n").encode()
+    assert received == [first + b'{"action": "short_press"}\n', first + b'{"action": "press"}\n'], received

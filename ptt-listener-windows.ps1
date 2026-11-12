@@ -14,7 +14,9 @@
 
     Relay mode (no -SenderExe; WSL2): forwards each action to the WSL-side
     relay (patches/ptt_relay.py), which hands them to voice-mode's control
-    socket.
+    socket. Each connection starts with "token <hex>", the shared secret the
+    relay writes to ~/.voicemode/ptt-relay.token in WSL; this script reads it
+    over the WSL share (-TokenPath). The relay closes a connection without it.
 
     Native mode (-SenderExe; voice-mode runs on Windows, no WSL): hands each
     action to a sender process, `python -m voice_mode.ptt_control_client
@@ -46,6 +48,11 @@
 .PARAMETER RelayHost
     Where the relay listens. Default 127.0.0.1, which works when the relay is
     bound to 0.0.0.0 inside WSL and reached through localhostForwarding.
+
+.PARAMETER TokenPath
+    Relay mode: the relay's token file. Default: the WSL user's
+    ~/.voicemode/ptt-relay.token, read over \\wsl.localhost. The relay creates
+    it on its first start. Read once, at the first send that finds it.
 
 .PARAMETER HoldThresholdMs
     No longer used (the hold starts on key-down since 2026-11-07); still
@@ -86,6 +93,7 @@
 param(
     [int]$Port = 8765,
     [string]$RelayHost = "127.0.0.1",
+    [string]$TokenPath = "",
     [int]$HoldThresholdMs = 0,
     [string]$SenderExe = "",
     [string]$SenderArgs = "-m voice_mode.ptt_control_client --stdin",
@@ -105,9 +113,9 @@ param(
 $ErrorActionPreference = "Stop"
 
 $Native = [bool]$SenderExe
-if (($Native -and ($PSBoundParameters.ContainsKey("Port") -or $PSBoundParameters.ContainsKey("RelayHost"))) -or
+if (($Native -and ($PSBoundParameters.ContainsKey("Port") -or $PSBoundParameters.ContainsKey("RelayHost") -or $PSBoundParameters.ContainsKey("TokenPath"))) -or
     (-not $Native -and $PSBoundParameters.ContainsKey("SenderArgs"))) {
-    Write-Host "  -SenderExe (native) cannot be combined with -Port or -RelayHost (the WSL relay), and -SenderArgs needs -SenderExe."
+    Write-Host "  -SenderExe (native) cannot be combined with -Port, -RelayHost or -TokenPath (the WSL relay), and -SenderArgs needs -SenderExe."
     exit 2
 }
 
@@ -122,6 +130,11 @@ if ($LogPath) {
     $LogFile = ""
 } else {
     $LogFile = "\\wsl.localhost\Ubuntu\home\wunsch\.voicemode\logs\ptt-listener.log"
+}
+# The relay's shared secret (patches/ptt_relay.py writes it in WSL). Same WSL
+# home as the log file above.
+if (-not $TokenPath) {
+    $TokenPath = "\\wsl.localhost\Ubuntu\home\wunsch\.voicemode\ptt-relay.token"
 }
 function Log {
     param([string]$Text, [string]$Colour = "Gray")
@@ -180,15 +193,39 @@ function Test-TerminalFocused {
     } catch { return $false }
 }
 
+$script:RelayToken = ""
+$script:TokenProblemLogged = $false
+
+# Read the token once and keep it. Until the file can be read, nothing is sent,
+# and that is logged once, not on every key.
+function Get-RelayToken {
+    if ($script:RelayToken) { return $script:RelayToken }
+    try {
+        $text = ([System.IO.File]::ReadAllText($TokenPath)).Trim()
+        if ($text -notmatch '^[0-9a-f]{64}$') { throw "it does not hold a token" }
+        $script:RelayToken = $text
+        return $text
+    } catch {
+        if (-not $script:TokenProblemLogged) {
+            Log ("relay token not readable at " + $TokenPath + " (" + $_.Exception.Message + "). " +
+                 "Start the relay in WSL once (it creates the file) or pass -TokenPath; push-to-talk sends nothing until then.") "Yellow"
+            $script:TokenProblemLogged = $true
+        }
+        return ""
+    }
+}
+
 function Send-RelayAction {
     param([string]$Action)
+    $token = Get-RelayToken
+    if (-not $token) { return $false }
     try {
         $client = New-Object System.Net.Sockets.TcpClient
         $iar = $client.BeginConnect($RelayHost, $Port, $null, $null)
         if (-not $iar.AsyncWaitHandle.WaitOne(500)) { $client.Close(); return $false }
         $client.EndConnect($iar)
         $stream = $client.GetStream()
-        $bytes  = [System.Text.Encoding]::UTF8.GetBytes(('{"action": "' + $Action + '"}' + "`n"))
+        $bytes  = [System.Text.Encoding]::UTF8.GetBytes(("token " + $token + "`n") + ('{"action": "' + $Action + '"}' + "`n"))
         $stream.Write($bytes, 0, $bytes.Length)
         $stream.Flush()
         $client.Close()
@@ -203,6 +240,10 @@ function Send-RelayAction {
 $script:Sender = $null
 $script:SenderStarts = 0
 $script:Outcome = ""
+# A reply not read yet. hold_start does not wait for its reply, so the key loop
+# keeps polling and a tap released meanwhile is still timed as a tap (a cold
+# sender took 0.97 s to answer). The reply is collected before the next write.
+$script:Pending = $null
 
 function Start-Sender {
     $info = New-Object System.Diagnostics.ProcessStartInfo
@@ -220,6 +261,7 @@ function Start-Sender {
 }
 
 function Stop-Sender {
+    $script:Pending = $null
     if ($script:Sender) {
         try { $script:Sender.StandardInput.Close() } catch { }
         try { if (-not $script:Sender.WaitForExit(2000)) { $script:Sender.Kill() } } catch { }
@@ -227,9 +269,33 @@ function Stop-Sender {
     }
 }
 
+# Wait for one reply line from the sender.
+function Receive-SenderReply {
+    param($Reply)
+    try {
+        # The sender gives up on the pipe after 0.5 s; 5 s covers a cold start.
+        if (-not $Reply.Wait(5000)) {
+            Stop-Sender
+            return "failed: the sender did not answer within 5 s"
+        }
+        if ($null -eq $Reply.Result) { Stop-Sender; return "failed: the sender ended" }
+        return $Reply.Result.Trim()
+    } catch {
+        Stop-Sender
+        return "failed: " + $_.Exception.Message
+    }
+}
+
 # One action in, one outcome line back (patches/ptt_control_client.py --stdin).
+# -NoWait writes the action and returns "pending"; its reply is collected (and
+# its outcome noted) before the next write.
 function Invoke-Sender {
-    param([string]$Action)
+    param([string]$Action, [switch]$NoWait)
+    if ($script:Pending) {
+        $earlier = Receive-SenderReply $script:Pending
+        $script:Pending = $null
+        [void](Note-Outcome $earlier)
+    }
     try {
         if (-not $script:Sender -or $script:Sender.HasExited) {
             if ($script:Sender) { Log "sender ended; starting it again" "Yellow" }
@@ -237,23 +303,20 @@ function Invoke-Sender {
         }
         $script:Sender.StandardInput.WriteLine($Action)
         $reply = $script:Sender.StandardOutput.ReadLineAsync()
-        # The sender gives up on the pipe after 0.5 s; 5 s covers a cold start.
-        if (-not $reply.Wait(5000)) {
-            Stop-Sender
-            return "failed: the sender did not answer within 5 s"
-        }
-        if ($null -eq $reply.Result) { Stop-Sender; return "failed: the sender ended" }
-        return $reply.Result.Trim()
     } catch {
         Stop-Sender
         return "failed: " + $_.Exception.Message
     }
+    if ($NoWait) {
+        $script:Pending = $reply
+        return "pending"
+    }
+    return Receive-SenderReply $reply
 }
 
 # Log why push-to-talk is inert once, not on every key: only when it changes.
-function Send-SenderAction {
-    param([string]$Action)
-    $result = Invoke-Sender $Action
+function Note-Outcome {
+    param([string]$result)
     if ($result -eq "none") { return $null }
     if ($result -ne $script:Outcome) {
         switch -Wildcard ($result) {
@@ -267,9 +330,18 @@ function Send-SenderAction {
     return ($result -eq "sent")
 }
 
+function Send-SenderAction {
+    param([string]$Action, [switch]$NoWait)
+    $result = Invoke-Sender $Action -NoWait:$NoWait
+    if ($result -eq "pending") { return "pending" }
+    return Note-Outcome $result
+}
+
+# -NoWait (native only): do not wait for the reply. The relay send never waits
+# for a reply; its connect is bounded at 500 ms.
 function Send-Action {
-    param([string]$Action)
-    if ($Native) { return Send-SenderAction $Action }
+    param([string]$Action, [switch]$NoWait)
+    if ($Native) { return Send-SenderAction $Action -NoWait:$NoWait }
     return Send-RelayAction $Action
 }
 
@@ -376,7 +448,7 @@ try {
             }
             $down      = $true
             $pressedAt = Get-Date
-            $ok = Send-Action "hold_start"
+            $ok = Send-Action "hold_start" -NoWait
             Log ("hold_start  (mic open)  sent=" + $ok) "Green"
         }
         elseif (-not $isDown -and $down) {
