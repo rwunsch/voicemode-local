@@ -27,6 +27,15 @@ powershell.exe -ExecutionPolicy Bypass -File \\wsl.localhost\Ubuntu\home\<you>\g
 ```
 
 The window exits at once unless `VOICEMODE_PILL=true`, so the entry is harmless when off.
+The entry repeats every argument the install was given except the autostart ones (`-Distro`,
+`-Repo`, `-BackendCommand`, `-BackendExe`, `-BackendArgs`, `-Force`, and `-DataDir` resolved to
+a full path). It is UTF-8 without a BOM after `chcp 65001`, so non-ASCII paths survive.
+
+The WSL window reads `VOICEMODE_PILL` from the distro's `~/.voicemode/voicemode.env` (or the old
+`.voicemode.env`) by the same rules as native mode and `voice_pill_state`: `export `, quotes,
+CRLF and a BOM are allowed, and the last assignment wins. An inline comment stays in the value
+there, so `VOICEMODE_PILL=true # on` is off. A distro that does not answer within 60 s is
+killed and counts as "could not tell", and the window starts anyway.
 
 `pill on` waits up to 15 s and fails with exit 1 if the window exited with an error. It cannot
 detect a failure after those 15 s. "Already running" only means a window holds the lock: that
@@ -119,6 +128,10 @@ run: a native converse turn through Claude Code, and macOS.
   window exits and logs why. If one has, it stays up and the page shows Disconnected. Exit 1
   after output is treated as a crash and restarted, on the expectation that `wsl --terminate`
   may look like that (not measured).
+- **A command with no backend to take it is not kept.** While the backend restarts, or after
+  its pipe broke, the window logs it and posts `{"window":{"dropped":"<cmd>"}}` to the page,
+  so the page can show Disconnected at once. It is never replayed: a late Stop could land on
+  a turn it was not meant for.
 - **Push-to-talk** (2026-11-07): while the key is down the pill shows **Holding…** (phase
   `holding`, from the `holding` field patch_ptt_instant adds to the server's status reply,
   above Speaking and Listening, green like Listening). The keys hint reads `tap: stop, hold:
