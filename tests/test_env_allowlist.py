@@ -56,14 +56,16 @@ def test_the_patch_applies_once_and_compiles(pristine, name):
 
 @pytest.mark.parametrize("key,allowed", [
     ("VOICEMODE_VOICES", True), ("VOICEMODE_PILL", True),
-    ("OPENAI_API_KEY", True), ("CARTESIA_API_KEY", True), ("VOICE_MODE_AUTO_START_KOKORO", True),
+    # Provider keys only with the optional patch_env_provider_keys.py (FELIX never sets one).
+    ("OPENAI_API_KEY", False), ("CARTESIA_API_KEY", False), ("VOICE_MODE_AUTO_START_KOKORO", True),
     ("BASH_ENV", False), ("LD_PRELOAD", False), ("PATH", False), ("PYTHONSTARTUP", False),
     ("BROWSER", False), ("NODE_OPTIONS", False), ("VOICEMODEX", False),
 ])
 def test_only_voice_keys_are_allowed(pristine, key, allowed):
     assert _apply(pristine["config.py"]).returncode == 0
     ns = {}
-    exec(_function(pristine["config.py"].read_text(), "_vml_env_key_allowed"), ns)
+    src = pristine["config.py"].read_text()
+    exec(_function(src, "_vml_env_key_allowed"), _globals(src, ns))
     assert ns["_vml_env_key_allowed"](key) is allowed
 
 
@@ -75,13 +77,13 @@ def test_the_loader_copies_only_allowed_keys(pristine, tmp_path, monkeypatch):
     for k in ("BASH_ENV", "VOICEMODE_X_TEST", "OPENAI_API_KEY"):
         monkeypatch.delenv(k, raising=False)
     ns = {"os": os, "Path": Path, "find_voicemode_env_files": lambda: [env_file]}
-    exec(_function(src, "_vml_env_key_allowed"), ns)
+    exec(_function(src, "_vml_env_key_allowed"), _globals(src, ns))
     exec(_function(src, "load_voicemode_env"), ns)
     path_before = os.environ.get("PATH")
     ns["load_voicemode_env"]()
     assert "BASH_ENV" not in os.environ
     assert os.environ.get("VOICEMODE_X_TEST") == "1"
-    assert os.environ.get("OPENAI_API_KEY") == "sk-test"
+    assert "OPENAI_API_KEY" not in os.environ          # only with the provider-keys patch
     assert os.environ.get("PATH") == path_before
 
 
@@ -98,3 +100,53 @@ def test_drift_fails_and_writes_nothing(pristine):
     target.write_text(text)
     assert _apply(target).returncode != 0
     assert target.read_text() == text
+
+
+PROVIDER = PATCHES / "patch_env_provider_keys.py"
+PROVIDER_KEYS = ("OPENAI" + "_API_KEY", "CARTESIA" + "_API_KEY")
+
+
+def test_the_core_patch_names_no_provider_key():
+    # FELIX's repo test (Robert, 2026-11-03: FELIX never uses or sets a model provider's
+    # API key) scans every vendored file for these names.
+    text = SCRIPT.read_text()
+    assert not any(k in text for k in PROVIDER_KEYS)
+
+
+@pytest.mark.parametrize("name", ["config.py", "configuration_management.py"])
+def test_the_provider_keys_patch_adds_the_two_keys(pristine, name):
+    assert _apply(pristine[name]).returncode == 0
+    done = subprocess.run([sys.executable, str(PROVIDER), str(pristine[name])], capture_output=True, text=True)
+    assert done.returncode == 0, done.stderr
+    text = pristine[name].read_text()
+    compile(text, name, "exec")
+    ns = {}
+    exec(_function(text, "_vml_env_key_allowed"), _globals(text, ns))
+    assert all(ns["_vml_env_key_allowed"](k) for k in PROVIDER_KEYS)
+    assert not ns["_vml_env_key_allowed"]("BASH_ENV")
+    again = subprocess.run([sys.executable, str(PROVIDER), str(pristine[name])], capture_output=True, text=True)
+    assert again.returncode == 0 and pristine[name].read_text() == text
+
+
+def test_the_provider_keys_patch_needs_the_core_patch_first(pristine):
+    done = subprocess.run([sys.executable, str(PROVIDER), str(pristine["config.py"])], capture_output=True, text=True)
+    assert done.returncode != 0
+
+
+def _globals(text, ns):
+    """The module-level constants the helper reads (the extra-key tuple)."""
+    tree = ast.parse(text)
+    for n in tree.body:
+        if isinstance(n, ast.Assign) and any(getattr(t, "id", "").startswith("_VML_") for t in n.targets):
+            exec(ast.get_source_segment(text, n), ns)
+    return ns
+
+
+def test_update_config_keeps_its_mcp_decorator(pristine):
+    # The helper was first inserted between @mcp.tool() and update_config: the decorator
+    # then registered the helper as an MCP tool, and update_config was no tool at all.
+    assert _apply(pristine["configuration_management.py"]).returncode == 0
+    tree = ast.parse(pristine["configuration_management.py"].read_text())
+    fns = {n.name: n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    assert fns["update_config"].decorator_list, "update_config lost @mcp.tool()"
+    assert not fns["_vml_env_key_allowed"].decorator_list, "the helper became an MCP tool"

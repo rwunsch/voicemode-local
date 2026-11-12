@@ -126,8 +126,10 @@ INTENDED_STEP_LINES.append(b'    {"copy": "mcp_progress.py", "to": "mcp_progress
 INTENDED_STEP_LINES.append(b'    {"patch": "patch_conch_fairness.py", "targets": ["tools/converse.py"], "why": "fair holds, progress heartbeat, a cancelled wait is logged; needs conch_hold.py and mcp_progress.py"},\n')
 INTENDED_PATCHES.append(("patch_conch_fairness.py", ["tools/converse.py"]))
 # 2026-11-12 (Talos C1): only voice settings travel from voicemode.env into the environment.
-INTENDED_STEP_LINES.append(b'    {"patch": "patch_env_allowlist.py", "targets": ["config.py", "tools/configuration_management.py"], "why": "only voice settings travel from voicemode.env into the environment; update_config refuses other keys"}\n')
+INTENDED_STEP_LINES.append(b'    {"patch": "patch_env_allowlist.py", "targets": ["config.py", "tools/configuration_management.py"], "why": "only voice settings travel from voicemode.env into the environment; update_config refuses other keys"},\n')
+INTENDED_STEP_LINES.append(b'    {"patch": "patch_env_provider_keys.py", "targets": ["config.py", "tools/configuration_management.py"], "why": "optional: the two provider keys upstream reads may also come from voicemode.env; not in the Windows manifest or FELIX"}\n')
 INTENDED_PATCHES.append(("patch_env_allowlist.py", ["config.py", "tools/configuration_management.py"]))
+INTENDED_PATCHES.append(("patch_env_provider_keys.py", ["config.py", "tools/configuration_management.py"]))
 INTENDED_COPIES += ["conch_hold.py", "mcp_progress.py"]
 # Text edits those additions force on lines that were already there: (now, before).
 INTENDED_EDITS = [
@@ -177,7 +179,9 @@ def test_native_list_is_the_default_plus_felix_three_in_felixs_place():
     assert native[-len(ours):] == ours and [s["patch"] for s in ours] == NATIVE_OURS
     assert ours[0]["targets"] == ["core.py", "streaming.py"]
     assert ours[1]["targets"] == ["tools/converse.py"]
-    assert [s for s in native if s not in added and s not in ours] == default
+    # The provider-keys step is deliberately default-only (FELIX never sets a provider key).
+    assert [s for s in native if s not in added and s not in ours] == \
+        [s for s in default if s.get("patch") != "patch_env_provider_keys.py"]
     # FELIX's order: listen_overrun, turns_playback_stop, simple_failover, then its three.
     names = [s.get("patch") or s.get("copy") for s in native]
     at = names.index("patch_simple_failover.py")
@@ -216,7 +220,10 @@ def test_native_output_differs_from_default_only_by_felixs_three_and_the_tempfil
     _apply(PATCHES / "apply.py", native, "--native-windows")
     d, n = _files(default), _files(native)
     assert set(d) == set(n)
-    assert {rel for rel in d if d[rel] != n[rel]} == {"tools/converse.py", "server.py", "core.py", "streaming.py"}
+    assert {rel for rel in d if d[rel] != n[rel]} == {"tools/converse.py", "server.py", "core.py", "streaming.py",
+                                                     "config.py", "tools/configuration_management.py"}
+    assert "VML: ENV PROVIDER KEYS" in d["config.py"].decode("utf-8")
+    assert "VML: ENV PROVIDER KEYS" not in n["config.py"].decode("utf-8")
     assert "VML: WINDOWS TEMPFILE" not in d["core.py"].decode("utf-8")
     assert "os.unlink(tmp_file.name)" not in n["core.py"].decode("utf-8")
 

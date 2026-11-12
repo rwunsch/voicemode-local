@@ -187,7 +187,7 @@ EXPECTED_MARKERS = {
         "tools/converse.py": ["voicemode-local listen overrun", "voicemode-local turns playback stop",
                               "voicemode-local session name", HOLD, "LANGUAGE-LOCKED VOICES",
                               BARGE, PILL, INSTANT, "VML: CONCH WAKERS", "VML: CONCH FAIRNESS"],
-        "config.py": ["VML: ENV ALLOWLIST"],
+        "config.py": ["VML: ENV ALLOWLIST", "VML: ENV PROVIDER KEYS"],
         "tools/configuration_management.py": ["VML: ENV ALLOWLIST"],
     },
 }

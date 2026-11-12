@@ -7,10 +7,11 @@ os.environ, which every child process inherits. So a model with only the voice t
 could set BASH_ENV=$(cmd), and cmd ran when the server next started voicemode-switch, a
 bash script (final review 2026-11-12, VERIFIED with bash; the full chain INFERRED).
 
-The loader now copies a key only when it is a voice setting: VOICEMODE_*, or one of the
-three other keys upstream reads from there (OPENAI_API_KEY, CARTESIA_API_KEY and the
-legacy VOICE_MODE_AUTO_START_KOKORO). update_config refuses any other key, so the file
-never gets one. The real environment is untouched: a user's own variables still work.
+The loader now copies a key only when it is a voice setting: VOICEMODE_*, or the legacy
+VOICE_MODE_AUTO_START_KOKORO. update_config refuses any other key, so the file never gets
+one. A model provider's key is not allowed here; patch_env_provider_keys.py (optional, in
+manifest.json only) adds the two that upstream reads, for installs that keep one in
+voicemode.env. FELIX never sets a provider key and leaves that patch out. The real environment is untouched: a user's own variables still work.
 Settings that name a program are, in addition, trusted from the environment only
 (voice_pill_state.trusted_env).
 
@@ -22,12 +23,15 @@ from pathlib import Path
 
 MARKER = "VML: ENV ALLOWLIST"
 
+EXTRA_KEYS_LINE = "_VML_EXTRA_ENV_KEYS = (\"VOICE_MODE_AUTO_START_KOKORO\",)  # " + MARKER + "\n"
+
 HELPER = (
+    EXTRA_KEYS_LINE
+    + "\n\n"
     "def _vml_env_key_allowed(key):  # " + MARKER + "\n"
     "    \"\"\"A voice setting may come from voicemode.env; anything else (BASH_ENV, PATH,\n"
     "    LD_PRELOAD, ...) would reach every child process and is refused.\"\"\"\n"
-    "    return key.startswith(\"VOICEMODE_\") or key in (\n"
-    "        \"OPENAI_API_KEY\", \"CARTESIA_API_KEY\", \"VOICE_MODE_AUTO_START_KOKORO\")\n"
+    "    return key.startswith(\"VOICEMODE_\") or key in _VML_EXTRA_ENV_KEYS\n"
     "\n"
     "\n"
 )
@@ -42,14 +46,15 @@ CONFIG_PAIRS = [
 ]
 
 MANAGEMENT_PAIRS = [
-    ("async def update_config(key: str, value: str) -> str:\n",
-     HELPER + "async def update_config(key: str, value: str) -> str:\n"),
+    # Above the decorator: between @mcp.tool() and the function it would become the tool.
+    ("@mcp.tool()\nasync def update_config(key: str, value: str) -> str:\n",
+     HELPER + "@mcp.tool()\nasync def update_config(key: str, value: str) -> str:\n"),
     ("    # Use user config path, check for legacy if new doesn't exist\n"
      "    config_path = USER_CONFIG_PATH\n",
      "    if not _vml_env_key_allowed(key):  # " + MARKER + "\n"
-     "        return (f\"❌ {key} is not a voice setting. Only VOICEMODE_* keys (and OPENAI_API_KEY, \"\n"
-     "                f\"CARTESIA_API_KEY) can be set here; anything else would reach every \"\n"
-     "                f\"program the voice server starts.\")\n"
+     "        return (f\"❌ {key} is not a voice setting. Only VOICEMODE_* keys can be set \"\n"
+     "                f\"here; anything else would reach every program the voice server starts. \"\n"
+     "                f\"Set other variables in the real environment.\")\n"
      "\n"
      "    # Use user config path, check for legacy if new doesn't exist\n"
      "    config_path = USER_CONFIG_PATH\n"),
