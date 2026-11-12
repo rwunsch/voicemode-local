@@ -27,6 +27,7 @@ Installed into voice_mode/ptt_listener_linux.py by patches/apply.sh.
 Run standalone: `python3 -m voice_mode.ptt_listener_linux`
 """
 import logging
+import signal
 import subprocess
 import time
 from typing import Optional
@@ -46,15 +47,29 @@ class Hotkey:
 
     def __init__(self, state, emit, focused):
         self._state, self._emit, self._focused = state, emit, focused
-        self._ctrl = False
+        self._ctrls = set()  # which Ctrl keys are down; Ctrl is down while any is
         self._held = False
 
-    def ctrl(self, down: bool) -> None:
-        self._ctrl = down
+    def ctrl(self, down: bool, which="ctrl") -> None:
+        """Track each Ctrl key on its own: with both down, letting go of one
+        leaves Ctrl down (one Boolean for both used to drop the hotkey)."""
+        if down:
+            self._ctrls.add(which)
+        else:
+            self._ctrls.discard(which)
+
+    def release_held(self, ts: float) -> None:
+        """The listener is stopping. If a hold is active, send hold_release so
+        the server's hold (mic open) is not left latched. Otherwise nothing."""
+        if not self._held:
+            return
+        self._held = False
+        self._state.on_release(ts)
+        self._emit("hold_release")
 
     def space(self, down: bool, ts: float) -> None:
         if down:
-            if self._held or not self._ctrl or not self._focused():
+            if self._held or not self._ctrls or not self._focused():
                 return
             self._held = True
             action = self._state.on_press(ts)
@@ -100,6 +115,23 @@ def resolve_terminal_pid(pid: Optional[int] = None) -> Optional[int]:
         return None
 
 
+def _interrupt(signum, frame):
+    raise KeyboardInterrupt
+
+
+def install_stop_signals() -> None:
+    """SIGTERM and SIGHUP stop the listener the way Ctrl-C does, so its finally
+    runs and an active hold is released. Main thread only; elsewhere a no-op."""
+    for name in ("SIGTERM", "SIGHUP"):
+        sig = getattr(signal, name, None)
+        if sig is None:
+            continue
+        try:
+            signal.signal(sig, _interrupt)
+        except ValueError:  # not the main thread
+            pass
+
+
 def run_listener() -> None:
     """Capture Control-Space and drive the control channel until interrupted."""
     from pynput import keyboard
@@ -127,16 +159,17 @@ def run_listener() -> None:
 
     def on_press(key):
         if key in (keyboard.Key.ctrl_l, keyboard.Key.ctrl_r):
-            hotkey.ctrl(True)
+            hotkey.ctrl(True, key)
         elif key == keyboard.Key.space:
             hotkey.space(True, time.monotonic())
 
     def on_release(key):
         if key in (keyboard.Key.ctrl_l, keyboard.Key.ctrl_r):
-            hotkey.ctrl(False)
+            hotkey.ctrl(False, key)
         elif key == keyboard.Key.space:
             hotkey.space(False, time.monotonic())
 
+    install_stop_signals()
     listener = keyboard.Listener(on_press=on_press, on_release=on_release)
     listener.start()
     logger.info(
@@ -149,6 +182,7 @@ def run_listener() -> None:
         pass
     finally:
         listener.stop()
+        hotkey.release_held(time.monotonic())
 
 
 if __name__ == "__main__":

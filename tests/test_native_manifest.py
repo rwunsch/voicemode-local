@@ -29,6 +29,8 @@ SOURCES = {
     "core.py": "core.py", "simple_failover.py": "simple_failover.py", "streaming.py": "streaming.py",
     "server.py": "server.py", "tools/converse.py": "converse.py", "conch_notify.py": "conch_notify.py",
     "conch_queue.py": "conch_queue.py", "conch.py": "conch.py",
+    "config.py": "config.py",
+    "tools/configuration_management.py": "configuration_management.py",
 }
 
 
@@ -121,12 +123,15 @@ INTENDED_COPIES += ["conch_wakers.py"]
 # 2026-11-11: fair holds, MCP progress heartbeat, a cancelled wait is logged.
 INTENDED_STEP_LINES.append(b'    {"copy": "conch_hold.py", "to": "conch_hold.py", "why": "fair holds: a hold does not starve a waiting session"},\n')
 INTENDED_STEP_LINES.append(b'    {"copy": "mcp_progress.py", "to": "mcp_progress.py", "why": "MCP progress heartbeat so a 180 s client timeout does not cancel converse"},\n')
-INTENDED_STEP_LINES.append(b'    {"patch": "patch_conch_fairness.py", "targets": ["tools/converse.py"], "why": "fair holds, progress heartbeat, a cancelled wait is logged; needs conch_hold.py and mcp_progress.py"}\n')
+INTENDED_STEP_LINES.append(b'    {"patch": "patch_conch_fairness.py", "targets": ["tools/converse.py"], "why": "fair holds, progress heartbeat, a cancelled wait is logged; needs conch_hold.py and mcp_progress.py"},\n')
 INTENDED_PATCHES.append(("patch_conch_fairness.py", ["tools/converse.py"]))
+# 2026-11-12 (Talos C1): only voice settings travel from voicemode.env into the environment.
+INTENDED_STEP_LINES.append(b'    {"patch": "patch_env_allowlist.py", "targets": ["config.py", "tools/configuration_management.py"], "why": "only voice settings travel from voicemode.env into the environment; update_config refuses other keys"}\n')
+INTENDED_PATCHES.append(("patch_env_allowlist.py", ["config.py", "tools/configuration_management.py"]))
 INTENDED_COPIES += ["conch_hold.py", "mcp_progress.py"]
 # Text edits those additions force on lines that were already there: (now, before).
 INTENDED_EDITS = [
-    (b'    "streaming.py",\n    "conch_notify.py",\n    "conch_queue.py",\n    "conch.py"\n', b'    "streaming.py"\n'),
+    (b'    "streaming.py",\n    "conch_notify.py",\n    "conch_queue.py",\n    "conch.py",\n    "config.py",\n    "tools/configuration_management.py"\n', b'    "streaming.py"\n'),
     (b'"why": "MCP tool for switching voice barge-in"},\n', b'"why": "MCP tool for switching voice barge-in"}\n'),
 ]
 

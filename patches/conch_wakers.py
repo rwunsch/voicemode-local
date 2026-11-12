@@ -162,7 +162,8 @@ def take_wake(state_dir, session_id, seq) -> bool:
             _replace(tmp, path)
             tmp = None
         except OSError:
-            logger.debug("conch wake count not saved", exc_info=True)
+            logger.warning("conch wake count not saved; no wake this time", exc_info=True)
+            return False  # fail closed: an uncounted wake would escape the cap
         finally:
             if tmp is not None:
                 try:
@@ -206,10 +207,27 @@ def _session_wake():
     return session_wake
 
 
+def _pill_state():
+    if __package__ == "voice_mode":
+        from voice_mode import voice_pill_state
+    else:  # loaded from patches/ (tests): the sibling file
+        import voice_pill_state
+    return voice_pill_state
+
+
 def wake_command() -> Optional[list]:
-    """The harness's wake command from the environment, or None (also when malformed)."""
+    """The harness's wake command from the environment, or None (also when malformed).
+    A value that a voicemode.env supplied is refused: a model can write that file."""
     raw = os.environ.get(COMMAND_SETTING, "").strip()
     if not raw:
+        return None
+    try:
+        if _pill_state().setting_came_from_a_file(COMMAND_SETTING):
+            logger.warning("%s is set in a voicemode.env file, which a model can write; "
+                           "ignored. Pass it in the environment only.", COMMAND_SETTING)
+            return None
+    except Exception:  # noqa: BLE001 - cannot check where it came from: do not run it
+        logger.warning("%s: cannot check where it was set; ignored", COMMAND_SETTING)
         return None
     try:
         value = json.loads(raw)

@@ -117,6 +117,26 @@ function Refuse {
     [Console]::Error.WriteLine($Text)
     exit 1
 }
+# One argument, quoted as powershell.exe splits its command line (CommandLineToArgvW):
+# a quote inside becomes \", and the backslashes before it, or before the closing quote, double.
+function Format-Argument {
+    param([string]$Value)
+    '"' + (($Value -replace '(\\*)"', '$1$1\"') -replace '(\\+)$', '$1$1') + '"'
+}
+# The same line made safe for cmd.exe, which reads it first: % expands even inside quotes,
+# and & | < > ^ act wherever cmd's own quote count says it is outside quotes (it knows no \").
+function Protect-CmdLine {
+    param([string]$Line)
+    $sb = New-Object Text.StringBuilder
+    $quoted = $false
+    foreach ($ch in $Line.ToCharArray()) {
+        if ($ch -eq [char]'"') { $quoted = -not $quoted }
+        elseif ($ch -eq [char]'%') { [void]$sb.Append('%') }
+        elseif (-not $quoted -and '&|<>^'.IndexOf($ch) -ge 0) { [void]$sb.Append('^') }
+        [void]$sb.Append($ch)
+    }
+    $sb.ToString()
+}
 if ($Native -and $Distro) { Refuse "pass -Distro (WSL) or -BackendExe (native), not both" }
 if ($Native -and -not $DataDir) { Refuse "native mode needs -DataDir" }
 if ($Native) {
@@ -143,8 +163,23 @@ if ($InstallAutostart -or $RemoveAutostart) {
         Remove-Item -Force -ErrorAction SilentlyContinue $entry
         Log "autostart removed: $entry"
     } else {
-        $cmd = "@start `"`" /min powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$ScriptPath`""
-        [IO.File]::WriteAllText($entry, $cmd + "`r`n", [Text.Encoding]::ASCII)
+        # The start this was asked from, again at login: every argument passed, except the
+        # ones about autostart itself. -DataDir as resolved here, so a relative one still works.
+        $pass = foreach ($k in $PSBoundParameters.Keys) {
+            if (@("InstallAutostart", "RemoveAutostart", "StartupDir", "PrintNames") -contains $k) { continue }
+            $v = $PSBoundParameters[$k]
+            if ($v -is [Management.Automation.SwitchParameter]) { if ($v.IsPresent) { "-$k" } }
+            elseif ($k -eq "DataDir") { "-$k"; Format-Argument $Local }
+            else { "-$k"; Format-Argument ([string]$v) }
+        }
+        $cmd = "@start `"`" /min powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File " +
+            ((@(Format-Argument $ScriptPath) + @($pass)) -join " ")
+        # UTF-8 without a BOM, after chcp 65001: cmd reads a batch file a line at a time in the
+        # current code page, so every line after chcp is UTF-8 and any path survives. The OEM
+        # code page cannot hold every character (a Cyrillic name on a Western machine), and a
+        # BOM would make cmd run it as part of the first command.
+        $text = "@chcp 65001>nul`r`n" + (Protect-CmdLine $cmd) + "`r`n"
+        [IO.File]::WriteAllText($entry, $text, (New-Object Text.UTF8Encoding($false)))
         Log "autostart installed: $entry"
     }
     exit 0
@@ -269,16 +304,35 @@ document.addEventListener('DOMContentLoaded',function(){
     }
 
     // 1 on, 0 off, -1 could not tell (wsl failed). Blocks: never call on the UI thread.
+    // The lines that name VOICEMODE_PILL, from voicemode.env, else its old name .voicemode.env
+    // (as voice_pill_state), then read by the native rules. A distro that does not answer in
+    // 60 s counts as "could not tell", and the pill starts anyway.
     public static int PillEnabled(string distro) {
+        string o = Output("wsl.exe", "-d " + distro + " --exec bash -c \"if [ -e ~/.voicemode/voicemode.env ]; then grep -s VOICEMODE_PILL ~/.voicemode/voicemode.env; else grep -s VOICEMODE_PILL ~/.voicemode/.voicemode.env; fi; true\"", 60000);
+        return o == null ? -1 : WslPillSetting(o);
+    }
+
+    public static int WslPillSetting(string o) { return PillSettingIn(o); }
+
+    // A program's stdout, or null when it fails or outlasts timeoutMs (then it is killed).
+    // Read on a task: ReadToEnd waits for the pipe to close, which a stuck wsl.exe, or any
+    // child still holding the pipe, never does, so the timeout would never apply.
+    public static string Output(string file, string arguments, int timeoutMs) {
         try {
-            var psi = new ProcessStartInfo("wsl.exe", "-d " + distro + " --exec bash -c \"grep -s ^VOICEMODE_PILL= ~/.voicemode/voicemode.env | tail -1\"");
+            var psi = new ProcessStartInfo(file, arguments);
             psi.UseShellExecute = false; psi.RedirectStandardOutput = true; psi.CreateNoWindow = true;
+            psi.StandardOutputEncoding = new UTF8Encoding(false);
+            var clock = Stopwatch.StartNew();
             using (var p = Process.Start(psi)) {
-                string o = p.StandardOutput.ReadToEnd();
-                if (!p.WaitForExit(60000) || p.ExitCode != 0) return -1;
-                return o.Trim() == "VOICEMODE_PILL=true" ? 1 : 0;
+                var read = p.StandardOutput.ReadToEndAsync();
+                if (!p.WaitForExit(timeoutMs)) {
+                    try { p.Kill(); } catch (Exception) { }
+                    return null;
+                }
+                if (!read.Wait(Math.Max(0, timeoutMs - (int)clock.ElapsedMilliseconds))) return null;
+                return p.ExitCode == 0 ? read.Result : null;
             }
-        } catch (Exception) { return -1; }
+        } catch (Exception) { return null; }
     }
 
     // Native mode: VOICEMODE_PILL from the process environment, else voicemode.env in
@@ -295,19 +349,27 @@ document.addEventListener('DOMContentLoaded',function(){
             if (!File.Exists(path)) return 0;
             string text;
             try { text = File.ReadAllText(path, new UTF8Encoding(false)); } catch (Exception) { return -1; }
-            v = "";
-            foreach (string raw in text.Split('\n')) {  // patches/voice_pill_state._parse_env
-                string line = raw.Trim();
-                if (line.Length == 0 || line.StartsWith("#") || line.IndexOf('=') < 0) continue;
-                int eq = line.IndexOf('=');
-                string key = line.Substring(0, eq).Trim(), value = line.Substring(eq + 1).Trim();
-                if (key.StartsWith("export ")) key = key.Substring(7).Trim();
-                if (value.Length >= 2 && value[0] == value[value.Length - 1] && (value[0] == '"' || value[0] == '\''))
-                    value = value.Substring(1, value.Length - 2);
-                if (key == "VOICEMODE_PILL") v = value;  // the last one wins
-            }
+            return PillSettingIn(text);
         }
-        return v.Trim() == "true" ? 1 : 0;
+        return string.Equals(v.Trim(), "true", StringComparison.OrdinalIgnoreCase) ? 1 : 0;
+    }
+
+    // 1 when the last VOICEMODE_PILL in this env-file text is "true", by the rules of
+    // patches/voice_pill_state._parse_env: BOM, CRLF, "export " and surrounding quotes
+    // allowed. An inline comment stays in the value there, so "true # on" is off here too.
+    public static int PillSettingIn(string text) {
+        string v = "";
+        foreach (string raw in text.TrimStart((char)0xFEFF).Split('\n')) {
+            string line = raw.Trim();
+            if (line.Length == 0 || line.StartsWith("#") || line.IndexOf('=') < 0) continue;
+            int eq = line.IndexOf('=');
+            string key = line.Substring(0, eq).Trim(), value = line.Substring(eq + 1).Trim();
+            if (key.StartsWith("export ")) key = key.Substring(7).Trim();
+            if (value.Length >= 2 && value[0] == value[value.Length - 1] && (value[0] == '"' || value[0] == '\''))
+                value = value.Substring(1, value.Length - 2);
+            if (key == "VOICEMODE_PILL") v = value;  // the last one wins
+        }
+        return string.Equals(v.Trim(), "true", StringComparison.OrdinalIgnoreCase) ? 1 : 0;
     }
 
     int Enabled() { return native ? NativePillEnabled() : PillEnabled(distro); }
@@ -469,9 +531,26 @@ document.addEventListener('DOMContentLoaded',function(){
         if (m == null) return;
         object v;
         if (m.TryGetValue("window", out v)) { var w = v as Dictionary<string, object>; if (w != null) OnWindowMessage(w); return; }
-        if (m.ContainsKey("cmd") && stdin != null) {
-            try { stdin.WriteLine(text); } catch (IOException) { } catch (ObjectDisposedException) { }
+        // A command the backend cannot take now (restarting, or its pipe broke) is not kept
+        // to replay later, where a Stop could land on a turn it was never meant for: the page
+        // hears at once that it went nowhere, and shows itself disconnected.
+        if (m.TryGetValue("cmd", out v) && !Send(stdin, text)) {
+            Log("command not delivered, no backend: " + v);
+            if (!closing && ctl != null) ctl.CoreWebView2.PostWebMessageAsString(Dropped(Convert.ToString(v)));
         }
+    }
+
+    // False when there is no backend to write to, or the write failed.
+    public static bool Send(StreamWriter w, string line) {
+        if (w == null) return false;
+        try { w.WriteLine(line); return true; } catch (IOException) { } catch (ObjectDisposedException) { }
+        return false;
+    }
+
+    // {"window":{"dropped":"<cmd>"}}: the window's own message to the page, never a snapshot.
+    public static string Dropped(string cmd) {
+        var inner = new Dictionary<string, object> { { "dropped", cmd ?? "" } };
+        return new JavaScriptSerializer().Serialize(new Dictionary<string, object> { { "window", inner } });
     }
 
     void OnWindowMessage(Dictionary<string, object> w) {

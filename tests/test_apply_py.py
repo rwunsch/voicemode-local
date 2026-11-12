@@ -38,6 +38,8 @@ SOURCES = {
     "conch_notify.py": "conch_notify.py",
     "conch_queue.py": "conch_queue.py",
     "conch.py": "conch.py",
+    "config.py": "config.py",
+    "tools/configuration_management.py": "configuration_management.py",
 }
 
 
@@ -100,6 +102,7 @@ INTENDED_SINCE_BASELINE = [
     ("patch_conch_wakers.py", ["tools/converse.py", "conch_notify.py", "conch_queue.py", "conch.py"]),   # 2026-11-11
     ("patch_session_name.py", ["tools/converse.py"]),   # 2026-11-11: adds the Copilot chat title step
     ("patch_conch_fairness.py", ["tools/converse.py"]),   # 2026-11-11: fair holds, progress
+    ("patch_env_allowlist.py", ["config.py", "tools/configuration_management.py"]),   # 2026-11-12: Talos C1
 ]
 # Modules added as "copy" steps since the baseline (2026-11-07: session_wake.py).
 INTENDED_COPIES_SINCE_BASELINE = ["session_wake.py"]

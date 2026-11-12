@@ -80,9 +80,17 @@ def test_wake_command_parsing(clean, raw, expected):
 
 
 def test_the_command_is_read_from_the_environment_only(clean, tmp_path):
-    # Like VOICEMODE_BARGE_CONTROL_COMMAND: a model can write voicemode.env, so a file
-    # value must never become a command that runs.
-    assert "voicemode.env" not in Path(cw.__file__).read_text().split("def wake_command")[1].split("def ")[0]
+    # Like VOICEMODE_BARGE_CONTROL_COMMAND: a model can write voicemode.env, and the server
+    # copies it into os.environ, so a file value must never become a command that runs.
+    # (A text check on wake_command missed exactly that; Talos 2026-11-12.)
+    home = tmp_path / "home" / ".voicemode"
+    home.mkdir(parents=True)
+    (home / "voicemode.env").write_text(f'{cw.COMMAND_SETTING}=["/bin/true"]\n')
+    ps = cw._pill_state()
+    clean.setattr(ps, "upstream_home", lambda: home)
+    clean.chdir(tmp_path)
+    clean.setenv(cw.COMMAND_SETTING, '["/bin/true"]')   # what load_voicemode_env does
+    assert cw.wake_command() is None
 
 
 # -- claude_pid -----------------------------------------------------------------
@@ -729,3 +737,27 @@ def test_a_free_mic_reserved_for_a_turn_is_named(queue):
 def test_no_reservation_no_label(queue):
     import voice_mode.conch_wakers as pkg_cw
     assert pkg_cw.reserved_label() is None
+
+
+def test_a_wake_command_from_a_voicemode_env_is_refused(clean, tmp_path):
+    # Talos 2026-11-12, reproduced: update_config + config_reload put a command here.
+    clean.setenv(cw.COMMAND_SETTING, '["/bin/sh", "-c", "touch /tmp/pwned"]')
+    ps = cw._pill_state()
+    clean.setattr(ps, "setting_came_from_a_file", lambda name: name == cw.COMMAND_SETTING)
+    assert cw.wake_command() is None
+    assert cw.waker_for(None) is None
+
+
+def test_a_wake_command_from_the_environment_is_used(clean):
+    clean.setenv(cw.COMMAND_SETTING, '["/bin/true"]')
+    ps = cw._pill_state()
+    clean.setattr(ps, "setting_came_from_a_file", lambda name: False)
+    assert cw.wake_command() == ["/bin/true"]
+
+
+def test_a_wake_count_that_cannot_be_saved_allows_no_wake(policy_env, tmp_path, monkeypatch):
+    # Talos 2026-11-12: a failed save still authorized the wake, so the cap never counted.
+    def refuse(*a, **k):
+        raise OSError(28, "No space left on device")
+    monkeypatch.setattr(cw.tempfile, "mkstemp", refuse)
+    assert cw.take_wake(tmp_path, "A", 1) is False

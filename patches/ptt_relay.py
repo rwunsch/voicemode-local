@@ -24,14 +24,35 @@ Wire format: one JSON object per line, ``{"action": "<ptt_core action name>"}``.
 A bare action name on its own line is also accepted, so the companion can stay
 trivial.
 
+Authentication (Talos review, 2026-11-12): the first line of every connection
+must be ``token <hex>``, the shared secret in ``~/.voicemode/ptt-relay.token``.
+The relay creates that file on its first start (32 random bytes as hex, mode
+600) and reuses it afterwards. A connection with a missing or wrong token is
+closed and nothing it sends is forwarded. Without this, any process that could
+reach the port could stop speech, hold the mic open or wake an idle session.
+The Windows listener reads the file over the WSL share.
+
+Limits: a line longer than MAX_LINE closes the connection (it is read with a
+bound, never buffered whole), and at most MAX_CONNECTIONS connections are
+served at once; more are closed at once.
+
+Hold state is relay-wide, not per connection, on purpose: the Windows listener
+opens a new connection for every action, so hold_start and its hold_release
+never share one. A lock keeps concurrent connections from interleaving it.
+
 Installed into voice_mode/ptt_relay.py by patches/apply.sh.
 Run standalone: `python3 -m voice_mode.ptt_relay`
 """
+import hmac
 import json
 import logging
 import os
+import re
+import secrets
 import socket
 import socketserver
+import threading
+from pathlib import Path
 from typing import Optional
 
 logger = logging.getLogger("voicemode.ptt_relay")
@@ -39,6 +60,43 @@ logger = logging.getLogger("voicemode.ptt_relay")
 DEFAULT_PORT = 8765
 VALID_ACTIONS = {"press", "short_press", "hold_start", "hold_release"}
 MAX_LINE = 1024  # a line is an action name; anything larger is not ours
+MAX_CONNECTIONS = 8  # the listener opens one short connection per action
+AUTH_DEADLINE_S = 2.0   # the token line must arrive within this, however slowly it trickles
+DEFAULT_TOKEN_PATH = Path.home() / ".voicemode" / "ptt-relay.token"
+
+
+def _valid_token(text: str) -> bool:
+    # Exactly what the Windows listener accepts (^[0-9a-f]{64}$). Not
+    # bytes.fromhex: it allows spaces and upper case.
+    return re.fullmatch(r"[0-9a-f]{64}", text) is not None
+
+
+def load_or_create_token(path=None) -> str:
+    """The relay's shared secret: read from ``path``, or created there once
+    (32 random bytes as hex, mode 600). A damaged file is replaced."""
+    path = Path(path) if path is not None else DEFAULT_TOKEN_PATH
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    try:
+        text = path.read_text(encoding="ascii").strip()
+    except (OSError, UnicodeDecodeError):
+        text = None
+    if text is not None and _valid_token(text):
+        os.chmod(path, 0o600)
+        return text
+    if text is not None:
+        logger.warning("relay token file %s is damaged; writing a new one", path)
+        path.unlink()
+    token = secrets.token_hex(32)
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:   # another relay created it a moment ago: use that one
+        text = path.read_text(encoding="ascii").strip()
+        if _valid_token(text):
+            return text
+        raise
+    with os.fdopen(fd, "w", encoding="ascii") as f:
+        f.write(token + "\n")
+    return token
 
 
 def parse_action(line: str) -> Optional[str]:
@@ -67,8 +125,59 @@ class _Handler(socketserver.StreamRequestHandler):
     timeout = 2.0
 
     def handle(self) -> None:
+        slots = self.server.slots
+        if not slots.acquire(blocking=False):
+            logger.info("relay: more than %d connections; closing one", self.server.max_conns)
+            return
         try:
-            for raw in self.rfile:
+            self._serve()
+        finally:
+            slots.release()
+
+    def _lines(self):
+        """Lines read with a bound. Stops at EOF and at an over-long line,
+        which also ends the connection."""
+        while True:
+            raw = self.rfile.readline(MAX_LINE + 2)
+            if not raw:
+                return
+            if len(raw) > MAX_LINE + 1:
+                logger.info("relay <- line over %d bytes; closing", MAX_LINE)
+                return
+            yield raw
+
+    def _cut(self) -> None:
+        try:
+            self.connection.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+
+    def _authenticated(self, raw: bytes) -> bool:
+        expected = self.server.token
+        if expected is None:
+            return True
+        parts = raw.strip().split(b" ", 1)
+        if len(parts) != 2 or parts[0] != b"token":
+            return False
+        return hmac.compare_digest(parts[1].strip(), expected.encode("ascii"))
+
+    def _serve(self) -> None:
+        try:
+            lines = self._lines()
+            if self.server.token is not None:
+                # One deadline for the whole token line: the per-read timeout restarts on
+                # every byte, so a trickling client could otherwise hold a slot for good.
+                cut = threading.Timer(AUTH_DEADLINE_S, self._cut)
+                cut.daemon = True
+                cut.start()
+                try:
+                    first = next(lines, None)
+                finally:
+                    cut.cancel()
+                if first is None or not self._authenticated(first):
+                    logger.info("relay <- missing or wrong token; closing")
+                    return
+            for raw in lines:
                 text = raw.decode("utf-8", "replace")
                 action = parse_action(text)
                 if action is None:
@@ -76,12 +185,13 @@ class _Handler(socketserver.StreamRequestHandler):
                         logger.info("relay <- rejected %r", text.strip()[:80])
                     continue
                 logger.info("relay <- %s", action)
-                forward(action)
+                forward(action, self.server.client)
         except (OSError, socket.timeout):
             pass
 
 
 _woke_only = False   # the current hold began with no voice channel
+_state_lock = threading.Lock()  # connections run on their own threads
 
 
 def forward(action: str, client=None) -> None:
@@ -92,14 +202,15 @@ def forward(action: str, client=None) -> None:
         if client is None:
             from voice_mode import ptt_control_client as client
         global _woke_only
-        if action == "hold_release" and _woke_only:
-            # The hold began with no voice turn: there is nothing to end, only a wake.
-            _woke_only = False
-            outcome = "no-channel"
-        else:
-            outcome = client.action_outcome(action)
-            if action == "hold_start":
-                _woke_only = outcome == "no-channel"
+        with _state_lock:
+            if action == "hold_release" and _woke_only:
+                # The hold began with no voice turn: there is nothing to end, only a wake.
+                _woke_only = False
+                outcome = "no-channel"
+            else:
+                outcome = client.action_outcome(action)
+                if action == "hold_start":
+                    _woke_only = outcome == "no-channel"
         if outcome == "no-channel":
             if action == "hold_release":
                 ok, detail = client.wake_idle_session()
@@ -121,7 +232,19 @@ class _Server(socketserver.ThreadingTCPServer):
     address_family = socket.AF_INET
 
 
-def serve(port: Optional[int] = None, host: Optional[str] = None) -> None:
+def make_server(host: str, port: int, token: Optional[str], client=None,
+                max_conns: int = MAX_CONNECTIONS) -> _Server:
+    """A bound relay server. ``token`` None turns authentication off (tests
+    only; serve() always passes one). ``client`` None means voice-mode's
+    ptt_control_client."""
+    srv = _Server((host, port), _Handler)
+    srv.token, srv.client, srv.max_conns = token, client, max_conns
+    srv.slots = threading.BoundedSemaphore(max_conns)
+    return srv
+
+
+def serve(port: Optional[int] = None, host: Optional[str] = None,
+          token_path=None) -> None:
     """Serve the relay.
 
     Binds loopback by default. On WSL2 the producer is a Windows-side listener,
@@ -132,8 +255,10 @@ def serve(port: Optional[int] = None, host: Optional[str] = None) -> None:
     """
     port = port if port is not None else int(os.getenv("VOICEMODE_PTT_PORT", DEFAULT_PORT))
     host = host if host is not None else os.getenv("VOICEMODE_PTT_HOST", "127.0.0.1")
-    with _Server((host, port), _Handler) as srv:
-        logger.info("PTT relay listening on %s:%d -> control socket", host, port)
+    token = load_or_create_token(token_path)
+    with make_server(host, port, token) as srv:
+        logger.info("PTT relay listening on %s:%d -> control socket (token: %s)",
+                    host, port, token_path or DEFAULT_TOKEN_PATH)
         try:
             srv.serve_forever()
         except KeyboardInterrupt:

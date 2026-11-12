@@ -16,6 +16,7 @@ the pill leaves the frontmost app and its keyboard focus alone.
 import argparse
 import fcntl
 import json
+import os
 import shlex
 import subprocess
 import sys
@@ -38,6 +39,7 @@ STABLE_RUN_S = 30
 HEARTBEAT_S = 60
 BACKEND_SILENCE_S = 15  # the backend writes every 1 s idle, 0.25 s in a turn: 15 s is 15x the slower
 WATCHDOG_TICK_S = 1.0
+TERM_GRACE_S = 2  # SIGTERM first, then this long before SIGKILL
 
 
 # -- pure logic ---------------------------------------------------------------
@@ -70,6 +72,16 @@ def heartbeat_line(last_line_age, visible, dismissed, mode, win_visible, screens
     age = "none" if last_line_age is None else f"{last_line_age:.1f}"
     return (f"hb last_line_age={age} visible={visible} dismissed={dismissed} mode={mode} "
             f"win_visible={win_visible} screens={screens}")
+
+
+def snapshot_phase(line):
+    """The snapshot's phase, or None when the line is not a snapshot with a string phase."""
+    try:
+        snap = json.loads(line)
+    except ValueError:
+        return None
+    phase = snap.get("phase") if isinstance(snap, dict) else None
+    return phase if isinstance(phase, str) else None
 
 
 def snapshot_visible(line):
@@ -222,13 +234,23 @@ def on_backend_exit(code, lines, had_output, ran_s, backoff, flag_on):
     return Decision("retry", delay=backoff, backoff=min(backoff * 2, BACKOFF_CAP_S))
 
 
+def _is_true(value):
+    return value.strip().lower() == "true"
+
+
 def pill_flag(env_text):
-    """VOICEMODE_PILL from voicemode.env text: the last assignment wins."""
-    val = None
-    for line in env_text.splitlines():
-        if line.startswith("VOICEMODE_PILL="):
-            val = line.split("=", 1)[1].strip() == "true"
-    return bool(val)
+    """VOICEMODE_PILL from voicemode.env text, parsed as voice_pill_state reads the file:
+    ``export``, quotes, whitespace, CRLF and a BOM allowed, the last assignment wins."""
+    return _is_true(_pill_state()._parse_env(env_text.lstrip("\ufeff")).get("VOICEMODE_PILL", ""))
+
+
+def flag_on(env_path):
+    """Whether the pill should run: VOICEMODE_PILL from the environment when it is set there
+    (FELIX sets it so, and upstream's default voicemode.env lacks the key), else from the
+    file at env_path. Reading the file can raise OSError; the caller decides what that means."""
+    if "VOICEMODE_PILL" in os.environ:
+        return _is_true(os.environ["VOICEMODE_PILL"])
+    return pill_flag(Path(env_path).read_text(encoding="utf-8", errors="replace"))
 
 
 # -- the window (needs macOS; not covered by pytest) -------------------------
@@ -416,6 +438,8 @@ class App:
         self.started = None
         self.nap = threading.Event()  # never set: a sleep that tests' faked time.sleep cannot reach
         self.last_line = None  # monotonic time of the backend's last line
+        self.last_phase = None  # the phase of the backend's last snapshot
+        self.repause = False  # the watchdog killed a paused backend: pause the next one
         self.label = state_label(self.state)
         try:
             self.pos, width, self.state.dock_y = parse_saved_position(self.pos_file.read_text())
@@ -472,8 +496,18 @@ class App:
             quiet = time.monotonic() - (self.last_line or self.started)
             if p.poll() is None and not self.closing and quiet > BACKEND_SILENCE_S:
                 self.log(f"backend silent for {quiet:.0f} s (limit {BACKEND_SILENCE_S} s): killing pid {p.pid}")
+                # A killed backend never runs its finally (_release_pause), and a pause owned by a
+                # dead pid reads as not paused: the next backend must take the pause over.
+                self.repause = self.last_phase == "paused"
                 try:
-                    p.kill()
+                    p.terminate()
+                    p.wait(TERM_GRACE_S)
+                except subprocess.TimeoutExpired:
+                    self.log(f"backend pid {p.pid} ignored SIGTERM for {TERM_GRACE_S} s: SIGKILL")
+                    try:
+                        p.kill()
+                    except OSError:
+                        pass
                 except OSError:
                     pass
                 return
@@ -500,6 +534,7 @@ class App:
     def supervise(self):
         """Run the backend, and run it again by the exit policy. One loop: no recursion."""
         env = Path.home() / ".voicemode" / "voicemode.env"
+        repause = False  # taken from the watchdog only once the killed backend has exited
         while not self.closing:
             self.started = time.monotonic()
             p, lines = self.spawn(), 0
@@ -509,18 +544,23 @@ class App:
                 for line in p.stdout:
                     lines += 1
                     self.last_line = time.monotonic()
+                    if repause:  # the new backend is up: hand it the pause it lost
+                        repause = False
+                        self.log("re-pausing: the backend the watchdog killed was paused")
+                        self.send('{"cmd":"pause"}')
                     self.on_line(line.strip())
                 p.wait()
+                repause, self.repause = repause or self.repause, False
             ran = time.monotonic() - self.started if p else 0  # a failed start ran for nothing
             code = p.returncode if p else 127
             self.stdin = self.proc = None
             if self.closing:
                 return
             try:
-                flag_on = self.force or pill_flag(env.read_text())
+                run_on = self.force or flag_on(env)
             except OSError:
-                flag_on = True  # cannot tell: keep running
-            d = on_backend_exit(code, lines, self.had_output, ran, self.backoff, flag_on)
+                run_on = True  # cannot tell: keep running
+            d = on_backend_exit(code, lines, self.had_output, ran, self.backoff, run_on)
             self.log(f"backend exited: code {code}, {lines} lines -> {d.action}")
             if d.action == "exit":
                 self.exit_code = d.exit_code
@@ -532,6 +572,9 @@ class App:
 
     def on_line(self, line):
         self.had_output = True
+        phase = snapshot_phase(line)
+        if phase is not None:
+            self.last_phase = phase
         if self.closing or not self.win:
             return
         v = snapshot_visible(line)
@@ -544,17 +587,21 @@ class App:
             from PyObjCTools import AppHelper
             AppHelper.callAfter(wv.evaluateJavaScript_completionHandler_, js, None)  # not pywebview's eval wrapper
 
+    def send(self, line):
+        """One JSON line to the backend's stdin; a backend that is gone is ignored."""
+        try:
+            if self.stdin:
+                self.stdin.write(line + "\n")
+                self.stdin.flush()
+        except (OSError, ValueError):
+            pass
+
     def from_page(self, text):
         r = route_page_message(text)
         if not r:
             return
         if r[0] == "cmd":
-            try:
-                if self.stdin:
-                    self.stdin.write(r[1] + "\n")
-                    self.stdin.flush()
-            except (OSError, ValueError):
-                pass
+            self.send(r[1])
             return
         prev = self.state.mode
         if "mode" in r[1]:
@@ -821,7 +868,7 @@ def main(argv=None):
         return 1
     env = Path.home() / ".voicemode" / "voicemode.env"
     try:
-        if not args.force and not pill_flag(env.read_text()):
+        if not args.force and not flag_on(env):
             print("voice_pill_mac: VOICEMODE_PILL is not true; exiting", file=sys.stderr)
             return 0
     except OSError:

@@ -27,6 +27,15 @@ powershell.exe -ExecutionPolicy Bypass -File \\wsl.localhost\Ubuntu\home\<you>\g
 ```
 
 The window exits at once unless `VOICEMODE_PILL=true`, so the entry is harmless when off.
+The entry repeats every argument the install was given, leaving out only the autostart
+switches themselves. So it keeps `-Distro`, `-Repo`, `-BackendCommand`, `-BackendExe`,
+`-BackendArgs` and `-Force`, and writes `-DataDir` as a full path. It is UTF-8 without a BOM after `chcp 65001`, so non-ASCII paths survive.
+
+The WSL window reads `VOICEMODE_PILL` from the distro's `~/.voicemode/voicemode.env` (or the old
+`.voicemode.env`) by the same rules as native mode and `voice_pill_state`: `export `, quotes,
+CRLF and a BOM are allowed, and the last assignment wins. An inline comment stays in the value
+there, so `VOICEMODE_PILL=true # on` is off. A distro that does not answer within 60 s is
+killed and counts as "could not tell", and the window starts anyway.
 
 `pill on` waits up to 15 s and fails with exit 1 if the window exited with an error. It cannot
 detect a failure after those 15 s. "Already running" only means a window holds the lock: that
@@ -119,6 +128,10 @@ run: a native converse turn through Claude Code, and macOS.
   window exits and logs why. If one has, it stays up and the page shows Disconnected. Exit 1
   after output is treated as a crash and restarted, on the expectation that `wsl --terminate`
   may look like that (not measured).
+- **A command with no backend to take it is not kept.** While the backend restarts, or after
+  its pipe broke, the window logs it and posts `{"window":{"dropped":"<cmd>"}}` to the page,
+  so the page can show Disconnected at once. It is never replayed: a late Stop could land on
+  a turn it was not meant for.
 - **Push-to-talk** (2026-11-07): while the key is down the pill shows **Holding…** (phase
   `holding`, from the `holding` field patch_ptt_instant adds to the server's status reply,
   above Speaking and Listening, green like Listening). The keys hint reads `tap: stop, hold:
@@ -464,3 +477,21 @@ Needs Robert (voice, ears, permissions):
 - Everything above, until `FELIX-MAC` runs it.
 - Snapshots are sent with `evaluateJavaScript` to a window that may be ordered out; WebKit may throttle it. If the page is stale after being hidden, that is why.
 - Display changes and more than one monitor.
+
+
+## What the pill offers (v1.1.3)
+
+- **German** is listed only where a German voice can speak. In order:
+  1. `VOICEMODE_PILL_LANGUAGES` decides when set (e.g. `English` or `English,German`).
+  2. Otherwise a German voice in `VOICEMODE_VOICES` / `VOICEMODE_TTS_VOICE`, or Piper (`:8881`)
+     in `VOICEMODE_TTS_BASE_URLS`.
+  3. Otherwise the German Kokoro model (`models/kokoro-de-martin/`) next to the install.
+  4. If only the English model is found, German is hidden. If nothing is found, it stays.
+  A session that is already in German keeps German listed, so the menu shows its real value.
+- **Push-to-talk keys** are shown only where a listener runs. `VOICEMODE_PTT_ENABLED` decides
+  when it says yes or no. Unset: on a Mac, while `voicemode-mcp`'s listener lives
+  (`~/.voicemode/run/ptt-listener.pid`); on Windows and Linux, shown.
+- **Saved voice and language choices** now carry the process's start time, so a new server that
+  reuses an old pid does not inherit them. A choice saved before v1.1.3 has no start time and
+  is dropped once.
+- `VOICEMODE_PILL` is read case-insensitively everywhere (`true`, `True`, `TRUE`).

@@ -106,11 +106,13 @@ def data_dir(base=None) -> Path:
 
 
 def backend_python() -> str:
-    return os.environ.get(PYTHON_SETTING) or sys.executable
+    """VOICEMODE_PILL_PYTHON from the environment only (a voicemode.env value is refused:
+    a model can write that file), else the server's own interpreter."""
+    return st.trusted_env(PYTHON_SETTING) or sys.executable
 
 
 def mac_python() -> str:
-    return os.environ.get(PYTHON_SETTING) or str(Path.home() / ".voicemode" / "pill-venv" / "bin" / "python")
+    return st.trusted_env(PYTHON_SETTING) or str(Path.home() / ".voicemode" / "pill-venv" / "bin" / "python")
 
 
 def windows_powershell() -> str:

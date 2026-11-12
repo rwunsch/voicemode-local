@@ -105,6 +105,98 @@ def test_flag_last_assignment_wins():
     assert not m.pill_flag("#VOICEMODE_PILL=true")
 
 
+import pytest  # noqa: E402
+
+
+@pytest.mark.parametrize("text, expected", [
+    ('VOICEMODE_PILL="true"\n', True),
+    ("export VOICEMODE_PILL=true\n", True),
+    ("VOICEMODE_PILL='true'\n", True),
+    ("A=1\r\nVOICEMODE_PILL=true\r\n", True),
+    ("  VOICEMODE_PILL = true  \n", True),
+    ("VOICEMODE_PILL=false\nVOICEMODE_PILL=true\n", True),
+    ("VOICEMODE_PILL=true\nVOICEMODE_PILL=false\n", False),
+    ("﻿VOICEMODE_PILL=true\n", True),
+    ("VOICEMODE_PILL=\"false\"\n", False),
+    ("A=1\n", False),
+])
+def test_flag_accepts_the_env_file_forms_voice_pill_state_reads(text, expected):
+    assert m.pill_flag(text) is expected
+
+
+def _env_file(tmp_path, text):
+    p = tmp_path / "voicemode.env"
+    p.write_text(text)
+    return p
+
+
+@pytest.mark.parametrize("environ, text, expected", [
+    ("true", "A=1\n", True),                    # FELIX: in the environment, not in the file
+    ("TRUE ", "A=1\n", True),
+    ("false", "VOICEMODE_PILL=true\n", False),  # the environment overrides the file both ways
+    ("true", "VOICEMODE_PILL=false\n", True),
+    ("", "VOICEMODE_PILL=true\n", False),       # set but empty is still set
+    (None, "VOICEMODE_PILL=true\n", True),      # unset: the file decides
+    (None, "A=1\n", False),
+])
+def test_flag_on_reads_the_environment_first(tmp_path, monkeypatch, environ, text, expected):
+    if environ is None:
+        monkeypatch.delenv("VOICEMODE_PILL", raising=False)
+    else:
+        monkeypatch.setenv("VOICEMODE_PILL", environ)
+    assert m.flag_on(_env_file(tmp_path, text)) is expected
+
+
+def test_flag_on_from_environment_needs_no_file(tmp_path, monkeypatch):
+    monkeypatch.setenv("VOICEMODE_PILL", "true")
+    assert m.flag_on(tmp_path / "missing.env") is True
+
+
+def test_flag_on_survives_a_file_that_is_not_utf8(tmp_path, monkeypatch):
+    monkeypatch.delenv("VOICEMODE_PILL", raising=False)
+    p = tmp_path / "voicemode.env"
+    p.write_bytes(b"A=\xff\xfe\nVOICEMODE_PILL=true\n")
+    assert m.flag_on(p) is True
+
+
+def test_main_runs_on_a_felix_launch(tmp_path, monkeypatch, capsys):
+    """VOICEMODE_PILL=true in the process environment, upstream's default voicemode.env
+    without the key: the window must not exit at the flag check."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("VOICEMODE_PILL", "true")
+    (tmp_path / ".voicemode").mkdir()
+    (tmp_path / ".voicemode" / "voicemode.env").write_text("# upstream default\nVOICEMODE_VOICES=af_sky\n")
+    monkeypatch.setattr(m.sys, "platform", "darwin")
+    monkeypatch.setattr(m, "single_instance", lambda: None)  # stop right after the flag check
+    assert m.main([]) == 0
+    err = capsys.readouterr().err
+    assert "not true" not in err
+    assert "another pill window is running" in err
+
+
+def test_backend_exit_keeps_running_on_a_felix_launch(tmp_path, monkeypatch, capsys):
+    """The same check after a backend exits: the environment flag keeps the retry loop."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("VOICEMODE_PILL", "true")
+    (tmp_path / ".voicemode").mkdir()
+    (tmp_path / ".voicemode" / "voicemode.env").write_text("VOICEMODE_VOICES=af_sky\n")
+    monkeypatch.setattr(m.time, "sleep", lambda s: None)
+    app = m.App(False, [sys.executable, "-c", "print('{}')"])
+    spawns = []
+    real = app.spawn
+
+    def spawn():
+        spawns.append(1)
+        if len(spawns) >= 3:
+            app.closing = True
+        return real()
+
+    app.spawn = spawn
+    app.supervise()
+    assert len(spawns) >= 3
+    assert "-> exit" not in capsys.readouterr().err
+
+
 def _listener():
     spec = importlib.util.spec_from_file_location("ptt_listener_macos", PATCHES / "ptt_listener_macos.py")
     mod = importlib.util.module_from_spec(spec)

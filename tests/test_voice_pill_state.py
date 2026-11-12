@@ -185,7 +185,7 @@ def test_live_pause_owner_keeps_the_pause_file(base):
 
 
 def test_stopped_session_tells_the_agent_until_it_comes_back(base, monkeypatch):
-    monkeypatch.setattr(st, "barge_state", lambda home=None: None)
+    monkeypatch.setattr(st, "barge_mode", lambda home=None: None)
     st.register_session(os.getpid(), "demo", None, base=base)
     assert st.result_note(os.getpid(), base=base) == ""
     st.mark_stopped(os.getpid(), True, base=base)
@@ -242,7 +242,7 @@ def test_barge_still_finds_the_switch_next_to_a_repo_venv(monkeypatch, tmp_path)
 # Robert, 2026-11-05: at voice start, say once whether interrupt by voice is on, and that it can
 # be switched, like the Beeps switch.
 def test_the_first_result_says_once_that_barge_is_on(base, monkeypatch):
-    monkeypatch.setattr(st, "barge_state", lambda home=None: True)
+    monkeypatch.setattr(st, "barge_mode", lambda home=None: "on")
     st.register_session(os.getpid(), "demo", None, base=base)
     first = st.result_note(os.getpid(), base=base)
     assert "Interrupt by voice is on" in first and "voice_barge" in first
@@ -250,19 +250,19 @@ def test_the_first_result_says_once_that_barge_is_on(base, monkeypatch):
 
 
 def test_the_first_result_says_when_barge_is_off(base, monkeypatch):
-    monkeypatch.setattr(st, "barge_state", lambda home=None: False)
+    monkeypatch.setattr(st, "barge_mode", lambda home=None: "off")
     st.register_session(os.getpid(), "demo", None, base=base)
     assert "Interrupt by voice is off" in st.result_note(os.getpid(), base=base)
 
 
 def test_no_barge_note_where_barge_cannot_run(base, monkeypatch):
-    monkeypatch.setattr(st, "barge_state", lambda home=None: None)
+    monkeypatch.setattr(st, "barge_mode", lambda home=None: None)
     st.register_session(os.getpid(), "demo", None, base=base)
     assert st.result_note(os.getpid(), base=base) == ""
 
 
 def test_no_barge_note_for_an_unregistered_session(base, monkeypatch):
-    monkeypatch.setattr(st, "barge_state", lambda home=None: True)
+    monkeypatch.setattr(st, "barge_mode", lambda home=None: "on")
     assert st.result_note(os.getpid(), base=base) == ""
 
 
@@ -470,3 +470,152 @@ def test_a_failing_autostart_hook_does_not_cost_the_turn(base):
 def asyncio_run(coro):
     import asyncio
     return asyncio.run(coro)
+
+
+# -- Talos review 2026-11-12: settings that name a program are never read from a file ----
+
+def test_setting_came_from_a_file_reads_every_env_file(monkeypatch, tmp_path):
+    home = tmp_path / "home"
+    (home / ".voicemode").mkdir(parents=True)
+    (home / ".voicemode" / "voicemode.env").write_text("VOICEMODE_X_CMD=/bin/evil\n")
+    monkeypatch.setattr(st, "upstream_home", lambda: home / ".voicemode")
+    monkeypatch.chdir(tmp_path)
+    assert st.setting_came_from_a_file("VOICEMODE_X_CMD") is True
+    assert st.setting_came_from_a_file("VOICEMODE_OTHER") is False
+
+
+def test_trusted_env_refuses_a_value_a_file_supplied(monkeypatch):
+    monkeypatch.setenv("VOICEMODE_X_CMD", "/bin/evil")
+    monkeypatch.setattr(st, "setting_came_from_a_file", lambda name: True)
+    assert st.trusted_env("VOICEMODE_X_CMD") == ""
+    monkeypatch.setattr(st, "setting_came_from_a_file", lambda name: False)
+    assert st.trusted_env("VOICEMODE_X_CMD") == "/bin/evil"
+
+
+# Talos review, finding 1: a non-holder's pill Stop only writes a stop file; a paused
+# enter() must see it without waiting for Resume.
+def test_stop_during_pause_returns_without_resume(base, monkeypatch):
+    import asyncio
+    monkeypatch.setattr(st, "autostart_hook", lambda b: None)
+    st.set_paused(True, os.getpid(), base=base)  # a live owner: stays paused
+
+    async def scenario():
+        task = asyncio.ensure_future(st.enter(os.getpid(), "demo", None, base=base))
+        await asyncio.sleep(0.3)
+        assert not task.done()  # still waiting on the pause
+        st.request_stop(os.getpid(), base=base)
+        return await asyncio.wait_for(task, timeout=1.0)
+
+    assert asyncio.run(scenario()) == st.STOPPED_MESSAGE
+    assert st.is_paused(base=base) is True
+
+
+# Talos review, finding 2: auto listens only while output goes to headphones; on speakers
+# "talk over you to stop you" is false.
+def test_the_first_result_for_auto_mentions_headphones(base, monkeypatch):
+    monkeypatch.setattr(st, "barge_mode", lambda home=None: "auto")
+    st.register_session(os.getpid(), "demo", None, base=base)
+    note = st.result_note(os.getpid(), base=base)
+    assert "headphones" in note and "voice_barge" in note
+    assert st.BARGE_ON_NOTE not in note
+    assert st.result_note(os.getpid(), base=base) == ""
+
+
+def test_the_first_result_for_on_is_unchanged(base, monkeypatch):
+    monkeypatch.setattr(st, "barge_mode", lambda home=None: "on")
+    st.register_session(os.getpid(), "demo", None, base=base)
+    assert st.result_note(os.getpid(), base=base) == "\n\n" + st.BARGE_ON_NOTE
+
+
+# Talos review, finding 3: noting that the barge notice was told must never rewrite the
+# session record, or a Stop written meanwhile (the pill's mark_stopped) is wiped.
+def test_the_barge_notice_never_wipes_a_concurrent_stop(base, monkeypatch):
+    pid = os.getpid()
+    st.register_session(pid, "demo", None, base=base)
+
+    def mode_with_a_stop_landing(home=None):
+        st.mark_stopped(pid, True, base=base)  # the pill's Stop, between read and write
+        return "on"
+
+    monkeypatch.setattr(st, "barge_mode", mode_with_a_stop_landing)
+    assert st.BARGE_ON_NOTE in st._barge_note_once(pid, base)
+    (s,) = st.live_sessions(base=base)
+    assert s["stopped"] is True
+    monkeypatch.setattr(st, "barge_mode", lambda home=None: "on")
+    assert st._barge_note_once(pid, base) == ""  # still told once
+
+
+def test_a_new_session_with_a_reused_pid_is_told_again(base, monkeypatch):
+    monkeypatch.setattr(st, "barge_mode", lambda home=None: "off")
+    st.register_session(os.getpid(), "demo", None, base=base)
+    assert st.BARGE_OFF_NOTE in st._barge_note_once(os.getpid(), base)
+    st.register_session(os.getpid(), "demo", None, base=base)  # registered from scratch
+    monkeypatch.setattr(st, "process_start", lambda pid: "another-start")
+    st.register_session(os.getpid(), "demo", None, base=base)
+    assert st.BARGE_OFF_NOTE in st._barge_note_once(os.getpid(), base)
+
+
+# Talos review, finding 4: one failed probe hid the barge switch for the backend's lifetime.
+def test_barge_available_retries_a_failed_probe(no_inproc, monkeypatch, tmp_path):
+    counter = tmp_path / "count"
+    py = tmp_path / "flaky-python"
+    py.write_text(f"#!/bin/sh\nif [ -e {counter} ]; then echo x >> {counter}; echo on; "
+                  f"else echo x > {counter}; echo 'cannot run: not yet'; fi\n")
+    py.chmod(0o755)
+    monkeypatch.setattr(st, "barge_interpreter", lambda: str(py))
+    monkeypatch.setattr(st, "BARGE_RETRY_S", 0, raising=False)
+    st.barge_available()
+    _settle()
+    st.barge_available()  # the failure is old enough: this call probes again
+    _settle()
+    assert st.barge_available() is True
+    assert len(counter.read_text().split()) == 2
+    for _ in range(5):  # True is kept for good
+        st.barge_available()
+    _settle()
+    assert len(counter.read_text().split()) == 2
+
+
+# Talos review, finding 5: voice_stop's unregister_session leaves the override, so a reused
+# pid inherited the voice and language. The override now records the process start.
+def test_an_override_for_another_process_with_the_same_pid_is_ignored(base, monkeypatch):
+    pid = os.getpid()
+    st.set_override(pid, "bf_emma", "English", base=base)
+    monkeypatch.setattr(st, "process_start", lambda p: "a-reused-pid")
+    assert st.get_override(pid, base=base) == {}
+    assert not (base / f"override-{pid}.json").exists()
+
+
+def test_an_override_survives_unregister_for_the_same_process(base):
+    pid = os.getpid()
+    st.register_session(pid, "demo", None, base=base)
+    st.set_override(pid, "bf_emma", "English", base=base)
+    st.unregister_session(pid, base=base)
+    assert st.get_override(pid, base=base) == {"voice": "bf_emma", "language": "English"}
+
+
+@pytest.mark.parametrize("raw,want", [("true", True), ("True", True), (" TRUE ", True), ("false", False), ("yes", False)])
+def test_pill_enabled_ignores_case_like_the_mac_window(monkeypatch, raw, want):
+    # The Mac wrapper reads VOICEMODE_PILL case-insensitively; autostart must agree, or
+    # VOICEMODE_PILL=True would never start the window.
+    monkeypatch.setenv("VOICEMODE_PILL", raw)
+    assert st.pill_enabled() is want
+
+
+def test_an_unknown_process_start_keeps_the_override_file(base, monkeypatch):
+    # Final review I2: ps timing out under load (Mac) gave None, and the user's chosen voice
+    # and language were deleted for good. Unknown is not "another process".
+    pid = os.getpid()
+    st.set_override(pid, "bf_emma", "German", base=base)
+    monkeypatch.setattr(st, "process_start", lambda p: None)
+    assert st.get_override(pid, base=base) == {}
+    assert (base / f"override-{pid}.json").exists()
+    monkeypatch.undo()
+    assert st.get_override(pid, base=base) == {"voice": "bf_emma", "language": "German"}
+
+
+def test_failed_barge_probes_back_off_up_to_ten_minutes():
+    # Final review minor: where barge can never run, a probe process every 60 s for the
+    # backend's whole life. Each further failure doubles the wait, capped.
+    assert [st.barge_retry_interval(n) for n in (1, 2, 3, 4, 5, 6, 20)] == \
+        [60.0, 120.0, 240.0, 480.0, 600.0, 600.0, 600.0]

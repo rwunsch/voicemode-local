@@ -51,7 +51,11 @@
     var waiting = (s.sessions || []).filter(function (r) { return r.state === "waiting"; }).length;
     var name = s.floor ? (s.floor.label || "") : "";
     var language = s.language || languageOf(s.voice);
-    var base = language === "German" ? GERMAN_VOICES : VOICES;
+    // German only where a German voice can speak; an older backend that does not say keeps it.
+    var german = s.german_available !== false;
+    // A session already in German keeps German listed, so the select shows its real value.
+    var languages = german || language === "German" ? LANGUAGES : ["English"];
+    var base = german && language === "German" ? GERMAN_VOICES : VOICES;
     var voices = s.voice && base.indexOf(s.voice) < 0 ? base.concat([s.voice]) : base;
     // The main button is Wake between turns (idle, between turns, stopped) when the backend
     // can name a session to wake, and Stop otherwise. One button, never both. Pause/Resume
@@ -78,11 +82,11 @@
       }),
       queueMore: rows.length > MAX_ROWS ? "+" + (rows.length - MAX_ROWS) + " more queued" : "",
       voice: s.voice || null, language: language,
-      keys: keysFor(s.platform),
+      keys: s.ptt === false ? [] : keysFor(s.platform), // no listener runs: no shortcut to show
       barge: { visible: !!barge.available, on: !!barge.enabled, enabled: true,
         countText: count + (count === 1 ? " interruption today" : " interruptions today") },
       beeps: { on: !!s.beeps },
-      voices: voices, languages: LANGUAGES,
+      voices: voices, languages: languages,
       session: name,
       stateText: wakeText || LABELS[phase] || LABELS.idle,
       wakeText: wakeText,
@@ -97,7 +101,16 @@
     return !(snapshotVisible === true && (wasStale || prevVisible === false));
   }
 
-  var api = { nextHidden: nextHidden, viewModel: viewModel, VOICES: VOICES, GERMAN_VOICES: GERMAN_VOICES, LANGUAGES: LANGUAGES, STALE_MS: STALE_MS };
+  // What an incoming message is: the tray's "restore", a command the window could not
+  // deliver ("dropped": the backend is restarting), another window message, or a snapshot.
+  function incomingKind(s) {
+    if (!s || typeof s !== "object") return "ignore";
+    if (s.cmd === "restore") return "restore";
+    if (s.window && typeof s.window === "object") return "dropped" in s.window ? "dropped" : "window";
+    return "snapshot";
+  }
+
+  var api = { incomingKind: incomingKind, nextHidden: nextHidden, viewModel: viewModel, VOICES: VOICES, GERMAN_VOICES: GERMAN_VOICES, LANGUAGES: LANGUAGES, STALE_MS: STALE_MS };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   if (typeof window !== "undefined") window.PillModel = api;
 })();

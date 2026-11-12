@@ -11,7 +11,7 @@
 |--------------|-------|
 | Status       | In progress: built and tested without keys; a real key test is pending |
 | Created      | 2026-11-07 |
-| Last Updated | 2026-11-07 (tap/hold rule: instant hold, tap under 800 ms stops) |
+| Last Updated | 2026-11-12 (relay token and limits; a tap behind a slow send stays a tap) |
 | Project      | voicemode-local, branch feature/native-ptt (task 7 of the native Windows plan) |
 
 ## Keys (both modes)
@@ -67,10 +67,43 @@ The key states are polled every 50 ms with `GetAsyncKeyState`; nothing is hooked
 
 ## Modes
 
-**Relay (WSL2), unchanged.** No `-SenderExe`. Sends `{"action": "..."}` lines over TCP to
+**Relay (WSL2).** No `-SenderExe`. Sends `{"action": "..."}` lines over TCP to
 `patches/ptt_relay.py` in WSL (`-RelayHost` 127.0.0.1, `-Port` 8765), probes the relay with
-`press` at start, and logs to `\\wsl.localhost\Ubuntu\home\wunsch\.voicemode\logs\ptt-listener.log`
+`press` at start, and logs to `.voicemode\logs\ptt-listener.log` in the WSL home (the listener asks WSL once: `wslpath -w "$HOME"`, 10 s limit)
 unless `-LogPath` says otherwise.
+
+**The relay needs a token (2026-11-12, Talos review).** Start the relay as before
+(`VOICEMODE_PTT_HOST=0.0.0.0 python -m voice_mode.ptt_relay`). On its first start it writes a
+shared secret to `~/.voicemode/ptt-relay.token` in WSL (32 random bytes as hex, mode 600) and
+reuses it after that. A damaged file is replaced. Every connection must begin with the line
+`token <hex>`; a connection with a missing or wrong token is closed and nothing it sends is
+forwarded. Without the token, anything that could reach the port could stop speech, hold the
+mic open or wake an idle session.
+
+- The listener reads the file over the WSL share, by default
+  `.voicemode\ptt-relay.token` in the same WSL home as its
+  log. Another distro or user: pass `-TokenPath`. `-TokenPath` with `-SenderExe` exits 2.
+- The token is read once, at the first send that finds it, and kept. If the file cannot be
+  read, the listener logs `relay token not readable at <path> ...` once and sends nothing
+  until it can. Start the relay once to create the file.
+- If the relay writes a new token (only when the file was damaged or deleted), restart the
+  listener.
+- The legacy Python companion `patches/ptt_listener_windows.py` sends no token, so the relay
+  refuses it. Nothing installs it; use the PowerShell listener.
+
+Other relay limits: a line longer than 1024 bytes closes the connection (it is read with a
+bound, never buffered whole; a 300 MB line with no newline used to grow the relay to 306 MB),
+and at most 8 connections are served at once; more are closed at once. The listener's hold
+state (did this hold begin with no voice turn) is kept for the whole relay, not per
+connection, because the listener opens a new connection for every action. A lock keeps
+connections from interleaving it.
+
+**A tap behind a slow send stays a tap (2026-11-12).** Native mode does not wait for the
+sender's reply to `hold_start`. The key loop keeps polling, so the release is timed from the
+key state. The reply is collected, and its outcome logged, before the next write. Before,
+a cold sender that took over 800 ms to answer made a quick tap count as a hold. The key-down
+log line then shows `sent=pending`. This was parse-checked and its structure is tested
+statically. It was not run with real keys.
 
 **Native.** `-SenderExe <python>` (and optionally `-SenderArgs`, default
 `-m voice_mode.ptt_control_client --stdin`). The script starts the sender once, as a hidden
@@ -134,7 +167,11 @@ flagged. A test now fails if pipe or token code comes back into the script.
 - `tests/test_ptt_control_client.py`: outcomes, and `--stdin` end to end against a real
   AF_UNIX server (Linux).
 - `tests/test_ptt_listener_windows_native.py`: the script, statically, and through
-  powershell.exe where WSL interop works: parameter mixing, a sender that cannot start.
+  powershell.exe where WSL interop works: parameter mixing, a sender that cannot start, an
+  unreadable token logged once, and relay mode end to end against a real relay with a token.
+- `tests/test_ptt_relay.py`: the token (right, wrong, missing; the file created once with mode
+  600), an over-long line closing the connection at once, the connection limit, and hold state
+  across connections, all against a real relay on loopback.
 - `tests/test_voicemode_native.py`: the launcher's command, the `ptt` switch, the pipe name.
 - `tests/test_ptt_listener_windows_native_windows.py` (Windows): the transport's own server
   on a real pipe receives `stop` (hint `switch-to-text`), `hold_start`, `hold_end` for tap, hold, release, and

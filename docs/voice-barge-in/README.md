@@ -61,7 +61,12 @@ the trigger's own python (`VOICEMODE_BARGE_PYTHON`, environment only, else `.ven
 3. On a voice cut, `converse` skips the pause and chime. The trigger hands over the last
    3 s of mic audio up to the moment recording starts, trimmed by timestamp, and
    `converse` prepends it. The file (`~/.voicemode/barge_preroll.bin`) is mode 0600 and
-   deleted after use.
+   deleted after use. A pause during that hand-off stops the mic at once and hands over
+   nothing (an older file is removed too). If the file cannot be written (Windows refuses
+   the replace while the server still reads the last one), that one hand-off is lost with
+   a warning and the trigger keeps running.
+4. A mic that fails to open (sounddevice on Windows and macOS: device busy or gone) costs
+   that stretch only: one warning per run of failed opens, and the next stretch tries again.
 
 Silero alone is not enough on speakers: it correctly calls the assistant's echo speech.
 

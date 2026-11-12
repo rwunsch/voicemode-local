@@ -25,6 +25,46 @@ another session (FELIX-MAC, FELIX-voice) and not re-run here; **inferred** = rea
 | Native install without WSL/Docker/admin | n/a | install.ps1 -Mode windows-native | install-mac.sh (v1.0.0) + `--barge` |
 | Live on/off switch | voicemode-switch | voicemode_native.py barge/pill on/off/status | voicemode-switch |
 
+## What v1.1.3 changes (tagged 2026-11-12, merged to main from fix/talos-review; fixes from Talos's review of FELIX #1743)
+
+27 findings on vendored files were checked against the code (all confirmed or partly), then
+fixed test-first, then reviewed again by a fresh reviewer. Highlights, by what FELIX notices:
+
+- **Security: voicemode.env can no longer inject programs or environment.** Upstream's
+  `update_config` tool writes any key, and the server copied the file into its environment.
+  - Only voice settings travel from voicemode.env into the environment now: `VOICEMODE_*`,
+    `OPENAI_API_KEY`, `CARTESIA_API_KEY`. `update_config` refuses any other key
+    (`patch_env_allowlist.py`, new: targets `config.py` and `tools/configuration_management.py`,
+    both added to `unshare`).
+  - `VOICEMODE_CONCH_WAKE_COMMAND` and `VOICEMODE_PILL_PYTHON` are trusted from the real
+    environment only, like the barge command. **FELIX must pass them in the process
+    environment**, never through voicemode.env.
+- **Pill.**
+  - Stop works while paused.
+  - The "auto" barge notice says it listens on headphones only.
+  - German is hidden when only English Kokoro is installed. **Set
+    `VOICEMODE_PILL_LANGUAGES=English` to be certain**: the model folder check assumes the
+    runtime layout and has not been seen on a FELIX machine.
+  - Push-to-talk keys show only where a listener runs. FELIX on a Mac shows none unless it sets
+    `VOICEMODE_PTT_ENABLED=true`.
+  - Saved voice and language choices are dropped once at the upgrade.
+- **Mac pill:** runs on `VOICEMODE_PILL` from the environment (it used to exit on every FELIX
+  launch), and a watchdog restart keeps the user's pause.
+- **Windows pill (`pill-windows.ps1`):**
+  - No startup hang on a stalled WSL lookup.
+  - `"true"`, `export` and any case of `true` are read as on.
+  - The autostart entry keeps its arguments.
+  - A command that cannot reach a restarting backend marks the page disconnected at once.
+- **Barge trigger:** survives a failed preroll save and a failed mic open, and a pause right
+  after a barge drops the captured audio.
+- **Push-to-talk:**
+  - The WSL relay requires a token (`~/.voicemode/ptt-relay.token`). FELIX's native sender
+    mode does not use the relay.
+  - A tap behind a slow send stays a tap.
+  - Linux and Mac listeners release a hold when stopped.
+- **Not run on real Windows or Mac hardware:** tests ran on WSL, partly through
+  `powershell.exe`.
+
 ## What v1.1.2 changes (tagged 2026-11-11, merged to main from fix/conch-minors)
 
 Small fixes from the v1.1.1 final review. No new settings and no manifest changes. Files:
@@ -61,7 +101,7 @@ Agreed with FELIX-voice on 2026-11-10. Robert's decisions are in
   | `VOICEMODE_PILL` | `true` to have a pill |
   | `VOICEMODE_PILL_AUTOSTART` | leave unset (`off` = the server never starts a window) |
   | `VOICEMODE_PILL_DATA_DIR` | FELIX's pill window folder, e.g. `<voice root>\pill-window`, with WebView2 pre-installed |
-  | `VOICEMODE_PILL_PYTHON` | macOS: the pill venv's python. Windows: optional, default is the server's own interpreter |
+  | `VOICEMODE_PILL_PYTHON` | macOS: the pill venv's python. Windows: optional, default is the server's own interpreter. **Environment only** since v1.1.3: a value in a voicemode.env is ignored |
   | `VOICEMODE_CONTROL_CHANNEL_ENABLED` | still `true` for live state |
 
 - **Barge `auto`.** `VOICEMODE_VOICE_BARGE=auto` listens only while output goes to headphones.

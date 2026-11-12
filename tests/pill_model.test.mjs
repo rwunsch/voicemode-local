@@ -267,3 +267,53 @@ test("a Wake result replaces the state text briefly", () => {
   assert.equal(viewModel(snap({ phase: "working", wake: null }), 0, 0).stateText, "Between turns");
   assert.equal(viewModel(snap({ wake: { text: "x" } }), 1000, 5000).wakeText, "");
 });
+
+// Talos review, finding 7: German only where a German voice can speak.
+test("German and its voices are dropped when the backend says German is unavailable", () => {
+  const vm = viewModel(snap({ german_available: false }), 0, 0);
+  assert.deepEqual(vm.languages, ["English"]);
+  assert.ok(!vm.voices.some((v) => GERMAN_VOICES.includes(v)));
+  const de = viewModel(snap({ german_available: false, voice: "af_sky", language: "German" }), 0, 0);
+  assert.deepEqual(de.voices, VOICES); // never the German list
+  assert.deepEqual(de.languages, ["English", "German"]); // its own value stays listed (final review)
+});
+
+test("German stays offered when available, or when an older backend does not say", () => {
+  assert.deepEqual(viewModel(snap({ german_available: true }), 0, 0).languages, ["English", "German"]);
+  assert.deepEqual(viewModel(snap(), 0, 0).languages, LANGUAGES);
+  assert.deepEqual(viewModel(snap({ german_available: true, voice: "dm_martin", language: "German" }), 0, 0).voices,
+    GERMAN_VOICES);
+});
+
+// Talos review, finding 8: no push-to-talk keys where no listener runs.
+test("no push-to-talk keys when the backend says no listener runs", () => {
+  for (const platform of ["windows", "linux", "mac"]) {
+    assert.deepEqual(viewModel(snap({ platform, ptt: false }), 0, 0).keys, [], platform);
+  }
+  assert.deepEqual(viewModel(snap({ platform: "windows", ptt: true }), 0, 0).keys,
+    [{ keys: ["Ctrl", "Space"], text: "tap: stop, hold: talk" }]);
+  assert.equal(viewModel(snap({ platform: "mac", ptt: true }), 0, 0).keys.length, 2);
+});
+
+// Talos review 2026-11-12: pill-windows.ps1 posts {"window":{"dropped":cmd}} when a command
+// cannot reach a restarting backend. Treated as a snapshot, it made the page look connected
+// for 3 more seconds; it must mark the page disconnected at once.
+test("incoming messages are told apart: restore, dropped, other window message, snapshot", () => {
+  const { incomingKind } = model;
+  assert.equal(incomingKind({ cmd: "restore" }), "restore");
+  assert.equal(incomingKind({ window: { dropped: "stop" } }), "dropped");
+  assert.equal(incomingKind({ window: { dropped: "" } }), "dropped");
+  assert.equal(incomingKind({ window: { mode: "pill" } }), "window");
+  assert.equal(incomingKind(snap()), "snapshot");
+  assert.equal(incomingKind(null), "ignore");
+  assert.equal(incomingKind("x"), "ignore");
+});
+
+// Final review minor: a session already in German, with German not available, showed a
+// select whose value was not in its own list. Keep German listed while it is the value.
+test("German stays listed while it is the session's language, even when not available", () => {
+  const vm = viewModel(snap({ language: "German", german_available: false }), 0, 0);
+  assert.ok(vm.languages.includes("German"));
+  const en = viewModel(snap({ language: "English", german_available: false }), 0, 0);
+  assert.deepEqual(en.languages, ["English"]);
+});

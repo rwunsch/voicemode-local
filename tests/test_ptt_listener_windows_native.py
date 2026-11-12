@@ -32,8 +32,8 @@ def test_relay_mode_keeps_its_defaults_and_wire_format():
     assert re.search(r'\[string\]\$RelayHost = "127\.0\.0\.1"', TEXT)
     # -HoldThresholdMs is still accepted (an old shortcut may pass it) but no longer used.
     assert re.search(r"\[int\]\$HoldThresholdMs = 0\b", TEXT)
-    # The WSL log file stays the default when no -LogPath is given in relay mode.
-    assert '"\\\\wsl.localhost\\Ubuntu\\home\\wunsch\\.voicemode\\logs\\ptt-listener.log"' in TEXT
+    # Relay mode logs into the WSL home when no -LogPath is given (found with wslpath).
+    assert 'Join-Path $WslHome ".voicemode\\logs\\ptt-listener.log"' in TEXT
     # The relay speaks {"action": ...} lines over TCP, as patches/ptt_relay.py reads them.
     assert "('{\"action\": \"' + $Action + '\"}' + \"`n\")" in TEXT
     assert "New-Object System.Net.Sockets.TcpClient" in TEXT
@@ -86,6 +86,7 @@ def _win(path):
 @needs_powershell
 @pytest.mark.parametrize("extra", [["-SenderExe", "python.exe", "-RelayHost", "127.0.0.1"],
                                    ["-SenderExe", "python.exe", "-Port", "8765"],
+                                   ["-SenderExe", "python.exe", "-TokenPath", r"C:\x.token"],
                                    ["-SenderArgs", "-m x"]])
 def test_native_and_relay_parameters_do_not_mix(extra):
     done = _ps(*extra, "-SendAction", "short_press")
@@ -160,3 +161,109 @@ def test_the_focus_pattern_is_a_parameter_with_todays_default():
     assert "[string]$FocusPattern = 'WindowsTerminal|powershell|pwsh|wsl|conhost|cmd|alacritty|wezterm|Code'" in text
     assert "$p.ProcessName -match $FocusPattern" in text
     assert "$TerminalProcessPattern" not in text
+
+
+# --- Talos review 2026-11-12: the relay token, and a tap behind a slow send ---
+
+def test_relay_mode_reads_the_token_from_the_wsl_home_by_default():
+    assert re.search(r"\[string\]\$TokenPath = \"\"", TEXT)
+    assert 'Join-Path $WslHome ".voicemode\\ptt-relay.token"' in TEXT
+
+
+def test_relay_mode_sends_the_token_line_first():
+    code = _code()
+    fn = code[code.index("function Send-RelayAction"):]
+    fn = fn[:fn.index("\n}") + 2]
+    assert '("token " + $token + "`n")' in fn
+    assert fn.index("Get-RelayToken") < fn.index("TcpClient")  # no token, no connection
+
+
+def test_key_down_does_not_wait_for_the_hold_start_reply():
+    """A cold native sender took 0.97 s to answer hold_start. The key loop used to
+    wait for it, so a tap released meanwhile was measured after the send and
+    counted as a hold. hold_start's reply is now collected at the next send."""
+    code = _code()
+    down = code.index("if ($isDown -and -not $down)")
+    up = code.index("elseif (-not $isDown -and $down)")
+    assert 'Send-Action "hold_start" -NoWait' in code[down:up]
+    release = code[up:]
+    assert release.index("$heldMs =") < release.index("Send-Action")
+
+
+def test_a_reply_left_pending_is_collected_before_the_next_write():
+    code = _code()
+    fn = code[code.index("function Invoke-Sender"):]
+    fn = fn[:fn.index("\n}") + 2]
+    assert fn.index("$script:Pending") < fn.index("StandardInput.WriteLine")
+    assert "$NoWait" in fn
+
+
+@needs_powershell
+def test_an_unreadable_token_is_logged_once_and_nothing_is_sent(tmp_path):
+    log = tmp_path / "ptt.log"
+    done = _ps("-Port", "9", "-LogPath", _win(log), "-TokenPath", _win(tmp_path / "missing.token"),
+               "-SendAction", "short_press,hold_start")
+    assert done.returncode == 0, done.stdout + done.stderr
+    text = log.read_text(encoding="utf-8-sig")
+    assert text.count("relay token not readable") == 1, text
+    assert "short_press sent=False" in text and "hold_start sent=False" in text
+
+
+def _load_relay():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("vml_ptt_relay_ps", REPO / "patches" / "ptt_relay.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+@needs_powershell
+def test_relay_mode_reaches_a_real_relay_with_the_token(tmp_path):
+    """End to end from Windows: the script reads the token file and the relay in WSL
+    (bound to 0.0.0.0, as the docs say) accepts and forwards its actions."""
+    import threading
+    import time
+    relay = _load_relay()
+    token_file = tmp_path / "ptt-relay.token"
+    token = relay.load_or_create_token(token_file)
+
+    class Client:
+        sent = []
+
+        def action_outcome(self, action):
+            self.sent.append(action)
+            return "sent"
+
+    client = Client()
+    srv = relay.make_server("0.0.0.0", 0, token=token, client=client)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        log = tmp_path / "ptt.log"
+        done = _ps("-Port", str(srv.server_address[1]), "-LogPath", _win(log),
+                   "-TokenPath", _win(token_file), "-SendAction", "short_press,hold_start")
+        assert done.returncode == 0, done.stdout + done.stderr
+        end = time.monotonic() + 5
+        while len(client.sent) < 2 and time.monotonic() < end:
+            time.sleep(0.05)
+    finally:
+        srv.shutdown()
+        srv.server_close()
+    assert client.sent == ["short_press", "hold_start"], log.read_text(encoding="utf-8-sig")
+
+
+def test_relay_mode_finds_the_wsl_home_instead_of_one_machines_path():
+    # The token (and the log) defaulted to \\wsl.localhost\Ubuntu\home\wunsch: relay mode
+    # needs the token now, so any other user or distro was broken by default.
+    assert "home\\wunsch" not in TEXT
+    assert "function Get-WslHome" in TEXT
+    assert "wslpath -w" in TEXT
+    body = TEXT.split("function Get-WslHome", 1)[1].split("\nfunction ", 1)[0]
+    assert "WaitForExit(" in body and "ReadToEnd()" not in body   # a stalled WSL cannot hang it
+
+
+def test_a_wsl_home_not_found_at_start_is_looked_up_again():
+    # Final review I1: on a cold WSL boot the 10 s lookup can fail once, and the token path
+    # stayed empty until the listener restarted: push-to-talk dead after login.
+    body = TEXT.split("function Get-RelayToken", 1)[1].split("\nfunction ", 1)[0]
+    assert "Get-WslHome" in body and "WslHomeTried" in body and "-ge 30" in body
+    assert "$script:TokenPath = Join-Path" in body

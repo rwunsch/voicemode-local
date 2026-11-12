@@ -97,8 +97,11 @@
 
   window.pillReceive = function (json) {
     var s; try { s = JSON.parse(json); } catch (e) { return; }
-    if (!s || typeof s !== "object") return;
-    if (s.cmd === "restore") { saveUi({ minimized: false }); return; } // the tray icon was clicked
+    var kind = M.incomingKind(s);
+    if (kind === "ignore") return;
+    if (kind === "restore") { saveUi({ minimized: false }); return; } // the tray icon was clicked
+    if (kind === "dropped") { lastSeen = null; render(); return; }    // backend restarting: say so now
+    if (kind === "window") return;
     var wasStale = lastSeen === null || Date.now() - lastSeen > M.STALE_MS;
     var prevVisible = snapshot ? snapshot.visible : null;
     snapshot = s; lastSeen = Date.now();

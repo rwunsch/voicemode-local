@@ -117,3 +117,95 @@ def test_wake_text_names_a_message_and_stays_short():
     assert 'message="Listening."' in mac.WAKE_TEXT
     assert "skip_tts" not in mac.WAKE_TEXT  # the woken session speaks the cue
     assert len(mac.WAKE_TEXT) <= 60
+
+
+# --- Talos review 2026-11-12: stopping the listener mid-hold ------------------
+
+def _run_with_fake_keyboard(monkeypatch, during_join):
+    """Run run_listener with fake pynput, Quartz and voice_mode modules."""
+    import signal
+    import sys
+    import types
+
+    sent, signals = [], {}
+    Key = types.SimpleNamespace(ctrl="ctrl", ctrl_l="ctrl_l", ctrl_r="ctrl_r",
+                                alt="alt", alt_l="alt_l", alt_r="alt_r", space="space")
+
+    class FakeListener:
+        def __init__(self, on_press, on_release, **_):
+            self.on_press, self.on_release = on_press, on_release
+
+        def start(self):
+            pass
+
+        def join(self):
+            during_join(self)
+
+        def stop(self):
+            pass
+
+    keyboard = types.SimpleNamespace(Key=Key, Listener=FakeListener)
+    pynput = types.ModuleType("pynput")
+    pynput.keyboard = keyboard
+    quartz = types.ModuleType("Quartz")
+    for i, name in enumerate(("kCGEventFlagMaskControl", "kCGEventFlagMaskAlternate",
+                              "kCGEventFlagMaskCommand", "kCGEventFlagMaskShift")):
+        setattr(quartz, name, 1 << i)
+    client = types.SimpleNamespace(available=lambda: True, socket_path=lambda: "/x",
+                                   on_action=sent.append, send=sent.append)
+    vm = types.ModuleType("voice_mode")
+    vm.ptt_core, vm.ptt_control_client = core, client
+    for name, mod in (("pynput", pynput), ("pynput.keyboard", keyboard), ("Quartz", quartz),
+                      ("voice_mode", vm), ("voice_mode.ptt_core", core),
+                      ("voice_mode.ptt_control_client", client)):
+        monkeypatch.setitem(sys.modules, name, mod)
+    monkeypatch.setattr(mac, "touch_pill", lambda: None)
+    monkeypatch.setattr(signal, "signal", lambda sig, fn: signals.__setitem__(sig, fn))
+    mac.run_listener()
+    return sent, signals
+
+
+def test_stopping_mid_hold_sends_hold_release(monkeypatch):
+    """Killing the listener while Space is held must not leave the server's hold
+    latched (mic open). Sent at once: no release tail, the process is exiting."""
+    def during_join(fake):
+        fake.on_press("ctrl_l")
+        fake.on_press("alt_l")
+        fake.on_press("space")
+        raise KeyboardInterrupt
+
+    sent, _ = _run_with_fake_keyboard(monkeypatch, during_join)
+    assert sent == ["hold_start", "hold_release"]
+
+
+def test_stopping_with_no_hold_sends_nothing(monkeypatch):
+    def during_join(fake):
+        fake.on_press("ctrl_l")
+        raise KeyboardInterrupt
+
+    sent, _ = _run_with_fake_keyboard(monkeypatch, during_join)
+    assert sent == []
+
+
+def test_sigterm_and_sighup_stop_the_listener_like_ctrl_c(monkeypatch):
+    import signal
+
+    def during_join(fake):
+        raise KeyboardInterrupt
+
+    _, signals = _run_with_fake_keyboard(monkeypatch, during_join)
+    assert {signal.SIGTERM, signal.SIGHUP} <= set(signals)
+    with pytest.raises(KeyboardInterrupt):
+        signals[signal.SIGHUP](signal.SIGHUP, None)
+
+
+def test_stopping_during_the_release_tail_still_sends_hold_release_once():
+    # Final review minor: the release waits a short tail; stopping in that window lost it,
+    # and the server's hold stayed latched with the mic open.
+    rig = Rig()
+    rig.press(5.0, 7.0)                       # a hold: its release waits for the tail timer
+    assert rig.sent == ["hold_start"] and len(rig.timers) == 1
+    rig.key.release_held(7.1)                 # the listener stops inside the tail
+    assert rig.sent == ["hold_start", "hold_release"]
+    rig.flush()                               # the timer fires late: nothing more
+    assert rig.sent == ["hold_start", "hold_release"]
