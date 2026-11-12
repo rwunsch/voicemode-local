@@ -44,6 +44,8 @@ SOURCES = {
     "conch_notify.py": "conch_notify.py",
     "conch_queue.py": "conch_queue.py",
     "conch.py": "conch.py",
+    "config.py": "config.py",
+    "tools/configuration_management.py": "configuration_management.py",
 }
 
 # felix-framework aea841ffd, plugins/voicemode/dependencies.json "patches", in order.
@@ -185,6 +187,8 @@ EXPECTED_MARKERS = {
         "tools/converse.py": ["voicemode-local listen overrun", "voicemode-local turns playback stop",
                               "voicemode-local session name", HOLD, "LANGUAGE-LOCKED VOICES",
                               BARGE, PILL, INSTANT, "VML: CONCH WAKERS", "VML: CONCH FAIRNESS"],
+        "config.py": ["VML: ENV ALLOWLIST"],
+        "tools/configuration_management.py": ["VML: ENV ALLOWLIST"],
     },
 }
 
