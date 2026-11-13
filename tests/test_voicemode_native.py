@@ -5,6 +5,7 @@ and the --host defaults of the two speech servers. Nothing here starts a speech
 service, binds a fixed port or touches ~/.voicemode: HOME is a temp folder.
 The real thing on Windows is tests/test_voicemode_native_windows.py.
 """
+import ast
 import importlib.util
 import json
 import re
@@ -16,6 +17,19 @@ import pytest
 
 REPO = Path(__file__).resolve().parent.parent
 SCRIPT = REPO / "scripts" / "windows" / "voicemode_native.py"
+if str(REPO) not in sys.path:
+    sys.path.insert(0, str(REPO))
+
+from vml_supervisor import helpers as sv_helpers  # noqa: E402
+from vml_supervisor import host as sv_host  # noqa: E402
+from vml_supervisor import ports as sv_ports  # noqa: E402
+from vml_supervisor import procs as sv_procs  # noqa: E402
+from vml_supervisor import services as sv_services  # noqa: E402
+from vml_supervisor import state as sv_state  # noqa: E402
+from vml_supervisor import winjob as sv_winjob  # noqa: E402
+from vml_supervisor.hooks import load_hooks  # noqa: E402
+from vml_supervisor.profile import BASE_RESERVED_PORTS  # noqa: E402
+from vml_supervisor.result import Result  # noqa: E402
 
 
 def _load(path, name):
@@ -47,17 +61,150 @@ def _env_file(home, text):
     (home / ".voicemode" / "voicemode.env").write_text(text, encoding="utf-8")
 
 
+# -- the launcher's seams, before and after it moved onto vml_supervisor (Task 8) --------
+# Each test below says what it checks once; these adapters reach the same behaviour in the
+# old launcher (its own lifecycle functions) and in the new one (the package, through the
+# profile in vml_profiles/claude.py), so the tests ran green against the old code first.
+
+def _new(vn):
+    """True once voicemode_native.py runs its lifecycle on vml_supervisor."""
+    return hasattr(vn, "profile_of")
+
+
+def _fake_commands(monkeypatch, vn, lookup):
+    """Every process-command lookup, in the launcher and in the package, answers from lookup.
+    owned and live_leases bind process_command as a default argument: those are replaced too."""
+    monkeypatch.setattr(vn, "process_command", lookup, raising=False)
+    monkeypatch.setattr(sv_procs.owned, "__defaults__", (lookup,))
+    monkeypatch.setattr(sv_state.live_leases, "__defaults__", (lookup,))
+    for module in (sv_procs, sv_services, sv_host):
+        monkeypatch.setattr(module, "process_command", lookup)
+
+
+def _set_port_free(vn, monkeypatch, check):
+    monkeypatch.setattr(vn, "port_free", check, raising=False)
+    for module in (sv_ports, sv_host):
+        monkeypatch.setattr(module, "port_free", check)
+
+
+def _ranges(vn, root):
+    """({kind: [ports]}, reserved ports)."""
+    if not _new(vn):
+        return {kind: list(vn.PORTS[kind]) for kind in ("tts", "stt")}, set(vn.RESERVED)
+    profile = vn.profile_of(root)
+    ranges = {kind: list(range(spec.port_range[0], spec.port_range[1] + 1))
+              for kind, spec in profile.services.items()}
+    return ranges, set(BASE_RESERVED_PORTS) | set(profile.reserved_ports)
+
+
+def _port_free(vn):
+    return vn.port_free if not _new(vn) else sv_procs.port_free
+
+
+def _candidates(vn, root, kind):
+    if not _new(vn):
+        return vn.port_candidates(kind)
+    vn.write_port_settings(root)
+    candidates, problem = sv_ports.port_candidates(vn.profile_of(root), kind)
+    assert problem is None, problem
+    return candidates
+
+
+def _choose(vn, root, kind, taken):
+    if not _new(vn):
+        return vn.choose_port(kind, taken=taken)
+    vn.write_port_settings(root)
+    return sv_ports.choose_port(vn.profile_of(root), kind, taken)
+
+
+def _ensure(vn, root, runtime, env=None):
+    """The leased speech services alone (serve's start); returns their ports."""
+    if not _new(vn):
+        return vn.ensure_services(root, runtime, {} if env is None else env, optional=[])
+    return vn.start_services(root, runtime, helpers=False)[1]
+
+
+def _release(vn, root):
+    if not _new(vn):
+        return vn.release(root)
+    return vn.leave(vn.profile_of(root))
+
+
+def _fake_stop_recorded(vn, monkeypatch, record):
+    if not _new(vn):
+        monkeypatch.setattr(vn, "stop_recorded", lambda run_dir, state: record(state))
+    else:
+        monkeypatch.setattr(sv_services, "stop_recorded", lambda profile, state: record(state) or [])
+
+
+def _live_leases(vn, root):
+    if not _new(vn):
+        return vn.live_leases(root / "run")
+    return sv_state.live_leases(vn.profile_of(root))
+
+
+def _owned(vn, entry):
+    return vn.owned(entry) if not _new(vn) else sv_procs.owned(entry)
+
+
+def _service_command(vn, kind, runtime, port):
+    if not _new(vn):
+        return vn.service_command(kind, runtime, port)
+    spec = vn.profile_of(runtime.parent, runtime).services[kind]
+    return [a.replace("{port}", str(port)) for a in spec.argv], spec.marker
+
+
+def _watch_command(vn, monkeypatch, root):
+    if not _new(vn):
+        seen = []
+        monkeypatch.setattr(vn, "process_command", lambda pid: None)
+        monkeypatch.setattr(vn.subprocess, "Popen",
+                            lambda args, **kw: seen.append(args) or type("P", (), {"pid": 7})())
+        (root / "run").mkdir(parents=True, exist_ok=True)
+        vn.start_watchdog(root)
+        return seen[0]
+    return vn.profile_of(root).watch_command
+
+
+def _watch_tick(vn, root, restarts):
+    if not _new(vn):
+        return vn.watch_tick(root, restarts)
+    profile = vn.profile_of(root)
+    hooks, problems = load_hooks(profile)
+    assert not problems, problems
+    return sv_host.watch_tick(profile, hooks, restarts.setdefault("watch", sv_host.WatchState()))
+
+
+def _max_restarts(vn, root):
+    return vn.MAX_RESTARTS if not _new(vn) else vn.profile_of(root).restart_limit[0]
+
+
+def _fake_services_job(vn, monkeypatch):
+    """The services' Job Object as ("job", <install root>)."""
+    monkeypatch.setattr(vn, "services_job", lambda root: ("job", root), raising=False)
+    monkeypatch.setattr(sv_winjob, "services_job", lambda profile: ("job", profile.root))
+    monkeypatch.setattr(sv_helpers, "services_job", lambda profile: ("job", profile.root))
+
+
+def _spawn_in_job(vn, command, job):
+    if not _new(vn):
+        return vn.spawn(command, job=job)
+    return vn.start_in_job(command, job)
+
+
 # -- ports ------------------------------------------------------------------
 
-def test_port_ranges_avoid_the_live_setup_and_felix(vn):
+def test_port_ranges_avoid_the_live_setup_and_felix(vn, tmp_path):
+    ranges, reserved = _ranges(vn, tmp_path / "root")
     live = {8880, 8881, 8882, 2022, 9000}
     felix = set(range(18880, 18900)) | set(range(12022, 12042))
-    assert live <= vn.RESERVED and felix <= vn.RESERVED
+    assert live <= reserved and felix <= reserved
     for kind in ("tts", "stt"):
-        ports = set(vn.PORTS[kind])
-        assert ports and not ports & vn.RESERVED
+        ports = set(ranges[kind])
+        assert ports and not ports & reserved
         assert min(ports) >= 1024 and max(ports) <= 65535
-    assert not set(vn.PORTS["tts"]) & set(vn.PORTS["stt"])
+    assert not set(ranges["tts"]) & set(ranges["stt"])
+    assert ranges["tts"] == list(range(28880, 28900)) and ranges["stt"] == list(range(22022, 22042))
 
 
 def test_port_free_sees_a_listener(vn):
@@ -65,37 +212,47 @@ def test_port_free_sees_a_listener(vn):
         busy.bind(("127.0.0.1", 0))
         busy.listen()
         port = busy.getsockname()[1]
-        assert vn.port_free(port) is False
-    assert vn.port_free(port) is True
+        assert _port_free(vn)(port) is False
+    assert _port_free(vn)(port) is True
 
 
-def test_choose_port_skips_taken_and_busy_ports(vn, monkeypatch):
-    first, second, third = vn.PORTS["tts"][:3]
-    monkeypatch.setattr(vn, "port_free", lambda p: p != first)
-    assert vn.choose_port("tts", taken=set()) == second
-    assert vn.choose_port("tts", taken={second}) == third
+def test_choose_port_skips_taken_and_busy_ports(vn, home, tmp_path, monkeypatch):
+    root = tmp_path / "root"
+    first, second, third = _ranges(vn, root)[0]["tts"][:3]
+    _set_port_free(vn, monkeypatch, lambda p: p != first)
+    assert _choose(vn, root, "tts", set()) == second
+    assert _choose(vn, root, "tts", {second}) == third
 
 
-def test_choose_port_tries_the_setting_first(vn, home, monkeypatch):
-    monkeypatch.setattr(vn, "port_free", lambda p: True)
+def test_choose_port_tries_the_setting_first(vn, home, tmp_path, monkeypatch):
+    root = tmp_path / "root"
+    _set_port_free(vn, monkeypatch, lambda p: True)
     _env_file(home, "VOICEMODE_NATIVE_STT_PORT=23456\n")
-    assert vn.port_candidates("stt")[0] == 23456
-    assert vn.choose_port("stt", taken=set()) == 23456
+    assert _candidates(vn, root, "stt")[0] == 23456
+    assert _choose(vn, root, "stt", set()) == 23456
     monkeypatch.setenv("VOICEMODE_NATIVE_STT_PORT", "24000")
-    assert vn.choose_port("stt", taken=set()) == 24000
+    assert _choose(vn, root, "stt", set()) == 24000
 
 
 @pytest.mark.parametrize("value", ["8880", "2022", "9000", "18880", "12022", "80", "abc", "70000"])
-def test_choose_port_refuses_a_reserved_or_bad_setting(vn, monkeypatch, value):
+def test_choose_port_refuses_a_reserved_or_bad_setting(vn, home, tmp_path, monkeypatch, value):
     monkeypatch.setenv("VOICEMODE_NATIVE_TTS_PORT", value)
     with pytest.raises(vn.VoiceError):
-        vn.port_candidates("tts")
+        _candidates(vn, tmp_path / "root", "tts")
 
 
-def test_choose_port_reports_when_every_port_is_busy(vn, monkeypatch):
-    monkeypatch.setattr(vn, "port_free", lambda p: False)
+def test_choose_port_reports_when_every_port_is_busy(vn, home, tmp_path, monkeypatch):
+    if not _new(vn):
+        monkeypatch.setattr(vn, "port_free", lambda p: False)
+        with pytest.raises(vn.VoiceError, match="No free local port"):
+            vn.choose_port("stt", taken=set())
+        return
+    root = tmp_path / "root"
+    world = FakeWorld(vn, monkeypatch, root)
+    _set_port_free(vn, monkeypatch, lambda p: False)
     with pytest.raises(vn.VoiceError, match="No free local port"):
-        vn.choose_port("stt", taken=set())
+        _ensure(vn, root, _fake_runtime(vn, root))
+    assert not [e for e in world.events if e.startswith("spawn:")]
 
 
 # -- settings ---------------------------------------------------------------
@@ -146,13 +303,8 @@ def test_root_outside_profile_is_refused_unless_allowed(vn, home, tmp_path, monk
 
 
 def test_allow_flag_reaches_the_watchdog(vn, tmp_path, monkeypatch):
-    seen = []
-    monkeypatch.setattr(vn, "process_command", lambda pid: None)
-    monkeypatch.setattr(vn.subprocess, "Popen", lambda args, **kw: seen.append(args) or type("P", (), {"pid": 7})())
     monkeypatch.setattr(vn, "ALLOW_OUTSIDE", True)
-    (tmp_path / "run").mkdir()
-    vn.start_watchdog(tmp_path)
-    assert seen[0][-2:] == ["watch", "--allow-root-outside-profile"]
+    assert _watch_command(vn, monkeypatch, tmp_path)[-2:] == ["watch", "--allow-root-outside-profile"]
 
 
 def test_push_to_talk_starts_natively(vn, home, monkeypatch, capsys):
@@ -191,53 +343,94 @@ def test_runtime_environment_points_at_loopback_ports(vn, tmp_path, monkeypatch)
 def test_service_commands_bind_loopback(vn, tmp_path, monkeypatch):
     monkeypatch.setattr(vn, "WINDOWS", True)
     for kind in ("tts", "stt"):
-        command, marker = vn.service_command(kind, tmp_path, 28880)
+        command, marker = _service_command(vn, kind, tmp_path, 28880)
         assert command[command.index("--host") + 1] == "127.0.0.1"
         assert command[command.index("--port") + 1] == "28880"
         assert marker and any(marker in part for part in command)
 
 
+def _os_kill_calls(source):
+    return [node for node in ast.walk(ast.parse(source))
+            if isinstance(node, ast.Call) and ast.unparse(node.func) == "os.kill"]
+
+
 def test_no_os_kill_zero_anywhere_in_the_launcher():
-    import ast
-    calls = [node for node in ast.walk(ast.parse(SCRIPT.read_text(encoding="utf-8")))
-             if isinstance(node, ast.Call) and ast.unparse(node.func) == "os.kill"]
-    assert calls  # POSIX stop still signals; only the probe with 0 is banned
+    # The check itself sees a probe with 0 (the old `assert calls` guarded against a vacuous
+    # check; the launcher's POSIX stop signals moved into vml_supervisor with Task 8).
+    probe = _os_kill_calls("import os\nos.kill(5, 0)\n")
+    assert probe and probe[0].args[1].value == 0
+    calls = _os_kill_calls(SCRIPT.read_text(encoding="utf-8"))
     assert not [c for c in calls if isinstance(c.args[1], ast.Constant) and c.args[1].value == 0]
 
 
 class FakeWorld:
-    """Fakes process creation and inspection, and records what starts in which order."""
+    """Fakes process creation and inspection, and records what starts in which order: in the
+    launcher (before Task 8) and in vml_supervisor's seams (after it)."""
 
     def __init__(self, vn, monkeypatch, root):
         self.vn, self.root, self.events, self.commands, self.next_pid = vn, root, [], {}, 1000
+        self.observers = []   # f(command, job, kwargs) for every start
+        self.replace = {}     # kind -> f(command, kwargs) returning a real process
+        self.allowed = set()  # real pids a test may signal
         self.commands[vn.os.getpid()] = "python voicemode_native.py launch"
-        monkeypatch.setattr(vn, "spawn", self.spawn)
         # Fake pids are real numbers on this machine: no signal may ever reach them.
+        self._kill = vn.os.kill
         monkeypatch.setattr(vn, "WINDOWS", True)
         monkeypatch.setattr(vn.os, "kill", self.no_signals)
-        monkeypatch.setattr(vn, "process_command", lambda pid: self.commands.get(pid))
-        monkeypatch.setattr(vn, "process_tree", lambda pid: {pid})
-        monkeypatch.setattr(vn, "listener_pids", self.listeners)
-        monkeypatch.setattr(vn, "check_service", lambda kind, port: self.events.append(f"ready:{kind}"))
-        monkeypatch.setattr(vn, "start_watchdog", lambda root: self.events.append("watchdog"))
-        monkeypatch.setattr(vn, "port_free", lambda p: True)
-        monkeypatch.setattr(vn, "kill_tree", self.kill)
-        monkeypatch.setattr(vn, "services_job", lambda root: None)
         monkeypatch.setattr(vn, "connector_job", lambda: None)
-        monkeypatch.setattr(vn, "connector_options", lambda: {})
-        monkeypatch.setattr(vn, "background_options", lambda: {})
+        # The launcher before Task 8 (gone afterwards, hence raising=False).
+        for name, value in (("spawn", self.spawn), ("process_tree", lambda pid: {pid}),
+                            ("listener_pids", self.listeners), ("check_service", self.check),
+                            ("start_watchdog", lambda root: self.events.append("watchdog")),
+                            ("port_free", lambda p: True), ("kill_tree", self.kill),
+                            ("services_job", lambda root: None), ("connector_options", lambda: {}),
+                            ("background_options", lambda: {})):
+            monkeypatch.setattr(vn, name, value, raising=False)
+        # vml_supervisor's seams.
+        _fake_commands(monkeypatch, vn, self.commands.get)
+        for module in (sv_winjob, sv_services, sv_helpers, sv_host):
+            monkeypatch.setattr(module, "spawn", self.spawn_in_job)
+            monkeypatch.setattr(module, "services_job", lambda profile: None)
+        for module in (sv_procs, sv_services, sv_host):
+            monkeypatch.setattr(module, "kill_tree", self.kill)
+        monkeypatch.setattr(sv_services, "process_tree", lambda pid: {pid})
+        monkeypatch.setattr(sv_services, "listener_pids", self.listeners)
+        monkeypatch.setattr(sv_services, "check_service", self.check)
+        monkeypatch.setattr(sv_services, "_start_watchdog",
+                            lambda profile, working_dir, results: self.events.append("watchdog"))
+        _set_port_free(vn, monkeypatch, lambda p: True)
+        monkeypatch.setattr(sv_helpers, "running_commands", lambda: (list(self.commands.items()), None))
+        monkeypatch.setattr(sv_helpers, "HELPER_START_CHECK", 0)
+        for module in (sv_helpers, sv_host):   # the trigger and the listener are Windows' helpers
+            monkeypatch.setattr(module, "PLATFORM", "win32")
 
-    @staticmethod
-    def no_signals(pid, sig):
+    def no_signals(self, pid, sig):
+        if pid in self.allowed:
+            return self._kill(pid, sig)
         raise AssertionError(f"a test sent signal {sig} to real pid {pid}")
 
     def spawn(self, command, job=None, **kwargs):
+        for observe in self.observers:
+            observe(command, job, kwargs)
         lease = self.root / "run" / "clients" / str(self.vn.os.getpid())
         self.events.append(("lease" if lease.exists() else "NO-LEASE"))
+        kind = self.kind_of(command)
+        if kind in self.replace:
+            process = self.replace[kind](command, kwargs)
+            self.allowed.add(process.pid)
+            self.events.append(f"spawn:{kind}")
+            return process
         pid, self.next_pid = self.next_pid, self.next_pid + 1
         self.commands[pid] = " ".join(map(str, command))
-        self.events.append(f"spawn:{self.kind_of(command)}")
-        return FakeProcess(pid)
+        self.events.append(f"spawn:{kind}")
+        return FakeProcess(self, pid)
+
+    def spawn_in_job(self, command, job, **kwargs):
+        return self.spawn(command, job=job, **kwargs), Result("no_job")
+
+    def check(self, kind, port, path=None):
+        self.events.append("ready:" + {"kokoro": "tts", "whisper": "stt"}.get(kind, kind))
+        return True
 
     def kind_of(self, command):
         text = " ".join(map(str, command))
@@ -252,19 +445,25 @@ class FakeWorld:
     def listeners(self, port):
         return {pid for pid, cmd in self.commands.items() if f"--port {port}" in cmd}
 
-    def kill(self, pid):
+    def kill(self, pid, timeout=None):
         self.events.append(f"kill:{self.kind_of(self.commands.get(pid, '').split())}")
         self.commands.pop(pid, None)
 
 
 class FakeProcess:
-    def __init__(self, pid):
-        self.pid = pid
+    """Alive while the world still has its command; wait() is an exit."""
+
+    def __init__(self, world, pid):
+        self.world, self.pid, self.returncode = world, pid, None
 
     def poll(self):
-        return 0
+        if self.returncode is None and self.pid not in self.world.commands:
+            self.returncode = 0
+        return self.returncode
 
     def wait(self, timeout=None):
+        self.world.commands.pop(self.pid, None)
+        self.returncode = 0
         return 0
 
 
@@ -279,6 +478,9 @@ def _non_events(events):
     return [e for e in events if e not in ("lease", "NO-LEASE")]
 
 
+_SETTING_OF = {"pill": "VOICEMODE_PILL", "ptt": "VOICEMODE_PTT_ENABLED", "barge": "VOICEMODE_VOICE_BARGE"}
+
+
 @pytest.mark.parametrize("enabled", [[], ["pill"], ["pill", "ptt"], ["barge"]])
 def test_start_order(vn, home, tmp_path, monkeypatch, enabled):
     root = tmp_path / "root"
@@ -287,14 +489,23 @@ def test_start_order(vn, home, tmp_path, monkeypatch, enabled):
     monkeypatch.setattr(vn, "WINDOWS", True)
     monkeypatch.setattr(vn, "configured_runtime", lambda root, expected: (runtime, True))
     monkeypatch.setattr(vn, "check_models", lambda runtime: None)
-    monkeypatch.setattr(vn, "optional_services", lambda: list(enabled))
+    for kind in enabled:
+        monkeypatch.setenv(_SETTING_OF[kind], "true")
     assert vn.launch(root) == 0
     assert "NO-LEASE" not in world.events          # the lease exists before anything starts
     # The pill is the voice server's to open (pill_autostart, 2026-11-10), never the launcher's.
     started = [k for k in enabled if k != "pill"]
-    expected = (["watchdog", "spawn:tts", "spawn:stt"] + [f"spawn:{k}" for k in started]
-                + ["ready:tts", "ready:stt", "spawn:voice-mode"])
-    assert _non_events(world.events)[:len(expected)] == expected
+    events = _non_events(world.events)
+    assert sorted(e for e in events if e.startswith("spawn:")) == sorted(
+        ["spawn:tts", "spawn:stt", "spawn:voice-mode"] + [f"spawn:{k}" for k in started])
+    # The watchdog first; the services, then their readiness, then voice-mode. The trigger and
+    # the listener start after the services and before voice-mode (since Task 8 after the
+    # services answer, as vml_supervisor orders them; before it, while they loaded).
+    at = events.index
+    assert events[0] == "watchdog"
+    assert at("spawn:tts") < at("spawn:stt") < at("ready:tts") < at("ready:stt") < at("spawn:voice-mode")
+    for kind in started:
+        assert at("spawn:stt") < at(f"spawn:{kind}") < at("spawn:voice-mode")
     assert "spawn:pill" not in world.events
     # The last connector left: every service it started is stopped, the lease is gone.
     stops = [e for e in world.events if e.startswith("kill:")]
@@ -308,9 +519,9 @@ def test_services_are_reused_not_restarted(vn, home, tmp_path, monkeypatch):
     runtime = _fake_runtime(vn, root)
     monkeypatch.setattr(vn, "WINDOWS", True)
     env = vn.runtime_environment(runtime)
-    first = vn.ensure_services(root, runtime, env, optional=[])
+    first = _ensure(vn, root, runtime, env)
     world.events.clear()
-    second = vn.ensure_services(root, runtime, env, optional=[])
+    second = _ensure(vn, root, runtime, env)
     assert first == second
     assert not [e for e in world.events if e.startswith("spawn:")]
 
@@ -319,8 +530,9 @@ def test_two_kinds_never_share_a_port(vn, home, tmp_path, monkeypatch):
     root = tmp_path / "root"
     FakeWorld(vn, monkeypatch, root)
     monkeypatch.setattr(vn, "WINDOWS", True)
-    ports = vn.ensure_services(root, _fake_runtime(vn, root), {}, optional=[])
-    assert ports["tts"] in vn.PORTS["tts"] and ports["stt"] in vn.PORTS["stt"]
+    ports = _ensure(vn, root, _fake_runtime(vn, root))
+    ranges = _ranges(vn, root)[0]
+    assert ports["tts"] in ranges["tts"] and ports["stt"] in ranges["stt"]
 
 
 # -- leases -----------------------------------------------------------------
@@ -335,13 +547,13 @@ def test_live_leases_keeps_live_and_removes_the_rest(vn, tmp_path, monkeypatch):
         31: r"C:\rt\.venv\Scripts\voice-mode.exe",
         41: "notepad.exe",
     }
-    monkeypatch.setattr(vn, "process_command", lambda pid: commands.get(pid))
+    _fake_commands(monkeypatch, vn, lambda pid: commands.get(pid))
     for name in ("11", "12", "21", "41"):
         (clients / name).write_text("")
     (clients / "30").write_text(json.dumps({"child": 31}))  # launcher gone, its voice-mode lives
     (clients / "not-a-pid").write_text("")
     (clients / ".lease-being-written").write_text("")
-    assert sorted(vn.live_leases(run_dir)) == [11, 12, 30]
+    assert sorted(_live_leases(vn, tmp_path)) == [11, 12, 30]
     assert sorted(p.name for p in clients.iterdir()) == [".lease-being-written", "11", "12", "30"]
 
 
@@ -354,24 +566,24 @@ def test_release_stops_services_only_after_the_last_connector(vn, tmp_path, monk
     (clients / str(me)).write_text("")
     (clients / str(other)).write_text("")
     alive = {other: "python voicemode_native.py launch"}
-    monkeypatch.setattr(vn, "process_command", lambda pid: alive.get(pid))
+    _fake_commands(monkeypatch, vn, lambda pid: alive.get(pid))
     stopped = []
-    monkeypatch.setattr(vn, "stop_recorded", lambda run_dir, state: stopped.append(state))
+    _fake_stop_recorded(vn, monkeypatch, stopped.append)
     vn.atomic_json(root / "run" / "state.json", {"tts": {"pid": 5, "port": 28880, "marker": "m"}})
-    vn.release(root)
+    _release(vn, root)
     assert stopped == [] and not (clients / str(me)).exists()
     alive.clear()
-    vn.release(root)
+    _release(vn, root)
     assert stopped == [{"tts": {"pid": 5, "port": 28880, "marker": "m"}}]
 
 
 def test_owned_needs_marker_and_port(vn, monkeypatch):
-    monkeypatch.setattr(vn, "process_command", lambda pid: "python kokoro-onnx-server.py --port 28880")
-    assert vn.owned({"pid": 5, "port": 28880, "marker": "kokoro-onnx-server.py"})
-    assert not vn.owned({"pid": 5, "port": 28881, "marker": "kokoro-onnx-server.py"})
-    assert not vn.owned({"pid": 5, "port": 28880, "marker": "whisper"})
-    assert vn.owned({"pid": 5, "port": None, "marker": "kokoro-onnx-server.py"})  # pill, ptt: no port
-    assert not vn.owned(None) and not vn.owned({"pid": 0, "port": 1, "marker": "x"})
+    _fake_commands(monkeypatch, vn, lambda pid: "python kokoro-onnx-server.py --port 28880")
+    assert _owned(vn, {"pid": 5, "port": 28880, "marker": "kokoro-onnx-server.py"})
+    assert not _owned(vn, {"pid": 5, "port": 28881, "marker": "kokoro-onnx-server.py"})
+    assert not _owned(vn, {"pid": 5, "port": 28880, "marker": "whisper"})
+    assert _owned(vn, {"pid": 5, "port": None, "marker": "kokoro-onnx-server.py"})  # pill, ptt: no port
+    assert not _owned(vn, None) and not _owned(vn, {"pid": 0, "port": 1, "marker": "x"})
 
 
 # -- runtime selection ------------------------------------------------------
@@ -486,7 +698,7 @@ def test_lease_records_its_runtime(vn, home, tmp_path, monkeypatch):
     root = tmp_path / "root"
     FakeWorld(vn, monkeypatch, root)
     runtime = _fake_runtime(vn, root)
-    vn.ensure_services(root, runtime, {}, optional=[])
+    _ensure(vn, root, runtime)
     lease = json.loads((root / "run" / "clients" / str(vn.os.getpid())).read_text())
     assert lease["runtime"] == str(runtime)
     state = json.loads((root / "run" / "state.json").read_text())
@@ -499,7 +711,7 @@ def test_a_runtime_replaced_meanwhile_is_not_started(vn, home, tmp_path, monkeyp
     runtime = _fake_runtime(vn, root)
     (runtime / ".complete.json").unlink()
     with pytest.raises(vn.VoiceError, match="replaced"):
-        vn.ensure_services(root, runtime, {}, optional=[])
+        _ensure(vn, root, runtime)
     assert not [e for e in world.events if e.startswith("spawn:")]
 
 
@@ -512,7 +724,7 @@ def test_prune_keeps_active_leased_and_serving_runtimes(vn, tmp_path, monkeypatc
     (clients / "50").write_text(json.dumps({"runtime": str(root / "runtime" / "leased")}))
     (clients / "51").write_text(json.dumps({"runtime": str(root / "runtime" / "old2")}))  # dead
     commands = {50: "python voicemode_native.py launch", 60: "python kokoro-onnx-server.py --port 28880"}
-    monkeypatch.setattr(vn, "process_command", lambda pid: commands.get(pid))
+    _fake_commands(monkeypatch, vn, lambda pid: commands.get(pid))
     vn.atomic_json(root / "run" / "state.json", {"tts": {
         "pid": 60, "port": 28880, "marker": "kokoro-onnx-server.py", "runtime": str(root / "runtime" / "serving")}})
     removed = vn.prune_runtimes(root, "active")
@@ -578,7 +790,7 @@ def _serving(vn, monkeypatch, tmp_path):
     world = FakeWorld(vn, monkeypatch, root)
     runtime = _fake_runtime(vn, root)
     monkeypatch.setattr(vn, "runtime_environment", lambda runtime, ports=None: {})
-    ports = vn.ensure_services(root, runtime, {}, optional=[])
+    ports = _ensure(vn, root, runtime)
     return root, world, ports
 
 
@@ -591,7 +803,7 @@ def test_watchdog_restarts_a_crashed_service_on_the_same_port(vn, home, tmp_path
     old = _state(root)["tts"]["pid"]
     world.commands.pop(old)  # it crashed
     world.events.clear()
-    assert vn.watch_tick(root, {}) is True
+    assert _watch_tick(vn, root, {}) is True
     entry = _state(root)["tts"]
     assert entry["pid"] != old and entry["port"] == ports["tts"]
     assert [e for e in world.events if e.startswith("spawn:")] == ["spawn:tts"]
@@ -601,22 +813,22 @@ def test_watchdog_restarts_a_crashed_service_on_the_same_port(vn, home, tmp_path
 def test_watchdog_does_not_restart_on_a_taken_port_or_too_often(vn, home, tmp_path, monkeypatch):
     root, world, ports = _serving(vn, monkeypatch, tmp_path)
     world.commands.pop(_state(root)["stt"]["pid"])
-    monkeypatch.setattr(vn, "port_free", lambda p: False)
+    _set_port_free(vn, monkeypatch, lambda p: False)
     world.events.clear()
-    assert vn.watch_tick(root, {}) is True
+    assert _watch_tick(vn, root, {}) is True
     assert not [e for e in world.events if e.startswith("spawn:")]
-    monkeypatch.setattr(vn, "port_free", lambda p: True)
+    _set_port_free(vn, monkeypatch, lambda p: True)
     restarts = {}
-    for _ in range(vn.MAX_RESTARTS + 2):
+    for _ in range(_max_restarts(vn, root) + 2):
         world.commands.pop(_state(root)["stt"]["pid"], None)
-        vn.watch_tick(root, restarts)
-    assert len([e for e in world.events if e == "spawn:stt"]) == vn.MAX_RESTARTS
+        _watch_tick(vn, root, restarts)
+    assert len([e for e in world.events if e == "spawn:stt"]) == _max_restarts(vn, root)
 
 
 def test_watchdog_stops_everything_when_no_lease_is_left(vn, home, tmp_path, monkeypatch):
     root, world, ports = _serving(vn, monkeypatch, tmp_path)
     (root / "run" / "clients" / str(vn.os.getpid())).unlink()
-    assert vn.watch_tick(root, {}) is False
+    assert _watch_tick(vn, root, {}) is False
     assert sorted(e for e in world.events if e.startswith("kill:")) == ["kill:stt", "kill:tts"]
 
 
@@ -632,17 +844,10 @@ def test_voice_mode_starts_in_the_runtime_folder_not_the_clients(vn, home, tmp_p
     client.mkdir(parents=True)
     monkeypatch.chdir(client)
     seen = {}
-    plain = world.spawn
-
-    def spawn(command, job=None, **kwargs):
-        if world.kind_of(command) == "voice-mode":
-            seen.update(kwargs)
-        return plain(command, job=job, **kwargs)
-
-    monkeypatch.setattr(vn, "spawn", spawn)
+    world.observers.append(lambda command, job, kwargs: world.kind_of(command) == "voice-mode"
+                           and seen.update(kwargs))
     monkeypatch.setattr(vn, "configured_runtime", lambda root, expected: (runtime, True))
     monkeypatch.setattr(vn, "check_models", lambda runtime: None)
-    monkeypatch.setattr(vn, "optional_services", lambda: [])
     assert vn.launch(root) == 0
     assert Path(seen["cwd"]) == runtime
     assert seen["env"]["VOICEMODE_CLIENT_FOLDER"] == str(client)
@@ -840,7 +1045,11 @@ def test_switch_on_writes_the_setting_and_starts_the_service_for_a_running_conne
     assert f"{name}=true" in s.env_file()
     assert [e for e in s.events if e.startswith("spawn:")] == [f"spawn:{kind}"]
     entry = s.state()[kind]
-    assert vn.owned(entry) and entry["runtime"] == str(s.runtime)
+    assert _owned(vn, entry)
+    # It runs from the serving runtime. A pill record names it; the trigger's and the
+    # listener's records (vml_supervisor helpers since Task 8) carry it in their command.
+    assert (entry["runtime"] == str(s.runtime) if "runtime" in entry or not _new(vn)
+            else str(s.runtime) in " ".join(entry["command"]))
     out = capsys.readouterr().out
     assert f"started (process {entry['pid']})" in out
     s.events.clear()
@@ -852,15 +1061,8 @@ def test_switch_on_writes_the_setting_and_starts_the_service_for_a_running_conne
 def test_switch_starts_into_the_services_job_like_ensure_services(vn, home, tmp_path, monkeypatch):
     s = Switch(vn, home, tmp_path, monkeypatch)
     jobs, envs = [], []
-    plain = s.world.spawn
-
-    def spawn(command, job=None, **kwargs):
-        jobs.append(job)
-        envs.append(kwargs["env"])
-        return plain(command, job=job, **kwargs)
-
-    monkeypatch.setattr(vn, "spawn", spawn)
-    monkeypatch.setattr(vn, "services_job", lambda root: ("job", root))
+    s.world.observers.append(lambda command, job, kwargs: jobs.append(job) or envs.append(kwargs["env"]))
+    _fake_services_job(vn, monkeypatch)
     vn.switch(s.root, "pill", "on")
     assert jobs == [("job", s.root)]
     assert envs[0]["VOICEMODE_PILL"] == "true"   # the window checks it; a stale false must not stop it
@@ -1007,16 +1209,10 @@ def test_launcher_env_reaches_voice_mode_and_the_pill_backend(vn, home, tmp_path
     world = FakeWorld(vn, monkeypatch, root)
     runtime = _fake_runtime(vn, root)
     envs = {}
-    plain = world.spawn
-
-    def spawn(command, job=None, **kwargs):
-        envs[world.kind_of(command)] = kwargs["env"]
-        return plain(command, job=job, **kwargs)
-
-    monkeypatch.setattr(vn, "spawn", spawn)
+    world.observers.append(lambda command, job, kwargs: envs.update({world.kind_of(command): kwargs["env"]}))
     monkeypatch.setattr(vn, "configured_runtime", lambda root, expected: (runtime, True))
     monkeypatch.setattr(vn, "check_models", lambda runtime: None)
-    monkeypatch.setattr(vn, "optional_services", lambda: ["pill"])
+    monkeypatch.setenv("VOICEMODE_PILL", "true")
     assert vn.launch(root) == 0
     # The pill window is now started by voice-mode itself (pill_autostart), so its backend
     # inherits voice-mode's environment: reaching voice-mode is reaching the pill.
@@ -1161,16 +1357,9 @@ def test_voice_mode_gets_the_control_channel_and_streaming_settings(vn, home, tm
     world = FakeWorld(vn, monkeypatch, root)
     runtime = _fake_runtime(vn, root)
     envs = {}
-    plain = world.spawn
-
-    def spawn(command, job=None, **kwargs):
-        envs[world.kind_of(command)] = kwargs["env"]
-        return plain(command, job=job, **kwargs)
-
-    monkeypatch.setattr(vn, "spawn", spawn)
+    world.observers.append(lambda command, job, kwargs: envs.update({world.kind_of(command): kwargs["env"]}))
     monkeypatch.setattr(vn, "configured_runtime", lambda root, expected: (runtime, True))
     monkeypatch.setattr(vn, "check_models", lambda runtime: None)
-    monkeypatch.setattr(vn, "optional_services", lambda: [])
     assert vn.launch(root) == 0
     assert envs["voice-mode"]["VOICEMODE_CONTROL_CHANNEL_ENABLED"] == "true"
     assert envs["voice-mode"]["VOICEMODE_STREAMING_ENABLED"] == "false"
@@ -1342,18 +1531,25 @@ class _FakePopen:
 
     def __init__(self, command, **kwargs):
         self.pid, self._handle = 4242, 7
+        self.stdin = self.stdout = self.stderr = None
 
     def kill(self):
         _FakePopen.killed.append(self.pid)
 
+    def wait(self, timeout=None):
+        return -9
+
 
 def test_a_failed_job_assignment_kills_the_child_and_raises(vn, monkeypatch):
     monkeypatch.setattr(vn, "WINDOWS", True)
+    monkeypatch.setattr(sv_winjob, "WINDOWS", True)
     monkeypatch.setattr(vn.subprocess, "Popen", _FakePopen)
-    monkeypatch.setattr(vn, "_resume_threads", lambda pid: (_ for _ in ()).throw(AssertionError("resumed")))
+    resumed = lambda pid: (_ for _ in ()).throw(AssertionError("resumed"))  # noqa: E731
+    monkeypatch.setattr(vn, "_resume_threads", resumed, raising=False)
+    monkeypatch.setattr(sv_winjob, "_resume_threads", resumed)
     _FakePopen.killed.clear()
     with pytest.raises(vn.VoiceError, match="Job Object"):
-        vn.spawn(["x.exe"], job=_FakeJob())
+        _spawn_in_job(vn, ["x.exe"], _FakeJob())
     assert _FakePopen.killed == [4242]
 
 
@@ -1363,3 +1559,49 @@ def test_on_parsing_matches_barge_state(vn, monkeypatch, value, on):
     monkeypatch.setattr(vn, "setting", lambda name, default=None: value if name == "VOICEMODE_PILL" else "")
     assert ("pill" in vn.optional_services()) is on
     assert vn.truthy(value) is on
+
+
+# -- carried from FELIX (Task 8) ------------------------------------------------
+
+def test_launch_stops_a_voice_server_that_ignores_the_stop_request(vn, home, tmp_path, monkeypatch):
+    """FELIX 454f20d0e tests/repo/test_voicemode_setup.py
+    test_launch_stops_a_voice_server_that_ignores_the_stop_request, its launch half (the
+    services half is vml_supervisor's test_stop_ends_a_service_that_ignores_the_stop_request).
+    A stop request reaches launch; voice-mode ignores the SIGTERM launch forwards; after
+    STOP_TIMEOUT launch kills it, releases its lease, and the last connector's services stop.
+    Adapted: the speech services are FakeWorld's; voice-mode is a real process."""
+    import signal
+    import subprocess
+    import threading
+    import time
+    root = tmp_path / "root"
+    world = FakeWorld(vn, monkeypatch, root)
+    runtime = _fake_runtime(vn, root)
+    monkeypatch.setattr(vn, "STOP_TIMEOUT", 1)
+    monkeypatch.setattr(vn, "configured_runtime", lambda root, expected: (runtime, True))
+    monkeypatch.setattr(vn, "check_models", lambda runtime: None)
+    begin = []
+    # This signals the whole test process, so it must not outlive this test. It starts once the
+    # voice server is ignoring the signal.
+    stop_request = threading.Timer(0.5, lambda: signal.raise_signal(signal.SIGTERM))
+
+    def voice_mode(command, kwargs):
+        child = subprocess.Popen([sys.executable, "-c",
+                                  "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+                                  "print('ready', flush=True); time.sleep(60)"],
+                                 stdout=subprocess.PIPE, text=True)
+        assert child.stdout.readline().strip() == "ready"
+        begin.append(time.monotonic())
+        stop_request.start()
+        return child
+
+    world.replace["voice-mode"] = voice_mode
+    try:
+        assert vn.launch(root) == -signal.SIGKILL
+    finally:
+        stop_request.cancel()
+        if stop_request.is_alive():
+            stop_request.join()  # A timer already past its check would still send the signal.
+    assert time.monotonic() - begin[0] < 15
+    assert json.loads((root / "run/state.json").read_text()) == {}
+    assert sorted(e for e in world.events if e.startswith("kill:")) == ["kill:stt", "kill:tts"]
