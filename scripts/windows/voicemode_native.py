@@ -8,7 +8,11 @@ hash-locked uv sync, atomic runtime selection, the pinned whisper.cpp zip, model
 links, connector_options, process_tree and kill_tree, leases and the watchdog,
 port_free. Copied rather than imported, and changed for a personal install: its own
 folder and ports, the user's home and settings, voicemode-local's patches/apply.py,
-optional pill and push-to-talk services, and Job Objects (new here).
+optional pill and push-to-talk services, and Job Objects (new here). Since Task 8 of the
+shared-supervisor plan the lifecycle (leases, ports, starting, watching, stopping, Job
+Objects, the Windows voice host) is vml_supervisor's, beside scripts/ in this checkout, and
+the values are this install's profile, vml_profiles/claude.py. This file builds the profile,
+decides the settings, words the package's Results, and keeps setup, the switches and the pill.
 
 Commands
   setup   install a runtime into <root>\\runtime\\<digest>-<random>, select it in active.json
@@ -16,8 +20,10 @@ Commands
           enabled, then voice-mode on this process's stdin and stdout
   serve   the leased speech services only, until stdin closes (diagnosis and tests)
   status  what is installed and running; starts nothing
-  stop    stop this install's services
-  watch   internal: stops the services once no connector is left, then exits
+  stop    stop this install's voice host, services and helpers
+  watch   internal (POSIX): stops the services once no connector is left, then exits
+  host    internal (Windows): `host <profile file>`, the voice host vml_supervisor starts
+          outside every chat; it owns the services and helpers until no connector is left
   barge on|off|status, pill on|off|status, ptt on|off|status
           the native switch: writes VOICEMODE_VOICE_BARGE / VOICEMODE_PILL /
           VOICEMODE_PTT_ENABLED to voicemode.env and, while a connector runs, starts or stops
@@ -37,13 +43,17 @@ and 22022-22041 (STT), or a port set in VOICEMODE_NATIVE_TTS_PORT / _STT_PORT. N
 8880, 8881, 8882, 2022 or 9000 (the WSL and Docker setup), nor FELIX's 18880-18899
 and 12022-12041.
 
-Lifetime: a connector holds a lease while it runs. The services, the pill and the
-listener live in one named Job Object per install that kills them when its last handle
-closes; every connector and the watchdog hold a handle. The watchdog restarts a crashed
-TTS or STT service on its own port, at most MAX_RESTARTS times in RESTART_WINDOW
-seconds; past that, the next connector starts a new one. voice-mode lives in its
-connector's own Job Object, so it dies with the connector. Never os.kill(pid, 0): on
-Windows that ends the process instead of checking it.
+Lifetime: a connector holds a lease while it runs. On Windows the services, the trigger and
+the listener are children of one voice host per install, started through Windows' process
+service so that it belongs to no chat's job; they live in one named Job Object the host holds,
+and the host ends them all once no lease is left. It restarts a crashed TTS or STT service on
+its own port, at most 3 times in 300 seconds, and every connector starts the host again when it
+ended anyway. The trigger and the listener follow their modes: launch writes the ones its
+settings decide to run\modes.json, a switch writes its own, and the host's next look applies
+them. Elsewhere (the tests) the connector starts them, with a watchdog. voice-mode lives in its
+connector's own Job Object, so it dies with the connector; the pill window too is started by
+voice-mode (or a switch), never by launch. Never os.kill(pid, 0): on Windows that ends the
+process instead of checking it.
 
 Reading other processes needs psutil, which only the runtime has: main() runs itself
 again with the runtime's Python when the Python it started under lacks it.
@@ -63,14 +73,13 @@ import platform
 import re
 import shutil
 import signal
-import socket
 import subprocess
 import sys
 import tempfile
 import time
 import zipfile
 from urllib.error import URLError
-from urllib.request import ProxyHandler, build_opener, urlopen
+from urllib.request import urlopen
 
 WINDOWS = sys.platform == "win32"
 SCRIPT = Path(__file__).resolve()
@@ -92,14 +101,11 @@ from vml_supervisor import procs, winjob  # noqa: E402
 from vml_supervisor import services as sv_services  # noqa: E402
 from vml_supervisor import state as sv_state  # noqa: E402
 from vml_supervisor.profile import BASE_RESERVED_PORTS  # noqa: E402
+from vml_supervisor.state import atomic_json, exclusive  # noqa: E402,F401  (setup's lock and records)
 
 LOOPBACK = "127.0.0.1"
 LOCAL_HOSTS = "127.0.0.1,localhost,::1"
 PROXY_VARIABLES = ("http_proxy", "https_proxy", "all_proxy", "ftp_proxy")
-# Ours, tried in order. FELIX's are 18880+ and 12022+; the live WSL and Docker setup
-# owns 8880, 8881, 8882, 2022 and 9000.
-PORTS = {"tts": list(range(28880, 28900)), "stt": list(range(22022, 22042))}
-RESERVED = frozenset({8880, 8881, 8882, 2022, 9000} | set(range(18880, 18900)) | set(range(12022, 12042)))
 PORT_SETTINGS = {"tts": "VOICEMODE_NATIVE_TTS_PORT", "stt": "VOICEMODE_NATIVE_STT_PORT"}
 SPEECH = ("tts", "stt")
 OPTIONAL = ("pill", "ptt", "barge")
@@ -115,7 +121,6 @@ SWITCH_TITLES = {"barge": "Interrupt by voice", "pill": "The voice pill", "ptt":
 ENV_SETTINGS = "VOICEMODE_NATIVE_ENV_SETTINGS"
 BARGE_COMMAND_SETTING = "VOICEMODE_BARGE_CONTROL_COMMAND"
 STOP_WAIT = 5  # seconds a pill window gets to close on its stop event
-LAUNCH_MARKERS = ("voicemode_native.py launch", "voicemode_native.py serve")
 
 LAYOUT = 1
 RUNTIMES = "runtime"
@@ -126,9 +131,6 @@ REQUIRED_FILES = (
     "dependencies.json",
     *(("services/whisper/whisper-server.exe",) if WINDOWS else ()),
 )
-WATCH_INTERVAL = 3
-MAX_RESTARTS = 3
-RESTART_WINDOW = 300
 ALLOW_OUTSIDE = False  # --allow-root-outside-profile
 # Kokoro synthesises one short text into a buffer; nothing is played (FELIX's setup check).
 SYNTH_CHECK = (
@@ -140,7 +142,6 @@ SYNTH_CHECK = (
     "    sys.exit('Kokoro produced no audio')\n"
     "print(f'Kokoro synthesised {len(samples)} samples at {rate} Hz into memory; no sound was output')\n"
 )
-START_TIMEOUT = 60
 STOP_TIMEOUT = 5
 MAX_ESPEAK_PATH = 160
 # Windows' 260-character path limit; FELIX measured its longest runtime file at 125
@@ -151,9 +152,6 @@ DEFAULT_VOICE = "af_sky"
 PACKAGE_INDEX = "https://pypi.org/simple/"
 EXIT_OFF_NETWORK = 69
 STOP_SIGNALS = {getattr(signal, name) for name in ("SIGTERM", "SIGINT", "SIGHUP") if hasattr(signal, name)}
-
-# Speech-service checks never go through a proxy, whatever the environment says.
-_local_opener = build_opener(ProxyHandler({}))
 
 
 class OffNetwork(RuntimeError):
@@ -283,33 +281,6 @@ def on_path(name):
     return None
 
 
-@contextlib.contextmanager
-def exclusive(path):
-    """Hold a lock file for the block; released at process end on both systems."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a+") as lock:
-        if sys.platform == "win32":  # the real OS, whatever WINDOWS is set to
-            import msvcrt
-
-            while True:
-                try:
-                    lock.seek(0)
-                    msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
-                    break
-                except OSError:
-                    time.sleep(0.2)
-            try:
-                yield
-            finally:
-                lock.seek(0)
-                msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1)
-        else:
-            import fcntl
-
-            fcntl.flock(lock, fcntl.LOCK_EX)
-            yield
-
-
 def url(port):
     return f"http://{LOOPBACK}:{port}/v1"
 
@@ -378,10 +349,6 @@ def package_index_reachable():
             return True
     except (URLError, TimeoutError, ConnectionError):
         return False
-
-
-def atomic_json(path, value):
-    atomic_write(path, (json.dumps(value) + "\n").encode("utf-8"))
 
 
 def atomic_write(path, data):
@@ -458,7 +425,7 @@ def runtime_environment(runtime, ports=None):
     """The user's environment, minus proxies, pointed at this install's own services, with
     the native switch as the barge control command (the voice_barge tool and the pill's
     toggle run it)."""
-    ports = ports or {kind: PORTS[kind][0] for kind in SPEECH}
+    ports = ports or {"tts": profile_values.TTS_PORTS[0], "stt": profile_values.STT_PORTS[0]}
     env = {key: value for key, value in os.environ.items()
            if key.lower() not in PROXY_VARIABLES and key.lower() != "no_proxy"
            and key not in ("PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP", "PYTHONUSERBASE")}
@@ -684,318 +651,17 @@ def prune_runtimes(root, active):
         return removed
 
 
-# -- Windows Job Objects -------------------------------------------------------
+# -- the optional processes' commands (vml_profiles/claude.py holds them) ---------------
 
-class Job:
-    """A Windows Job Object that ends every process in it when its last handle closes.
-
-    Named, it is shared: every process that opens the name holds a handle, and the
-    processes in it outlive all but the last of them. With silent_breakaway only the
-    processes assigned to it are in it, not what they start: for a parent whose child
-    starts processes that must live in jobs of their own (a process already in a job can
-    only join one nested inside it). With breakaway, a child leaves the job only when it is
-    created with CREATE_BREAKAWAY_FROM_JOB, as spawn() asks for: a connector's voice-mode runs
-    the native switch, and what that starts belongs in the services' job, not the connector's.
-    """
-
-    def __init__(self, name=None, silent_breakaway=False, breakaway=False):
-        import ctypes
-        from ctypes import wintypes
-
-        self._ctypes = ctypes
-        k = self._kernel = ctypes.WinDLL("kernel32", use_last_error=True)
-        k.CreateJobObjectW.restype = wintypes.HANDLE
-        k.CreateJobObjectW.argtypes = (wintypes.LPVOID, wintypes.LPCWSTR)
-        k.SetInformationJobObject.argtypes = (wintypes.HANDLE, ctypes.c_int, wintypes.LPVOID, wintypes.DWORD)
-        k.AssignProcessToJobObject.argtypes = (wintypes.HANDLE, wintypes.HANDLE)
-        k.CloseHandle.argtypes = (wintypes.HANDLE,)
-
-        class Basic(ctypes.Structure):
-            _fields_ = [("PerProcessUserTimeLimit", ctypes.c_int64), ("PerJobUserTimeLimit", ctypes.c_int64),
-                        ("LimitFlags", wintypes.DWORD), ("MinimumWorkingSetSize", ctypes.c_size_t),
-                        ("MaximumWorkingSetSize", ctypes.c_size_t), ("ActiveProcessLimit", wintypes.DWORD),
-                        ("Affinity", ctypes.c_size_t), ("PriorityClass", wintypes.DWORD),
-                        ("SchedulingClass", wintypes.DWORD)]
-
-        class Extended(ctypes.Structure):
-            _fields_ = [("BasicLimitInformation", Basic), ("IoInfo", ctypes.c_uint64 * 6),
-                        ("ProcessMemoryLimit", ctypes.c_size_t), ("JobMemoryLimit", ctypes.c_size_t),
-                        ("PeakProcessMemoryUsed", ctypes.c_size_t), ("PeakJobMemoryUsed", ctypes.c_size_t)]
-
-        self.handle = k.CreateJobObjectW(None, name)
-        if not self.handle:
-            raise ctypes.WinError(ctypes.get_last_error())
-        info = Extended()
-        # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, plus BREAKAWAY_OK | SILENT_BREAKAWAY_OK when asked.
-        info.BasicLimitInformation.LimitFlags = (0x2000 | (0x1800 if silent_breakaway else 0)
-                                                 | (0x800 if breakaway else 0))
-        if not k.SetInformationJobObject(self.handle, 9, ctypes.byref(info), ctypes.sizeof(info)):
-            error = ctypes.get_last_error()
-            self.close()
-            raise ctypes.WinError(error)
-
-    def assign(self, process_handle):
-        if not self._kernel.AssignProcessToJobObject(self.handle, int(process_handle)):
-            raise self._ctypes.WinError(self._ctypes.get_last_error())
-
-    def close(self):
-        if self.handle:
-            self._kernel.CloseHandle(self.handle)
-            self.handle = None
+def optional_command(kind, runtime, root=None):
+    """(command, marker) of the pill window, the push-to-talk listener or the barge trigger;
+    see vml_profiles.claude.optional_command. root is the install; by default the runtime's."""
+    return profile_values.optional_command(kind, runtime, root, windows=WINDOWS)
 
 
-def _resume_threads(pid):
-    """Resume a process created suspended: every thread it owns (it has one)."""
-    import ctypes
-    from ctypes import wintypes
-
-    k = ctypes.WinDLL("kernel32", use_last_error=True)
-    k.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
-    k.OpenThread.restype = wintypes.HANDLE
-    k.ResumeThread.argtypes = (wintypes.HANDLE,)
-    k.CloseHandle.argtypes = (wintypes.HANDLE,)
-
-    class Entry(ctypes.Structure):
-        _fields_ = [("dwSize", wintypes.DWORD), ("cntUsage", wintypes.DWORD),
-                    ("th32ThreadID", wintypes.DWORD), ("th32OwnerProcessID", wintypes.DWORD),
-                    ("tpBasePri", wintypes.LONG), ("tpDeltaPri", wintypes.LONG), ("dwFlags", wintypes.DWORD)]
-
-    snapshot = k.CreateToolhelp32Snapshot(0x4, 0)  # TH32CS_SNAPTHREAD
-    if not snapshot or snapshot == wintypes.HANDLE(-1).value:
-        raise ctypes.WinError(ctypes.get_last_error())
-    resumed = 0
-    try:
-        entry = Entry()
-        entry.dwSize = ctypes.sizeof(Entry)
-        more = k.Thread32First(snapshot, ctypes.byref(entry))
-        while more:
-            if entry.th32OwnerProcessID == pid:
-                thread = k.OpenThread(0x2, False, entry.th32ThreadID)  # THREAD_SUSPEND_RESUME
-                if thread:
-                    if k.ResumeThread(thread) != 0xFFFFFFFF:
-                        resumed += 1
-                    k.CloseHandle(thread)
-            more = k.Thread32Next(snapshot, ctypes.byref(entry))
-    finally:
-        k.CloseHandle(snapshot)
-    if not resumed:
-        raise RuntimeError(f"could not resume process {pid}")
-
-
-CREATE_BREAKAWAY_FROM_JOB = 0x01000000
-
-
-def spawn(command, job=None, **kwargs):
-    """Popen; on Windows with a job, created suspended and put in the job before its first
-    instruction, so nothing it starts can escape the job. It is first asked to leave the job
-    this process is in (a process in an unrelated job cannot join ours); where that job
-    forbids it, the child stays in it too, and joining ours works only if it is ours."""
-    if not (WINDOWS and job is not None):
-        return subprocess.Popen(command, **kwargs)
-    flags = kwargs.pop("creationflags", 0) | 0x4  # CREATE_SUSPENDED
-    try:
-        process = subprocess.Popen(command, creationflags=flags | CREATE_BREAKAWAY_FROM_JOB, **kwargs)
-    except PermissionError:  # this process's job does not allow breakaway
-        process = subprocess.Popen(command, creationflags=flags, **kwargs)
-    try:
-        try:
-            job.assign(process._handle)
-        except OSError as error:
-            # Outside the job nothing would ever stop it: it never runs a single instruction.
-            raise VoiceError(f"Could not put {Path(command[0]).name} in its Job Object ({error}); "
-                             "it was not started.",
-                             "Start Claude Code from a normal desktop session, then restart the "
-                             "voice connector.") from error
-        _resume_threads(process.pid)
-    except BaseException:
-        process.kill()
-        raise
-    return process
-
-
-_jobs = {}
-
-
-def services_job(root):
-    """This install's shared Job Object for its services, held open for this process's lifetime."""
-    if not WINDOWS:
-        return None
-    if root not in _jobs:
-        name = "Local\\voicemode-local-services-" + hashlib.sha256(str(root).lower().encode()).hexdigest()[:16]
-        _jobs[root] = Job(name)
-    return _jobs[root]
-
-
-def connector_job():
-    """A private Job Object for this connector's own voice-mode: it dies when this process does."""
-    if not WINDOWS:
-        return None
-    if None not in _jobs:
-        _jobs[None] = Job(breakaway=True)
-    return _jobs[None]
-
-
-# -- processes (FELIX's) ------------------------------------------------------
-
-def connector_options():
-    """voice-mode talks to the MCP host over this process's own stdin and stdout. On Windows Python
-    passes those on only when named (FELIX, 2026-11-04: unnamed, `initialize` got no answer in 120 s)."""
-    if not WINDOWS:
-        return {}
-    return {"stdin": sys.stdin, "stdout": sys.stdout, "stderr": sys.stderr,
-            "creationflags": subprocess.CREATE_NO_WINDOW}
-
-
-def background_options():
-    """A process that outlives this one, with no window."""
-    if WINDOWS:
-        return {"creationflags": subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP}
-    return {"start_new_session": True}
-
-
-def _psutil_process(pid):
-    import psutil
-
-    try:
-        return psutil.Process(pid)
-    except (psutil.NoSuchProcess, psutil.AccessDenied):
-        return None
-
-
-def process_command(pid):
-    """A process's command line, or None when it is gone."""
-    if WINDOWS:
-        import psutil
-
-        process = _psutil_process(pid)
-        try:
-            return (" ".join(process.cmdline()) or None) if process else None
-        except psutil.Error:
-            return None
-    result = subprocess.run(["ps", "-ww", "-o", "command=", "-p", str(pid)],
-                            capture_output=True, text=True, check=False)
-    return result.stdout.strip() or None
-
-
-def process_tree(pid):
-    """A process and everything it started. A venv's python.exe starts the real interpreter as a
-    child on Windows, and the child is the one that listens (FELIX, 2026-11-04)."""
-    if not WINDOWS:
-        return {pid}
-    import psutil
-
-    process = _psutil_process(pid)
-    if process is None:
-        return set()
-    try:
-        return {pid, *(child.pid for child in process.children(recursive=True))}
-    except psutil.Error:
-        return {pid}
-
-
-def kill_tree(pid):
-    import psutil
-
-    process = _psutil_process(pid)
-    if process is None:
-        return
-    try:
-        members = [*process.children(recursive=True), process]
-    except psutil.Error:
-        members = [process]
-    for member in members:
-        with contextlib.suppress(psutil.Error):
-            member.kill()
-    psutil.wait_procs(members, timeout=STOP_TIMEOUT)
-
-
-def listener_pids(port):
-    """Process ids listening on a TCP port."""
-    if WINDOWS:
-        import psutil
-
-        return {item.pid for item in psutil.net_connections("tcp")
-                if item.status == psutil.CONN_LISTEN and item.laddr and item.laddr.port == port and item.pid}
-    known = [p for p in ("/usr/sbin/lsof", "/usr/bin/lsof") if os.path.exists(p)]
-    lsof = known[0] if known else shutil.which("lsof") or "lsof"
-    result = subprocess.run([lsof, "-nP", "-t", f"-iTCP:{port}", "-sTCP:LISTEN"],
-                            capture_output=True, text=True, check=False)
-    return {int(line) for line in result.stdout.split() if line.isdigit()}
-
-
-def owned(entry):
-    """A recorded service counts as ours only while its command still matches."""
-    if not isinstance(entry, dict) or not isinstance(entry.get("pid"), int) or entry["pid"] <= 0:
-        return False
-    command = process_command(entry["pid"])
-    if not command or entry.get("marker", "\0") not in command:
-        return False
-    return entry.get("port") is None or f"--port {entry['port']}" in command
-
-
-# -- services ----------------------------------------------------------------
-
-def port_free(port):
-    """True only when nothing answers on the port and it can be bound on loopback."""
-    with contextlib.closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as probe:
-        probe.settimeout(0.5)
-        if probe.connect_ex((LOOPBACK, port)) == 0:
-            return False
-    with contextlib.closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as probe:
-        try:
-            probe.bind((LOOPBACK, port))
-        except OSError:
-            return False
-    return True
-
-
-def port_candidates(kind):
-    """The port from the setting (if any), then our own range."""
-    raw = setting(PORT_SETTINGS[kind])
-    if raw is None:
-        return list(PORTS[kind])
-    try:
-        port = int(str(raw).strip())
-    except ValueError:
-        port = None
-    if port is None or not 1024 <= port <= 65535 or port in RESERVED:
-        raise VoiceError(f"{PORT_SETTINGS[kind]}={raw!r} is not usable: give a port from 1024 to 65535 "
-                         "outside 8880-8882, 2022, 9000 and FELIX's 18880-18899 and 12022-12041.",
-                         f"Fix or remove {PORT_SETTINGS[kind]}, then restart the voice connector.")
-    return [port, *[p for p in PORTS[kind] if p != port]]
-
-
-def choose_port(kind, taken):
-    candidates = port_candidates(kind)
-    port = next((p for p in candidates if p not in taken and port_free(p)), None)
-    if port is None:
-        raise VoiceError(f"No free local port for the {kind.upper()} service "
-                         f"(tried {candidates[0]} to {candidates[-1]}).",
-                         f"Close what uses them, or set {PORT_SETTINGS[kind]}, then restart.")
-    return port
-
-
-def service_command(kind, runtime, port):
-    """(command, marker): the marker is what identifies the process as ours later."""
-    if kind == "tts":
-        script = runtime / "services/kokoro-onnx-server.py"
-        return [str(venv_program(runtime, "python")), str(script), "--host", LOOPBACK, "--port", str(port),
-                "--model-dir", str(runtime / "models/kokoro")], str(script)
-    whisper = str(whisper_program(runtime)) if WINDOWS else (on_path("whisper-server") or "whisper-server")
-    model = runtime / "models/whisper/ggml-base.bin"
-    # No --convert: it needs ffmpeg, and whisper-server will not start without it (FELIX, 2026-11-04).
-    return [whisper, "--host", LOOPBACK, "--port", str(port), "-m", str(model), "-l", "auto",
-            "--inference-path", "/v1/audio/transcriptions"], str(model)
-
-
-def powershell():
-    system = os.environ.get("SystemRoot", r"C:\Windows")
-    return str(Path(system) / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe")
-
-
-def pill_data_dir(root):
-    """The pill window's own folder for this install: log, position, page copy, WebView2."""
-    return Path(root) / "pill"
+powershell = profile_values.powershell
+pill_data_dir = profile_values.pill_data_dir
+ptt_log = profile_values.ptt_log
 
 
 def _long_path(full):
@@ -1054,251 +720,11 @@ def pill_stop_event(root):
     return pill_names(pill_data_dir(root))[1]
 
 
-def ptt_log(root):
-    return Path(root) / "run" / "ptt-listener.log"
-
-
-def optional_command(kind, runtime, root=None):
-    """The pill window, the push-to-talk listener or the barge trigger, which hears the mic
-    through sounddevice here. root is the install; by default the one that holds runtime.
-    The listener runs in native mode: -SenderExe, the runtime's Python running
-    voice_mode.ptt_control_client --stdin, which maps each action, names the control pipe from
-    the environment voice-mode also gets (runtime_environment), checks its owner and server,
-    and writes the command; never the WSL relay. The pipe name is derived on every send,
-    never cached."""
-    if kind == "barge":
-        return ([str(venv_program(runtime, "python")), "-m", "voice_mode.voice_barge", str(runtime / SILERO)],
-                "voice_mode.voice_barge")
-    script = REPO / ("pill-windows.ps1" if kind == "pill" else "ptt-listener-windows.ps1")
-    command = [powershell(), "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script)]
-    root = Path(root) if root is not None else Path(runtime).parent.parent
-    if kind == "ptt":
-        command += ["-SenderExe", str(venv_program(runtime, "python")),
-                    "-SenderArgs", subprocess.list2cmdline(["-m", "voice_mode.ptt_control_client", "--stdin"]),
-                    "-LogPath", str(ptt_log(root))]
-    if kind == "pill":
-        command[2:2] = ["-STA"]
-        # Native mode: the backend is started directly, no wsl.exe. -BackendArgs is one
-        # Windows command-line tail, quoted as CreateProcess expects.
-        command += ["-BackendExe", str(venv_program(runtime, "python")),
-                    "-BackendArgs", subprocess.list2cmdline(["-m", "voice_mode.voice_pill", "--stdio"]),
-                    "-DataDir", str(pill_data_dir(root))]
-    return command, str(script)
-
-
-def valid_response(kind, data):
-    if kind == "tts":
-        return isinstance(data, dict) and isinstance(data.get("data"), list) and any(
-            isinstance(m, dict) and m.get("id") == "kokoro-onnx" for m in data["data"])
-    return isinstance(data, dict) and data.get("status") == "ok"
-
-
-def check_service(kind, port):
-    address = url(port) + "/models" if kind == "tts" else f"http://{LOOPBACK}:{port}/health"
-    try:
-        response = _local_opener.open(address, timeout=2)
-    except (URLError, OSError) as error:
-        raise RuntimeError(f"Local {kind.upper()} service unavailable at {address}: {error}") from error
-    with response:
-        if response.status != 200 or not valid_response(kind, json.load(response)):
-            raise RuntimeError(f"Incompatible local {kind.upper()} service at {address}.")
-
-
-@contextlib.contextmanager
-def service_lock(run_dir):
-    run_dir.mkdir(parents=True, exist_ok=True)
-    with exclusive(run_dir / "services.lock"):
-        yield
-
-
-def live_leases(run_dir):
-    """Connector leases whose launcher, or the voice-mode it started, still runs; the rest go."""
-    clients = run_dir / "clients"
-    clients.mkdir(parents=True, exist_ok=True)
-    alive = []
-    for lease in clients.iterdir():
-        if lease.name.startswith("."):
-            continue  # being written
-        try:
-            pid = int(lease.name)
-        except ValueError:
-            lease.unlink(missing_ok=True)
-            continue
-        command = process_command(pid)
-        record = read_json(lease, {}) if lease.stat().st_size else {}
-        child = record.get("child") if isinstance(record, dict) else None
-        child_command = process_command(child) if isinstance(child, int) and child > 0 else None
-        if (command and any(m in command for m in LAUNCH_MARKERS)) or (child_command and "voice-mode" in child_command):
-            alive.append(pid)
-        else:
-            lease.unlink(missing_ok=True)
-    return alive
-
-
-def stop_recorded(run_dir, state):
-    for kind in list(state):
-        entry = state.pop(kind)
-        if not owned(entry):
-            continue  # gone already, or the pid now belongs to another program
-        if WINDOWS:
-            kill_tree(entry["pid"])
-            continue
-        with contextlib.suppress(ProcessLookupError):
-            os.kill(entry["pid"], signal.SIGTERM)
-        deadline = time.monotonic() + STOP_TIMEOUT
-        while owned(entry) and time.monotonic() < deadline:
-            time.sleep(0.1)
-        if owned(entry):
-            with contextlib.suppress(ProcessLookupError):
-                os.kill(entry["pid"], signal.SIGKILL)
-    atomic_json(run_dir / "state.json", state)
-
-
-def ensure_services(root, runtime, env, optional=None):
-    """Register a lease, make sure the watchdog runs, then start (or reuse) the speech services and
-    the enabled optional ones; wait until both speech services answer. Returns their ports."""
-    # The pill window is the voice server's own job now (patches/pill_autostart.py, at its
-    # first voice turn): the launcher no longer starts it. `pill on` still opens it at once.
-    optional = [k for k in optional_services() if k != "pill"] if optional is None else optional
-    run_dir = root / "run"
-    started = {}
-    job = services_job(root)
-    with service_lock(run_dir):
-        # The lease and the watchdog first: a launcher killed at any later point cannot leave
-        # services without supervision.
-        if not (runtime / ".complete.json").is_file():
-            raise VoiceError(f"The runtime {runtime.name} was replaced while starting.",
-                             "Restart the voice connector.")
-        (run_dir / "clients").mkdir(exist_ok=True)
-        atomic_json(run_dir / "clients" / str(os.getpid()), {"runtime": str(runtime)})
-        start_watchdog(root)
-        state = read_json(run_dir / "state.json", {}) or {}
-        for kind in (*SPEECH, *optional):
-            if owned(state.get(kind)):
-                continue
-            state.pop(kind, None)
-            started[kind] = start_service(kind, root, runtime, env, state, job)
-    deadline = time.monotonic() + START_TIMEOUT
-    for kind in SPEECH:
-        entry = state[kind]
-        while True:
-            try:
-                check_service(kind, entry["port"])
-                # The answer must come from the process we recorded, not another that took the port.
-                listeners = listener_pids(entry["port"])
-                if not process_tree(entry["pid"]) & listeners or not owned(entry):
-                    raise VoiceError(f"Something other than our {kind.upper()} service answered on "
-                                     f"{LOOPBACK}:{entry['port']} (ours is process {entry['pid']}; listening: "
-                                     f"{sorted(listeners) or 'none found'}); voice was not connected to it.",
-                                     f"Restart the voice connector, or set {PORT_SETTINGS[kind]}.")
-                break
-            except VoiceError:
-                raise
-            except RuntimeError as error:
-                process = started.get(kind)
-                if process is not None and process.poll() is not None:
-                    raise VoiceError(f"The local {kind.upper()} service stopped while starting.",
-                                     f"See {entry['log']}.") from error
-                if time.monotonic() >= deadline:
-                    raise VoiceError(f"Local speech services did not become ready: {error}",
-                                     f"See {entry['log']}.") from error
-                time.sleep(0.5)
-    return {kind: state[kind]["port"] for kind in SPEECH}
-
-
-def start_service(kind, root, runtime, env, state, job):
-    """Start one service into the install's job and record it in run\\state.json. The caller
-    holds the service lock and has checked that none of this kind is running."""
-    run_dir = root / "run"
-    if kind in SPEECH:
-        # A service still loading has not bound its port yet: never pick it twice.
-        port = choose_port(kind, {e.get("port") for e in state.values() if isinstance(e, dict)})
-        command, marker = service_command(kind, runtime, port)
-    else:
-        port = None
-        command, marker = optional_command(kind, runtime, root)
-    log = run_dir / f"{kind}.log"
-    with log.open("a") as output:
-        process = spawn(command, job=job, env=env, stdin=subprocess.DEVNULL, stdout=output,
-                        stderr=output, **background_options())
-    state[kind] = {"pid": process.pid, "port": port, "marker": marker, "log": str(log),
-                   "command": [str(c) for c in command], "runtime": str(runtime)}
-    try:
-        atomic_json(run_dir / "state.json", state)
-    except BaseException:
-        process.kill()
-        raise
-    return process
-
-
-def start_watchdog(root):
-    """Start (once) the process that stops the services when every connector is gone."""
-    pid_file = root / "run" / "watch.pid"
-    with contextlib.suppress(ValueError, OSError):
-        command = process_command(int(pid_file.read_text()))
-        if command and "voicemode_native.py watch" in command:
-            return
-    env = dict(os.environ, VOICEMODE_NATIVE_ROOT=str(root))
-    command = [sys.executable, str(SCRIPT), "watch", *(["--allow-root-outside-profile"] if ALLOW_OUTSIDE else [])]
-    process = subprocess.Popen(command, env=env, stdin=subprocess.DEVNULL,
-                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **background_options())
-    pid_file.write_text(str(process.pid))
-
+# -- watch and stop --------------------------------------------------------------
 
 def watch(root):
     """POSIX: vml_supervisor's watchdog for this install (Windows has the voice host instead)."""
     return sv_host.watch_main(profile_of(root))
-
-
-def _watch_log(run_dir, line):
-    with (run_dir / "watch.log").open("a", encoding="utf-8") as log:
-        log.write(time.strftime("%Y-%m-%d %H:%M:%S ") + line + "\n")
-
-
-def watch_tick(root, restarts):
-    """One look: False once everything is stopped. A TTS or STT service that died is started again
-    with its recorded command on its recorded port, at most MAX_RESTARTS times in RESTART_WINDOW
-    seconds, and only while that port is free."""
-    run_dir = root / "run"
-    with service_lock(run_dir):
-        if not live_leases(run_dir):
-            stop_recorded(run_dir, read_json(run_dir / "state.json", {}) or {})
-            return False
-        state = read_json(run_dir / "state.json", {}) or {}
-        changed = False
-        now = time.monotonic()
-        for kind in SPEECH:
-            entry = state.get(kind)
-            if not isinstance(entry, dict) or not entry.get("command") or owned(entry):
-                continue
-            recent = [t for t in restarts.get(kind, []) if now - t < RESTART_WINDOW]
-            restarts[kind] = recent
-            if len(recent) >= MAX_RESTARTS:
-                continue  # the next connector starts a new one
-            if not port_free(entry["port"]):
-                _watch_log(run_dir, f"{kind} died; port {entry['port']} is taken, not restarted")
-                continue
-            with open(entry["log"], "a") as output:
-                process = spawn(entry["command"], job=services_job(root),
-                                env=runtime_environment(Path(entry["runtime"])), stdin=subprocess.DEVNULL,
-                                stdout=output, stderr=output, **background_options())
-            _watch_log(run_dir, f"restarted {kind} on port {entry['port']}: process {process.pid} "
-                                f"(was {entry['pid']})")
-            entry["pid"] = process.pid
-            restarts[kind].append(now)
-            changed = True
-        if changed:
-            atomic_json(run_dir / "state.json", state)
-    return True
-
-
-def release(root):
-    """Drop this connector's lease; stop the services when no connector is left."""
-    run_dir = root / "run"
-    with service_lock(run_dir):
-        (run_dir / "clients" / str(os.getpid())).unlink(missing_ok=True)
-        if not live_leases(run_dir):
-            stop_recorded(run_dir, read_json(run_dir / "state.json", {}) or {})
 
 
 def stop(root):
@@ -1429,12 +855,6 @@ def ensure_speech(profile, helpers=True):
         raise failure(results, profile.runtime_dir)
     say(results)
     return {kind: ports[kind] for kind in SPEECH}
-
-
-def start_services(root, runtime, helpers=True):
-    """(profile, ports): ensure_speech for the install at root running runtime."""
-    profile = profile_of(root, runtime)
-    return profile, ensure_speech(profile, helpers)
 
 
 def leave(profile):

@@ -61,49 +61,37 @@ def _env_file(home, text):
     (home / ".voicemode" / "voicemode.env").write_text(text, encoding="utf-8")
 
 
-# -- the launcher's seams, before and after it moved onto vml_supervisor (Task 8) --------
-# Each test below says what it checks once; these adapters reach the same behaviour in the
-# old launcher (its own lifecycle functions) and in the new one (the package, through the
-# profile in vml_profiles/claude.py), so the tests ran green against the old code first.
-
-def _new(vn):
-    """True once voicemode_native.py runs its lifecycle on vml_supervisor."""
-    return hasattr(vn, "profile_of")
-
+# -- vml_supervisor's seams ----------------------------------------------------------
+# Since Task 8 the launcher's lifecycle is vml_supervisor's, through the profile in
+# vml_profiles/claude.py. These adapters reach the behaviour each test checks; they first ran
+# green against the launcher's own functions (commit 0f4025c), then against the package.
 
 def _fake_commands(monkeypatch, vn, lookup):
-    """Every process-command lookup, in the launcher and in the package, answers from lookup.
-    owned and live_leases bind process_command as a default argument: those are replaced too."""
-    monkeypatch.setattr(vn, "process_command", lookup, raising=False)
-    monkeypatch.setattr(sv_procs.owned, "__defaults__", (lookup,))
-    monkeypatch.setattr(sv_state.live_leases, "__defaults__", (lookup,))
+    """Every process-command lookup in the package answers from lookup. owned and live_leases
+    bind process_command as a default argument: those are replaced too, in every copy the
+    modules hold (another test's importlib.reload(procs) leaves services with the old one)."""
+    owned = {id(f): f for f in (getattr(m, "owned", None) for m in (sv_procs, sv_services, sv_helpers, sv_host)) if f}
+    leases = {id(f): f for f in (getattr(m, "live_leases", None) for m in (sv_state, sv_services, sv_host)) if f}
+    for function in [*owned.values(), *leases.values()]:
+        monkeypatch.setattr(function, "__defaults__", (lookup,))
     for module in (sv_procs, sv_services, sv_host):
         monkeypatch.setattr(module, "process_command", lookup)
 
 
 def _set_port_free(vn, monkeypatch, check):
-    monkeypatch.setattr(vn, "port_free", check, raising=False)
     for module in (sv_ports, sv_host):
         monkeypatch.setattr(module, "port_free", check)
 
 
 def _ranges(vn, root):
     """({kind: [ports]}, reserved ports)."""
-    if not _new(vn):
-        return {kind: list(vn.PORTS[kind]) for kind in ("tts", "stt")}, set(vn.RESERVED)
     profile = vn.profile_of(root)
     ranges = {kind: list(range(spec.port_range[0], spec.port_range[1] + 1))
               for kind, spec in profile.services.items()}
     return ranges, set(BASE_RESERVED_PORTS) | set(profile.reserved_ports)
 
 
-def _port_free(vn):
-    return vn.port_free if not _new(vn) else sv_procs.port_free
-
-
 def _candidates(vn, root, kind):
-    if not _new(vn):
-        return vn.port_candidates(kind)
     vn.write_port_settings(root)
     candidates, problem = sv_ports.port_candidates(vn.profile_of(root), kind)
     assert problem is None, problem
@@ -111,64 +99,37 @@ def _candidates(vn, root, kind):
 
 
 def _choose(vn, root, kind, taken):
-    if not _new(vn):
-        return vn.choose_port(kind, taken=taken)
     vn.write_port_settings(root)
     return sv_ports.choose_port(vn.profile_of(root), kind, taken)
 
 
 def _ensure(vn, root, runtime, env=None):
     """The leased speech services alone (serve's start); returns their ports."""
-    if not _new(vn):
-        return vn.ensure_services(root, runtime, {} if env is None else env, optional=[])
-    return vn.start_services(root, runtime, helpers=False)[1]
+    return vn.ensure_speech(vn.profile_of(root, runtime), helpers=False)
 
 
 def _release(vn, root):
-    if not _new(vn):
-        return vn.release(root)
     return vn.leave(vn.profile_of(root))
 
 
 def _fake_stop_recorded(vn, monkeypatch, record):
-    if not _new(vn):
-        monkeypatch.setattr(vn, "stop_recorded", lambda run_dir, state: record(state))
-    else:
-        monkeypatch.setattr(sv_services, "stop_recorded", lambda profile, state: record(state) or [])
+    monkeypatch.setattr(sv_services, "stop_recorded", lambda profile, state: record(state) or [])
 
 
 def _live_leases(vn, root):
-    if not _new(vn):
-        return vn.live_leases(root / "run")
     return sv_state.live_leases(vn.profile_of(root))
 
 
 def _owned(vn, entry):
-    return vn.owned(entry) if not _new(vn) else sv_procs.owned(entry)
+    return sv_procs.owned(entry)
 
 
 def _service_command(vn, kind, runtime, port):
-    if not _new(vn):
-        return vn.service_command(kind, runtime, port)
     spec = vn.profile_of(runtime.parent, runtime).services[kind]
     return [a.replace("{port}", str(port)) for a in spec.argv], spec.marker
 
 
-def _watch_command(vn, monkeypatch, root):
-    if not _new(vn):
-        seen = []
-        monkeypatch.setattr(vn, "process_command", lambda pid: None)
-        monkeypatch.setattr(vn.subprocess, "Popen",
-                            lambda args, **kw: seen.append(args) or type("P", (), {"pid": 7})())
-        (root / "run").mkdir(parents=True, exist_ok=True)
-        vn.start_watchdog(root)
-        return seen[0]
-    return vn.profile_of(root).watch_command
-
-
 def _watch_tick(vn, root, restarts):
-    if not _new(vn):
-        return vn.watch_tick(root, restarts)
     profile = vn.profile_of(root)
     hooks, problems = load_hooks(profile)
     assert not problems, problems
@@ -176,20 +137,13 @@ def _watch_tick(vn, root, restarts):
 
 
 def _max_restarts(vn, root):
-    return vn.MAX_RESTARTS if not _new(vn) else vn.profile_of(root).restart_limit[0]
+    return vn.profile_of(root).restart_limit[0]
 
 
 def _fake_services_job(vn, monkeypatch):
     """The services' Job Object as ("job", <install root>)."""
-    monkeypatch.setattr(vn, "services_job", lambda root: ("job", root), raising=False)
     monkeypatch.setattr(sv_winjob, "services_job", lambda profile: ("job", profile.root))
     monkeypatch.setattr(sv_helpers, "services_job", lambda profile: ("job", profile.root))
-
-
-def _spawn_in_job(vn, command, job):
-    if not _new(vn):
-        return vn.spawn(command, job=job)
-    return vn.start_in_job(command, job)
 
 
 # -- ports ------------------------------------------------------------------
@@ -212,8 +166,8 @@ def test_port_free_sees_a_listener(vn):
         busy.bind(("127.0.0.1", 0))
         busy.listen()
         port = busy.getsockname()[1]
-        assert _port_free(vn)(port) is False
-    assert _port_free(vn)(port) is True
+        assert sv_procs.port_free(port) is False
+    assert sv_procs.port_free(port) is True
 
 
 def test_choose_port_skips_taken_and_busy_ports(vn, home, tmp_path, monkeypatch):
@@ -242,11 +196,6 @@ def test_choose_port_refuses_a_reserved_or_bad_setting(vn, home, tmp_path, monke
 
 
 def test_choose_port_reports_when_every_port_is_busy(vn, home, tmp_path, monkeypatch):
-    if not _new(vn):
-        monkeypatch.setattr(vn, "port_free", lambda p: False)
-        with pytest.raises(vn.VoiceError, match="No free local port"):
-            vn.choose_port("stt", taken=set())
-        return
     root = tmp_path / "root"
     world = FakeWorld(vn, monkeypatch, root)
     _set_port_free(vn, monkeypatch, lambda p: False)
@@ -304,7 +253,7 @@ def test_root_outside_profile_is_refused_unless_allowed(vn, home, tmp_path, monk
 
 def test_allow_flag_reaches_the_watchdog(vn, tmp_path, monkeypatch):
     monkeypatch.setattr(vn, "ALLOW_OUTSIDE", True)
-    assert _watch_command(vn, monkeypatch, tmp_path)[-2:] == ["watch", "--allow-root-outside-profile"]
+    assert vn.profile_of(tmp_path).watch_command[-2:] == ["watch", "--allow-root-outside-profile"]
 
 
 def test_push_to_talk_starts_natively(vn, home, monkeypatch, capsys):
@@ -364,8 +313,8 @@ def test_no_os_kill_zero_anywhere_in_the_launcher():
 
 
 class FakeWorld:
-    """Fakes process creation and inspection, and records what starts in which order: in the
-    launcher (before Task 8) and in vml_supervisor's seams (after it)."""
+    """Fakes process creation and inspection in vml_supervisor's seams, and records what starts
+    in which order."""
 
     def __init__(self, vn, monkeypatch, root):
         self.vn, self.root, self.events, self.commands, self.next_pid = vn, root, [], {}, 1000
@@ -378,15 +327,6 @@ class FakeWorld:
         monkeypatch.setattr(vn, "WINDOWS", True)
         monkeypatch.setattr(vn.os, "kill", self.no_signals)
         monkeypatch.setattr(vn, "connector_job", lambda: None)
-        # The launcher before Task 8 (gone afterwards, hence raising=False).
-        for name, value in (("spawn", self.spawn), ("process_tree", lambda pid: {pid}),
-                            ("listener_pids", self.listeners), ("check_service", self.check),
-                            ("start_watchdog", lambda root: self.events.append("watchdog")),
-                            ("port_free", lambda p: True), ("kill_tree", self.kill),
-                            ("services_job", lambda root: None), ("connector_options", lambda: {}),
-                            ("background_options", lambda: {})):
-            monkeypatch.setattr(vn, name, value, raising=False)
-        # vml_supervisor's seams.
         _fake_commands(monkeypatch, vn, self.commands.get)
         for module in (sv_winjob, sv_services, sv_helpers, sv_host):
             monkeypatch.setattr(module, "spawn", self.spawn_in_job)
@@ -1048,7 +988,7 @@ def test_switch_on_writes_the_setting_and_starts_the_service_for_a_running_conne
     assert _owned(vn, entry)
     # It runs from the serving runtime. A pill record names it; the trigger's and the
     # listener's records (vml_supervisor helpers since Task 8) carry it in their command.
-    assert (entry["runtime"] == str(s.runtime) if "runtime" in entry or not _new(vn)
+    assert (entry["runtime"] == str(s.runtime) if kind == "pill"
             else str(s.runtime) in " ".join(entry["command"]))
     out = capsys.readouterr().out
     assert f"started (process {entry['pid']})" in out
@@ -1544,12 +1484,10 @@ def test_a_failed_job_assignment_kills_the_child_and_raises(vn, monkeypatch):
     monkeypatch.setattr(vn, "WINDOWS", True)
     monkeypatch.setattr(sv_winjob, "WINDOWS", True)
     monkeypatch.setattr(vn.subprocess, "Popen", _FakePopen)
-    resumed = lambda pid: (_ for _ in ()).throw(AssertionError("resumed"))  # noqa: E731
-    monkeypatch.setattr(vn, "_resume_threads", resumed, raising=False)
-    monkeypatch.setattr(sv_winjob, "_resume_threads", resumed)
+    monkeypatch.setattr(sv_winjob, "_resume_threads", lambda pid: (_ for _ in ()).throw(AssertionError("resumed")))
     _FakePopen.killed.clear()
     with pytest.raises(vn.VoiceError, match="Job Object"):
-        _spawn_in_job(vn, ["x.exe"], _FakeJob())
+        vn.start_in_job(["x.exe"], _FakeJob())
     assert _FakePopen.killed == [4242]
 
 
@@ -1642,11 +1580,8 @@ def test_the_relaunched_launcher_keeps_its_lease_marker_with_the_allow_flag(vn, 
     (root / "active.json").write_text(json.dumps({"runtime": "abc"}))
     seen = []
     done = type("P", (), {"pid": 9, "wait": lambda self: 0})()
-    monkeypatch.setattr(vn, "Job", lambda **kw: None, raising=False)
     monkeypatch.setattr(sv_winjob, "Job", lambda **kw: None)
-    monkeypatch.setattr(vn, "spawn", lambda command, job=None, **kw: seen.append(command) or done, raising=False)
     monkeypatch.setattr(sv_winjob, "spawn", lambda command, job, **kw: seen.append(command) or (done, Result("breakaway")))
-    monkeypatch.setattr(vn, "connector_options", lambda: {}, raising=False)
     assert vn.restart_with_runtime_python(root, ["launch"]) == 0
     line = " ".join(seen[0])
     assert "voicemode_native.py launch" in line and "--allow-root-outside-profile" in line
@@ -1689,3 +1624,59 @@ def test_launch_decides_the_modes_again_from_its_settings(vn, home, tmp_path, mo
     monkeypatch.setenv("VOICEMODE_PTT_ENABLED", "true")
     assert vn.launch(root) == 0
     assert "spawn:ptt" in world.events and "spawn:barge" not in world.events
+
+
+def test_setup_prunes_nothing_when_it_cannot_check_the_leases(vn, tmp_path, monkeypatch, capsys):
+    """Setup runs under the user's Python, which may lack psutil. Before Task 8 a lease lookup
+    there raised; through the package every lease would look dead and be deleted, and the
+    runtime a running connector uses could go. Nothing is pruned, and that is said."""
+    root = tmp_path / "root"
+    for name in ("active", "leased", "old"):
+        (root / "runtime" / name / ".venv").mkdir(parents=True)
+    clients = root / "run" / "clients"
+    clients.mkdir(parents=True)
+    (clients / "50").write_text(json.dumps({"runtime": str(root / "runtime" / "leased")}))
+    monkeypatch.setattr(sv_procs, "require_psutil", lambda: Result("psutil_missing", "no psutil"))
+    _fake_commands(monkeypatch, vn, lambda pid: None)   # what a lookup gives without psutil
+    assert vn.prune_runtimes(root, "active") == []
+    assert sorted(p.name for p in (root / "runtime").iterdir()) == ["active", "leased", "old"]
+    assert (clients / "50").exists()
+    assert "kept" in capsys.readouterr().err
+    (clients / "50").unlink()                           # nothing to look up: it prunes as before
+    assert sorted(vn.prune_runtimes(root, "active")) == ["leased", "old"]
+
+
+def test_a_failed_launch_never_leaves_a_voice_mode_that_ignores_sigterm(vn, home, tmp_path, monkeypatch):
+    """launch's own cleanup on POSIX: SIGTERM, and after STOP_TIMEOUT a kill (before Task 8 a
+    voice-mode ignoring SIGTERM was left running when launch failed after starting it)."""
+    import subprocess
+    root = tmp_path / "root"
+    world = FakeWorld(vn, monkeypatch, root)
+    runtime = _fake_runtime(vn, root)
+    monkeypatch.setattr(vn, "WINDOWS", False)
+    monkeypatch.setattr(vn, "STOP_TIMEOUT", 1)
+    monkeypatch.setattr(vn, "configured_runtime", lambda root, expected: (runtime, True))
+    monkeypatch.setattr(vn, "check_models", lambda runtime: None)
+    started = []
+
+    def voice_mode(command, kwargs):
+        child = subprocess.Popen([sys.executable, "-c",
+                                  "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+                                  "print('ready', flush=True); time.sleep(60)"],
+                                 stdout=subprocess.PIPE, text=True)
+        assert child.stdout.readline().strip() == "ready"
+        started.append(child)
+        return child
+
+    world.replace["voice-mode"] = voice_mode
+    real = sv_state.atomic_json
+
+    def lease_write(path, value):
+        if isinstance(value, dict) and "child" in value:
+            raise OSError("disk full")
+        return real(path, value)
+
+    monkeypatch.setattr(sv_state, "atomic_json", lease_write)
+    with pytest.raises(OSError, match="disk full"):
+        vn.launch(root)
+    assert started and started[0].poll() == -9
