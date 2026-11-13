@@ -8,6 +8,8 @@
    timeout (Copilot CLI) sees progress every 30 s while converse waits or listens.
 3. A wait in the conch queue that is cancelled logs CONCH_WAIT_END result=cancelled;
    upstream deregistered it silently.
+4. The tool description says how to share the mic without leaving: call converse again
+   with wait_for_conch=true; only the user ends a voice conversation.
 
 Idempotent (marker). Stops setup if an anchor is not found exactly once. Verified against
 pristine voice-mode 8.12.0 and the fully patched tree. Every new branch fails safe to
@@ -18,7 +20,20 @@ from pathlib import Path
 
 MARKER = "VML: CONCH FAIRNESS"
 
+_TURN_TAKING = ("Multi-agent turn-taking: if your next converse call will continue this thread "
+                "(asking a question you'll answer, or speaking across several turns), pass "
+                "hold_conch=true so other agents wait instead of cutting in at the turn boundary.\n")
+
 PAIRS = [
+    # 4. The tool description: sharing the mic is queueing again, never leaving (Windows
+    #    2026-11-13: a chat "released the voice channel" for another session, then stopped).
+    (_TURN_TAKING,
+     _TURN_TAKING + "\n"
+     "Sharing the mic: the floor is handed on at the end of every turn unless you hold it. "
+     "To let another session speak, do NOT stop calling converse and do NOT announce a "
+     "release: call converse again with wait_for_conch=true. You queue behind the other "
+     "session and get the floor back automatically. Only the user ends a voice conversation.\n",
+     2),  # converse.py defines the tool twice with the same docstring; both get the text
     ("            held_seconds = conch.release(hold=hold_conch)\n",
      "            try:  # " + MARKER + ": a hold does not starve a waiting session\n"
      "                from voice_mode import conch_hold as _vml_ch\n"
@@ -84,18 +99,19 @@ def apply(target):
         return 1
     pairs = PAIRS
     if MARKER in source:
-        if any(r not in source for _, r in pairs):
+        if any(p[1] not in source for p in pairs):
             print(f"[{Path(__file__).name}] {target}: carries an older version of this patch; "
                   "it is kept. To get the new text, reinstall voice-mode and apply again "
                   "(docs/patching/README.md).", file=sys.stderr)
         return 0
-    for anchor, _ in pairs:
-        if source.count(anchor) != 1:
-            print(f"[patch_conch_fairness] {target}: an anchor was found {source.count(anchor)} times, not once",
-                  file=sys.stderr)
+    for pair in pairs:
+        want = pair[2] if len(pair) > 2 else 1
+        if source.count(pair[0]) != want:
+            print(f"[patch_conch_fairness] {target}: an anchor was found {source.count(pair[0])} times, "
+                  f"not {want}", file=sys.stderr)
             return 1
-    for anchor, replacement in pairs:
-        source = source.replace(anchor, replacement)
+    for pair in pairs:
+        source = source.replace(pair[0], pair[1])
     compile(source, str(target), "exec")
     _write(target, source, ending)
     return 0

@@ -321,3 +321,25 @@ def test_a_current_patch_is_quiet_on_the_second_pass(pristine_converse):
     assert _apply(pristine_converse).returncode == 0
     again = _apply(pristine_converse)
     assert again.returncode == 0 and again.stderr == ""
+
+
+@pytest.mark.skipif(not __import__("os").environ.get("VM812_SRC"), reason="VM812_SRC is not set")
+def test_the_tool_description_says_to_queue_again_rather_than_stop(tmp_path):
+    """Windows 2026-11-13: a Copilot chat 'released the voice channel' for another session
+    and then stopped talking. The description every harness reads must say how to share
+    the mic without leaving: call converse again with wait_for_conch=true."""
+    import os
+    import shutil
+    import subprocess
+    import sys
+    from pathlib import Path
+    t = tmp_path / "converse.py"
+    shutil.copy(Path(os.environ["VM812_SRC"]) / "converse.py", t)
+    patcher = Path(__file__).resolve().parent.parent / "patches" / "patch_conch_fairness.py"
+    r = subprocess.run([sys.executable, str(patcher), str(t)], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    src = t.read_text(encoding="utf-8")
+    doc = src[src.index('"""Have an ongoing voice conversation'):]
+    doc = doc[:doc.index('"""', 3)]
+    assert "wait_for_conch=true" in doc
+    assert "Only the user ends a voice conversation" in doc
