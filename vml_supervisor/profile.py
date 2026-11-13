@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
-from dataclasses import dataclass, field, fields
+from dataclasses import MISSING, dataclass, field, fields
 from pathlib import Path
 
 from .result import Result
@@ -28,6 +28,14 @@ BLOCKING = ("port_range_reserved", "port_ranges_overlap", "port_range_bad", "ser
 def blocking(results) -> bool:
     """True when validate()'s findings include one that must refuse a start."""
     return any(r.code in BLOCKING for r in results)
+
+
+class ProfileError(ValueError):
+    """A profile that cannot be built; `result` is the recorded refusal (never a bare TypeError)."""
+
+    def __init__(self, result: Result):
+        super().__init__(result.detail)
+        self.result = result
 
 
 @dataclass(frozen=True)
@@ -116,8 +124,17 @@ class HostProfile:
             raise
 
     @classmethod
-    def from_file(cls, path: Path) -> "HostProfile":
-        return cls.from_dict(json.loads(Path(path).read_text()))
+    def from_file(cls, path: Path, results: list | None = None) -> "HostProfile":
+        """Read a profile. A missing key raises ProfileError (profile_malformed, naming the key). A key
+        this version does not know is a Result(profile_key_unknown) appended to `results`; with no
+        `results` list to receive it, it raises ProfileError instead of passing silently."""
+        d = json.loads(Path(path).read_text())
+        profile = cls.from_dict(d)
+        for finding in unknown_keys(d):
+            if results is None:
+                raise ProfileError(finding)
+            results.append(finding)
+        return profile
 
     # -- validation ----------------------------------------------------
     def validate(self) -> list[Result]:
@@ -179,8 +196,34 @@ def _tup(v):
     return tuple(v)
 
 
-def _decode(cls, d: dict):
+def unknown_keys(d: dict) -> list[Result]:
+    """Result(profile_key_unknown) for each key of the profile dict, or of its nested specs, that this
+    version does not know; the detail is the (dotted) key."""
+    found = [Result("profile_key_unknown", k, {"key": k})
+             for k in sorted(d) if k not in {f.name for f in fields(HostProfile)}]
+    nested = [("services", ServiceSpec), ("helpers", HelperSpec)]
+    for group, spec in nested:
+        known = {f.name for f in fields(spec)}
+        for name, entry in sorted(d.get(group, {}).items() if isinstance(d.get(group), dict) else []):
+            if isinstance(entry, dict):
+                found += [Result("profile_key_unknown", f"{group}.{name}.{k}", {"key": f"{group}.{name}.{k}"})
+                          for k in sorted(entry) if k not in known]
+    override = d.get("port_override")
+    if isinstance(override, dict):
+        known = {f.name for f in fields(PortOverride)}
+        found += [Result("profile_key_unknown", f"port_override.{k}", {"key": f"port_override.{k}"})
+                  for k in sorted(override) if k not in known]
+    return found
+
+
+def _decode(cls, d: dict, where: str = ""):
     """Rebuild a dataclass from its encoded dict using the declared field types."""
+    absent = [f.name for f in fields(cls) if f.name not in d and f.default is MISSING
+              and f.default_factory is MISSING]
+    if absent:
+        names = ", ".join(f"{where}{n}" for n in absent)
+        raise ProfileError(Result("profile_malformed", f"profile is missing key(s): {names}",
+                                  {"missing": [f"{where}{n}" for n in absent]}))
     kw = {}
     hints = {f.name: str(f.type) for f in fields(cls)}
     for name, t in hints.items():
@@ -194,11 +237,11 @@ def _decode(cls, d: dict):
         elif "Path" in t and "dict" not in t:
             kw[name] = Path(v)
         elif t.startswith("dict[str, ServiceSpec"):
-            kw[name] = {k: _decode(ServiceSpec, x) for k, x in v.items()}
+            kw[name] = {k: _decode(ServiceSpec, x, f"services.{k}.") for k, x in v.items()}
         elif t.startswith("dict[str, HelperSpec"):
-            kw[name] = {k: _decode(HelperSpec, x) for k, x in v.items()}
+            kw[name] = {k: _decode(HelperSpec, x, f"helpers.{k}.") for k, x in v.items()}
         elif t == "PortOverride":
-            kw[name] = _decode(_DATACLASSES[t], v)
+            kw[name] = _decode(_DATACLASSES[t], v, f"{name}.")
         elif t.startswith("tuple"):
             kw[name] = _tup(v)
         else:
@@ -227,8 +270,8 @@ def load_profile(path: Path) -> tuple[HostProfile | None, list[Result]]:
         return None, [Result("profile_malformed", f"{path}: hook_paths must be a list")]
     try:
         profile = HostProfile.from_dict(d)
+    except ProfileError as exc:
+        return None, [Result(exc.result.code, f"{path}: {exc.result.detail}", exc.result.data)]
     except (TypeError, ValueError, KeyError, AttributeError) as exc:
         return None, [Result("profile_malformed", f"{path}: {exc!r}")]
-    known = {f.name for f in fields(HostProfile)}
-    return profile, [Result("profile_key_unknown", k, {"key": k})
-                     for k in sorted(d) if k not in known]
+    return profile, unknown_keys(d)

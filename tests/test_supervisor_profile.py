@@ -297,3 +297,34 @@ def test_blocking_names_the_findings_that_refuse_a_start():
                  "ready_kind_unknown"):
         assert blocking([Result(code)]) is True
     assert blocking([Result("hook_unknown", "bogus")]) is False and blocking([]) is False
+
+
+def test_from_file_names_a_missing_key_in_a_recorded_refusal(tmp_path):
+    from vml_supervisor.profile import HostProfile, ProfileError, load_profile
+    f = tmp_path / "p.json"
+    make_profile().to_file(f)
+    d = json.loads(f.read_text())
+    del d["job_name"]
+    del d["services"]["tts"]["marker"]
+    f.write_text(json.dumps(d))
+    with pytest.raises(ProfileError) as caught:
+        HostProfile.from_file(f)
+    assert caught.value.result.code == "profile_malformed" and "job_name" in caught.value.result.detail
+    prof, results = load_profile(f)
+    assert prof is None and results[0].code == "profile_malformed"
+    d2 = dict(d, job_name="x")
+    f.write_text(json.dumps(d2))
+    with pytest.raises(ProfileError) as caught:
+        HostProfile.from_file(f)
+    assert "services.tts.marker" in caught.value.result.detail
+
+
+def test_from_file_does_not_ignore_unknown_keys_silently(tmp_path):
+    from vml_supervisor.profile import HostProfile, ProfileError
+    f = _file_with(tmp_path, zzz=1)
+    with pytest.raises(ProfileError) as caught:
+        HostProfile.from_file(f)
+    assert caught.value.result.code == "profile_key_unknown"
+    results = []
+    assert HostProfile.from_file(f, results) == make_profile()
+    assert [(r.code, r.detail) for r in results] == [("profile_key_unknown", "zzz")]
