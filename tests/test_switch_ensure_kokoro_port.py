@@ -44,9 +44,16 @@ def _run_ensure(tmp_path: Path, config: str, urls: str) -> tuple[str, str]:
     env = {**os.environ, "HOME": str(home), "PATH": f"{bin_dir}:{os.environ['PATH']}"}
     subprocess.run([str(script), "ensure", "--quiet"], env=env, check=True, timeout=30)
 
-    # start_detached backgrounds the server, so give the stub a moment to log.
-    deadline = time.time() + 3
-    while time.time() < deadline and not py_log.exists():
+    # start_detached backgrounds several starts (a lock wait, the server, the barge trigger), so
+    # wait until the stub's log stops growing, not merely until it exists: under full-suite load
+    # the first line alone was read and the trigger's line came later (2026-11-13).
+    deadline, size, quiet_since = time.time() + 6, -1, time.time()
+    while time.time() < deadline:
+        now = py_log.stat().st_size if py_log.exists() else -1
+        if now != size:
+            size, quiet_since = now, time.time()
+        elif size >= 0 and time.time() - quiet_since >= 0.5:
+            break
         time.sleep(0.05)
     read = lambda p: p.read_text() if p.exists() else ""
     return read(py_log), read(docker_log)
