@@ -318,3 +318,55 @@ def test_require_psutil_is_none_off_windows(monkeypatch):
     monkeypatch.setattr(procs, "WINDOWS", False)
     monkeypatch.setattr(procs, "_psutil", lambda: None)
     assert procs.require_psutil() is None
+
+
+# ----- final review I9: a zombie child of ours is never "alive" (the macOS case) ------------------
+
+
+def _zombie(new_session):
+    child = subprocess.Popen([sys.executable, "-c", "pass"], start_new_session=new_session)
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:   # exited, not reaped: a zombie
+        with open(f"/proc/{child.pid}/stat") as fh:
+            if fh.read().rsplit(")", 1)[1].split()[0] == "Z":
+                return child
+        time.sleep(0.02)
+    raise AssertionError("the child did not exit")
+
+
+def _reaped(pid):
+    try:
+        os.waitpid(pid, os.WNOHANG)
+    except ChildProcessError:
+        return True
+    return False
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="reads /proc to make the zombie")
+def test_the_alive_check_reaps_our_own_exited_child(monkeypatch):
+    from vml_supervisor import procs
+    child = _zombie(new_session=False)
+    # As on macOS: no /proc to read, so only the reap can tell a zombie from a live process.
+    real_open = open
+    monkeypatch.setattr("builtins.open", lambda path, *a, **kw: (_ for _ in ()).throw(OSError("no /proc"))
+                        if str(path).startswith("/proc/") else real_open(path, *a, **kw))
+    assert procs._alive(child.pid) is False
+    monkeypatch.undo()
+    assert _reaped(child.pid)
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="reads /proc to make the zombie")
+def test_the_group_check_reaps_our_own_exited_leader(monkeypatch):
+    from vml_supervisor import procs
+    child = _zombie(new_session=True)
+    monkeypatch.setattr(procs.os, "listdir", lambda path: (_ for _ in ()).throw(OSError("no /proc")))
+    assert procs._group_alive(child.pid) is False
+    monkeypatch.undo()
+    assert _reaped(child.pid)
+    assert procs.kill_tree(child.pid, 0.5) is None
+
+
+@posix_only
+def test_a_process_that_is_not_our_child_is_still_seen_alive():
+    from vml_supervisor import procs
+    assert procs._alive(os.getppid()) is True and procs._alive(1) is True

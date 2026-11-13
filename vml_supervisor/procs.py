@@ -117,7 +117,29 @@ def process_tree(pid) -> set[int]:
         return {pid}
 
 
+def _reap(pid) -> bool:
+    """True when pid (or, negative, any member of that process group) was an exited child of ours
+    and has now been reaped. A zombie still answers signal 0, and macOS has no /proc to tell it
+    from a live process, so an exited child must be reaped before it can count as gone (final
+    review I9). Not our child (ChildProcessError): False, and nothing is touched."""
+    reaped = False
+    while True:
+        try:
+            done, _ = os.waitpid(pid, os.WNOHANG)
+        except ChildProcessError:
+            return reaped
+        except OSError:
+            return reaped
+        if done == 0:
+            return reaped
+        reaped = True
+        if pid > 0:
+            return True
+
+
 def _alive(pid) -> bool:
+    if _reap(pid):
+        return False
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -141,7 +163,9 @@ def require_psutil() -> Result | None:
 
 
 def _group_alive(pgid) -> bool:
-    """True when any non-zombie process is in the group (zombies awaiting a reaper do not count)."""
+    """True when any non-zombie process is in the group (zombies awaiting a reaper do not count).
+    Our own exited members are reaped first (see _reap)."""
+    _reap(-pgid)
     try:
         names = [n for n in os.listdir("/proc") if n.isdigit()]
     except OSError:
