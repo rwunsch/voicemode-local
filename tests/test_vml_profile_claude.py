@@ -207,3 +207,15 @@ def test_the_environment_hook_passes_the_cores_shape_check(tmp_path):
     env, problem = hook_calls.environment(hooks, p, str(p.runtime_dir), {"tts": 28880}, {})
     assert problem is None and env["A"] == "1"
     assert json.dumps(env)
+
+
+def test_read_mode_reads_the_connectors_voicemode_env_not_the_hosts(home, tmp_path):
+    """The Windows host is started by Windows' process service with the user's default
+    environment, not the connector's: the file is the one in the connector's home (profile.env)."""
+    other = tmp_path / "connector-home"
+    (other / ".voicemode").mkdir(parents=True)
+    (other / ".voicemode" / "voicemode.env").write_text("VOICEMODE_VOICE_BARGE=auto\n", encoding="utf-8")
+    _env_file(home, "VOICEMODE_VOICE_BARGE=false\n")     # the host's own home
+    p = _profile(tmp_path, env={"HOME": str(other), "USERPROFILE": str(other)}).to_dict()
+    assert claude.read_mode(p, "barge") == "auto"
+    assert claude.read_mode(_profile(tmp_path).to_dict(), "barge") == "off"   # no home given: this one's

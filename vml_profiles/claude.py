@@ -23,8 +23,8 @@ Where a mode comes from, first match wins:
 2. The connector's own environment, for a setting the launcher's environment held
    (VOICEMODE_NATIVE_ENV_SETTINGS lists them; voice-mode copies voicemode.env into its environment,
    which is no override).
-3. ~/.voicemode/voicemode.env, read with patches/voice_pill_state.py's parser when it loads, else a
-   plain KEY=value read.
+3. The connector's ~/.voicemode/voicemode.env (its home from profile.env: the host's own may be
+   another), read with patches/voice_pill_state.py's parser when it loads, else a plain read.
 """
 from __future__ import annotations
 
@@ -228,10 +228,19 @@ def write_modes(run_dir, modes: dict) -> None:
     atomic_json(Path(run_dir) / MODES_FILE, current)
 
 
-def _file_settings() -> dict:
+def _voicemode_home(env: dict) -> Path:
+    """The connector's ~/.voicemode: from its home in profile.env (USERPROFILE on Windows, HOME
+    elsewhere, as Path.home() reads them), else this process's. The Windows host is started with
+    the user's default environment, not the connector's, so its own home may be another."""
+    base = env.get("USERPROFILE" if sys.platform == "win32" else "HOME")
+    return Path(base) / ".voicemode" if base else Path.home() / ".voicemode"
+
+
+def _file_settings(env: dict) -> dict:
+    home = _voicemode_home(env)
     if _SETTINGS is not None:
-        return _SETTINGS.read_env_file()
-    path = Path.home() / ".voicemode" / "voicemode.env"
+        return _SETTINGS.read_env_file(home)
+    path = home / "voicemode.env"
     try:
         text = path.read_bytes().decode("utf-8-sig", errors="replace")
     except OSError:
@@ -260,7 +269,7 @@ def read_mode(profile: dict, kind: str):
     env = profile.get("env") or {}
     listed = env.get(ENV_SETTINGS)
     held = name in env and (listed is None or name in listed.split(","))
-    return mode_of(kind, env[name] if held else _file_settings().get(name, ""))
+    return mode_of(kind, env[name] if held else _file_settings(env).get(name, ""))
 
 
 def environment(profile: dict, runtime: str, ports: dict, modes: dict) -> dict:
