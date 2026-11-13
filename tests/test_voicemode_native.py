@@ -67,13 +67,15 @@ def _env_file(home, text):
 # green against the launcher's own functions (commit 0f4025c), then against the package.
 
 def _fake_commands(monkeypatch, vn, lookup):
-    """Every process-command lookup in the package answers from lookup. owned and live_leases
-    bind process_command as a default argument: those are replaced too, in every copy the
-    modules hold (another test's importlib.reload(procs) leaves services with the old one)."""
-    owned = {id(f): f for f in (getattr(m, "owned", None) for m in (sv_procs, sv_services, sv_helpers, sv_host)) if f}
-    leases = {id(f): f for f in (getattr(m, "live_leases", None) for m in (sv_state, sv_services, sv_host)) if f}
-    for function in [*owned.values(), *leases.values()]:
-        monkeypatch.setattr(function, "__defaults__", (lookup,))
+    """Every process-command lookup in the package answers from lookup: process_command, and
+    owned and live_leases (which bind it as a default argument) wherever a module holds them."""
+    real_owned, real_leases = sv_procs.owned, sv_state.live_leases
+    owned = lambda entry, command_of=None: real_owned(entry, lookup)  # noqa: E731
+    leases = lambda profile, command_of=None: real_leases(profile, lookup)  # noqa: E731
+    for module in (sv_procs, sv_services, sv_helpers, sv_host):
+        monkeypatch.setattr(module, "owned", owned)
+    for module in (sv_state, sv_services, sv_host):
+        monkeypatch.setattr(module, "live_leases", leases)
     for module in (sv_procs, sv_services, sv_host):
         monkeypatch.setattr(module, "process_command", lookup)
 
@@ -251,9 +253,15 @@ def test_root_outside_profile_is_refused_unless_allowed(vn, home, tmp_path, monk
     assert rc == 1
 
 
-def test_allow_flag_reaches_the_watchdog(vn, tmp_path, monkeypatch):
+def test_allow_flag_reaches_the_watchdog(vn, home, tmp_path, monkeypatch):
+    """Observed where the watchdog is spawned (vml_supervisor's _start_watchdog), not in the profile."""
+    root = tmp_path / "root"
+    world = FakeWorld(vn, monkeypatch, root)
     monkeypatch.setattr(vn, "ALLOW_OUTSIDE", True)
-    assert vn.profile_of(tmp_path).watch_command[-2:] == ["watch", "--allow-root-outside-profile"]
+    _ensure(vn, root, _fake_runtime(vn, root))
+    assert len(world.watched) == 1
+    assert world.watched[0][-2:] == ["watch", "--allow-root-outside-profile"]
+    assert "voicemode_native.py watch" in " ".join(world.watched[0])   # its marker, owned later
 
 
 def test_push_to_talk_starts_natively(vn, home, monkeypatch, capsys):
@@ -336,8 +344,9 @@ class FakeWorld:
         monkeypatch.setattr(sv_services, "process_tree", lambda pid: {pid})
         monkeypatch.setattr(sv_services, "listener_pids", self.listeners)
         monkeypatch.setattr(sv_services, "check_service", self.check)
-        monkeypatch.setattr(sv_services, "_start_watchdog",
-                            lambda profile, working_dir, results: self.events.append("watchdog"))
+        # The real _start_watchdog runs; only its Popen is this world's (watched: the argv).
+        self.watched = []
+        monkeypatch.setattr(sv_services, "subprocess", _SubprocessWith(self.start_watchdog))
         _set_port_free(vn, monkeypatch, lambda p: True)
         monkeypatch.setattr(sv_helpers, "running_commands", lambda: (list(self.commands.items()), None))
         monkeypatch.setattr(sv_helpers, "HELPER_START_CHECK", 0)
@@ -365,6 +374,13 @@ class FakeWorld:
         self.events.append(f"spawn:{kind}")
         return FakeProcess(self, pid)
 
+    def start_watchdog(self, argv, **kwargs):
+        self.watched.append([str(a) for a in argv])
+        self.events.append("watchdog")
+        pid, self.next_pid = self.next_pid, self.next_pid + 1
+        self.commands[pid] = " ".join(map(str, argv))
+        return FakeProcess(self, pid)
+
     def spawn_in_job(self, command, job, **kwargs):
         return self.spawn(command, job=job, **kwargs), Result("no_job")
 
@@ -388,6 +404,17 @@ class FakeWorld:
     def kill(self, pid, timeout=None):
         self.events.append(f"kill:{self.kind_of(self.commands.get(pid, '').split())}")
         self.commands.pop(pid, None)
+
+
+class _SubprocessWith:
+    """The subprocess module, with Popen replaced (for one module's global name only)."""
+
+    def __init__(self, popen):
+        self.Popen = popen
+
+    def __getattr__(self, name):
+        import subprocess
+        return getattr(subprocess, name)
 
 
 class FakeProcess:
@@ -1700,3 +1727,56 @@ def test_every_launcher_name_the_windows_only_tests_use_exists(vn):
         used |= {(path.name, name) for name in re.findall(r"\bvn\.([A-Za-z_]\w*)", path.read_text(encoding="utf-8"))}
     assert used   # the check sees something
     assert [(f, name) for f, name in sorted(used) if not hasattr(vn, name)] == []
+
+
+def test_the_relaunched_launcher_starts_in_the_install_folder(vn, tmp_path, monkeypatch):
+    """Not the client's folder (Windows searches the current folder first, and it may be a
+    customer's repo): every child of the relaunched launcher would inherit it."""
+    monkeypatch.setattr(vn, "WINDOWS", True)
+    monkeypatch.setitem(sys.modules, "psutil", None)
+    root = tmp_path / "root"
+    (root / "runtime" / "abc" / ".venv" / "Scripts").mkdir(parents=True)
+    (root / "runtime" / "abc" / ".venv" / "Scripts" / "python.exe").write_text("")
+    (root / "active.json").write_text(json.dumps({"runtime": "abc"}))
+    client = tmp_path / "client"
+    client.mkdir()
+    monkeypatch.chdir(client)
+    seen = []
+    done = type("P", (), {"pid": 9, "wait": lambda self: 0})()
+    monkeypatch.setattr(sv_winjob, "Job", lambda **kw: None)
+    monkeypatch.setattr(sv_winjob, "spawn", lambda command, job, **kw: seen.append(kw) or (done, Result("breakaway")))
+    monkeypatch.delenv("VOICEMODE_CLIENT_FOLDER", raising=False)
+    assert vn.restart_with_runtime_python(root, ["launch"]) == 0
+    assert seen[0].get("cwd") == str(root)
+    # The session label still gets the client's folder: launch reads it from here.
+    assert seen[0]["env"]["VOICEMODE_CLIENT_FOLDER"] == str(client)
+
+
+def test_launch_labels_with_the_client_folder_its_relauncher_passed(vn, home, tmp_path, monkeypatch):
+    root = tmp_path / "root"
+    world = FakeWorld(vn, monkeypatch, root)
+    runtime = _fake_runtime(vn, root)
+    monkeypatch.setattr(vn, "configured_runtime", lambda root, expected: (runtime, True))
+    monkeypatch.setattr(vn, "check_models", lambda runtime: None)
+    monkeypatch.chdir(root)                                   # as relaunched: the install folder
+    monkeypatch.setenv("VOICEMODE_CLIENT_FOLDER", str(tmp_path / "work" / "my-project"))
+    envs = {}
+    world.observers.append(lambda command, job, kwargs: envs.update({world.kind_of(command): kwargs["env"]}))
+    assert vn.launch(root) == 0
+    assert envs["voice-mode"]["VOICEMODE_CLIENT_FOLDER"] == str(tmp_path / "work" / "my-project")
+
+
+def test_a_launch_only_turns_a_helper_on(vn, home, tmp_path, monkeypatch, capsys):
+    """Launches are a union, as before Task 8: a connector whose settings do not want the
+    listener must not turn off another connector's. Only an explicit switch turns it off."""
+    s = Switch(vn, home, tmp_path, monkeypatch)
+    monkeypatch.delenv("VOICEMODE_PTT_ENABLED", raising=False)
+    monkeypatch.setenv("VOICEMODE_PTT_ENABLED", "true")
+    vn.ensure_speech(vn.profile_of(s.root, s.runtime))            # connector A wants it
+    assert _host_mode(vn, s.root, "ptt") == ("true", None)
+    monkeypatch.delenv("VOICEMODE_PTT_ENABLED")
+    vn.ensure_speech(vn.profile_of(s.root, s.runtime))            # connector B does not say
+    assert _host_mode(vn, s.root, "ptt") == ("true", None)
+    assert s.state()["ptt"]["mode"] == "true"
+    vn.switch(s.root, "ptt", "off")                               # the user does
+    assert _host_mode(vn, s.root, "ptt") == ("off", None)

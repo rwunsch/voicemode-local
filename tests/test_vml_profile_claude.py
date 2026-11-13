@@ -18,7 +18,7 @@ if str(REPO) not in sys.path:
 from vml_profiles import claude  # noqa: E402
 from vml_supervisor import hooks as hook_calls  # noqa: E402
 from vml_supervisor.hooks import load_hooks  # noqa: E402
-from vml_supervisor.profile import BASE_RESERVED_PORTS, HostProfile, load_profile  # noqa: E402
+from vml_supervisor.profile import load_profile  # noqa: E402
 
 SCRIPT = REPO / "scripts" / "windows" / "voicemode_native.py"
 
@@ -219,3 +219,33 @@ def test_read_mode_reads_the_connectors_voicemode_env_not_the_hosts(home, tmp_pa
     p = _profile(tmp_path, env={"HOME": str(other), "USERPROFILE": str(other)}).to_dict()
     assert claude.read_mode(p, "barge") == "auto"
     assert claude.read_mode(_profile(tmp_path).to_dict(), "barge") == "off"   # no home given: this one's
+
+
+def test_a_corrupt_modes_file_does_not_block_a_write_and_is_said(tmp_path, capsys):
+    """Every launch and switch writes modes.json: a corrupt one must not make them fail (setup
+    would not repair it). The write starts from {} and names the file once on stderr."""
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / "modes.json").write_text("{not json")
+    claude.write_modes(run_dir, {"ptt": "true"})
+    assert claude.read_modes(run_dir) == {"ptt": "true"}
+    err = capsys.readouterr().err
+    assert err.count(str(run_dir / "modes.json")) == 1 and "corrupt" in err
+
+
+def test_write_modes_holds_the_service_lock(tmp_path, monkeypatch):
+    import contextlib
+    held = []
+    real = claude.service_lock
+
+    @contextlib.contextmanager
+    def watched(run_dir):
+        with real(run_dir):
+            held.append(("in", claude.read_modes(run_dir)))
+            yield
+            held.append("out")
+
+    monkeypatch.setattr(claude, "service_lock", watched)
+    claude.write_modes(tmp_path / "run", {"barge": "auto"})
+    assert held == [("in", {}), "out"]          # read and write both inside
+    assert claude.read_modes(tmp_path / "run") == {"barge": "auto"}

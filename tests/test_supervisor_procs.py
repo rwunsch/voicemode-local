@@ -7,7 +7,6 @@ import socket
 import subprocess
 import sys
 import time
-from dataclasses import replace
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -221,12 +220,15 @@ def test_options():
         assert background_options() == {"start_new_session": True}
 
 
-def test_the_package_imports_without_psutil(monkeypatch):
-    monkeypatch.setitem(sys.modules, "psutil", None)
-    import importlib
-    from vml_supervisor import procs
-    importlib.reload(procs)
-    assert callable(procs.process_command)
+def test_the_package_imports_without_psutil():
+    # In a fresh interpreter: reloading procs here would leave the modules that imported its
+    # functions by name holding the old copies, for every test after this one.
+    repo = str(Path(__file__).resolve().parent.parent)
+    code = ("import sys; sys.modules['psutil'] = None; sys.path.insert(0, sys.argv[1]); "
+            "from vml_supervisor import procs, services, helpers, host; "
+            "assert callable(procs.process_command); print('ok')")
+    done = subprocess.run([sys.executable, "-c", code, repo], capture_output=True, text=True, timeout=60)
+    assert done.returncode == 0 and done.stdout.strip() == "ok", done.stderr
 
 
 def _gone(pid):

@@ -186,10 +186,15 @@ def test_services_job_is_named_by_the_profile_and_cached(monkeypatch):
 
 
 def test_the_module_imports_without_windows_apis():
-    # ctypes.WinDLL exists only on Windows; importing the module must not reach for it.
-    import importlib
-    assert importlib.reload(winjob) is winjob
-    assert winjob.WINDOWS == (sys.platform == "win32")
+    # ctypes.WinDLL exists only on Windows; importing the module must not reach for it. In a
+    # fresh interpreter: a reload here would strand the references other modules hold.
+    import subprocess
+    from pathlib import Path
+    repo = str(Path(__file__).resolve().parent.parent)
+    code = ("import sys; sys.path.insert(0, sys.argv[1]); from vml_supervisor import winjob; "
+            "print(winjob.WINDOWS == (sys.platform == 'win32'))")
+    done = subprocess.run([sys.executable, "-c", code, repo], capture_output=True, text=True, timeout=60)
+    assert done.returncode == 0 and done.stdout.strip() == "True", done.stderr
 
 
 # -- fix round 1 ----------------------------------------------------------------

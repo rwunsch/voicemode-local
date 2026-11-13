@@ -48,8 +48,8 @@ the listener are children of one voice host per install, started through Windows
 service so that it belongs to no chat's job; they live in one named Job Object the host holds,
 and the host ends them all once no lease is left. It restarts a crashed TTS or STT service on
 its own port, at most 3 times in 300 seconds, and every connector starts the host again when it
-ended anyway. The trigger and the listener follow their modes: launch writes the ones its
-settings decide to run/modes.json, a switch writes its own, and the host's next look applies
+ended anyway. The trigger and the listener follow their modes: launch writes to run/modes.json
+the ones its settings turn on (never off: connectors are a union), a switch writes its own, and the host's next look applies
 them. Elsewhere (the tests) the connector starts them, with a watchdog. voice-mode lives in its
 connector's own Job Object, so it dies with the connector; the pill window too is started by
 voice-mode (or a switch), never by launch. Never os.kill(pid, 0): on Windows that ends the
@@ -802,9 +802,12 @@ def write_port_settings(root):
 
 
 def launch_modes():
-    """The trigger's and the listener's modes as launch decides them: from the settings, the
-    environment first (as optional_services reads them)."""
-    return {kind: profile_values.mode_of(kind, setting(name, "")) for kind, name in profile_values.MODE_SETTINGS.items()}
+    """The trigger's and the listener's modes this launch's settings turn ON (the environment
+    first, as optional_services reads them). Never "off": connectors are a union, so one whose
+    settings do not want a helper must not stop another's. Only a switch writes off."""
+    modes = {kind: profile_values.mode_of(kind, setting(name, ""))
+             for kind, name in profile_values.MODE_SETTINGS.items()}
+    return {kind: mode for kind, mode in modes.items() if mode != "off"}
 
 
 def failure(results, runtime):
@@ -1233,7 +1236,9 @@ def launch(root):
             env = runtime_environment(runtime, ports)
             # Upstream loads every .voicemode/voicemode.env walking up from its working folder;
             # from a WSL checkout that was the WSL setup's file. The label still gets the folder.
-            env["VOICEMODE_CLIENT_FOLDER"] = os.getcwd()
+            # A relaunch under the runtime's Python runs in the install folder and passes the
+            # client's folder on in VOICEMODE_CLIENT_FOLDER.
+            env["VOICEMODE_CLIENT_FOLDER"] = os.environ.get("VOICEMODE_CLIENT_FOLDER") or os.getcwd()
             env.update(tool_selection())
             env.update(voice_mode_settings())
             child = start_in_job([str(venv_program(runtime, "voice-mode"))], connector_job(), env=env,
@@ -1412,8 +1417,12 @@ def restart_with_runtime_python(root, args):
     # The flag after the command: a lease is alive while its launcher's command line holds
     # `voicemode_native.py launch`, so nothing may come between the two.
     flag = ["--allow-root-outside-profile"] if ALLOW_OUTSIDE else []
-    child = start_in_job([str(python), str(SCRIPT), *args, *flag], job,
-                         env=dict(os.environ, VOICEMODE_NATIVE_ROOT=str(root)), **procs.connector_options())
+    # The install folder as its working folder, never the client's: Windows searches the
+    # current folder first, and every child of the launcher would inherit it.
+    env = dict(os.environ, VOICEMODE_NATIVE_ROOT=str(root))
+    env.setdefault("VOICEMODE_CLIENT_FOLDER", os.getcwd())   # the session label: launch reads it
+    child = start_in_job([str(python), str(SCRIPT), *args, *flag], job, cwd=str(root), env=env,
+                         **procs.connector_options())
     return child.wait()
 
 

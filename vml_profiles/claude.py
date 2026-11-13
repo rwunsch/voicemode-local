@@ -16,8 +16,8 @@ import time and takes plain data):
   services' actual ports, with a helper's mode as its setting.
 
 Where a mode comes from, first match wins:
-1. run/modes.json: what launch decided when it started (from its settings) or a switch decided
-   since. The host looks every few seconds, so without this a switch would be undone by the next
+1. run/modes.json: a helper a launch's settings turned on (a launch never turns one off:
+   connectors are a union), or what a switch decided since. The host looks every few seconds, so without this a switch would be undone by the next
    look whenever the connector's environment said otherwise, and launch could not overrule a value
    an earlier switch left in voicemode.env, as it did before.
 2. The connector's own environment, for a setting the launcher's environment held
@@ -37,6 +37,7 @@ import sys
 from pathlib import Path
 
 from vml_supervisor.profile import HelperSpec, HostProfile, PortOverride, ServiceSpec
+from vml_supervisor.state import atomic_json, service_lock
 
 REPO = Path(__file__).resolve().parents[1]
 SCRIPT = REPO / "scripts" / "windows" / "voicemode_native.py"
@@ -221,11 +222,19 @@ def read_modes(run_dir) -> dict:
 
 
 def write_modes(run_dir, modes: dict) -> None:
-    """Merge modes into run/modes.json, atomically (the host reads it while it is written)."""
-    from vml_supervisor.state import atomic_json
-    current = read_modes(run_dir)
-    current.update({kind: mode for kind, mode in modes.items() if kind in MODE_SETTINGS})
-    atomic_json(Path(run_dir) / MODES_FILE, current)
+    """Merge modes into run/modes.json under the services' lock (two connectors or a switch may
+    write at once), atomically (the host reads it meanwhile). A corrupt file must not stop every
+    launch and switch, and setup would not repair it: it is read as {} and named on stderr."""
+    path = Path(run_dir) / MODES_FILE
+    with service_lock(run_dir):
+        try:
+            current = read_modes(run_dir)
+        except ValueError as error:
+            print(f"voicemode-local: {path} is corrupt ({error}); it is written again from the modes "
+                  "decided now", file=sys.stderr, flush=True)
+            current = {}
+        current.update({kind: mode for kind, mode in modes.items() if kind in MODE_SETTINGS})
+        atomic_json(path, current)
 
 
 def _voicemode_home(env: dict) -> Path:
