@@ -209,3 +209,16 @@ def test_stopping_during_the_release_tail_still_sends_hold_release_once():
     assert rig.sent == ["hold_start", "hold_release"]
     rig.flush()                               # the timer fires late: nothing more
     assert rig.sent == ["hold_start", "hold_release"]
+
+
+def test_a_press_in_the_release_tail_is_not_ended_by_the_earlier_holds_timer():
+    # Talos 2026-11-13: the earlier hold's tail timer fired while the new hold's key was down
+    # and sent hold_release, ending the new hold early.
+    rig = Rig()
+    rig.press(5.0, 7.0, repeat=False)         # first hold released: tail timer pending
+    rig.key.space(True, 7.1, mods=True)       # pressed again inside the 350 ms tail
+    rig.flush()                               # the OLD timer fires while the key is down
+    assert rig.sent[-1] == "hold_start"       # the second hold is still on
+    rig.key.space(False, 9.0, mods=True)      # the real end of the second hold
+    rig.flush()
+    assert rig.sent == ["hold_start", "hold_release", "hold_start", "hold_release"]

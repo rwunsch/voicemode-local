@@ -78,7 +78,9 @@ def load_or_create_token(path=None) -> str:
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     try:
         text = path.read_text(encoding="ascii").strip()
-    except (OSError, UnicodeDecodeError):
+    except UnicodeDecodeError:
+        text = ""   # not ASCII: damaged like any other bad token, so it is replaced
+    except OSError:
         text = None
     if text is not None and _valid_token(text):
         os.chmod(path, 0o600)

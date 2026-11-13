@@ -619,3 +619,14 @@ def test_failed_barge_probes_back_off_up_to_ten_minutes():
     # backend's whole life. Each further failure doubles the wait, capped.
     assert [st.barge_retry_interval(n) for n in (1, 2, 3, 4, 5, 6, 20)] == \
         [60.0, 120.0, 240.0, 480.0, 600.0, 600.0, 600.0]
+
+
+def test_a_selection_made_while_process_start_failed_survives_the_next_lookup(base, monkeypatch):
+    # Talos 2026-11-13: set_override stored start=None when ps failed; the next successful
+    # lookup saw None != the real start, unlinked the file and dropped the user's choice.
+    pid = os.getpid()
+    monkeypatch.setattr(st, "process_start", lambda p: None)
+    st.set_override(pid, "bf_emma", "German", base=base)
+    monkeypatch.undo()
+    assert st.get_override(pid, base=base) == {"voice": "bf_emma", "language": "German"}
+    assert st.get_override(pid, base=base) == {"voice": "bf_emma", "language": "German"}

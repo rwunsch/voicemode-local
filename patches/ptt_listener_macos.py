@@ -188,6 +188,7 @@ class MacHotkey:
         self._tail, self._wake_enabled = release_tail, wake_enabled
         self._held = False
         self._pending = None   # a hold_release waiting out its tail
+        self._gen = 0          # bumped when a tail is sent early: its timer then does nothing
         self._idle_down = None      # when an idle press went down
         self._last_wake = None
 
@@ -196,6 +197,8 @@ class MacHotkey:
             if self._held or self._idle_down is not None or not mods:
                 return  # auto-repeat, or not our hotkey
             self._touch()
+            if self._pending is not None:
+                self._send_pending()   # the earlier hold ends now, before the new one starts
             if not self._available():
                 self._idle_down = ts
                 return
@@ -215,12 +218,16 @@ class MacHotkey:
         action = self._state.on_release(ts)
         if action is not None and action.value == "hold_release" and self._tail > 0:
             self._pending = action            # release_held sends it if we stop first
-            self._timer(self._tail, self._send_pending)
+            gen = self._gen
+            self._timer(self._tail, lambda: self._send_pending(gen))
         else:
             self._send(action)
 
-    def _send_pending(self) -> None:
+    def _send_pending(self, gen=None) -> None:
+        if gen is not None and gen != self._gen:
+            return   # a timer from an earlier hold: its release was already sent
         action, self._pending = getattr(self, "_pending", None), None
+        self._gen += 1   # any timer still waiting belongs to a hold that is over
         self._send(action)
 
     def release_held(self, ts: float) -> None:
