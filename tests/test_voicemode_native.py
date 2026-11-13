@@ -1546,6 +1546,7 @@ def test_a_failed_job_assignment_kills_the_child_and_raises(vn, monkeypatch):
     monkeypatch.setattr(sv_winjob, "WINDOWS", True)
     monkeypatch.setattr(vn.subprocess, "Popen", _FakePopen)
     monkeypatch.setattr(sv_winjob, "_resume_threads", lambda pid: (_ for _ in ()).throw(AssertionError("resumed")))
+    monkeypatch.setattr(sv_winjob, "_parent_in_job", lambda: True)
     _FakePopen.killed.clear()
     with pytest.raises(vn.VoiceError, match="Job Object"):
         vn.start_in_job(["x.exe"], _FakeJob())
@@ -1621,6 +1622,7 @@ def test_a_refused_breakaway_is_said_not_silent(vn, monkeypatch, capsys):
 
     monkeypatch.setattr(vn.subprocess, "Popen", Popen)
     monkeypatch.setattr(sv_winjob, "_resume_threads", lambda pid: None)
+    monkeypatch.setattr(sv_winjob, "_parent_in_job", lambda: True)
     job = type("Job", (), {"assign": lambda self, handle: None})()
     process = vn.start_in_job(["x.exe"], job)
     assert process.pid == 4243 and len(flags) == 2
@@ -1798,6 +1800,41 @@ def test_launch_labels_with_the_client_folder_its_relauncher_passed(vn, home, tm
     world.observers.append(lambda command, job, kwargs: envs.update({world.kind_of(command): kwargs["env"]}))
     assert vn.launch(root) == 0
     assert envs["voice-mode"]["VOICEMODE_CLIENT_FOLDER"] == str(tmp_path / "work" / "my-project")
+
+
+def test_a_stale_client_folder_in_the_environment_does_not_beat_the_real_cwd(vn, home, tmp_path, monkeypatch):
+    root = tmp_path / "root"
+    world = FakeWorld(vn, monkeypatch, root)
+    runtime = _fake_runtime(vn, root)
+    monkeypatch.setattr(vn, "configured_runtime", lambda root, expected: (runtime, True))
+    monkeypatch.setattr(vn, "check_models", lambda runtime: None)
+    client = tmp_path / "work" / "real-project"
+    client.mkdir(parents=True)
+    monkeypatch.chdir(client)                                 # a direct launch, not a relaunch
+    monkeypatch.setenv("VOICEMODE_CLIENT_FOLDER", str(tmp_path / "old" / "stale-project"))
+    envs = {}
+    world.observers.append(lambda command, job, kwargs: envs.update({world.kind_of(command): kwargs["env"]}))
+    assert vn.launch(root) == 0
+    assert envs["voice-mode"]["VOICEMODE_CLIENT_FOLDER"] == str(client)
+
+
+def test_a_relaunch_replaces_a_stale_client_folder_with_its_own_cwd(vn, tmp_path, monkeypatch):
+    monkeypatch.setattr(vn, "WINDOWS", True)
+    monkeypatch.setitem(sys.modules, "psutil", None)
+    root = tmp_path / "root"
+    (root / "runtime" / "abc" / ".venv" / "Scripts").mkdir(parents=True)
+    (root / "runtime" / "abc" / ".venv" / "Scripts" / "python.exe").write_text("")
+    (root / "active.json").write_text(json.dumps({"runtime": "abc"}))
+    client = tmp_path / "client"
+    client.mkdir()
+    monkeypatch.chdir(client)
+    seen = []
+    done = type("P", (), {"pid": 9, "wait": lambda self: 0})()
+    monkeypatch.setattr(sv_winjob, "Job", lambda **kw: None)
+    monkeypatch.setattr(sv_winjob, "spawn", lambda command, job, **kw: seen.append(kw) or (done, Result("breakaway")))
+    monkeypatch.setenv("VOICEMODE_CLIENT_FOLDER", str(tmp_path / "old" / "stale-project"))
+    assert vn.restart_with_runtime_python(root, ["launch"]) == 0
+    assert seen[0]["env"]["VOICEMODE_CLIENT_FOLDER"] == str(client)
 
 
 def test_a_launch_only_turns_a_helper_on(vn, home, tmp_path, monkeypatch, capsys):

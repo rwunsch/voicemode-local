@@ -1256,7 +1256,7 @@ def launch(root):
             # from a WSL checkout that was the WSL setup's file. The label still gets the folder.
             # A relaunch under the runtime's Python runs in the install folder and passes the
             # client's folder on in VOICEMODE_CLIENT_FOLDER.
-            env["VOICEMODE_CLIENT_FOLDER"] = os.environ.get("VOICEMODE_CLIENT_FOLDER") or os.getcwd()
+            env["VOICEMODE_CLIENT_FOLDER"] = client_folder(root)
             env.update(tool_selection())
             env.update(voice_mode_settings())
             child = start_in_job([str(venv_program(runtime, "voice-mode"))], connector_job(), env=env,
@@ -1414,6 +1414,19 @@ def info(root):
     return 0
 
 
+def client_folder(root) -> str:
+    """The folder the session label names. The real cwd of this launch wins; VOICEMODE_CLIENT_FOLDER
+    counts only in a relaunch, which runs in the install folder and had the variable set by the
+    relauncher of this same launch. Anywhere else the variable is inherited, possibly stale."""
+    cwd = os.getcwd()
+    inherited = os.environ.get("VOICEMODE_CLIENT_FOLDER")
+    try:
+        relaunched = Path(cwd).resolve() == Path(root).resolve()
+    except OSError:
+        relaunched = False
+    return inherited if inherited and relaunched else cwd
+
+
 def restart_with_runtime_python(root, args):
     """Reading other processes needs psutil, which the runtime has. None means carry on here.
     args: the command and its action, as given."""
@@ -1439,7 +1452,8 @@ def restart_with_runtime_python(root, args):
     # The install folder as its working folder, never the client's: Windows searches the
     # current folder first, and every child of the launcher would inherit it.
     env = dict(os.environ, VOICEMODE_NATIVE_ROOT=str(root))
-    env.setdefault("VOICEMODE_CLIENT_FOLDER", os.getcwd())   # the session label: launch reads it
+    # The session label: launch reads it. This launch's own cwd, never one inherited from an older session.
+    env["VOICEMODE_CLIENT_FOLDER"] = os.getcwd()
     child = start_in_job([str(python), str(SCRIPT), *args, *flag], job, cwd=str(root), env=env,
                          **procs.connector_options())
     return child.wait()
