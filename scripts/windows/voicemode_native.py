@@ -80,6 +80,19 @@ DEPENDENCIES = HERE / "dependencies.json"
 PATCHES = REPO / "patches"
 TTS_SERVER = REPO / "kokoro-onnx-server.py"
 
+# The lifecycle lives in vml_supervisor and the values in vml_profiles/claude.py, both in this
+# checkout beside scripts/: the checkout's root goes on the import path (Task 8 ruling).
+if str(REPO) not in sys.path:
+    sys.path.insert(0, str(REPO))
+
+from vml_profiles import claude as profile_values  # noqa: E402
+from vml_supervisor import helpers as sv_helpers  # noqa: E402
+from vml_supervisor import host as sv_host  # noqa: E402
+from vml_supervisor import procs, winjob  # noqa: E402
+from vml_supervisor import services as sv_services  # noqa: E402
+from vml_supervisor import state as sv_state  # noqa: E402
+from vml_supervisor.profile import BASE_RESERVED_PORTS  # noqa: E402
+
 LOOPBACK = "127.0.0.1"
 LOCAL_HOSTS = "127.0.0.1,localhost,::1"
 PROXY_VARIABLES = ("http_proxy", "https_proxy", "all_proxy", "ftp_proxy")
@@ -638,18 +651,27 @@ def _setup_locked(root, data, expected, uv, uv_env):
 
 def prune_runtimes(root, active):
     """Remove every runtime that is neither active, nor named by a live lease, nor serving."""
-    run_dir = root / "run"
     holders = root / RUNTIMES
     if not holders.is_dir():
         return []
-    with service_lock(run_dir):
+    profile = profile_of(root, holders / active)
+    run_dir = Path(profile.run_dir)
+    with sv_state.service_lock(run_dir):
+        state = read_json(run_dir / "state.json", {}) or {}
+        clients = run_dir / "clients"
+        if procs.require_psutil() is not None and (state or (clients.is_dir() and any(clients.iterdir()))):
+            # Setup runs under the user's Python: without psutil every lease would look dead and be
+            # deleted, and a runtime in use could go. Nothing is pruned; the next setup tries again.
+            print("voicemode-local: could not check which runtimes are in use (no psutil here); "
+                  "older runtimes were kept.", file=sys.stderr)
+            return []
         keep = {active}
-        for pid in live_leases(run_dir):
-            record = read_json(run_dir / "clients" / str(pid), {})
+        for pid in sv_state.live_leases(profile):
+            record = read_json(clients / str(pid), {})
             if isinstance(record, dict) and record.get("runtime"):
                 keep.add(Path(record["runtime"]).name)
-        for entry in (read_json(run_dir / "state.json", {}) or {}).values():
-            if owned(entry) and entry.get("runtime"):
+        for entry in state.values():
+            if procs.owned(entry) and entry.get("runtime"):
                 keep.add(Path(entry["runtime"]).name)
         removed = []
         for folder in sorted(holders.iterdir()):
@@ -1224,14 +1246,8 @@ def start_watchdog(root):
 
 
 def watch(root):
-    """Hold the services' job open; restart a crashed speech service; stop the services once no
-    lease is alive, then exit."""
-    services_job(root)
-    restarts = {}
-    while True:
-        time.sleep(WATCH_INTERVAL)
-        if not watch_tick(root, restarts):
-            return
+    """POSIX: vml_supervisor's watchdog for this install (Windows has the voice host instead)."""
+    return sv_host.watch_main(profile_of(root))
 
 
 def _watch_log(run_dir, line):
@@ -1286,15 +1302,200 @@ def release(root):
 
 
 def stop(root):
-    run_dir = root / "run"
-    with service_lock(run_dir):
-        others = live_leases(run_dir)
-        state = read_json(run_dir / "state.json", {}) or {}
-        running = [kind for kind in state if owned(state[kind])]
-        stop_recorded(run_dir, state)
-    print(f"Stopped voicemode-local's native services: {', '.join(running) or 'none were running'}.")
-    if others:
-        print(f"{len(others)} voice connector(s) still running will have no speech until they restart.")
+    """Stop this install's voice host, services and helpers (vml_supervisor's stop), whatever leases remain."""
+    results = sv_services.stop(profile_of(root))
+    done = next((r for r in results if r.code == "services_stopped"), None)
+    say([r for r in results if r is not done])
+    data = done.data if done is not None else {}
+    print(f"Stopped voicemode-local's native services: {', '.join(data.get('services', [])) or 'none were running'}.")
+    if data.get("connectors"):
+        print(f"{data['connectors']} voice connector(s) still running will have no speech until they restart.")
+
+
+# -- the profile over vml_supervisor (Task 8) ---------------------------------------
+# The package starts, leases, watches and stops; this launcher builds the profile, decides the
+# settings it reads, and words the Results it returns (the package writes no text for people).
+
+# Results that are the expected outcome, not news.
+QUIET = frozenset({"no_job", "breakaway", "host_started", "host_started_late", "helper_started",
+                   "helper_running", "helper_restarted", "helper_stopped", "helper_not_running",
+                   "services_stopped"})
+
+
+def active_runtime(root):
+    """The runtime folder active.json names, else the runtime holder (a profile needs one)."""
+    record = read_json(root / "active.json")
+    name = Path(str(record.get("runtime", ""))).name if isinstance(record, dict) else ""
+    return root / RUNTIMES / name if name else root / RUNTIMES
+
+
+def connector_environment(runtime):
+    """What the services and helpers get: the launcher's own environment for voice-mode."""
+    env = runtime_environment(runtime)
+    env.update(tool_selection())
+    env.update(voice_mode_settings())
+    return env
+
+
+def profile_of(root, runtime=None):
+    """This install's HostProfile (vml_profiles/claude.py), for the runtime given or the active one."""
+    runtime = Path(runtime) if runtime is not None else active_runtime(root)
+    return profile_values.personal_profile(root, runtime, env=connector_environment(runtime),
+                                           allow_outside=ALLOW_OUTSIDE, windows=WINDOWS)
+
+
+def say(results, quiet=QUIET):
+    """Every Result that is news, one line each on stderr: nothing the package met goes unsaid."""
+    for result in results:
+        if result.code not in quiet:
+            print(f"voicemode-local: {result.code}: {result.detail}", file=sys.stderr, flush=True)
+
+
+def port_setting(kind):
+    """The port VOICEMODE_NATIVE_TTS_PORT / _STT_PORT sets (environment, then voicemode.env), or None."""
+    raw = setting(PORT_SETTINGS[kind])
+    if raw is None:
+        return None
+    try:
+        port = int(str(raw).strip())
+    except ValueError:
+        port = None
+    reserved = set(BASE_RESERVED_PORTS) | set(profile_values.FELIX_PORTS)
+    if port is None or not 1024 <= port <= 65535 or port in reserved:
+        raise VoiceError(f"{PORT_SETTINGS[kind]}={raw!r} is not usable: give a port from 1024 to 65535 "
+                         "outside 8880-8882, 2022, 9000 and FELIX's 18880-18899 and 12022-12041.",
+                         f"Fix or remove {PORT_SETTINGS[kind]}, then restart the voice connector.")
+    return port
+
+
+def write_port_settings(root):
+    """run/ports.json from the port settings, for whoever chooses the ports: on Windows the host,
+    which inherits no environment and must not miss a port set in it."""
+    ports = {kind: port for kind in SPEECH if (port := port_setting(kind)) is not None}
+    sv_state.atomic_json(Path(root) / "run" / profile_values.PORTS_FILE, ports)
+
+
+def launch_modes():
+    """The trigger's and the listener's modes as launch decides them: from the settings, the
+    environment first (as optional_services reads them)."""
+    return {kind: profile_values.mode_of(kind, setting(name, "")) for kind, name in profile_values.MODE_SETTINGS.items()}
+
+
+def failure(results, runtime):
+    """The VoiceError for speech services that did not start, from the first Result that says why."""
+    windows_step = "Start Claude Code from a normal desktop session, then restart the voice connector."
+    for result in results:
+        data = result.data if isinstance(result.data, dict) else {}
+        kind = str(data.get("service", "")).lower()
+        noun = kind.upper()
+        if result.code == "runtime_incomplete":
+            return VoiceError(f"The runtime {Path(runtime).name} was replaced while starting.",
+                              "Restart the voice connector.")
+        if result.code == "no_free_port":
+            return VoiceError(f"No free local port for the {noun} service (tried {data.get('first')} to "
+                              f"{data.get('last')}).",
+                              f"Close what uses them, or set {PORT_SETTINGS.get(kind, 'its port setting')}, "
+                              "then restart.")
+        if result.code in ("owner_other", "owner_unknown"):
+            return VoiceError(f"Something other than our {noun} service answered on {LOOPBACK}:{data.get('port')} "
+                              f"(ours is process {data.get('pid')}; listening: "
+                              f"{data.get('listeners') or 'none found'}); voice was not connected to it.",
+                              f"Restart the voice connector, or set {PORT_SETTINGS.get(kind, 'its port setting')}.")
+        if result.code == "service_exited":
+            return VoiceError(f"The local {noun} service stopped while starting.", f"See {data.get('log')}.")
+        if result.code == "service_not_ready":
+            return VoiceError(f"Local speech services did not become ready: {result.detail}",
+                              f"See {data.get('log')}.")
+        if result.code in ("job_assign_failed", "resume_failed"):
+            return VoiceError(f"Could not put a speech service in its Job Object ({result.detail}); it was not "
+                              "started.", windows_step)
+        if result.code.startswith("host_") and result.code not in ("host_started", "host_started_late"):
+            return VoiceError(f"The voice host could not be started ({result.code}: {result.detail}).", windows_step)
+    told = "; ".join(f"{r.code}: {r.detail}" for r in results if r.code not in QUIET) or "no reason was given"
+    return VoiceError(f"Local speech services did not start: {told}.",
+                      "If this repeats, run setup again, then restart the voice connector.")
+
+
+def ensure_speech(profile, helpers=True):
+    """Lease this connector and make sure the speech services answer (vml_supervisor); with
+    helpers, the trigger and the listener follow their modes too. Returns the services' ports."""
+    write_port_settings(profile.root)
+    if helpers:
+        profile_values.write_modes(profile.run_dir, launch_modes())
+        ports, results = sv_host.ensure(profile, os.getpid())
+    else:
+        ports, results = sv_services.ensure_services(profile, os.getpid())
+    if any(kind not in ports for kind in SPEECH):
+        raise failure(results, profile.runtime_dir)
+    say(results)
+    return {kind: ports[kind] for kind in SPEECH}
+
+
+def start_services(root, runtime, helpers=True):
+    """(profile, ports): ensure_speech for the install at root running runtime."""
+    profile = profile_of(root, runtime)
+    return profile, ensure_speech(profile, helpers)
+
+
+def leave(profile):
+    """Drop this connector's lease; the services stop when no connector is left."""
+    say(sv_services.release(profile, os.getpid()))
+
+
+def start_in_job(command, job, **kwargs):
+    """winjob.spawn, said: a child that could not be put in its job is not started (VoiceError),
+    and one whose parent's job forbids breakaway (it also ends with that job) is said on stderr."""
+    try:
+        process, spawned = winjob.spawn(command, job, **kwargs)
+    except winjob.SpawnError as error:
+        raise VoiceError(f"Could not put {Path(command[0]).name} in its Job Object ({error.result.detail}); "
+                         "it was not started.",
+                         "Start Claude Code from a normal desktop session, then restart the voice "
+                         "connector.") from error
+    if spawned.code not in ("no_job", "breakaway"):
+        print(f"voicemode-local: {Path(command[0]).name}: {spawned.code}: {spawned.detail}",
+              file=sys.stderr, flush=True)
+    return process
+
+
+_connector_jobs = []
+
+
+def connector_job():
+    """A private Job Object for this connector's own voice-mode: it dies when this process does.
+    With breakaway: what voice-mode starts through the native switch belongs in the services' job."""
+    if not WINDOWS:
+        return None
+    if not _connector_jobs:
+        _connector_jobs.append(winjob.Job(breakaway=True))
+    return _connector_jobs[0]
+
+
+def start_pill(profile, runtime, env, state):
+    """Start the pill window into the services' job and record it in run\\state.json. The caller
+    holds the service lock and has checked that none is running. The pill is not a vml_supervisor
+    helper: launch never starts it (voice-mode does, pill_autostart) and it stops through its event."""
+    run_dir = Path(profile.run_dir)
+    command, marker = optional_command("pill", runtime, profile.root)
+    job = None
+    try:
+        job = winjob.services_job(profile)
+    except OSError as error:
+        print(f"voicemode-local: job_unavailable: {profile.job_name}: {error}; the window starts without it",
+              file=sys.stderr, flush=True)
+    Path(profile.working_dir).mkdir(parents=True, exist_ok=True)
+    log = run_dir / "pill.log"
+    with log.open("a") as output:
+        process = start_in_job(command, job, env=env, cwd=str(profile.working_dir), stdin=subprocess.DEVNULL,
+                               stdout=output, stderr=output, **procs.background_options())
+    state["pill"] = {"pid": process.pid, "port": None, "marker": marker, "log": str(log),
+                     "command": [str(c) for c in command], "runtime": str(runtime)}
+    try:
+        sv_state.atomic_json(run_dir / "state.json", state)
+    except BaseException:
+        procs.kill_tree(process.pid, STOP_TIMEOUT)
+        raise
+    return process
 
 
 # -- the native switch ---------------------------------------------------------
@@ -1364,26 +1565,36 @@ def env_override(name, value):
 
 def stop_optional(root, kind, entry):
     """The pill through its stop event first (the window closes and ends its backend), then
-    kill_tree of what is still there; the trigger and the push-to-talk listener by kill_tree."""
+    kill_tree of what is still there."""
     if kind == "pill" and WINDOWS and set_pill_stop_event(root):
         deadline = time.monotonic() + STOP_WAIT
-        while owned(entry) and time.monotonic() < deadline:
+        while procs.owned(entry) and time.monotonic() < deadline:
             time.sleep(0.1)
-    if owned(entry):
-        kill_tree(entry["pid"])
+    if procs.owned(entry):
+        failed = procs.kill_tree(entry["pid"], STOP_TIMEOUT)
+        if failed is not None:
+            raise VoiceError(f"The {SWITCH_NOUNS[kind]} would not stop ({failed.detail}).")
 
 
 def _serving_runtime(root, state, run_dir, leases):
     """The runtime the running connectors use: the speech services', else a lease's."""
     for kind in SPEECH:
         entry = state.get(kind)
-        if owned(entry) and entry.get("runtime"):
+        if procs.owned(entry) and entry.get("runtime"):
             return Path(entry["runtime"])
     for pid in leases:
         record = read_json(run_dir / "clients" / str(pid), {})
         if isinstance(record, dict) and record.get("runtime"):
             return Path(record["runtime"])
     return None
+
+
+def _say_no_channel(run_dir, leases):
+    records = [read_json(run_dir / "clients" / str(pid), {}) for pid in leases]
+    if any(isinstance(r, dict) and r.get("control_channel") is False for r in records):
+        print("A voice connector started before this has no control channel, so it cannot show who "
+              "is speaking or be interrupted by voice: reconnect it (/mcp in Claude Code). New "
+              "connectors get the channel.")
 
 
 def switch(root, kind, action):
@@ -1411,41 +1622,84 @@ def switch(root, kind, action):
     if not can_inspect():
         print("Nothing is running here to change: voicemode-local is not set up natively.")
         return 0
+    if kind in profile_values.MODE_SETTINGS:
+        return _switch_helper(root, kind, profile_values.mode_of(kind, value))
+    return _switch_pill(root, kind, on, name, value)
+
+
+def _switch_helper(root, kind, mode):
+    """The trigger or the listener: a vml_supervisor helper. The decision goes to run/modes.json
+    first, so the host's next look keeps it (read_mode in vml_profiles/claude.py)."""
     run_dir = root / "run"
     noun = SWITCH_NOUNS[kind]
-    with service_lock(run_dir):
+    profile_values.write_modes(run_dir, {kind: mode})
+    profile = profile_of(root)
+    if mode == "off":
+        result = sv_helpers.stop_helper(profile, kind)
+        say(result.data.get("results", []))
+        if result.code == "helper_stopped":
+            print(f"Stopped the {noun} (process {result.data.get('pid')}).")
+        elif result.code != "helper_not_running":
+            raise VoiceError(f"The {noun} could not be stopped ({result.code}: {result.detail}).")
+        return 0
+    state = read_json(run_dir / "state.json", {}) or {}
+    entry = state.get(kind)
+    if procs.owned(entry) and entry.get("mode") == mode:
+        print(f"The {noun} is already running (process {entry['pid']}).")
+        return 0
+    leases = sv_state.live_leases(profile)
+    runtime = _serving_runtime(root, state, run_dir, leases) if leases else None
+    if runtime is None:
+        print(f"No voice connector is running: the {noun} starts with the next voice connector.")
+        return 0
+    if kind == "barge" and not silero_present(runtime):
+        raise VoiceError(f"The Silero model that interrupt by voice needs is missing from {runtime}.",
+                         setup_step())
+    result = sv_helpers.start_helper(profile_of(root, runtime), kind, mode)
+    say(result.data.get("results", []))
+    pid = result.data.get("pid")
+    if result.code == "helper_running":
+        print(f"The {noun} is already running (process {pid}).")
+    elif result.code in ("helper_started", "helper_restarted"):
+        print(f"The {noun} {result.code.split('_')[1]} (process {pid}).")
+    else:
+        raise VoiceError(f"The {noun} did not start ({result.code}: {result.detail}).",
+                         f"See {result.data.get('log')}." if result.data.get("log") else None)
+    _say_no_channel(run_dir, leases)
+    return 0
+
+
+def _switch_pill(root, kind, on, name, value):
+    """The pill window: its own path, not a vml_supervisor helper (launch never starts it, and it
+    closes through its stop event)."""
+    run_dir = root / "run"
+    noun = SWITCH_NOUNS[kind]
+    with sv_state.service_lock(run_dir):
         state = read_json(run_dir / "state.json", {}) or {}
         entry = state.get(kind)
         if not on:
-            if owned(entry):
+            if procs.owned(entry):
                 stop_optional(root, kind, entry)
                 print(f"Stopped the {noun} (process {entry['pid']}).")
             if kind in state:
                 state.pop(kind)
-                atomic_json(run_dir / "state.json", state)
+                sv_state.atomic_json(run_dir / "state.json", state)
             return 0
-        if owned(entry):
+        if procs.owned(entry):
             print(f"The {noun} is already running (process {entry['pid']}).")
             return 0
-        leases = live_leases(run_dir)
+        leases = sv_state.live_leases(profile_of(root))
         runtime = _serving_runtime(root, state, run_dir, leases) if leases else None
         if runtime is None:
             print(f"No voice connector is running: the {noun} starts with the next voice connector.")
             return 0
-        if kind == "barge" and not silero_present(runtime):
-            raise VoiceError(f"The Silero model that interrupt by voice needs is missing from {runtime}.",
-                             setup_step())
         state.pop(kind, None)
-        ports = {k: state[k]["port"] for k in SPEECH if owned(state.get(k))}
+        ports = {k: state[k]["port"] for k in SPEECH if procs.owned(state.get(k))}
         env = runtime_environment(runtime, ports if len(ports) == len(SPEECH) else None)
         env[name] = value  # the window checks it, and a stale false from voice-mode must not stop it
-        process = start_service(kind, root, runtime, env, state, services_job(root))
+        process = start_pill(profile_of(root, runtime), runtime, env, state)
         print(f"The {noun} started (process {process.pid}).")
-        records = [read_json(run_dir / "clients" / str(pid), {}) for pid in leases]
-        if any(isinstance(r, dict) and r.get("control_channel") is False for r in records):
-            print("A voice connector started before this has no control channel, so it cannot show who "
-                  "is speaking or be interrupted by voice: reconnect it (/mcp in Claude Code). New "
-                  "connectors get the channel.")
+        _say_no_channel(run_dir, leases)
     return 0
 
 
@@ -1462,7 +1716,7 @@ def switch_status(root, kind):
     print(line)
     entry = (read_json(root / "run" / "state.json", {}) or {}).get(kind)
     noun = SWITCH_NOUNS[kind]
-    running = can_inspect() and owned(entry)
+    running = can_inspect() and procs.owned(entry)
     print(f"{noun}: running (process {entry['pid']})" if running else f"{noun}: not running")
     return 0
 
@@ -1541,47 +1795,57 @@ def voice_mode_settings():
 
 
 def launch(root):
-    """The MCP command: services, then the optional pill and listener, then voice-mode on stdio."""
+    """The MCP command: the leased speech services (and the trigger and the listener when they are
+    on), then voice-mode on stdio. On Windows the services belong to the voice host outside every
+    chat; every HOST_CHECK seconds this connector starts it again if it ended anyway."""
     data, expected = manifest()
     runtime, current = configured_runtime(root, expected)
     if not current:
         print("voicemode-local: the native runtime is out of date; the previous one is used. "
               f'To update, run: "{sys.executable}" "{SCRIPT}" setup', file=sys.stderr, flush=True)
     check_models(runtime)
+    profile = profile_of(root, runtime)
     child = None
     stopping = []
     try:
         with forwarded_signals(lambda: child, stopping):
-            ports = ensure_services(root, runtime, runtime_environment(runtime))
+            ports = ensure_speech(profile)
             env = runtime_environment(runtime, ports)
             # Upstream loads every .voicemode/voicemode.env walking up from its working folder;
             # from a WSL checkout that was the WSL setup's file. The label still gets the folder.
             env["VOICEMODE_CLIENT_FOLDER"] = os.getcwd()
             env.update(tool_selection())
             env.update(voice_mode_settings())
-            child = spawn([str(venv_program(runtime, "voice-mode"))], job=connector_job(), env=env,
-                          cwd=str(runtime), **connector_options())
+            child = start_in_job([str(venv_program(runtime, "voice-mode"))], connector_job(), env=env,
+                                 cwd=str(runtime), **procs.connector_options())
             # If this launcher dies, its voice-mode keeps the lease alive until it ends too.
-            atomic_json(root / "run" / "clients" / str(os.getpid()),
-                        {"child": child.pid, "runtime": str(runtime),
-                         "control_channel": (env.get(CONTROL_CHANNEL) or "").strip().lower() == "true"})
+            sv_state.atomic_json(root / "run" / "clients" / str(os.getpid()),
+                                 {"child": child.pid, "runtime": str(runtime),
+                                  "control_channel": (env.get(CONTROL_CHANNEL) or "").strip().lower() == "true"})
+            checked = time.monotonic()
             while True:
                 try:
                     return child.wait(timeout=1)
                 except subprocess.TimeoutExpired:
                     if stopping and time.monotonic() - stopping[0] > STOP_TIMEOUT:
                         child.kill()
+                    if procs.WINDOWS and time.monotonic() - checked >= sv_host.HOST_CHECK:
+                        checked = time.monotonic()
+                        say(sv_host.check_host(profile), quiet=())
     except Stopped as stopped:
         return 128 + stopped.args[0]
     finally:
         if child is not None and child.poll() is None:
             if WINDOWS:
-                kill_tree(child.pid)
+                say([r for r in [procs.kill_tree(child.pid, STOP_TIMEOUT)] if r is not None])
             else:
                 child.terminate()
-                with contextlib.suppress(subprocess.TimeoutExpired):
+                try:
                     child.wait(STOP_TIMEOUT)
-        release(root)
+                except subprocess.TimeoutExpired:  # it ignored the stop request: never left running
+                    child.kill()
+                    child.wait()
+        leave(profile)
 
 
 def serve(root):
@@ -1589,13 +1853,14 @@ def serve(root):
     data, expected = manifest()
     runtime, _ = configured_runtime(root, expected)
     check_models(runtime)
+    profile = profile_of(root, runtime)
     try:
-        ports = ensure_services(root, runtime, runtime_environment(runtime), optional=[])
+        ports = ensure_speech(profile, helpers=False)
         print(json.dumps(ports), flush=True)
         sys.stdin.read()
         return 0
     finally:
-        release(root)
+        leave(profile)
 
 
 def status(root):
@@ -1603,10 +1868,14 @@ def status(root):
     runtime, current = configured_runtime(root, expected)
     check_models(runtime)
     state = read_json(root / "run/state.json", {}) or {}
-    running = {kind: entry for kind, entry in state.items() if owned(entry)}
+    running = {kind: entry for kind, entry in state.items() if procs.owned(entry)}
+    profile = profile_of(root, runtime)
     for kind in SPEECH:
         if kind in running:
-            check_service(kind, running[kind]["port"])
+            spec = profile.services[kind]
+            if not sv_services.check_service(spec.ready_kind, running[kind]["port"], spec.ready_path):
+                raise RuntimeError(f"Local {kind.upper()} service unavailable at "
+                                   f"http://{LOOPBACK}:{running[kind]['port']}{spec.ready_path}.")
     if running:
         print("Running: " + ", ".join(
             f"{kind} {LOOPBACK}:{e['port']}" if e.get("port") else kind for kind, e in running.items()) + ".")
@@ -1719,14 +1988,24 @@ def restart_with_runtime_python(root, args):
             return 0
         return None  # the command itself reports what is missing
     # Only the inner launcher is in this job: its services and voice-mode go in jobs of their own.
-    job = Job(silent_breakaway=True)
+    job = winjob.Job(silent_breakaway=True)
+    # The flag after the command: a lease is alive while its launcher's command line holds
+    # `voicemode_native.py launch`, so nothing may come between the two.
     flag = ["--allow-root-outside-profile"] if ALLOW_OUTSIDE else []
-    child = spawn([str(python), str(SCRIPT), *flag, *args], job=job,
-                  env=dict(os.environ, VOICEMODE_NATIVE_ROOT=str(root)), **connector_options())
+    child = start_in_job([str(python), str(SCRIPT), *args, *flag], job,
+                         env=dict(os.environ, VOICEMODE_NATIVE_ROOT=str(root)), **procs.connector_options())
     return child.wait()
 
 
 def main(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv[:1] == ["host"]:
+        # The Windows voice host, started by vml_supervisor outside every chat with the profile
+        # file as its one argument: it inherits nothing, so it resolves no root or settings here.
+        if len(argv) != 2:
+            print("usage: voicemode_native.py host <profile file>", file=sys.stderr)
+            return 2
+        return sv_host.host_main(Path(argv[1]))
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("command", choices=["setup", "launch", "serve", "status", "stop", "watch",
                                             "barge", "pill", "ptt", "info", "remove-data"])
@@ -1758,8 +2037,7 @@ def main(argv=None):
             stop(root)
             return 0
         if args.command == "watch":
-            watch(root)
-            return 0
+            return watch(root)
         if args.command in SWITCHES:
             return switch(root, args.command, args.action)
         return {"launch": launch, "serve": serve, "status": status}[args.command](root)

@@ -47,9 +47,10 @@ cp "$REPO/patches/"*.py "$REPO/patches/manifest.json" "$REPO/patches/manifest.wi
 cp "$REPO/scripts/windows/voicemode_native.py" "$REPO/scripts/windows/dependencies.json" \
    "$REPO/scripts/windows/requirements.lock" "$DIR/scripts/windows/"
 cp "$REPO/kokoro-onnx-server.py" "$DIR/"
-# The shared supervisor package.
-mkdir -p "$DIR/vml_supervisor"
+# The shared supervisor package, and the profile the native launcher builds over it.
+mkdir -p "$DIR/vml_supervisor" "$DIR/vml_profiles"
 cp "$REPO/vml_supervisor/"*.py "$DIR/vml_supervisor/"
+cp "$REPO/vml_profiles/"*.py "$DIR/vml_profiles/"
 # The pill window and its page, for its native mode; install.ps1 for its native mode.
 cp "$REPO/pill-windows.ps1" "$REPO/install.ps1" "$REPO/ptt-listener-windows.ps1" "$DIR/"
 mkdir -p "$DIR/ui"

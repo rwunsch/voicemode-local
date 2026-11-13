@@ -32,7 +32,6 @@ import hashlib
 import importlib.util
 import json
 import os
-import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -139,8 +138,9 @@ def service_specs(runtime, windows=WINDOWS) -> dict:
     tts = ServiceSpec([str(venv_program(runtime, "python", windows)), str(script), "--host", LOOPBACK,
                        "--port", "{port}", "--model-dir", str(runtime / "models/kokoro")],
                       str(script), TTS_PORTS, "/v1/models", "kokoro")
-    whisper = (str(runtime / "services/whisper/whisper-server.exe") if windows
-               else shutil.which("whisper-server") or "whisper-server")
+    # Off Windows (tests, a Mac) a bare name: Popen searches PATH, and only Windows searches the
+    # current folder first. Looking it up here would scan PATH on every profile built.
+    whisper = str(runtime / "services/whisper/whisper-server.exe") if windows else "whisper-server"
     model = runtime / "models/whisper/ggml-base.bin"
     # No --convert: it needs ffmpeg, and whisper-server will not start without it (FELIX, 2026-11-04).
     stt = ServiceSpec([whisper, "--host", LOOPBACK, "--port", "{port}", "-m", str(model), "-l", "auto",

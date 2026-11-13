@@ -1605,3 +1605,87 @@ def test_launch_stops_a_voice_server_that_ignores_the_stop_request(vn, home, tmp
     assert time.monotonic() - begin[0] < 15
     assert json.loads((root / "run/state.json").read_text()) == {}
     assert sorted(e for e in world.events if e.startswith("kill:")) == ["kill:stt", "kill:tts"]
+
+
+def test_a_refused_breakaway_is_said_not_silent(vn, monkeypatch, capsys):
+    """Task 4 ruling: the old spawn retried without breakaway and said nothing. Where the
+    connector's job forbids breakaway, the child is also in that job and ends with it: said."""
+    monkeypatch.setattr(sv_winjob, "WINDOWS", True)
+    flags = []
+
+    class Popen:
+        def __init__(self, command, creationflags=0, **kwargs):
+            flags.append(creationflags)
+            if creationflags & sv_winjob.CREATE_BREAKAWAY_FROM_JOB:
+                raise PermissionError("breakaway is not allowed")
+            self.pid, self._handle = 4243, 8
+
+    monkeypatch.setattr(vn.subprocess, "Popen", Popen)
+    monkeypatch.setattr(sv_winjob, "_resume_threads", lambda pid: None)
+    job = type("Job", (), {"assign": lambda self, handle: None})()
+    process = vn.start_in_job(["x.exe"], job)
+    assert process.pid == 4243 and len(flags) == 2
+    err = capsys.readouterr().err
+    assert "breakaway" in err and "x.exe" in err
+
+
+def test_the_relaunched_launcher_keeps_its_lease_marker_with_the_allow_flag(vn, tmp_path, monkeypatch):
+    """A lease is alive while its launcher's command holds `voicemode_native.py launch`. The
+    relaunch under the runtime's Python put --allow-root-outside-profile between the two, so
+    the marker never matched and only voice-mode's own marker kept the lease (found 2026-11-13)."""
+    monkeypatch.setattr(vn, "WINDOWS", True)
+    monkeypatch.setattr(vn, "ALLOW_OUTSIDE", True)
+    monkeypatch.setitem(sys.modules, "psutil", None)          # this Python cannot inspect
+    root = tmp_path / "root"
+    (root / "runtime" / "abc" / ".venv" / "Scripts").mkdir(parents=True)
+    (root / "runtime" / "abc" / ".venv" / "Scripts" / "python.exe").write_text("")
+    (root / "active.json").write_text(json.dumps({"runtime": "abc"}))
+    seen = []
+    done = type("P", (), {"pid": 9, "wait": lambda self: 0})()
+    monkeypatch.setattr(vn, "Job", lambda **kw: None, raising=False)
+    monkeypatch.setattr(sv_winjob, "Job", lambda **kw: None)
+    monkeypatch.setattr(vn, "spawn", lambda command, job=None, **kw: seen.append(command) or done, raising=False)
+    monkeypatch.setattr(sv_winjob, "spawn", lambda command, job, **kw: seen.append(command) or (done, Result("breakaway")))
+    monkeypatch.setattr(vn, "connector_options", lambda: {}, raising=False)
+    assert vn.restart_with_runtime_python(root, ["launch"]) == 0
+    line = " ".join(seen[0])
+    assert "voicemode_native.py launch" in line and "--allow-root-outside-profile" in line
+
+
+def _host_mode(vn, root, kind):
+    """What the voice host's next look decides for a helper (its read_mode hook)."""
+    from vml_supervisor import hooks as hook_calls
+    profile = vn.profile_of(root)
+    hooks, problems = load_hooks(profile)
+    assert not problems
+    return hook_calls.read_mode(hooks, profile, kind)
+
+
+def test_a_switch_is_not_undone_by_the_hosts_next_look(vn, home, tmp_path, monkeypatch, capsys):
+    """The connector's environment says false (it wins over voicemode.env at launch); `ptt on`
+    still starts the listener, as before, and the host's next look must keep it (Windows test
+    test_ptt_switch_starts_and_stops_the_listener_in_the_services_job runs exactly this)."""
+    s = Switch(vn, home, tmp_path, monkeypatch)
+    monkeypatch.setenv("VOICEMODE_PTT_ENABLED", "false")
+    monkeypatch.setenv("VOICEMODE_NATIVE_ENV_SETTINGS", "VOICEMODE_PTT_ENABLED")
+    assert _host_mode(vn, s.root, "ptt") == ("off", None)
+    assert vn.switch(s.root, "ptt", "on") == 0
+    assert "started (process" in capsys.readouterr().out
+    assert _host_mode(vn, s.root, "ptt") == ("true", None)
+    vn.switch(s.root, "ptt", "off")
+    assert _host_mode(vn, s.root, "ptt") == ("off", None)
+
+
+def test_launch_decides_the_modes_again_from_its_settings(vn, home, tmp_path, monkeypatch):
+    """An earlier switch's decision does not outlive the next launch: launch reads its settings,
+    the environment first, as it always did."""
+    root = tmp_path / "root"
+    world = FakeWorld(vn, monkeypatch, root)
+    runtime = _fake_runtime(vn, root)
+    monkeypatch.setattr(vn, "configured_runtime", lambda root, expected: (runtime, True))
+    monkeypatch.setattr(vn, "check_models", lambda runtime: None)
+    (root / "run").mkdir(parents=True)
+    (root / "run" / "modes.json").write_text(json.dumps({"ptt": "off", "barge": "off"}))
+    monkeypatch.setenv("VOICEMODE_PTT_ENABLED", "true")
+    assert vn.launch(root) == 0
+    assert "spawn:ptt" in world.events and "spawn:barge" not in world.events
