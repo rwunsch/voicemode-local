@@ -128,10 +128,9 @@
   $("voice").onchange = function () { send({ cmd: "set_voice", voice: this.value }); this.blur(); };
   $("language").onchange = function () { send({ cmd: "set_language", language: this.value }); this.blur(); };
   $("barge").onclick = function () {
-    var shown = M.bargeShown(snapshot && snapshot.barge && snapshot.barge.enabled, bargePending, Date.now()).on;
-    bargePending = { on: !shown, at: Date.now() };
-    send({ window: { log: "click barge " + (!shown ? "on" : "off") } });
-    send({ cmd: "set_barge", on: !shown });
+    bargePending = M.clickBarge(snapshot && snapshot.barge && snapshot.barge.enabled, bargePending, Date.now());
+    send({ window: { log: "click barge " + (bargePending.on ? "on" : "off") } });
+    send({ cmd: "set_barge", on: bargePending.on });
     render();
   };
   $("beeps").onclick = function () { send({ cmd: "set_beeps", on: !(snapshot && snapshot.beeps) }); };

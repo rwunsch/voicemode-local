@@ -105,12 +105,30 @@
   // agrees or PENDING_MS passes (Mac, 2026-11-13: the label waited 1-2 s for the next tick, and
   // a click with no visible change read as "I can't click it"). keep is what the page holds on to.
   var PENDING_MS = 5000;
+  // A pending click ends when the backend has moved since the click and now agrees, or after
+  // PENDING_MS. "Moved" matters for On-then-Off before the backend moved (Talos on FELIX #1813):
+  // the Off matches the backend's old Off, but the backend still passes through On first.
   function bargeShown(enabled, pending, now) {
     enabled = !!enabled;
-    if (!pending || pending.on === enabled || now - pending.at > PENDING_MS) {
+    if (!pending || now - pending.at > PENDING_MS) {
       return { on: enabled, pending: false, keep: null };
     }
-    return { on: !!pending.on, pending: true, keep: pending };
+    var from = "from" in pending ? !!pending.from : !pending.on;   // the backend at the first click
+    var moved = !!pending.moved || enabled !== from;
+    if (moved && enabled === !!pending.on) {
+      return { on: enabled, pending: false, keep: null };
+    }
+    var keep = moved === !!pending.moved ? pending : Object.assign({}, pending, { moved: true });
+    return { on: !!pending.on, pending: true, keep: keep };
+  }
+
+  // The pending state a click starts: the opposite of what the switch shows now. A click while an
+  // earlier one is pending and the backend has not moved keeps that click's starting point.
+  function clickBarge(enabled, pending, now) {
+    var shown = bargeShown(enabled, pending, now);
+    var held = shown.keep;
+    var from = held && !held.moved ? ("from" in held ? !!held.from : !held.on) : !!enabled;
+    return { on: !shown.on, at: now, from: from, moved: false };
   }
 
   // What an incoming message is: the tray's "restore", a command the window could not
@@ -122,7 +140,7 @@
     return "snapshot";
   }
 
-  var api = { bargeShown: bargeShown, PENDING_MS: PENDING_MS, incomingKind: incomingKind, nextHidden: nextHidden, viewModel: viewModel, VOICES: VOICES, GERMAN_VOICES: GERMAN_VOICES, LANGUAGES: LANGUAGES, STALE_MS: STALE_MS };
+  var api = { clickBarge: clickBarge, bargeShown: bargeShown, PENDING_MS: PENDING_MS, incomingKind: incomingKind, nextHidden: nextHidden, viewModel: viewModel, VOICES: VOICES, GERMAN_VOICES: GERMAN_VOICES, LANGUAGES: LANGUAGES, STALE_MS: STALE_MS };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   if (typeof window !== "undefined") window.PillModel = api;
 })();
