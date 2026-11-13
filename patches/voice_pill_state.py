@@ -726,10 +726,15 @@ async def enter(pid: int, label: str, voice: str | None, base=None) -> str | Non
     touch_session(pid, voice, base, label=label)
     hook = autostart_hook if autostart_hook is not None else _default_autostart()
     if hook is not None:
-        try:
-            hook(base)
-        except Exception as e:
-            _warn_once(f"voice pill autostart failed: {e}")
+        # On its own thread: the hook waits for a middle process (POSIX detach), and this is
+        # the server's event loop. A stalled start must not hold the turn or other requests
+        # (Talos on FELIX #1813). A failure is still said once.
+        def _start_pill():
+            try:
+                hook(base)
+            except Exception as e:
+                _warn_once(f"voice pill autostart failed: {e}")
+        threading.Thread(target=_start_pill, name="voice-pill-autostart", daemon=True).start()
     # A Stop from the pill must end the wait: it does not lift the pause.
     await wait_while_paused(until=lambda: stop_requested(pid, base), base=base)
     if take_stop(pid, base):

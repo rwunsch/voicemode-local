@@ -30,6 +30,14 @@ def tool(monkeypatch, tmp_path):
         return pa.result
 
     pa.ensure = ensure
+    pa.start_result = None   # set to ("failed", why) to fake a start that did not happen
+
+    def start(base=None):
+        if pa.start_result is not None:
+            pa.calls.append(base)
+            return pa.start_result
+        return ("started", "") if ensure(base) else ("not_due", "")
+    pa.start = start
     pa.backend_alive = lambda base=None: pa.alive
     pa.kind, pa.autostart, pa.mac_venv = "windows", True, tmp_path / "pill-venv-python"
     pa.platform_kind = lambda: pa.kind
@@ -169,3 +177,11 @@ def test_no_answer_names_a_command_only_some_installs_ship(tool, monkeypatch):
     monkeypatch.setenv("VOICEMODE_PILL", "false")
     outs += [run(mod, "show"), run(mod, "status"), run(mod, "hide")]
     assert not [o for o in outs if "voicemode-switch" in o]
+
+
+def test_show_says_a_failed_start_failed_and_why(tool):
+    """Talos on FELIX #1813: a detached launch that failed was reported as "starting"."""
+    mod, _, pa, _ = tool
+    pa.start_result = ("failed", "the middle process exited with 1: not executable")
+    out = run(mod, "show")
+    assert "could not start" in out.lower() and "not executable" in out and "starting" not in out.lower()

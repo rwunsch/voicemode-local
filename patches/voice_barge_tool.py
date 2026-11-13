@@ -50,10 +50,13 @@ def _pill_show() -> str:
                 "Switching it on is part of this install's voice setup.")
     voice_pill_state.set_pill_closed(False)
     try:
-        started = pill_autostart.ensure()
+        outcome, why = pill_autostart.start()
         up = pill_autostart.backend_alive()
     except Exception as e:  # the tool answers in words, never with a traceback
         return f"Could not start the pill window ({type(e).__name__}: {e}); see {_pill_log()}."
+    if outcome == "failed":
+        return f"Could not start the pill window: {why}"
+    started = outcome == "started"
     if started:
         return "The pill window is starting; it shows while a voice session is live."
     if up:
