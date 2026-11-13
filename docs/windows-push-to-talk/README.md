@@ -88,8 +88,10 @@ mic open or wake an idle session.
   until it can. Start the relay once to create the file.
 - If the relay writes a new token (only when the file was damaged or deleted), restart the
   listener.
-- The legacy Python companion `patches/ptt_listener_windows.py` sends no token, so the relay
-  refuses it. Nothing installs it; use the PowerShell listener.
+- The legacy Python companion `patches/ptt_listener_windows.py` sends the token first too
+  (since 2026-11-13), read from `VOICEMODE_PTT_TOKEN_PATH` or the WSL home it is run from.
+  Nothing installs it and it has not been run on Windows since that change; use the
+  PowerShell listener.
 
 Other relay limits: a line longer than 1024 bytes closes the connection (it is read with a
 bound, never buffered whole; a 300 MB line with no newline used to grow the relay to 306 MB),
