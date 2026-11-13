@@ -19,6 +19,8 @@ so FELIX's `voice.py` and our `voicemode_native.py` both become thin profiles ov
 **Tech Stack:** Python 3.10+ (stdlib, optional psutil, ctypes on Windows), pytest. Windows
 PowerShell 5.1 for `Win32_Process.Create`.
 
+**Base (pinned 2026-11-12):** FELIX #1743 at 454f20d0e (the Windows voice host fix).
+
 **Spec:** `docs/felix-integration/2026-11-12-one-supervisor-proposal.md` (approved by Robert,
 2026-11-12: split yes, route i, Talos keeps reviewing vendor). The research map behind this plan
 is FELIX `voice.py` at b36f288ce / 8c9dce0e2 (identical lifecycle) against our
@@ -92,7 +94,7 @@ is FELIX `voice.py` at b36f288ce / 8c9dce0e2 (identical lifecycle) against our
     `watch_marker: str`;
   - `job_name: str`;
   - `host_start_grace: float` (60 s);
-  - `mode_source: ModeSource` (`kind: "json" | "env_file" | "none"`, `path`, `key`).
+  - (`mode_source` was here; Task 4b replaced it with the `read_mode` hook.)
 - Produces: `ServiceSpec(argv: list[str], marker: str, port_range: tuple[int, int],
   ready_path: str, ready_kind: "kokoro" | "whisper")`. `argv` may contain the placeholder
   `{port}`.
@@ -219,6 +221,63 @@ is FELIX `voice.py` at b36f288ce / 8c9dce0e2 (identical lifecycle) against our
   `tests/run_windows_transport_tests.sh`. Expected: pass. Write down if that cannot run here.
 - [ ] **Step 6:** Commit: `feat(supervisor): Job Objects; spawn records a refused breakaway (no silent fallback)`.
 
+### Task 4b: Profile schema version and named hooks (extension pattern, approved 2026-11-12)
+
+**Files:**
+- Modify: `vml_supervisor/profile.py` (add the fields), `tests/test_supervisor_profile.py`
+- Create: `vml_supervisor/hooks.py`, `tests/test_supervisor_hooks.py`
+
+**Interfaces:**
+- Produces: `HostProfile.schema_version: int` (current `1`; `from_file` of a newer major gives
+  `Result("profile_schema_unsupported")`), and `HostProfile.hooks: dict[str, str]`. Keys are
+  `environment`, `pre_start`, `read_mode` and `on_result`; values are entry points
+  `"module:function"`. `mode_source` is removed (it becomes the `read_mode` hook).
+- Produces: `HostProfile.hook_paths: tuple[Path, ...]`, the import search path for hook modules.
+  Hook modules must import with the runtime's Python and only the runtime's packages.
+- Produces: `load_hooks(profile) -> tuple[Hooks, list[Result]]`. It imports every named hook
+  once (with `hook_paths` on `sys.path`) and returns a `Hooks` object.
+  - FELIX's updater replaces the hook folder while a host may still run. So the host loads its
+    hooks once at start and keeps running on what it loaded; a new path takes effect at the
+    next host start.
+- Produces: `call_hook(hooks, name, *args, default=None) -> tuple[Any, Result | None]`, which
+  calls an already-loaded hook.
+  - It imports `module` (with `profile.hook_paths: tuple[Path, ...]` added to `sys.path`) and
+    calls `function(*args)`.
+  - No hook named: `(default, None)`.
+  - Import or call failure: `(default, Result("hook_failed", f"{name}: {exc!r}"))`. It never
+    raises.
+- The hook signatures (plain data in, plain data out; the default when a hook is absent is
+  in brackets). FELIX-voice's review of 2026-11-12 added the extra inputs and three hooks.
+  - `resolve_runtime(profile_dict) -> [runtime_path: str, current: bool]`
+    [`profile.runtime_dir`, True]. FELIX: `active.json` plus the digest comparison.
+  - `environment(profile_dict, runtime: str, ports: dict, modes: dict) -> dict[str, str]`
+    [`profile.env`].
+  - `service_command(profile_dict, kind: str, runtime: str, port: int) -> [argv: list, marker: str]`
+    [`ServiceSpec.argv` with `{port}` filled in, and `ServiceSpec.marker`]. FELIX: its own
+    kokoro server; the bundled `whisper-server.exe` on Windows and Homebrew's on Mac.
+  - `prepare_home(profile_dict, env: dict) -> None` [nothing]. FELIX: writes the shared HOME's
+    voicemode.env and the walk-up stopper. The core takes this over once the conch-home and
+    walk-up settings exist (Plan C).
+  - `pre_start(profile_dict, runtime: str, env: dict) -> str | None` [None]. A string blocks
+    the start as `Result("pre_start_refused", text)`. FELIX: the microphone check, run with the
+    runtime's python and that env.
+  - `read_mode(profile_dict, kind: str) -> str | None` [None].
+  - `on_result(profile_dict, results: list[dict]) -> None` [nothing].
+
+- [ ] **Step 1: Failing tests:**
+  - `test_a_missing_hook_returns_the_default`, for each of the seven hooks;
+  - `test_hooks_are_loaded_once_and_survive_their_module_being_replaced`: load, delete or
+    rewrite the module file, then call again; the original runs;
+  - `test_a_hook_is_loaded_from_its_entry_point` (a tmp module on `hook_paths`);
+  - `test_a_failing_hook_is_a_result_not_an_exception`;
+  - `test_a_newer_schema_is_refused_with_a_result`;
+  - `test_profile_round_trip_keeps_hooks_and_version`.
+- [ ] **Step 2:** Run. Expected: FAIL (import / missing field).
+- [ ] **Step 3:** Implement. Update the Task 1 round-trip and validate tests for the removed
+  `mode_source`.
+- [ ] **Step 4:** Run the supervisor tests. Expected: pass.
+- [ ] **Step 5:** Commit: `feat(supervisor): profile schema version and named hooks`.
+
 ### Task 5: Services: ensure, release, stop
 
 **Files:**
@@ -270,14 +329,17 @@ is FELIX `voice.py` at b36f288ce / 8c9dce0e2 (identical lifecycle) against our
     stop the old one, `stop_unrecorded`, spawn into the services job, and record.
   - Outside the lock: a 3 s liveness check.
   - `OSError` gives `Result("helper_failed")`; it never raises.
+- The `Result` of `start_helper` and `stop_helper` carries the helper's own status line in
+  `detail` (for barge: the trigger's `on` / `off` / `auto (…)` / `cannot run: …`), so a profile
+  owner can print it unchanged. This is FELIX-voice's point 8.
 - Produces: `stop_helper(profile, kind) -> Result`, and
   `stop_unrecorded(profile, kind) -> list[Result]`. The folder boundary is `root + os.sep`,
   case-folded on Windows.
-- Produces: `read_mode(profile) -> str | None`, from `profile.mode_source`. A JSON key path
-  such as `voice.barge`, or an env-file key.
+- Produces: `read_mode(profile, kind) -> str | None`, which calls the `read_mode` hook
+  (Task 4b). No hook means None, which means the helper's default mode.
 
 - [ ] **Step 1: Failing tests:** ports of FELIX's 1219, 1306, 1318, 1330, 1338, 1346 and 1394
-  under the same names. Add `test_read_mode_from_json_and_env_file`.
+  under the same names. Add `test_read_mode_comes_from_the_hook_and_defaults_without_one`.
 - [ ] **Step 2:** Run. Expected: FAIL (import).
 - [ ] **Step 3:** Implement by moving FELIX's `start_helper`, `stop_unrecorded`,
   `running_commands` and `stop_entry`. The helper commands come from `HelperSpec`.
@@ -346,13 +408,15 @@ is FELIX `voice.py` at b36f288ce / 8c9dce0e2 (identical lifecycle) against our
 **Interfaces:**
 - Consumes: `HostProfile`, `ensure`, `release`, `stop`, `start_helper`, `stop_helper`,
   `host_main`, `watch_main`.
-- Produces: `personal_profile(root: Path, runtime: Path) -> HostProfile`. It holds the values
+- Produces: `vml_profiles/claude.py` with `personal_profile(root: Path, runtime: Path) ->
+  HostProfile` and its hook functions. It holds the values
   in the research map's "Ours" column:
   - ranges 28880 / 22022;
   - `env` override keys `VOICEMODE_NATIVE_{TTS,STT}_PORT`;
   - markers `voicemode_native.py launch|serve|watch|host`;
   - job name `Local\voicemode-local-services-<sha16(root.lower())>`;
-  - `mode_source` = env file `~/.voicemode/voicemode.env`, key `VOICEMODE_VOICE_BARGE`;
+  - hooks in `vml_profiles/claude.py`: `read_mode` (the `VOICEMODE_VOICE_BARGE` value from
+    `~/.voicemode/voicemode.env`) and `environment` (today's `voice_mode_settings`);
   - `working_dir = root / "voice-mode"`, created on first use.
 
 - [ ] **Step 1:** Decide how the native launcher imports the package. The repo checkout path
@@ -384,7 +448,8 @@ is FELIX `voice.py` at b36f288ce / 8c9dce0e2 (identical lifecycle) against our
 
 - [ ] **Step 1: Failing test:**
   `test_felix_values_validate_and_run_the_service_lifecycle`. Use the fake world from Task 5
-  with FELIX's ranges, its `ports.json` override and the JSON `mode_source` (`voice.barge`).
+  with FELIX's ranges, its `ports.json` override and example hooks: `read_mode` reading
+  `voice.barge` from a preferences JSON, and `pre_start` and `on_result` stand-ins.
 - [ ] **Step 2:** Run. Expected: FAIL until the fixture exists. Then implement the fixture.
   Expected: pass.
 - [ ] **Step 3:** Write `vml_supervisor/README.md`. List every `Result.code` with its

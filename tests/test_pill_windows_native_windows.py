@@ -124,7 +124,7 @@ class Pill:
     def start(self):
         with self.out.open("ab") as out:
             self.process = subprocess.Popen(self.command, env=self.env, stdin=subprocess.DEVNULL, stdout=out,
-                                            stderr=out, **vn.background_options())
+                                            stderr=out, **vn.procs.background_options())
         return self
 
     def log(self):
@@ -146,9 +146,9 @@ class Pill:
 
     def kill(self):
         if self.process is not None and self.process.poll() is None:
-            try:
-                vn.kill_tree(self.process.pid)
-            except ImportError:  # no psutil in this Python: the window, not its backend
+            # vml_supervisor's kill_tree (Task 8); a Result instead of None means it could not
+            # (psutil_missing in this Python): then the window, not its backend.
+            if vn.procs.kill_tree(self.process.pid, vn.STOP_TIMEOUT) is not None:
                 self.process.kill()
 
 
@@ -321,12 +321,30 @@ def test_a_second_start_on_the_same_dir_exits_and_another_dir_runs_alongside(pil
 
 
 def test_a_crashed_backend_is_restarted(pills):
+    # Exit 2: a crash. Not 3, which since d026ecb (2026-11-11) is voice_pill.EXIT_DONE, "the last
+    # voice session has left", on which the window closes and does not restart (final review M8:
+    # this test still used 3 and failed from then on).
     pill = pills().start()
     wait_visible(pill)
-    (pill.fake / "exit_now").write_text("3")
+    (pill.fake / "exit_now").write_text("2")
     wait_for(lambda: sum("pid=" in line for line in pill.runs()) >= 2, 30, "a second backend run")
-    assert "backend exited: code 3" in pill.log()
+    assert "backend exited: code 2" in pill.log()
     assert pill.stop() == 0
+
+
+def test_exit_done_closes_the_window_without_a_restart(pills):
+    pill = pills().start()
+    wait_visible(pill)
+    (pill.fake / "exit_now").write_text(str(vn_pill_exit_done()))
+    assert pill.process.wait(timeout=60) == 0, pill.log()
+    assert "no voice session left; closing" in pill.log()
+    assert sum("pid=" in line for line in pill.runs()) == 1
+
+
+def vn_pill_exit_done():
+    """voice_pill.EXIT_DONE, read from the patch source (it imports voice-mode, so it is not loaded)."""
+    text = (REPO / "patches" / "voice_pill.py").read_text(encoding="utf-8")
+    return int(re.search(r"^EXIT_DONE = (\d+)", text, re.M).group(1))
 
 
 def test_a_backend_that_refuses_before_any_output_ends_the_window(pills):
@@ -395,7 +413,7 @@ def print_names(data_dir, cwd):
     out = subprocess.run([vn.powershell(), "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
                           str(REPO / "pill-windows.ps1"), "-BackendExe", "C:\\none\\python.exe",
                           "-DataDir", str(data_dir), "-PrintNames"],
-                         capture_output=True, cwd=cwd, timeout=60, **vn.background_options())
+                         capture_output=True, cwd=cwd, timeout=60, **vn.procs.background_options())
     assert out.returncode == 0, out
     return tuple(line.strip() for line in out.stdout.decode("ascii").splitlines() if line.strip())
 

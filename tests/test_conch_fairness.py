@@ -154,8 +154,10 @@ def test_a_failing_report_never_breaks_the_call():
     ctx = FakeCtx(fail=True)
 
     async def go():
+        # 0.5 s of 0.02 s beats: >= 2 calls holds under load (final review M7; it was a 0.07 s
+        # window, which a slow event loop could leave with one beat).
         async with mp.heartbeat(ctx_getter=lambda: ctx, interval=0.02):
-            await asyncio.sleep(0.07)
+            await asyncio.sleep(0.5)
         return "ok"
     assert _run(go()) == "ok"
     assert len(ctx.calls) >= 2                 # it keeps trying

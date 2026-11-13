@@ -1,0 +1,737 @@
+"""The POSIX watchdog, the Windows voice host, and the connector's ensure.
+
+Moved from FELIX voice.py (454f20d0e: HOST_MARKER, HOST_GRACE, HOST_PROBLEMS, HOST_CHECK,
+start_outside_chats, ensure_host, host(), watch(), launch's host backstop, main's `host`) and merged
+with voicemode_native.py's watch / watch_tick (restarts: a dead service is started again on its
+recorded port, never onto a taken one, at most restart_limit times, each logged to run/watch.log).
+
+On Windows the Copilot app ends a chat's processes with the chat's job, so services started by one
+chat died for every chat when the app unloaded it (FELIX laptop, 2026-11-12, n=1). The host is
+started through Windows' process service (Win32_Process.Create), so it belongs to no chat's job; it
+owns the services' Job Object, the services and the helpers as its children. Elsewhere a new session
+already outlives the chat, so the connector starts the services and a watchdog.
+
+The host inherits nothing: it takes the profile FILE as its argument (start_host writes it to
+run/host-profile.json). It loads the hooks once when it starts and keeps running on what it loaded;
+host_command[0] should be profile.python, which the hooks are written for.
+
+Every Result the watchdog and the host meet goes to run/watch.log, one per line (time, then the
+Result as JSON), and to the profile's on_result hook. Nothing here raises for an expected failure.
+
+Result codes
+- start_host: host_started (data: pid, command), host_started_late (PowerShell timed out, but a
+  process carrying host_marker and this profile file runs: data pid), host_not_configured (empty
+  host_command), host_marker_empty, host_command_bad (an argument holds `"` or a line break, or
+  host_command[0] is not profile.python),
+  host_command_unowned (host_marker is not in the command), host_profile_write_failed,
+  host_start_refused (PowerShell did not answer "0 <pid>": no fallback); in data["results"]
+  host_profile_acl_failed (Windows: icacls could not make run/host-profile.json user-only).
+- ensure_host: host_kept_stopped (run/stopped: a stop sticks until a connector's ensure),
+  start_host's and its data["results"], host_pid_write_failed (the new host was stopped),
+  host_requires_psutil (Windows without psutil: no host is started), host_restart_limit (more than
+  restart_limit[0] host starts in restart_limit[1] s, counted across connectors in
+  run/host-starts.json: none is started), state_write_failed (that count could not be written).
+- ensure: hook_failed / hook_bad_return, validate()'s findings (a BLOCKING one returns at once),
+  pre_start_refused (nothing else is done: no lease); then on Windows services.ensure_services's (which reaches ensure_host under the lock);
+  elsewhere ensure_services's, then for each helper of this platform its start_helper Result
+  followed by the Results in its data["results"].
+- watch_tick / the host's look (watch.log): service_restarted, service_restart_failed,
+  restart_port_taken (POSIX: said once and left for the next connector; host: started on another
+  port, service_moved), restart_limit_reached (said once per run of the limit; on the host also
+  for a service that could not be started at all, which is tried at most restart_limit[0] times
+  in restart_limit[1] s, each failure said once and recorded in state.json for the connectors),
+  helper_not_started (the last lease went before the helper could start),
+  state_write_failed (the restarted process was stopped), kill_incomplete, plus
+  services.start_missing_services's and stop_recorded's codes, host_stopped, watch_stopped,
+  watch_lock_failed, host_failed (an unexpected error ended the host; the next connector starts
+  a new one), watch_failed (the same for the watchdog), psutil_missing (the host ends at once,
+  leaving the leases alone), helpers_write_failed, job_unavailable, profile_key_unknown,
+  hook_failed (a failing read_mode is said once until it answers again; the helper is then
+  left as it is, running or not), helper_restart_limit_reached (a helper that keeps stopping is retried at most
+  restart_limit[0] times in restart_limit[1] s, said once).
+- read_mode "off" (any case) means the helper must not run: stop_helper, not start_helper.
+- run/helpers.json: {kind: {state: running|stopped|failed, code, detail, results: [{code,
+  detail}]}}, the helper's start_helper Result with its secondary results flattened in, so a
+  kill_incomplete behind a successful start shows.
+"""
+from __future__ import annotations
+
+import contextlib
+import dataclasses
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+import traceback
+from pathlib import Path
+
+from . import hooks as hook_calls
+from .helpers import PLATFORM, read_mode, running_commands, start_helper, stop_helper
+from .hooks import Hooks, load_hooks
+from .procs import (WINDOWS, background_options, kill_tree, owned, port_free, process_command,
+                    require_psutil)
+from .procs import stop_signals_held, unblock_stop_signals
+from .profile import HostProfile, blocking, load_profile
+from .result import Result
+from .services import (HOST_PID, HOST_STARTS, STOPPED, ensure_services, service_environment, start_missing_services,
+                       stop_recorded)
+from .state import atomic_json, live_leases, read_json, read_state, service_lock, write_state
+from .winjob import SpawnError, services_job, spawn
+
+HOST_PROFILE = "host-profile.json"   # in run_dir: the profile the host reads
+HELPERS_FILE = "helpers.json"        # in run_dir: the helpers' state, for the chat's start notes
+WATCH_LOG = "watch.log"              # in run_dir
+HOST_CHECK = 10.0                    # seconds between a connector's checks that the host still runs
+HOST_START_TIMEOUT = 60              # seconds PowerShell may take to ask Windows for the host
+_RUNNING = ("helper_started", "helper_running", "helper_restarted")
+_STOPPED = ("helper_stopped", "helper_not_running", "helper_not_started")
+_SINGLE_QUOTES = "'\u2018\u2019\u201a\u201b"   # PowerShell ends a '...' string at any of these
+
+
+# ----- the log ------------------------------------------------------------------------------------
+
+
+def _as_dict(result: Result) -> dict:
+    return {"code": result.code, "detail": result.detail, "data": result.data}
+
+
+def log_results(profile: HostProfile, hooks: Hooks | None, results: list) -> None:
+    """Append each Result to run/watch.log and hand them to the on_result hook. Never raises: the
+    log is the only place a host started with no console can speak."""
+    if not results:
+        return
+    stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    lines = "".join(f"{stamp} {json.dumps(_as_dict(r), default=str)}\n" for r in results)
+    with contextlib.suppress(OSError):
+        with (Path(profile.run_dir) / WATCH_LOG).open("a", encoding="utf-8") as log:
+            log.write(lines)
+    if hooks is not None:
+        _, problem = hook_calls.on_result(hooks, profile, [json.loads(json.dumps(_as_dict(r), default=str))
+                                                           for r in results])
+        if problem is not None:
+            log_results(profile, None, [problem])
+
+
+# ----- restarts (the watchdog and the host) -------------------------------------------------------
+
+
+@dataclasses.dataclass
+class WatchState:
+    """What a watchdog or host remembers between looks."""
+    restarts: dict = dataclasses.field(default_factory=dict)   # kind -> [monotonic times]
+    said: set = dataclasses.field(default_factory=set)         # (kind, pid, code) already logged
+
+
+def _recorded(entry) -> bool:
+    return (isinstance(entry, dict) and isinstance(entry.get("command"), list) and entry["command"]
+            and isinstance(entry.get("port"), int) and not isinstance(entry["port"], bool))
+
+
+def restart_dead_services(profile: HostProfile, hooks: Hooks, state: dict, watch: WatchState, now: float,
+                          results: list) -> set[str]:
+    """Start each recorded service that died again, with its recorded command on its recorded port,
+    at most restart_limit[0] times in restart_limit[1] seconds, as a child of this process (in the
+    services' Job Object on Windows). The caller holds the lock and writes nothing else. Returns the
+    services whose recorded port another program now holds (each restart_port_taken, said once):
+    the caller decides whether to start them on another port."""
+    count, window = profile.restart_limit
+    working_dir = Path(profile.working_dir)
+    taken: set[str] = set()
+    job = None
+    for kind in profile.services:
+        entry = state.get(kind)
+        if not _recorded(entry) or owned(entry):
+            continue
+        recent = [t for t in watch.restarts.get(kind, []) if now - t < window]
+        watch.restarts[kind] = recent
+        if len(recent) >= count:
+            if (kind, "limit") not in watch.said:
+                watch.said.add((kind, "limit"))
+                results.append(Result("restart_limit_reached", f"{kind} died {count} times in {window:g} s; "
+                                      "not restarted", {"service": kind, "port": entry["port"]}))
+            continue
+        watch.said.discard((kind, "limit"))
+        port, old = entry["port"], entry.get("pid")
+        if not port_free(port):
+            if (kind, old, "taken") not in watch.said:
+                watch.said.add((kind, old, "taken"))
+                results.append(Result("restart_port_taken", f"{kind} died; port {port} is taken, not "
+                                      "restarted there", {"service": kind, "port": port}))
+            taken.add(kind)
+            continue
+        if WINDOWS and job is None:
+            try:
+                job = services_job(profile)
+            except OSError as error:
+                results.append(Result("job_unavailable", f"{profile.job_name}: {error}; {kind} restarts "
+                                      "without the job"))
+        runtime = entry.get("runtime") if isinstance(entry.get("runtime"), str) else str(profile.runtime_dir)
+        ports = {k: e["port"] for k, e in state.items() if k in profile.services and _recorded(e)}
+        env, problem = hook_calls.environment(hooks, profile, runtime, ports, {})
+        if problem is not None:
+            results.append(problem)
+        log = entry.get("log") if isinstance(entry.get("log"), str) else str(Path(profile.run_dir) / f"{kind}.log")
+        extra = {} if WINDOWS else {"preexec_fn": unblock_stop_signals}
+        watch.restarts[kind].append(now)
+        with stop_signals_held():
+            try:
+                working_dir.mkdir(parents=True, exist_ok=True)
+                with open(log, "a") as output:
+                    process, spawned = spawn([str(a) for a in entry["command"]], job,
+                                             env=service_environment(env), cwd=str(working_dir),
+                                             stdin=subprocess.DEVNULL, stdout=output, stderr=output,
+                                             **background_options(), **extra)
+            except SpawnError as error:
+                results.append(error.result)
+                continue
+            except OSError as error:
+                results.append(Result("service_restart_failed", f"{kind}: {entry['command']}: {error}",
+                                      {"service": kind, "log": log}))
+                continue
+            if spawned.code not in ("no_job", "breakaway"):
+                results.append(spawned)
+            entry["pid"] = process.pid
+            if not write_state(profile, state, results):
+                failed = kill_tree(process.pid, profile.stop_timeout)
+                if failed is not None:
+                    results.append(failed)
+                entry["pid"] = old
+                continue
+        results.append(Result("service_restarted", f"restarted {kind} on port {port}: process {process.pid} "
+                              f"(was {old})", {"service": kind, "port": port, "pid": process.pid, "was": old}))
+    return taken
+
+
+# ----- the POSIX watchdog ---------------------------------------------------------------------------
+
+
+def watch_tick(profile: HostProfile, hooks: Hooks, watch: WatchState) -> bool:
+    """One look, under the lock: no live lease stops every recorded service and helper (False);
+    otherwise a dead service is restarted on its recorded port (True). Results go to watch.log."""
+    results: list[Result] = []
+    try:
+        with service_lock(profile.run_dir):
+            if not live_leases(profile):
+                results.extend(stop_recorded(profile, read_state(profile, results)))
+                results.append(Result("watch_stopped", "no connector is left"))
+                return False
+            state = read_state(profile, results)
+            restart_dead_services(profile, hooks, state, watch, time.monotonic(), results)
+            return True
+    except OSError as error:
+        results.append(Result("watch_lock_failed", f"{profile.run_dir}: {error}"))
+        return True
+    finally:
+        log_results(profile, hooks, results)
+
+
+def watch_main(profile: HostProfile) -> int:
+    """The POSIX watchdog: every watch_interval a watch_tick, until no connector is left."""
+    hooks, loaded = load_hooks(profile)
+    log_results(profile, hooks, loaded)
+    watch = WatchState()
+    try:
+        while True:
+            time.sleep(profile.watch_interval)
+            if not watch_tick(profile, hooks, watch):
+                return 0
+    except Exception:  # noqa: BLE001 - said in the log; the next connector starts a new watchdog
+        log_results(profile, hooks, [Result("watch_failed", traceback.format_exc())])
+        return 1
+
+
+# ----- the Windows host -----------------------------------------------------------------------------
+
+
+def _helper_record(result: Result) -> dict:
+    secondary = result.data.get("results") if isinstance(result.data, dict) else None
+    state = "running" if result.code in _RUNNING else "stopped" if result.code in _STOPPED else "failed"
+    return {"state": state, "code": result.code, "detail": result.detail,
+            "results": [{"code": r.code, "detail": r.detail} for r in secondary or [] if isinstance(r, Result)]}
+
+
+def _host_services(profile: HostProfile, hooks: Hooks, watch: WatchState, results: list) -> None:
+    """The host's look at its services, under the lock: restart the dead ones on their ports, and
+    start those with no record (or whose port was taken, on another port).
+
+    A start that fails is tried at most restart_limit[0] times in restart_limit[1] s (then
+    restart_limit_reached, said once), each failure is said once until a start succeeds, and the
+    failure is recorded in state.json ({"failed": code, "detail", "data"}), so a connector
+    waiting in wait_until_ready hears it at once. A note behind a start (breakaway_refused) goes
+    into the service's record ("notes"), so the connector hears that too."""
+    state = read_state(profile, results)
+    taken = restart_dead_services(profile, hooks, state, watch, time.monotonic(), results)
+    moved = {kind: state.pop(kind)["port"] for kind in taken}
+    wanted = {kind: spec for kind, spec in profile.services.items()
+              if kind in taken or not _recorded(state.get(kind))}
+    wanted = {kind: spec for kind, spec in wanted.items() if not owned(state.get(kind))}
+    count, window = profile.restart_limit
+    now = time.monotonic()
+    for kind in list(wanted):
+        key = f"start:{kind}"
+        recent = [t for t in watch.restarts.get(key, []) if now - t < window]
+        watch.restarts[key] = recent
+        if len(recent) >= count:
+            if (key, "limit") not in watch.said:
+                watch.said.add((key, "limit"))
+                results.append(Result("restart_limit_reached", f"{kind} could not be started {count} times in "
+                                      f"{window:g} s; not tried again until the window passes", {"service": kind}))
+            del wanted[kind]
+            continue
+        watch.said.discard((key, "limit"))
+        recent.append(now)
+    if not wanted:
+        return
+    (runtime, current), problem = hook_calls.resolve_runtime(hooks, profile)
+    if problem is not None:
+        results.append(problem)
+    for kind in wanted:
+        state.pop(kind, None)
+    failures: dict = {}
+    met: list[Result] = []
+    start_missing_services(dataclasses.replace(profile, services=wanted), hooks, runtime, state, {}, met, failures)
+    said = {id(failures[kind]) for kind in failures if (f"start:{kind}", failures[kind].code) in watch.said}
+    results.extend(r for r in met if id(r) not in said)
+    for kind in wanted:
+        if kind in failures:
+            problem = failures[kind]
+            watch.said.add((f"start:{kind}", problem.code))
+            state[kind] = {"failed": problem.code, "detail": problem.detail,
+                           "data": json.loads(json.dumps(problem.data, default=str))}
+        else:
+            for said_key in [k for k in watch.said if len(k) == 2 and k[0] == f"start:{kind}" and k[1] != "limit"]:
+                watch.said.discard(said_key)
+            notes = [{"code": r.code, "detail": r.detail} for r in met
+                     if r.code == "breakaway_refused" and r.data.get("service") == kind]
+            if notes and isinstance(state.get(kind), dict):
+                state[kind]["notes"] = notes
+    if failures or any(isinstance(e, dict) and e.get("notes") for e in state.values()):
+        write_state(profile, state, results)
+    for kind, old in moved.items():
+        entry = state.get(kind)
+        if isinstance(entry, dict) and "failed" not in entry:
+            results.append(Result("service_moved", f"{kind} from port {old} to {entry.get('port')}",
+                                  {"service": kind, "was": old, "port": entry.get("port")}))
+
+
+def is_off(mode) -> bool:
+    """read_mode's "off" (any case): the helper must not run."""
+    return isinstance(mode, str) and mode.strip().lower() == "off"
+
+
+def _note(kind: str, record: dict, records: dict, results: list) -> None:
+    if records.get(kind) != record:
+        results.append(Result(record["code"], f"{kind}: {record['detail']}",
+                              {"helper": kind, "results": record["results"]}))
+    records[kind] = record
+
+
+def _host_helpers(profile: HostProfile, hooks: Hooks, watch: WatchState, records: dict, results: list) -> None:
+    """Outside the lock (start_helper takes it): bring each helper of this platform to the mode
+    read_mode gives now. One running in that mode is left alone; "off" stops it. When read_mode
+    fails, the helper is left as it is (running or not) and the failure is said once. A helper that stopped is
+    started again at most restart_limit[0] times in restart_limit[1] s."""
+    state, _ = read_json(Path(profile.run_dir) / "state.json", {})
+    state = state if isinstance(state, dict) else {}
+    count, window = profile.restart_limit
+    now = time.monotonic()
+    for kind, spec in profile.helpers.items():
+        if spec.platforms and PLATFORM not in spec.platforms:
+            continue
+        entry = state.get(kind)
+        running = owned(entry)
+        mode = None
+        if spec.needs_mode:
+            problems: list[Result] = []
+            mode = read_mode(profile, kind, hooks, problems)
+            if problems:
+                if (kind, "read_mode") not in watch.said:
+                    watch.said.add((kind, "read_mode"))
+                    results.extend(problems)
+                # A guess must neither restart a running helper in another mode nor start one the
+                # user turned off: it stays as recorded until the hook answers again.
+                continue
+            else:
+                watch.said.discard((kind, "read_mode"))
+        if is_off(mode):
+            if not running and records.get(kind, {}).get("state") == "stopped":
+                continue
+            _note(kind, _helper_record(stop_helper(profile, kind, hooks)), records, results)
+            continue
+        if kind in records and running and entry.get("mode") == mode:
+            continue
+        key = f"helper:{kind}"
+        if kind in records and not running and records[kind].get("state") != "stopped":
+            recent = [t for t in watch.restarts.get(key, []) if now - t < window]
+            watch.restarts[key] = recent
+            if len(recent) >= count:
+                if (key, "limit") not in watch.said:
+                    watch.said.add((key, "limit"))
+                    _note(kind, {"state": "failed", "code": "helper_restart_limit_reached",
+                                 "detail": f"{kind} stopped {count} times in {window:g} s; not started again",
+                                 "results": []}, records, results)
+                continue
+            recent.append(now)
+        watch.said.discard((key, "limit"))
+        # Checked under start_helper's lock: the last connector may have released since this look began.
+        _note(kind, _helper_record(start_helper(profile, kind, mode, hooks,
+                                                only_if=lambda: bool(live_leases(profile)))), records, results)
+
+
+def host_main(profile_file: Path) -> int:
+    """The Windows voice host. Every watch_interval: under the lock, end everything once no
+    connector lease is left (after host_start_grace for the first), restart dead services, start
+    missing ones; then bring each helper to its mode and write run/helpers.json."""
+    profile_file = Path(profile_file)
+    profile, problems = load_profile(profile_file)
+    if profile is None:
+        with contextlib.suppress(OSError):   # next to the profile file: run_dir, if anywhere
+            with (profile_file.parent / WATCH_LOG).open("a", encoding="utf-8") as log:
+                for problem in problems:
+                    log.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {json.dumps(_as_dict(problem))}\n")
+        return 2
+    run_dir = Path(profile.run_dir)
+    with contextlib.suppress(OSError):
+        run_dir.mkdir(parents=True, exist_ok=True)
+    hooks, loaded = load_hooks(profile)
+    invalid = profile.validate()
+    log_results(profile, hooks, [*problems, *loaded, *invalid])
+    if blocking(invalid):
+        return 2   # said in watch.log: the profile itself is wrong, so nothing is started
+    missing = require_psutil()
+    if missing is not None:
+        # Every lease would look dead and be deleted, and nothing could be owned: end at once.
+        log_results(profile, hooks, [missing])
+        return 2
+    if WINDOWS:
+        try:
+            services_job(profile)   # held for the host's lifetime: its services and helpers live in it
+        except OSError as error:
+            log_results(profile, hooks, [Result("job_unavailable", f"{profile.job_name}: {error}")])
+    began, seen = time.monotonic(), False
+    watch = WatchState()
+    records: dict = {}
+    written = None
+    try:
+        while True:
+            results: list[Result] = []
+            try:
+                with service_lock(run_dir):
+                    if live_leases(profile):
+                        seen = True
+                    elif seen or time.monotonic() - began > profile.host_start_grace:
+                        results.extend(stop_recorded(profile, read_state(profile, results)))
+                        # A clean end is not a crash: it does not count towards the host-start limit.
+                        for name in (HOST_PID, HELPERS_FILE, HOST_STARTS):
+                            with contextlib.suppress(OSError):
+                                (run_dir / name).unlink(missing_ok=True)
+                        results.append(Result("host_stopped", "no connector is left" if seen else
+                                              f"no connector came in {profile.host_start_grace:g} s"))
+                        log_results(profile, hooks, results)
+                        return 0
+                    _host_services(profile, hooks, watch, results)
+            except OSError as error:
+                results.append(Result("watch_lock_failed", f"{run_dir}: {error}"))
+            _host_helpers(profile, hooks, watch, records, results)
+            if records != written:
+                try:
+                    atomic_json(run_dir / HELPERS_FILE, records)
+                    written = json.loads(json.dumps(records))
+                except OSError as error:
+                    results.append(Result("helpers_write_failed", f"{run_dir / HELPERS_FILE}: {error}"))
+            log_results(profile, hooks, results)
+            time.sleep(profile.watch_interval)
+    except Exception:  # noqa: BLE001 - said in the log; the next connector starts a new host
+        with contextlib.suppress(OSError):   # its helpers' state is no longer kept
+            (run_dir / HELPERS_FILE).unlink(missing_ok=True)
+        log_results(profile, hooks, [Result("host_failed", traceback.format_exc())])
+        return 1
+
+
+# ----- starting the host (the connector side) ------------------------------------------------------
+
+
+def _quote(word: str) -> str:
+    """One argument for a Windows command line: quoted, a trailing backslash doubled so it does not
+    escape the closing quote. Words holding `"` are refused before this."""
+    stripped = word.rstrip("\\")
+    return '"' + stripped + "\\" * (2 * (len(word) - len(stripped))) + '"'
+
+
+def _single_quoted(text: str) -> str:
+    """Text for inside a PowerShell '...' string: each kind of single quote doubled."""
+    return "".join(c * 2 if c in _SINGLE_QUOTES else c for c in text)
+
+
+def start_host(profile: HostProfile) -> Result:
+    """Start the host through Windows' process service (Win32_Process.Create), so it belongs to no
+    chat's job and outlives the chat that asked for it: FELIX's start_outside_chats, the route of
+    fe-bootstrap's voice-install.js startDetachedWindows. Windows PowerShell by its full path (the
+    current folder is searched first otherwise), no window, working folder profile.working_dir. The
+    host inherits nothing: its arguments are profile.host_command + [the profile file], which this
+    writes first. A refusal is host_start_refused, with no fallback."""
+    command = [str(word) for word in profile.host_command]
+    if not command:
+        return Result("host_not_configured", "the profile names no host_command")
+    if not profile.host_marker:
+        return Result("host_marker_empty", "the profile's host_marker is empty; no host was started")
+    profile_file = Path(profile.run_dir) / HOST_PROFILE
+    words = [*command, str(profile_file)]
+    folder = str(profile.working_dir)
+    bad = [word for word in [*words, folder] if any(c in word for c in '"\r\n')]
+    if bad:
+        return Result("host_command_bad", f"an argument holds a quotation mark or a line break: {bad[0]!r}; "
+                      "no host was started", {"argument": bad[0]})
+    if os.path.normcase(command[0]) != os.path.normcase(str(profile.python)):
+        # The hooks are written for profile.python, and they load in the host.
+        return Result("host_command_bad", f"the host must run as {profile.python}, not {command[0]}; "
+                      "no host was started", {"argument": command[0]})
+    if profile.host_marker not in " ".join(words):
+        return Result("host_command_unowned", f"the host_marker {profile.host_marker!r} is not in the "
+                      "command; no host was started", {"command": words})
+    notes: list[Result] = []
+    try:
+        Path(profile.working_dir).mkdir(parents=True, exist_ok=True)
+        profile.to_file(profile_file)
+        if not WINDOWS:
+            os.chmod(profile_file, 0o600)   # it holds profile.env
+    except OSError as error:
+        return Result("host_profile_write_failed", f"{profile_file}: {error}")
+    if WINDOWS:
+        failed = _user_only(profile_file)
+        if failed is not None:
+            notes.append(failed)
+    line = _single_quoted(" ".join(_quote(word) for word in words))
+    script = ("$s = New-CimInstance -ClassName Win32_ProcessStartup -ClientOnly -Property @{ShowWindow=[uint16]0}; "
+              "$r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments "
+              f"@{{CommandLine='{line}'; CurrentDirectory='{_single_quoted(folder)}'; ProcessStartupInformation=$s}}; "
+              '"$($r.ReturnValue) $($r.ProcessId)"')
+    system_root = os.environ.get("SystemRoot") or os.environ.get("SYSTEMROOT") or r"C:\Windows"
+    powershell = system_root.rstrip("\\/") + r"\System32\WindowsPowerShell\v1.0\powershell.exe"
+    try:
+        done = subprocess.run([powershell, "-NoProfile", "-NonInteractive", "-Command", script],
+                              cwd=folder, stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                              check=False, timeout=HOST_START_TIMEOUT, **background_options())
+    except subprocess.TimeoutExpired as error:
+        late = _found_late(profile, profile_file, words, error)
+        return Result(late.code, late.detail, {**late.data, "results": notes})
+    except (OSError, subprocess.SubprocessError) as error:
+        return Result("host_start_refused", f"{powershell}: {error}", {"command": words})
+    out, err = (done.stdout or "").strip(), (done.stderr or "").strip()
+    match = re.fullmatch(r"0 (\d+)", out)
+    if not match:
+        return Result("host_start_refused", f"Windows did not start the host: {out} {err[:300]}".strip(),
+                      {"command": words, "returncode": done.returncode, "stdout": out, "stderr": err[:300]})
+    pid = int(match.group(1))
+    return Result("host_started", f"host {pid}", {"pid": pid, "command": words, "results": notes})
+
+
+def _user_only(path: Path) -> Result | None:
+    """Windows: the file readable by this user only (icacls /inheritance:r /grant:r USER:F), as
+    the 0600 elsewhere; it holds profile.env. None when set; otherwise host_profile_acl_failed (the
+    host still starts: the file is in the user's own folder, and the profile owner keeps env lean)."""
+    system_root = os.environ.get("SystemRoot") or os.environ.get("SYSTEMROOT") or r"C:\Windows"
+    icacls = system_root.rstrip("\\/") + r"\System32\icacls.exe"
+    user = os.environ.get("USERNAME", "")
+    if not user:
+        return Result("host_profile_acl_failed", f"{path}: USERNAME is not set; the file keeps its "
+                      "inherited permissions")
+    command = [icacls, str(path), "/inheritance:r", "/grant:r", f"{user}:F"]
+    try:
+        done = subprocess.run(command, stdin=subprocess.DEVNULL, capture_output=True, text=True, check=False,
+                              timeout=30, **background_options())
+    except (OSError, subprocess.SubprocessError) as error:
+        return Result("host_profile_acl_failed", f"{command}: {error}", {"command": command})
+    if done.returncode:
+        return Result("host_profile_acl_failed", f"icacls exited with {done.returncode}: "
+                      f"{((done.stderr or '') + (done.stdout or '')).strip()[:300]}",
+                      {"command": command, "returncode": done.returncode})
+    return None
+
+
+def _found_late(profile: HostProfile, profile_file: Path, words: list, error) -> Result:
+    """PowerShell timed out, but Windows may have started the host anyway: a live process carrying
+    host_marker and this profile file is it. Otherwise host_start_refused."""
+    found, problem = running_commands()
+    wanted = [profile.host_marker, str(profile_file)]
+    if WINDOWS:
+        wanted = [w.lower() for w in wanted]
+    for pid, command in found:
+        text = command.lower() if WINDOWS else command
+        if pid != os.getpid() and all(w in text for w in wanted):
+            return Result("host_started_late", f"host {pid} (PowerShell timed out: {error})",
+                          {"pid": pid, "command": words})
+    seen = f"; the process list could not be read: {problem.detail}" if problem is not None else ""
+    return Result("host_start_refused", f"PowerShell timed out ({error}) and no host was found{seen}",
+                  {"command": words})
+
+
+def _host_starts(profile: HostProfile, results: list) -> list | None:
+    """The recent host starts (wall clock, across connectors) when another is allowed; None (with
+    host_restart_limit in results) when restart_limit is reached. The caller holds the lock."""
+    count, window = profile.restart_limit
+    now = time.time()
+    starts, _ = read_json(Path(profile.run_dir) / HOST_STARTS, [])
+    starts = [t for t in starts if isinstance(t, (int, float)) and not isinstance(t, bool)
+              and 0 <= now - t < window] if isinstance(starts, list) else []
+    if len(starts) >= count:
+        results.append(Result("host_restart_limit", f"the host was started {count} times in {window:g} s; "
+                              "not started again", {"starts": len(starts)}))
+        return None
+    return starts
+
+
+def _drop_failures(profile: HostProfile, results: list) -> None:
+    """A new host is about to start: the {"failed": ...} records in state.json belong to a host
+    that ended (a reboot, a kill, a crash), and only the live host's count, or a connector would
+    fail at once on a failure the new host never met. The caller holds the lock."""
+    state = read_state(profile, results)
+    kept = {kind: entry for kind, entry in state.items()
+            if not (isinstance(entry, dict) and "failed" in entry)}
+    if kept != state:
+        write_state(profile, kept, results)
+
+
+def ensure_host(profile: HostProfile, results: list) -> bool:
+    """Start the host once per install unless run/host.pid is a live process carrying host_marker.
+    The caller holds the service lock, so two connectors start one host. True when it runs.
+    Without psutil (Windows) nothing can be looked up: a running host would look dead and each
+    connector would start another, so none is started."""
+    if require_psutil() is not None:
+        results.append(Result("host_requires_psutil", "psutil is not installed; a running host cannot be "
+                              "found without it, so no host was started"))
+        return False
+    if (Path(profile.run_dir) / STOPPED).exists():
+        results.append(Result("host_kept_stopped", "voice was stopped (run/stopped); no host is started until "
+                              "a connector starts again"))
+        return False
+    pid_file = Path(profile.run_dir) / HOST_PID
+    if profile.host_marker:
+        with contextlib.suppress(ValueError, OSError):
+            command = process_command(int(pid_file.read_text()))
+            if command and profile.host_marker in command:
+                return True
+    starts = _host_starts(profile, results)
+    if starts is None:
+        return False
+    _drop_failures(profile, results)
+    started = start_host(profile)
+    results.append(started)
+    results.extend(r for r in started.data.get("results", []) if isinstance(r, Result))
+    if started.code not in ("host_started", "host_started_late"):
+        return False
+    try:
+        atomic_json(Path(profile.run_dir) / HOST_STARTS, [*starts, time.time()])
+    except OSError as error:
+        results.append(Result("state_write_failed", f"{Path(profile.run_dir) / HOST_STARTS}: {error}"))
+    try:
+        pid_file.write_text(str(started.data["pid"]))
+    except OSError as error:
+        # Unrecorded, the next connector would start a second host beside it.
+        failed = kill_tree(started.data["pid"], profile.stop_timeout)
+        if failed is not None:
+            results.append(failed)
+        results.append(Result("host_pid_write_failed", f"{pid_file}: {error}; host {started.data['pid']} "
+                              "was stopped", {"pid": started.data["pid"]}))
+        return False
+    return True
+
+
+def check_host(profile: HostProfile) -> list[Result]:
+    """The connector's backstop (FELIX launch, every HOST_CHECK seconds on Windows): a host that
+    ended anyway is started again, and it restarts the services."""
+    results: list[Result] = []
+    try:
+        with service_lock(profile.run_dir):
+            ensure_host(profile, results)
+    except OSError as error:
+        results.append(Result("watch_lock_failed", f"{profile.run_dir}: {error}"))
+    return results
+
+
+def _hand_to_on_result(profile: HostProfile, hooks: Hooks, results: list) -> None:
+    """Every Result of one ensure, once, to the on_result hook; its own failure joins the list."""
+    _, problem = hook_calls.on_result(hooks, profile, [json.loads(json.dumps(_as_dict(r), default=str))
+                                                       for r in results])
+    if problem is not None:
+        results.append(problem)
+
+
+def ensure(profile: HostProfile, connector_pid: int) -> tuple[dict[str, int], list[Result]]:
+    """The connector's entry point, on both platforms.
+
+    First, before any lease or lock: the profile is validated (a BLOCKING finding refuses the
+    start), the runtime resolved, the environment hook asked (no ports, no modes yet),
+    prepare_home called with that environment and pre_start asked. Refusal text from pre_start
+    returns ({}, [..., Result("pre_start_refused", text)]) with no lease and nothing started; a
+    pre_start that fails is recorded and does not block.
+
+    Then, Windows: write the lease, start the host unless it runs, wait up to start_timeout for
+    the services it starts (services.ensure_services does all three). The host starts the
+    helpers. Elsewhere: ensure_services, then start_helper for each helper of this platform
+    (stop_helper when read_mode says "off"; nothing when read_mode fails); each helper's secondary
+    results follow its Result.
+
+    All of ensure's Results go to the on_result hook once, at the end."""
+    hooks, loaded = load_hooks(profile)
+    results = [*loaded, *profile.validate()]
+    if blocking(results):
+        _hand_to_on_result(profile, hooks, results)
+        return {}, results
+    (runtime, current), problem = hook_calls.resolve_runtime(hooks, profile)
+    if problem is not None:
+        results.append(problem)
+    env, problem = hook_calls.environment(hooks, profile, runtime, {}, {})
+    if problem is not None:
+        results.append(problem)
+    _, problem = hook_calls.prepare_home(hooks, profile, env)
+    if problem is not None:
+        results.append(problem)
+    checked = hook_calls.run_pre_start(hooks, profile, runtime, env)
+    if checked is not None:
+        results.append(checked)
+        if checked.code == "pre_start_refused":
+            _hand_to_on_result(profile, hooks, results)
+            return {}, results
+    ports, started = ensure_services(profile, connector_pid, hooks, resolved=(runtime, current))
+    results.extend(started)
+    if not WINDOWS:
+        for kind, spec in profile.helpers.items():
+            if spec.platforms and PLATFORM not in spec.platforms:
+                continue
+            mode = None
+            if spec.needs_mode:
+                problems: list[Result] = []
+                mode = read_mode(profile, kind, hooks, problems)
+                if problems:
+                    # As in the host: a guess must not restart a running helper in another mode,
+                    # nor start one the user turned off. Left as it is; the problem is said.
+                    results.extend(problems)
+                    continue
+            result = stop_helper(profile, kind, hooks) if is_off(mode) else start_helper(profile, kind, mode, hooks)
+            results.append(result)
+            results.extend(r for r in result.data.get("results", []) if isinstance(r, Result))
+    _hand_to_on_result(profile, hooks, results)
+    return ports, results
+
+
+# ----- command line ------------------------------------------------------------------------------
+
+
+def main(argv: list[str] | None = None) -> int:
+    """`host <profile file>` runs host_main; `watch <profile file>` runs watch_main. 2 on bad use."""
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if len(argv) != 2 or argv[0] not in ("host", "watch"):
+        return 2
+    if argv[0] == "host":
+        return host_main(Path(argv[1]))
+    profile, _ = load_profile(Path(argv[1]))
+    if profile is None:
+        return 2
+    return watch_main(profile)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

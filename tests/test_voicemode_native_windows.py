@@ -728,7 +728,9 @@ def test_install_ps1_native_end_to_end_under_windows_powershell(install):
         assert line and json.loads(line)["id"] == 1
         state = _state(install)
         print(f"[install.ps1] the entry's launch started: {sorted(state)}")
-        assert {"tts", "stt", "barge", "pill"} <= set(state)
+        # The pill is voice-mode's to open at its first voice turn (pill_autostart, d026ecb,
+        # 2026-11-10), never launch's; nothing here takes a voice turn.
+        assert {"tts", "stt", "barge"} <= set(state) and "pill" not in state
         proc.stdin.close()
         assert proc.wait(60) == 0
     finally:

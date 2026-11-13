@@ -13,6 +13,11 @@
 #   tests/test_ptt_listener_windows_native_windows.py  the push-to-talk listener's native
 #                                            mode against a fake control server on a real
 #                                            pipe; no keys are pressed or synthesised
+#   tests/test_supervisor_winjob_windows.py  vml_supervisor.winjob: a child spawned with
+#                                            breakaway leaves its parent's Job Object
+#   tests/test_supervisor_host_windows.py    vml_supervisor.host: a host started through
+#                                            Win32_Process.Create outlives the caller's job
+#                                            (the full host test needs psutil, else it skips)
 #
 # Copies the modules they load and the test files into a fresh folder under the
 # Windows temp dir (same patches/ + tests/ layout as the repo), runs pytest there
@@ -42,6 +47,10 @@ cp "$REPO/patches/"*.py "$REPO/patches/manifest.json" "$REPO/patches/manifest.wi
 cp "$REPO/scripts/windows/voicemode_native.py" "$REPO/scripts/windows/dependencies.json" \
    "$REPO/scripts/windows/requirements.lock" "$DIR/scripts/windows/"
 cp "$REPO/kokoro-onnx-server.py" "$DIR/"
+# The shared supervisor package, and the profile the native launcher builds over it.
+mkdir -p "$DIR/vml_supervisor" "$DIR/vml_profiles"
+cp "$REPO/vml_supervisor/"*.py "$DIR/vml_supervisor/"
+cp "$REPO/vml_profiles/"*.py "$DIR/vml_profiles/"
 # The pill window and its page, for its native mode; install.ps1 for its native mode.
 cp "$REPO/pill-windows.ps1" "$REPO/install.ps1" "$REPO/ptt-listener-windows.ps1" "$DIR/"
 mkdir -p "$DIR/ui"
@@ -55,20 +64,24 @@ done
 APPLY_ENV=""
 if [ -n "${VM812_SRC:-}" ]; then
     mkdir -p "$DIR/vm812" "$DIR/expected/voice_mode/tools"
-    for f in control_channel.py control_socket.py core.py simple_failover.py streaming.py converse.py conch_notify.py conch_queue.py conch.py; do
+    # The same files as tests/test_apply_windows.py SOURCES (config.py and
+    # configuration_management.py since the env allowlist patch).
+    for f in control_channel.py control_socket.py core.py simple_failover.py streaming.py converse.py conch_notify.py conch_queue.py conch.py config.py configuration_management.py; do
         cp "$VM812_SRC/$f" "$DIR/vm812/$f"
     done
-    for f in control_channel.py control_socket.py core.py simple_failover.py streaming.py conch_notify.py conch_queue.py conch.py; do
+    for f in control_channel.py control_socket.py core.py simple_failover.py streaming.py conch_notify.py conch_queue.py conch.py config.py; do
         cp "$DIR/vm812/$f" "$DIR/expected/voice_mode/$f"
     done
     cp "$DIR/vm812/converse.py" "$DIR/expected/voice_mode/tools/converse.py"
+    cp "$DIR/vm812/configuration_management.py" "$DIR/expected/voice_mode/tools/configuration_management.py"
     python3 "$REPO/patches/apply.py" --package-dir "$DIR/expected/voice_mode" >/dev/null
     APPLY_ENV="\$env:VML_APPLY_SRC='$(wslpath -w "$DIR/vm812")'; \$env:VML_APPLY_EXPECTED='$(wslpath -w "$DIR/expected/voice_mode")'; "
 fi
 TESTS_WIN=""
 for t in test_control_transport_windows.py test_voice_pill_windows.py test_apply_windows.py \
          test_voicemode_native_windows.py test_pill_windows_native_windows.py \
-         test_ptt_listener_windows_native_windows.py; do
+         test_ptt_listener_windows_native_windows.py test_supervisor_winjob_windows.py \
+         test_supervisor_host_windows.py; do
     cp "$REPO/tests/$t" "$DIR/tests/"
     TESTS_WIN="$TESTS_WIN '$(wslpath -w "$DIR/tests/$t")'"
 done
