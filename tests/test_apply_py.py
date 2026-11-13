@@ -105,6 +105,7 @@ INTENDED_SINCE_BASELINE = [
     ("patch_env_allowlist.py", ["config.py", "tools/configuration_management.py"]),   # 2026-11-12: Talos C1
     ("patch_env_provider_keys.py", ["config.py", "tools/configuration_management.py"]),   # 2026-11-12: optional
     ("patch_simple_failover.py", ["simple_failover.py"]),   # 2026-11-13: TTS timeout knob (edit 3)
+    ("patch_git_timeout.py", ["config.py"]),   # 2026-11-13: transcript-saving git call bounded (5 s, stdin closed)
 ]
 # Modules added as "copy" steps since the baseline (2026-11-07: session_wake.py).
 INTENDED_COPIES_SINCE_BASELINE = ["session_wake.py"]

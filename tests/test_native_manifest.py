@@ -127,9 +127,11 @@ INTENDED_STEP_LINES.append(b'    {"patch": "patch_conch_fairness.py", "targets":
 INTENDED_PATCHES.append(("patch_conch_fairness.py", ["tools/converse.py"]))
 # 2026-11-12 (Talos C1): only voice settings travel from voicemode.env into the environment.
 INTENDED_STEP_LINES.append(b'    {"patch": "patch_env_allowlist.py", "targets": ["config.py", "tools/configuration_management.py"], "why": "only voice settings travel from voicemode.env into the environment; update_config refuses other keys"},\n')
+INTENDED_STEP_LINES.append(b'    {"patch": "patch_git_timeout.py", "targets": ["config.py"], "why": "the transcript-saving git call is bounded (5 s, stdin closed): it froze the voice server for 176 s on Windows"},\n')   # 2026-11-13: bounded git call
 INTENDED_STEP_LINES.append(b'    {"patch": "patch_env_provider_keys.py", "targets": ["config.py", "tools/configuration_management.py"], "why": "optional: the two provider keys upstream reads may also come from voicemode.env; not in the Windows manifest or FELIX"}\n')
 INTENDED_PATCHES.append(("patch_env_allowlist.py", ["config.py", "tools/configuration_management.py"]))
 INTENDED_PATCHES.append(("patch_env_provider_keys.py", ["config.py", "tools/configuration_management.py"]))
+INTENDED_PATCHES.append(("patch_git_timeout.py", ["config.py"]))   # 2026-11-13: bounded git call
 INTENDED_PATCHES.append(("patch_simple_failover.py", ["simple_failover.py"]))   # 2026-11-13: TTS timeout knob (edit 3)
 INTENDED_COPIES += ["conch_hold.py", "mcp_progress.py"]
 # Text edits those additions force on lines that were already there: (now, before).

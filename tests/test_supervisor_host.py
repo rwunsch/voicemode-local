@@ -996,3 +996,18 @@ def test_a_stale_failure_from_a_dead_host_does_not_fail_the_next_launch(tmp_path
     assert "no_free_port" not in codes(results)                     # the new host has not looked yet
     assert codes(results).count("service_not_ready") == 2           # so the connector waited for it
     assert read_state(profile) == {"barge": {"pid": 77, "port": None, "marker": "voice_barge"}}
+
+
+def test_a_connector_leaving_does_not_stop_voice_for_the_others(tmp_path, monkeypatch):
+    """FELIX parity, Robert's Windows run 2026-11-13 (n=1): the app unloaded one idle chat
+    (leases 4 -> 3) while another was mid-call; the host kept TTS/STT and the busy chat's next
+    turns worked. Only the last connector leaving ends the host."""
+    world = _host_world(tmp_path, monkeypatch)
+    leases = iter([[11, 12, 13, 14], [11, 12, 13], [12, 13], [12], []])
+    monkeypatch.setattr(host, "live_leases", lambda profile: next(leases))
+    (world.root / "run/host.pid").write_text("99")
+    assert host.host_main(world.file) == 0
+    assert world.calls.count("services") == 1
+    assert world.calls.count("stopped") == 1 and world.calls[-1] == "stopped"
+    stopped_at = world.calls.index("stopped")
+    assert world.calls.count(("barge", None)) == 4 and stopped_at == len(world.calls) - 1
