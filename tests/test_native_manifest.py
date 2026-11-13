@@ -130,6 +130,7 @@ INTENDED_STEP_LINES.append(b'    {"patch": "patch_env_allowlist.py", "targets": 
 INTENDED_STEP_LINES.append(b'    {"patch": "patch_env_provider_keys.py", "targets": ["config.py", "tools/configuration_management.py"], "why": "optional: the two provider keys upstream reads may also come from voicemode.env; not in the Windows manifest or FELIX"}\n')
 INTENDED_PATCHES.append(("patch_env_allowlist.py", ["config.py", "tools/configuration_management.py"]))
 INTENDED_PATCHES.append(("patch_env_provider_keys.py", ["config.py", "tools/configuration_management.py"]))
+INTENDED_PATCHES.append(("patch_simple_failover.py", ["simple_failover.py"]))   # 2026-11-13: TTS timeout knob (edit 3)
 INTENDED_COPIES += ["conch_hold.py", "mcp_progress.py"]
 # Text edits those additions force on lines that were already there: (now, before).
 INTENDED_EDITS = [

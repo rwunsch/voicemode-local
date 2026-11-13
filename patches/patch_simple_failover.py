@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Patch voice_mode/simple_failover.py: two independent edits.
+"""Patch voice_mode/simple_failover.py: three independent edits.
 
 1. Remove the silent OpenAI voice swap.
 2. Make the hardcoded 60s STT read timeout configurable.
+3. Make the hardcoded 30s TTS timeout configurable.
 
 Upstream simple_tts_failover maps a local voice (e.g. af_sky) to an OpenAI voice
 (nova) when it falls through to the OpenAI endpoint, so a Kokoro/Piper outage
@@ -19,6 +20,9 @@ Edit 2 replaces `timeout=60.0` on the STT AsyncOpenAI client with a lookup of
 two new env vars. Defaults are unchanged, so it is a no-op until an operator
 sets one. See the injected comment for the measurements behind it. Verified
 against voice-mode 8.12.0.
+
+Edit 3 does the same for the TTS client's `timeout=30.0` (VOICEMODE_TTS_TIMEOUT,
+VOICEMODE_TTS_TIMEOUT_LOCAL). Defaults unchanged. Verified against voice-mode 8.12.0.
 
 Usage: patch_simple_failover.py [<path-to-simple_failover.py>]
 """
@@ -113,6 +117,69 @@ def apply_timeout_knob(target: Path) -> int:
     return 0
 
 
+MARKER_TTS_TIMEOUT = "TTS TIMEOUT KNOB (voicemode-local)"
+
+# Anchor: the helper goes immediately before the function that builds every TTS client.
+TT_ANCHOR = "def _prepare_tts_endpoint(base_url, voice, model, clone_profile):\n"
+
+TT_HELPER = '''# TTS TIMEOUT KNOB (voicemode-local): upstream builds every TTS client with a hardcoded
+# 30s timeout, and local endpoints get no SDK retries. A local Kokoro under CPU load can
+# need longer for one long sentence (Windows, 2026-11-13, n=1: 12.4s of audio took 40.9s),
+# so the request times out and the turn is lost. Streaming is off while barge-in may
+# listen, so the whole sentence is generated before playback starts.
+# Defaults are unchanged (30s everywhere); a deployment opts in with:
+#   VOICEMODE_TTS_TIMEOUT        seconds, all TTS endpoints (default 30)
+#   VOICEMODE_TTS_TIMEOUT_LOCAL  seconds, local endpoints only (default: as above)
+# A value that is not a number is logged and the default is used.
+def _tts_timeout(base_url: str) -> float:
+    import logging
+    import os
+
+    def _num(name: str, fallback: float) -> float:
+        raw = os.getenv(name)
+        if raw is None or not raw.strip():
+            return fallback
+        try:
+            value = float(raw)
+        except ValueError:
+            value = -1.0
+        if value <= 0:
+            logging.getLogger("voicemode").warning(
+                "%s=%r is not a positive number of seconds; using %ss", name, raw, fallback)
+            return fallback
+        return value
+
+    default = _num("VOICEMODE_TTS_TIMEOUT", 30.0)
+    if is_local_provider(base_url):
+        return _num("VOICEMODE_TTS_TIMEOUT_LOCAL", default)
+    return default
+
+
+'''
+
+TT_OLD = "        timeout=30.0,  # Reasonable timeout\n"
+TT_NEW = "        timeout=_tts_timeout(base_url),  # voicemode-local: see _tts_timeout\n"
+
+
+def apply_tts_timeout_knob(target: Path) -> int:
+    """Edit 3: make the TTS client's 30s timeout configurable."""
+    src, crlf = _read(target)
+    if MARKER_TTS_TIMEOUT in src:
+        print(f"  already patched (tts timeout knob): {target}")
+        return 0
+    for name, marker in (("tts helper anchor", TT_ANCHOR), ("tts timeout literal", TT_OLD)):
+        if src.count(marker) != 1:
+            print(f"ANCHOR DRIFT: {name} matched {src.count(marker)} times "
+                  f"(expected 1) in {target}. Upstream simple_failover.py "
+                  f"changed -- update patch_simple_failover.py.", file=sys.stderr)
+            return 1
+    out = src.replace(TT_ANCHOR, TT_HELPER + TT_ANCHOR, 1).replace(TT_OLD, TT_NEW, 1)
+    compile(out, str(target), "exec")
+    _write(target, out, crlf)
+    print(f"  patched (tts timeout knob): {target}")
+    return 0
+
+
 def apply(target: Path) -> int:
     src, crlf = _read(target)
     if MARKER in src:
@@ -145,4 +212,5 @@ if __name__ == "__main__":
     # silently skip the other. Exit non-zero if either failed.
     rc_swap = apply(target)
     rc_timeout = apply_timeout_knob(target)
-    sys.exit(rc_swap or rc_timeout)
+    rc_tts = apply_tts_timeout_knob(target)
+    sys.exit(rc_swap or rc_timeout or rc_tts)
