@@ -28,7 +28,8 @@ Settings (environment first, as voice_pill_state.setting reads them):
   VOICEMODE_PILL_PYTHON    the backend's interpreter natively (default: this one); on macOS
                            the pill venv's python (default ~/.voicemode/pill-venv/bin/python).
 
-Stdlib only, like voice_pill_state.
+Stdlib only, like voice_pill_state. A patch copied into voice_mode: it must not import
+vml_supervisor, so _detach below is that package's procs.detach sequence, kept small here.
 """
 import json
 import os
@@ -161,31 +162,72 @@ def mac_window_log() -> Path:
     return st.upstream_home() / "logs" / "pill-window.log"
 
 
+# The middle process of _detach: starts the window in its own session, prints its pid, exits at
+# once, so the window is reparented (launchd / init) and is no descendant of this server.
+DETACH = (
+    "import subprocess, sys\n"
+    "cwd, log_path, *cmd = sys.argv[1:]\n"
+    "with open(log_path, 'ab') as log:\n"
+    "    p = subprocess.Popen(cmd, cwd=cwd, stdin=subprocess.DEVNULL, stdout=log, stderr=log,\n"
+    "                         start_new_session=True, close_fds=True)\n"
+    "print(p.pid)\n"
+)
+DETACH_TIMEOUT_S = 60
+
+
+def _detach(command: list[str], log_path) -> tuple[int | None, str]:
+    """POSIX: start command through a short-lived middle process, so it is no descendant of this
+    server. (pid, "") or (None, the reason). The Copilot app kills a deleted chat's processes by
+    ancestry: on a Mac (FELIX-MAC, 2026-11-13, n=1) a start_new_session child died within 1 s of
+    the chat being deleted; one started through a middle process survived. Not os.fork: forking
+    a threaded or asyncio process is unsafe on macOS."""
+    try:
+        done = subprocess.run([sys.executable, "-I", "-c", DETACH, os.getcwd(), str(log_path), *command],
+                              stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                              timeout=DETACH_TIMEOUT_S, check=False)
+    except subprocess.TimeoutExpired:
+        return None, f"the middle process timed out after {DETACH_TIMEOUT_S} s"
+    except (OSError, subprocess.SubprocessError, ValueError) as e:
+        return None, f"the middle process could not run: {e}"
+    out, err = (done.stdout or "").strip(), (done.stderr or "").strip()[-300:]
+    if done.returncode != 0:
+        return None, f"the middle process exited with {done.returncode}: {err}"
+    if not out.isascii() or not out.isdigit():
+        return None, f"the middle process printed {out[-100:]!r}, not a pid: {err}"
+    return int(out), ""
+
+
 def spawn(command: list[str], kind: str, base=None):
     """Start the window detached. On Windows, break away from the server's Job Object
     where the job allows it, so the window outlives this server; else start it plainly
-    (it then lives as long as the job, and the next turn of another session restarts it).
+    (it then lives as long as the job, and the next turn of another session restarts it);
+    the Popen is returned. Elsewhere through _detach, so the window is no descendant of the
+    server (a chat's processes are killed by ancestry); its pid is returned, or None when it
+    could not start (said in autostart.log, never raised).
     The start is logged in autostart.log. The Mac window writes its own log to stderr,
     which goes to mac_window_log(); the Windows window keeps its log in its data folder."""
     with _log_file(base) as log:
         log.write(f"{time.strftime('%Y-%m-%dT%H:%M:%S')} start: {json.dumps(command)}\n".encode())
         log.flush()
-        if kind == "macos":
-            path = mac_window_log()
-            path.parent.mkdir(parents=True, exist_ok=True)
-            log.write(f"window log: {path}\n".encode())
-            with open(path, "ab") as out:
-                return subprocess.Popen(command, start_new_session=True, stdin=subprocess.DEVNULL,
-                                        stdout=out, stderr=out, close_fds=True)
-        common = dict(stdin=subprocess.DEVNULL, stdout=log, stderr=log, close_fds=True)
         if kind == "windows":
+            common = dict(stdin=subprocess.DEVNULL, stdout=log, stderr=log, close_fds=True)
             flags = CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP
             try:
                 return subprocess.Popen(command, creationflags=flags | CREATE_BREAKAWAY_FROM_JOB, **common)
             except OSError as e:
                 log.write(f"breakaway refused ({e}); starting inside the job\n".encode())
                 return subprocess.Popen(command, creationflags=flags, **common)
-        return subprocess.Popen(command, start_new_session=True, **common)
+        if kind == "macos":
+            path = mac_window_log()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            log.write(f"window log: {path}\n".encode())
+            log.flush()
+        else:
+            path = st._base(base) / "autostart.log"
+        pid, reason = _detach(command, path)
+        if pid is None:
+            log.write(f"start failed: {reason}\n".encode())
+        return pid
 
 
 def ensure(base=None) -> bool:
