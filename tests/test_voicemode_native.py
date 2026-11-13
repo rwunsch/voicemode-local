@@ -1680,3 +1680,23 @@ def test_a_failed_launch_never_leaves_a_voice_mode_that_ignores_sigterm(vn, home
     with pytest.raises(OSError, match="disk full"):
         vn.launch(root)
     assert started and started[0].poll() == -9
+
+
+def test_the_launcher_compiles_without_warnings():
+    """Every MCP start compiles it: a SyntaxWarning (an invalid escape such as run\\m in a
+    docstring) lands on the connector's stderr each time (seen in the Windows run, 2026-11-13)."""
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        compile(SCRIPT.read_text(encoding="utf-8"), str(SCRIPT), "exec")
+
+
+def test_every_launcher_name_the_windows_only_tests_use_exists(vn):
+    """The *_windows.py tests run only on Windows; a name they use from the launcher that is
+    gone fails there and nowhere else (Task 8 deleted background_options and kill_tree, and
+    test_pill_windows_native_windows.py failed 10 times on the laptop, 2026-11-13)."""
+    used = set()
+    for path in sorted((REPO / "tests").glob("*_windows.py")):
+        used |= {(path.name, name) for name in re.findall(r"\bvn\.([A-Za-z_]\w*)", path.read_text(encoding="utf-8"))}
+    assert used   # the check sees something
+    assert [(f, name) for f, name in sorted(used) if not hasattr(vn, name)] == []

@@ -124,7 +124,7 @@ class Pill:
     def start(self):
         with self.out.open("ab") as out:
             self.process = subprocess.Popen(self.command, env=self.env, stdin=subprocess.DEVNULL, stdout=out,
-                                            stderr=out, **vn.background_options())
+                                            stderr=out, **vn.procs.background_options())
         return self
 
     def log(self):
@@ -146,9 +146,9 @@ class Pill:
 
     def kill(self):
         if self.process is not None and self.process.poll() is None:
-            try:
-                vn.kill_tree(self.process.pid)
-            except ImportError:  # no psutil in this Python: the window, not its backend
+            # vml_supervisor's kill_tree (Task 8); a Result instead of None means it could not
+            # (psutil_missing in this Python): then the window, not its backend.
+            if vn.procs.kill_tree(self.process.pid, vn.STOP_TIMEOUT) is not None:
                 self.process.kill()
 
 
@@ -395,7 +395,7 @@ def print_names(data_dir, cwd):
     out = subprocess.run([vn.powershell(), "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
                           str(REPO / "pill-windows.ps1"), "-BackendExe", "C:\\none\\python.exe",
                           "-DataDir", str(data_dir), "-PrintNames"],
-                         capture_output=True, cwd=cwd, timeout=60, **vn.background_options())
+                         capture_output=True, cwd=cwd, timeout=60, **vn.procs.background_options())
     assert out.returncode == 0, out
     return tuple(line.strip() for line in out.stdout.decode("ascii").splitlines() if line.strip())
 

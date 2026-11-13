@@ -64,13 +64,16 @@ done
 APPLY_ENV=""
 if [ -n "${VM812_SRC:-}" ]; then
     mkdir -p "$DIR/vm812" "$DIR/expected/voice_mode/tools"
-    for f in control_channel.py control_socket.py core.py simple_failover.py streaming.py converse.py conch_notify.py conch_queue.py conch.py; do
+    # The same files as tests/test_apply_windows.py SOURCES (config.py and
+    # configuration_management.py since the env allowlist patch).
+    for f in control_channel.py control_socket.py core.py simple_failover.py streaming.py converse.py conch_notify.py conch_queue.py conch.py config.py configuration_management.py; do
         cp "$VM812_SRC/$f" "$DIR/vm812/$f"
     done
-    for f in control_channel.py control_socket.py core.py simple_failover.py streaming.py conch_notify.py conch_queue.py conch.py; do
+    for f in control_channel.py control_socket.py core.py simple_failover.py streaming.py conch_notify.py conch_queue.py conch.py config.py; do
         cp "$DIR/vm812/$f" "$DIR/expected/voice_mode/$f"
     done
     cp "$DIR/vm812/converse.py" "$DIR/expected/voice_mode/tools/converse.py"
+    cp "$DIR/vm812/configuration_management.py" "$DIR/expected/voice_mode/tools/configuration_management.py"
     python3 "$REPO/patches/apply.py" --package-dir "$DIR/expected/voice_mode" >/dev/null
     APPLY_ENV="\$env:VML_APPLY_SRC='$(wslpath -w "$DIR/vm812")'; \$env:VML_APPLY_EXPECTED='$(wslpath -w "$DIR/expected/voice_mode")'; "
 fi

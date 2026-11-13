@@ -49,7 +49,7 @@ service so that it belongs to no chat's job; they live in one named Job Object t
 and the host ends them all once no lease is left. It restarts a crashed TTS or STT service on
 its own port, at most 3 times in 300 seconds, and every connector starts the host again when it
 ended anyway. The trigger and the listener follow their modes: launch writes the ones its
-settings decide to run\modes.json, a switch writes its own, and the host's next look applies
+settings decide to run/modes.json, a switch writes its own, and the host's next look applies
 them. Elsewhere (the tests) the connector starts them, with a watchdog. voice-mode lives in its
 connector's own Job Object, so it dies with the connector; the pill window too is started by
 voice-mode (or a switch), never by launch. Never os.kill(pid, 0): on Windows that ends the
@@ -851,9 +851,9 @@ def ensure_speech(profile, helpers=True):
         ports, results = sv_host.ensure(profile, os.getpid())
     else:
         ports, results = sv_services.ensure_services(profile, os.getpid())
+    say(results)   # all of them, also when one below becomes the error: none goes unsaid
     if any(kind not in ports for kind in SPEECH):
         raise failure(results, profile.runtime_dir)
-    say(results)
     return {kind: ports[kind] for kind in SPEECH}
 
 
