@@ -92,7 +92,8 @@ def test_show_names_why_the_window_was_not_started(tool):
     pa.kind, pa.autostart = "windows", False
     assert "VOICEMODE_PILL_AUTOSTART" in run(mod, "show")
     pa.kind, pa.autostart = "macos", True   # mac_venv does not exist
-    assert "voicemode-switch pill on" in run(mod, "show")
+    out = run(mod, "show")
+    assert "not set up" in out and "voicemode-switch" not in out
     pa.kind = "windows"
     out = run(mod, "show")
     assert "already" in out and "starting" in out and "could not" not in out.lower()
@@ -103,7 +104,8 @@ def test_show_with_the_pill_off_does_not_start_it(tool, monkeypatch):
     monkeypatch.setenv("VOICEMODE_PILL", "false")
     out = run(mod, "show")
     assert pa.calls == []
-    assert "VOICEMODE_PILL" in out and "voicemode-switch pill on" in out
+    # Say what is off, never a command only some installs ship (FELIX review of v1.2.7).
+    assert "VOICEMODE_PILL" in out and "voicemode-switch" not in out
 
 
 def test_hide_sets_closed(tool):
@@ -153,3 +155,17 @@ def test_nothing_raises_when_ensure_raises(tool):
     pa.error = OSError("no powershell")
     out = run(mod, "show")
     assert isinstance(out, str) and "no powershell" in out and "autostart.log" in out
+
+
+def test_no_answer_names_a_command_only_some_installs_ship(tool, monkeypatch):
+    """FELIX's review of v1.2.7: `voicemode-switch` is voicemode-local's own script; FELIX and other
+    harnesses do not ship it, so advice to run it is a dead end there."""
+    mod, st, pa, _ = tool
+    pa.result = False
+    outs = []
+    for kind, autostart in ((None, True), ("windows", False), ("macos", True), ("windows", True)):
+        pa.kind, pa.autostart = kind, autostart
+        outs.append(run(mod, "show"))
+    monkeypatch.setenv("VOICEMODE_PILL", "false")
+    outs += [run(mod, "show"), run(mod, "status"), run(mod, "hide")]
+    assert not [o for o in outs if "voicemode-switch" in o]
