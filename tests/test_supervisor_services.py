@@ -722,3 +722,52 @@ def test_a_recorded_port_that_is_not_a_number_is_not_a_crash(world):
     chosen, results = ensure_services(profile, world.connector.pid)
     assert results == [] and set(chosen) == {"tts", "stt"}
     release(profile, world.connector.pid)
+
+
+# ----- final review I5: a taken override port is said, not passed over silently ------------------
+
+
+def test_a_taken_override_port_is_said(world):
+    tts = world.ports["tts"]
+    override = world.profile.root / "ports.json"
+    world.profile.root.mkdir(parents=True, exist_ok=True)
+    override.write_text(json.dumps({"tts": tts[1]}))
+    profile = dataclasses.replace(world.profile, port_override=PortOverride("file", override))
+    holder = socket.socket()
+    holder.bind(("127.0.0.1", tts[1]))
+    holder.listen()
+    try:
+        results = []
+        port = services._choose(profile, "tts", {}, results)
+        assert port == tts[0]
+        assert [(r.code, r.data) for r in results] == [
+            ("override_port_taken", {"service": "tts", "port": tts[1], "chosen": tts[0], "source": str(override)})]
+        # free again: the override is used, and nothing is said
+        holder.close()
+        results = []
+        assert services._choose(profile, "tts", {}, results) == tts[1] and results == []
+        # no override set: nothing to say either
+        assert services._choose(world.profile, "tts", {}, results) == tts[0] and results == []
+    finally:
+        holder.close()
+
+
+# ----- final review M1: the lock itself failing is a Result ---------------------------------------
+
+
+@pytest.mark.parametrize("call", ["release", "stop", "ensure_services"])
+def test_a_lock_that_cannot_be_taken_is_a_result(world, monkeypatch, call):
+    @contextlib.contextmanager
+    def broken(run_dir):
+        raise PermissionError(13, "Permission denied", str(run_dir))
+        yield
+
+    monkeypatch.setattr(services, "service_lock", broken)
+    if call == "release":
+        results = services.release(world.profile, world.connector.pid)
+    elif call == "stop":
+        results = services.stop(world.profile)
+    else:
+        ports, results = services.ensure_services(world.profile, world.connector.pid)
+        assert ports == {}
+    assert "service_lock_failed" in codes(results)

@@ -10,7 +10,9 @@ services' Job Object, and the command and runtime kept in each record.
 Nothing here raises for an expected failure; each one is a Result in the returned list.
 
 Result codes
-- from ensure_services: hook_failed, hook_bad_return (a hook; its default was used),
+- from ensure_services: validate()'s findings (a BLOCKING one returns at once, nothing started),
+  service_lock_failed (nothing is done), stop_marker_remove_failed,
+  hook_failed, hook_bad_return (a hook; its default was used),
   psutil_missing (Windows), runtime_not_current (resolve_runtime said so; services still start),
   runtime_incomplete (runtime/.complete.json is gone: nothing is started), on Windows the host's
   codes from host.ensure_host (host_started; host_not_configured, host_marker_empty,
@@ -21,15 +23,21 @@ Result codes
   watch_marker_empty,
   watchdog_start_failed (POSIX; a watchdog whose pid could not be recorded is stopped),
   state_corrupt (read as empty, under the lock), port_override_invalid, unknown_service,
-  no_free_port, service_command_bad (empty marker: not started), service_command_unowned (the
+  override_port_taken (the override's port is taken: another is used), no_free_port,
+  service_command_bad (empty marker: not started), service_command_unowned (the
   marker or `--port N` is missing from the command, so it could never be owned: not started),
   breakaway_refused, job_assign_failed, resume_failed, service_start_failed,
   state_write_failed (the new service was killed), kill_incomplete, service_exited,
   service_not_ready, owner_other (another process answers on the port), owner_unknown (the
   answer came, but no listener could be found to prove it is ours).
-- from release: lease_remove_failed, state_corrupt, kill_incomplete, psutil_missing,
+- from wait_until_ready: a failure the Windows host recorded for the service ({"failed": code}
+  in state.json: no_free_port, service_command_unowned, job_assign_failed, ...) at once, a recorded
+  note (breakaway_refused) with a ready service, service_exited (also when the recorded process is
+  gone before it answered), service_not_ready, owner_other, owner_unknown.
+- from release: service_lock_failed, lease_remove_failed, state_corrupt, kill_incomplete, psutil_missing,
   state_write_failed.
-- from stop: host_marker_empty (run/host.pid is left alone), kill_incomplete (the host would not
+- from stop: service_lock_failed, stop_marker_write_failed (run/stopped, which keeps a host from
+  starting again until the next connector's ensure), host_marker_empty (run/host.pid is left alone), kill_incomplete (the host would not
   die: run/host.pid is kept), the same as release, then services_stopped (data: the services that
   were running, whether a host was, and how many connectors still hold a lease).
 """
@@ -46,11 +54,11 @@ from urllib.request import ProxyHandler, build_opener
 
 from . import hooks as hook_calls
 from .hooks import Hooks, load_hooks
-from .ports import choose_port, port_candidates
+from .ports import choose_port, port_candidates, requested_port
 from .procs import (LOOPBACK, WINDOWS, background_options, kill_tree, listener_pids, owned,
                     process_command, process_tree, require_psutil, stop_signals_held,
                     unblock_stop_signals)
-from .profile import HostProfile
+from .profile import HostProfile, blocking
 from .result import Result
 from .state import atomic_json, live_leases, read_json, read_state, service_lock, write_lease, write_state
 from .winjob import SpawnError, services_job, spawn
@@ -60,6 +68,9 @@ _local_opener = build_opener(ProxyHandler({}))
 READY_POLL = 0.5
 HOST_PID = "host.pid"   # in run_dir: the Windows host's process id, written under the service lock
 HOST_STARTS = "host-starts.json"   # in run_dir: recent host starts, for the start limit
+# in run_dir: written by stop(). While it exists no host is started (ensure_host, check_host), so
+# a stop sticks on Windows as it does elsewhere; the next connector's ensure removes it.
+STOPPED = "stopped"
 
 # The operating system's own variables a service needs; everything else comes from the profile.
 _OS_KEEP = ("PATH", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR", "TZ")
@@ -130,13 +141,26 @@ def _remove_lease(profile: HostProfile, connector_pid: int, results: list) -> No
         results.append(Result("lease_remove_failed", f"{lease}: {error}", {"pid": connector_pid}))
 
 
+def _take_lock(stack: contextlib.ExitStack, run_dir, results: list) -> bool:
+    """The service lock on the stack; False (with service_lock_failed in results) when run_dir
+    cannot be created or locked."""
+    try:
+        stack.enter_context(service_lock(run_dir))
+    except OSError as error:
+        results.append(Result("service_lock_failed", f"{run_dir}: {error}"))
+        return False
+    return True
+
+
 def release(profile: HostProfile, connector_pid: int) -> list[Result]:
     """Drop this connector's lease; stop the services when no connector is left."""
     results: list[Result] = []
     missing = require_psutil()
     if missing is not None:
         results.append(missing)
-    with service_lock(profile.run_dir):
+    with contextlib.ExitStack() as stack:
+        if not _take_lock(stack, profile.run_dir, results):
+            return results
         _remove_lease(profile, connector_pid, results)
         if not live_leases(profile):
             results.extend(stop_recorded(profile, read_state(profile, results)))
@@ -177,7 +201,14 @@ def stop(profile: HostProfile) -> list[Result]:
     missing = require_psutil()
     if missing is not None:
         results.append(missing)
-    with service_lock(profile.run_dir):
+    with contextlib.ExitStack() as stack:
+        if not _take_lock(stack, profile.run_dir, results):
+            return results
+        try:
+            (Path(profile.run_dir) / STOPPED).write_text(time.strftime("%Y-%m-%d %H:%M:%S\n"))
+        except OSError as error:
+            results.append(Result("stop_marker_write_failed", f"{Path(profile.run_dir) / STOPPED}: {error}; "
+                                  "a connector still running may start the host again"))
         host = _stop_host(profile, results)
         others = live_leases(profile)
         state = read_state(profile, results)
@@ -259,6 +290,12 @@ def _choose(profile: HostProfile, kind: str, state: dict, results: list) -> int 
     taken = {entry["port"] for entry in state.values() if isinstance(entry, dict)
              and isinstance(entry.get("port"), int) and not isinstance(entry["port"], bool)}
     port = choose_port(profile, kind, taken)
+    requested, source = requested_port(profile, kind)
+    if requested is not None and port != requested:
+        # The override asked for this port and it is taken: said, never a silent fallback.
+        results.append(Result("override_port_taken", f"{kind}: {source} asks for port {requested}, which is "
+                              f"taken; {'using ' + str(port) if port is not None else 'no other port is free'}",
+                              {"service": kind, "port": requested, "chosen": port, "source": source}))
     if port is None:
         results.append(Result("no_free_port", f"{kind}: tried {candidates[0]} to {candidates[-1]}",
                               {"service": kind, "first": candidates[0], "last": candidates[-1]}))
@@ -303,7 +340,7 @@ def _start(profile, hooks, kind, port, runtime, env, working_dir, job, state, re
                                   {"service": kind, "log": str(log)}))
             return None
         if spawned.code not in ("no_job", "breakaway"):
-            results.append(spawned)
+            results.append(Result(spawned.code, spawned.detail, {**spawned.data, "service": kind}))
         state[kind] = {"pid": process.pid, "port": port, "marker": marker, "log": str(log),
                        "command": [str(part) for part in command], "runtime": runtime}
         try:
@@ -323,15 +360,20 @@ def _start(profile, hooks, kind, port, runtime, env, working_dir, job, state, re
 
 
 def start_missing_services(profile: HostProfile, hooks: Hooks, runtime: str, state: dict, started: dict,
-                           results: list) -> set[str]:
+                           results: list, failures: dict | None = None) -> set[str]:
     """Start the profile's services that are not running, as children of this process, and record
     them in state (and state.json). The caller holds the service lock. Returns the services that
-    could not be started (each with its Result); the running and started ones are in state."""
+    could not be started (each with its Result); the running and started ones are in state. With
+    `failures`, each service that could not be started maps to the Result that says why (the
+    Windows host records it in state.json for the connectors waiting)."""
+    failures = {} if failures is None else failures
     working_dir = Path(profile.working_dir)
     try:
         working_dir.mkdir(parents=True, exist_ok=True)
     except OSError as error:
-        results.append(Result("working_dir_unavailable", f"{working_dir}: {error}"))
+        problem = Result("working_dir_unavailable", f"{working_dir}: {error}")
+        results.append(problem)
+        failures.update({kind: problem for kind in profile.services})
         return set(profile.services)
     job = None
     if WINDOWS:
@@ -343,14 +385,21 @@ def start_missing_services(profile: HostProfile, hooks: Hooks, runtime: str, sta
     failed: set[str] = set()
     ports: dict[str, int] = {}
     wanted = []
+
+    def fail(kind, before):
+        failed.add(kind)
+        failures[kind] = results[-1] if len(results) > before else Result(
+            "service_start_failed", f"{kind} could not be started", {"service": kind})
+
     for kind in profile.services:
         if owned(state.get(kind)):
             ports[kind] = state[kind]["port"]
             continue
         state.pop(kind, None)
+        before = len(results)
         port = _choose(profile, kind, {**state, **{k: {"port": p} for k, p in ports.items()}}, results)
         if port is None:
-            failed.add(kind)
+            fail(kind, before)
         else:
             ports[kind] = port
             wanted.append(kind)
@@ -360,9 +409,10 @@ def start_missing_services(profile: HostProfile, hooks: Hooks, runtime: str, sta
             results.append(problem)
         env = service_environment(env)
         for kind in wanted:
+            before = len(results)
             process = _start(profile, hooks, kind, ports[kind], runtime, env, working_dir, job, state, results)
             if process is None:
-                failed.add(kind)
+                fail(kind, before)
             else:
                 started[kind] = process
     return failed
@@ -385,6 +435,11 @@ def wait_until_ready(profile: HostProfile, started: dict | None = None, deadline
         while True:
             state, _ = read_json(run_dir / "state.json", {})
             entry = state.get(kind) if isinstance(state, dict) else None
+            if isinstance(entry, dict) and isinstance(entry.get("failed"), str):
+                # The Windows host could not start it: said at once, not after start_timeout.
+                data = entry.get("data") if isinstance(entry.get("data"), dict) else {}
+                results.append(Result(entry["failed"], str(entry.get("detail", "")), {**data, "service": kind}))
+                break
             usable = isinstance(entry, dict) and isinstance(entry.get("port"), int) and isinstance(entry.get("pid"), int)
             if usable and check_service(spec.ready_kind, entry["port"], spec.ready_path):
                 port, pid = entry["port"], entry["pid"]
@@ -398,11 +453,20 @@ def wait_until_ready(profile: HostProfile, started: dict | None = None, deadline
                                            "listeners": sorted(listeners)}))
                 else:
                     ready[kind] = port
+                    for note in entry.get("notes") or []:
+                        if isinstance(note, dict) and isinstance(note.get("code"), str):
+                            results.append(Result(note["code"], str(note.get("detail", "")), {"service": kind}))
                 break
             process = started.get(kind)
             if process is not None and process.poll() is not None:
                 results.append(Result("service_exited", f"{kind} exited with {process.returncode}; see {log}",
                                       {"service": kind, "code": process.returncode, "log": log}))
+                break
+            if usable and not owned(entry):
+                # Recorded, not answering, and the recorded process is gone: it died after its record.
+                log = entry.get("log") if isinstance(entry.get("log"), str) else log
+                results.append(Result("service_exited", f"{kind} (process {entry['pid']}) is gone; see {log}",
+                                      {"service": kind, "pid": entry["pid"], "log": log}))
                 break
             if time.monotonic() >= deadline:
                 where = f"on {LOOPBACK}:{entry['port']}" if usable else "(not started yet)"
@@ -423,10 +487,14 @@ def ensure_host(profile: HostProfile, hooks: Hooks, results: list) -> bool:
     return host.ensure_host(profile, results)
 
 
-def ensure_services(profile: HostProfile, connector_pid: int,
-                    hooks: Hooks | None = None) -> tuple[dict[str, int], list[Result]]:
+def ensure_services(profile: HostProfile, connector_pid: int, hooks: Hooks | None = None,
+                    resolved: tuple[str, bool] | None = None) -> tuple[dict[str, int], list[Result]]:
     """Register this connector's lease and make sure the profile's services run; wait until they
     answer. Returns the ports of the services that are ready and ours, and every problem met.
+
+    resolved is (runtime, current) from a caller that has already validated the profile and asked
+    resolve_runtime (host.ensure); without it this validates (a BLOCKING finding refuses the start)
+    and resolves itself.
 
     On Windows the services belong to the host (ensure_host, host.py); elsewhere a new session
     already outlives the chat, so this connector starts them, with a watchdog."""
@@ -434,24 +502,38 @@ def ensure_services(profile: HostProfile, connector_pid: int,
     if hooks is None:
         hooks, loaded = load_hooks(profile)
         results.extend(loaded)
+    if resolved is None:
+        invalid = profile.validate()
+        results.extend(invalid)
+        if blocking(invalid):
+            return {}, results
+        (runtime, current), problem = hook_calls.resolve_runtime(hooks, profile)
+        if problem is not None:
+            results.append(problem)
+    else:
+        runtime, current = resolved
     missing = require_psutil()
     if missing is not None:
         results.append(missing)
-    (runtime, current), problem = hook_calls.resolve_runtime(hooks, profile)
-    if problem is not None:
-        results.append(problem)
     if not current:
         results.append(Result("runtime_not_current", runtime, {"runtime": runtime}))
     run_dir = Path(profile.run_dir)
     started: dict = {}
     failed: set[str] = set()
-    with service_lock(run_dir):
+    with contextlib.ExitStack() as stack:
+        if not _take_lock(stack, run_dir, results):
+            return {}, results
         # Register first, so the host or the watchdog never sees no connector while this one starts.
         try:
             write_lease(profile, connector_pid, {"runtime": runtime})
         except OSError as error:
             results.append(Result("lease_write_failed", f"{connector_pid}: {error}", {"pid": connector_pid}))
             return {}, results
+        # A new launch lifts an earlier stop (see STOPPED).
+        try:
+            (run_dir / STOPPED).unlink(missing_ok=True)
+        except OSError as error:
+            results.append(Result("stop_marker_remove_failed", f"{run_dir / STOPPED}: {error}"))
         if not (Path(runtime) / ".complete.json").is_file():
             results.append(Result("runtime_incomplete", f"{runtime} has no .complete.json; it was replaced "
                                   "or never finished", {"runtime": runtime}))

@@ -39,13 +39,30 @@ return shapes, what is loaded from `hook_paths`) is the module docstring of `hoo
 | `schema_version` | The profile file format (a newer one is refused). |
 | `hooks`, `hook_paths` | Hook names to entry points, and the folders searched for them. |
 
+## Owning a process
+
+The core treats a recorded process as its own only while that process's command line holds the
+record's marker and, for a service, the literal `--port N` (two arguments: `--port` then the
+number; not `--port=N`, not `-p N`). Anything else could be another program that took the pid
+or the port. So a service command (`ServiceSpec.argv`, or the `service_command` hook's return)
+must hold a non-empty marker and `--port {port}`, or it is not started
+(`service_command_bad`, `service_command_unowned`); a helper's or the host's command must hold
+its marker (`helper_command_unowned`, `host_command_unowned`).
+
+## Validation
+
+`HostProfile.validate()` runs at every start (`ensure`, `ensure_services`, `host_main`): both
+`tts` and `stt` present, each range `1 <= first <= last <= 65535`, no reserved port in a range,
+no two ranges overlapping, `ready_kind` one of `kokoro` and `whisper`. Any of these refuses the
+start (`profile.BLOCKING`); an unknown hook name is reported and ignored.
+
 ## Entry points
 
 | Entry point | Module | Purpose |
 |---|---|---|
-| `ensure(profile, connector_pid)` | `host` | A connector's entry: lease, services and (off Windows) helpers. Returns `(ports, results)`. |
+| `ensure(profile, connector_pid)` | `host` | A connector's entry: `validate()`, then the `resolve_runtime`, `environment`, `prepare_home` and `pre_start` hooks before any lease; then lease, services and (off Windows) helpers. Every Result goes to `on_result` once. Returns `(ports, results)`. |
 | `release(profile, connector_pid)` | `services` | Drop the connector's lease; the last one out stops the services. |
-| `stop(profile)` | `services` | Stop the host, the services and the helpers, whatever leases remain. |
+| `stop(profile)` | `services` | Stop the host, the services and the helpers, whatever leases remain. Writes `run/stopped`, so no host starts again until a connector's `ensure`. |
 | `start_helper(profile, kind, mode, hooks)` | `helpers` | Start one helper in a mode; one `Result`. |
 | `stop_helper(profile, kind, hooks)` | `helpers` | Stop one helper, recorded or not; one `Result`. |
 | `host_main(profile_file)` | `host` | The Windows host's loop (`host <profile file>`). |
@@ -63,19 +80,22 @@ Every operation returns `Result(code, detail, data)` objects instead of raising.
 | `breakaway_refused` | The parent's job forbids breakaway; the child also dies with the parent. |
 | `helper_command_bad` | A helper's command could not be built or started. |
 | `helper_not_running` | A helper was asked to stop and was not running. |
+| `helper_not_started` | The host did not start a helper: no connector lease was live under the lock. |
 | `helper_status_failed` | A helper's status command failed or printed nothing. |
 | `helper_stopped` | A helper was stopped. |
 | `helper_unrecorded_stopped` | A helper with no record was found by its marker and stopped. |
 | `helpers_write_failed` | The helper records could not be written. |
 | `hook_bad_return` | A hook returned the wrong shape; the default was used. |
 | `hook_failed` | A hook raised or exited; the default was used. |
-| `hook_unknown` | The profile names a hook this package does not have. |
+| `hook_unknown` | The profile names a hook this package does not have; it is ignored and the start goes on. |
 | `host_command_bad` | The profile's host command is empty or unusable. |
 | `host_command_unowned` | The host command does not carry the host marker, so the host could never be found again. |
 | `host_failed` | The host stopped on an error. |
+| `host_kept_stopped` | `run/stopped` exists (a `stop`): no host is started until a connector's `ensure` removes it. |
 | `host_marker_empty` | The host marker is empty; the host pid file is left alone. |
 | `host_not_configured` | The profile has no host command. |
 | `host_pid_write_failed` | The host's pid could not be recorded. |
+| `host_profile_acl_failed` | Windows: the user-only ACL on `run/host-profile.json` could not be set; the host still starts. |
 | `host_profile_write_failed` | The host's profile file could not be written. |
 | `host_requires_psutil` | Windows without `psutil`: a running host cannot be found, so none was started. |
 | `host_restart_limit` | The host was started too often in the window; not started again. |
@@ -90,17 +110,20 @@ Every operation returns `Result(code, detail, data)` objects instead of raising.
 | `lease_write_failed` | A connector's lease file could not be written. |
 | `no_free_port` | No port in the service's candidates is free. |
 | `no_job` | No Job Object was used (not Windows, or none given). |
+| `override_port_taken` | The port override asked for a port that is taken; another port was used (data: `port`, `chosen`). |
 | `owner_other` | Another process answers on the service's port. |
 | `owner_unknown` | The port answered but no listener could be found to prove it is ours. |
 | `port_override_invalid` | The port override is unreadable or not a usable port. |
-| `port_range_reserved` | A service's range contains a reserved port. |
-| `port_ranges_overlap` | Two services' ranges overlap. |
+| `port_range_bad` | A service's port range is backwards or outside 1-65535; the start is refused. |
+| `port_range_reserved` | A service's range contains a reserved port; the start is refused. |
+| `port_ranges_overlap` | Two services' ranges overlap; the start is refused. |
 | `pre_start_refused` | The `pre_start` hook returned refusal text; the start was blocked. |
 | `process_list_unavailable` | The process list could not be read. |
 | `profile_key_unknown` | The profile file has a key this version does not know. |
 | `profile_malformed` | The profile file is unreadable or not a profile. |
 | `profile_schema_unsupported` | The profile file's schema is newer than this package supports. |
 | `psutil_missing` | `psutil` is not installed (needed on Windows for process lookups and stops). |
+| `ready_kind_unknown` | A service's `ready_kind` is not `kokoro` or `whisper`; the start is refused. |
 | `restart_limit_reached` | A service died too often in the window; not restarted. |
 | `restart_port_taken` | A service died and its port is now taken; not restarted there. |
 | `resume_failed` | A suspended Windows process could not be resumed and was killed. |
@@ -109,6 +132,8 @@ Every operation returns `Result(code, detail, data)` objects instead of raising.
 | `service_command_bad` | A service's marker is empty; not started. |
 | `service_command_unowned` | The service command lacks the marker or `--port N`; not started. |
 | `service_exited` | A service exited while starting. |
+| `service_lock_failed` | The run folder's services lock could not be taken; nothing was done. |
+| `service_missing` | The profile lacks the `tts` or `stt` service; the start is refused. |
 | `service_moved` | A service now runs on another port than recorded. |
 | `service_not_ready` | A service did not answer in `start_timeout`. |
 | `service_restart_failed` | A dead service could not be restarted. |
@@ -117,6 +142,8 @@ Every operation returns `Result(code, detail, data)` objects instead of raising.
 | `services_stopped` | `stop` finished; data says what was running. |
 | `state_corrupt` | A state file is not valid JSON or not an object; read as empty. |
 | `state_write_failed` | The state could not be written (a newly started service is killed). |
+| `stop_marker_remove_failed` | `run/stopped` could not be removed by a new connector. |
+| `stop_marker_write_failed` | `stop` could not write `run/stopped`; a running connector may start the host again. |
 | `unknown_helper` | The profile has no such helper. |
 | `unknown_service` | The profile has no such service. |
 | `watch_failed` | The watchdog stopped on an error. |

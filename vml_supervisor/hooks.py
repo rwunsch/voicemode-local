@@ -51,7 +51,7 @@ def load_hooks(profile: HostProfile) -> tuple[Hooks, list[Result]]:
     try:
         for name, entry in profile.hooks.items():
             if name not in HOOK_NAMES:
-                continue  # reported by HostProfile.validate()
+                continue  # reported by HostProfile.validate(), which ensure and host_main call
             try:
                 module, _, func = entry.partition(":")
                 if not module or not func:

@@ -142,3 +142,84 @@ def test_every_result_code_is_in_the_readme():
     readme = (package / "README.md").read_text(encoding="utf-8")
     missing = sorted(code for code in found if f"`{code}`" not in readme)
     assert found and missing == []
+
+
+# ----- final review C1: ensure() runs prepare_home and pre_start, and gives on_result everything ----
+
+ENSURE_HOOKS = textwrap.dedent('''
+    """felix_voice_ensure_test: a FELIX-like profile's hooks, driven through host.ensure."""
+    import json
+    from pathlib import Path
+
+    def prepare_home(profile, env):
+        Path(profile["root"]).mkdir(parents=True, exist_ok=True)
+        (Path(profile["root"]) / "home-prepared.json").write_text(json.dumps(env))
+
+    def pre_start(profile, runtime, env):
+        root = Path(profile["root"])
+        if (root / "crash").exists():
+            raise RuntimeError("the microphone check crashed")
+        return "no microphone" if (root / "no-mic").exists() else None
+
+    def on_result(profile, results):
+        sink = Path(profile["root"]) / "on-result.json"
+        seen = json.loads(sink.read_text()) if sink.exists() else []
+        sink.write_text(json.dumps(seen + [results]))
+''')
+
+
+@pytest.fixture
+def felix_ensure(world, tmp_path):  # noqa: F811
+    hook_dir = tmp_path / "felix_ensure_hooks"
+    hook_dir.mkdir()
+    (hook_dir / "felix_voice_ensure_test.py").write_text(ENSURE_HOOKS)
+    base = world.profile
+    felix = felix_profile_example(base.root, base.runtime_dir, hook_dir, world.fake,
+                                  ranges=(tuple(world.ports["tts"]), tuple(world.ports["stt"])))
+    profile = dataclasses.replace(
+        felix, run_dir=base.run_dir, env={"FELIX_HOME": str(base.root)},
+        hooks={"prepare_home": "felix_voice_ensure_test:prepare_home",
+               "pre_start": "felix_voice_ensure_test:pre_start",
+               "on_result": "felix_voice_ensure_test:on_result"})
+    profile.root.mkdir(parents=True, exist_ok=True)
+    yield profile
+    sys.modules.pop("felix_voice_ensure_test", None)
+    release(profile, world.connector.pid)
+
+
+def _sink(profile):
+    path = profile.root / "on-result.json"
+    return json.loads(path.read_text()) if path.exists() else []
+
+
+def test_a_refusing_pre_start_blocks_the_start_with_no_lease(world, felix_ensure):  # noqa: F811
+    from vml_supervisor import host
+    profile = felix_ensure
+    (profile.root / "no-mic").write_text("")
+    ports, results = host.ensure(profile, world.connector.pid)
+    assert ports == {} and [(r.code, r.detail) for r in results] == [("pre_start_refused", "no microphone")]
+    assert not (profile.run_dir / "clients" / str(world.connector.pid)).exists()
+    assert read_state(profile) == {}
+    # prepare_home ran first, with the environment hook's (here the default) environment
+    assert json.loads((profile.root / "home-prepared.json").read_text()) == {"FELIX_HOME": str(profile.root)}
+    assert [[r["code"] for r in batch] for batch in _sink(profile)] == [["pre_start_refused"]]
+
+
+def test_a_crashing_pre_start_does_not_block_and_on_result_gets_every_result(world, felix_ensure):  # noqa: F811
+    from vml_supervisor import host
+    profile = felix_ensure
+    (profile.root / "crash").write_text("")
+    ports, results = host.ensure(profile, world.connector.pid)
+    assert set(ports) == {"tts", "stt"}, results
+    assert codes(results) == ["hook_failed"] and "microphone check crashed" in results[0].detail
+    assert (profile.run_dir / "clients" / str(world.connector.pid)).exists()
+    sink = _sink(profile)
+    assert len(sink) == 1 and [r["code"] for r in sink[0]] == ["hook_failed"]   # once, at the end
+
+
+def test_on_result_hears_a_clean_ensure_too(world, felix_ensure):  # noqa: F811
+    from vml_supervisor import host
+    profile = felix_ensure
+    ports, results = host.ensure(profile, world.connector.pid)
+    assert set(ports) == {"tts", "stt"} and results == []
+    assert _sink(profile) == [[]]

@@ -164,7 +164,7 @@ def _host_world(tmp_path, monkeypatch, **over):
     monkeypatch.setattr(host, "service_lock", lambda run_dir: contextlib.nullcontext())
     monkeypatch.setattr(host, "owned", lambda entry: isinstance(entry, dict) and entry.get("pid") in live)
 
-    def start_missing(profile, hooks, runtime, state, started, results):
+    def start_missing(profile, hooks, runtime, state, started, results, failures=None):
         calls.append("services")
         for kind, pid, port in (("tts", 1, 28880), ("stt", 2, 22022)):
             if kind in profile.services:
@@ -174,7 +174,7 @@ def _host_world(tmp_path, monkeypatch, **over):
         host.atomic_json(profile.run_dir / "state.json", state)
         return set()
 
-    def start_helper(profile, kind, mode, hooks=None):
+    def start_helper(profile, kind, mode, hooks=None, only_if=None):
         calls.append((kind, mode))
         return Result("helper_started", f"{kind} started", {"helper": kind, "results": []})
 
@@ -216,7 +216,7 @@ def test_the_voice_host_records_helper_results_in_helpers_json(tmp_path, monkeyp
         written.append(json.loads(json.dumps(value))) if Path(path).name == host.HELPERS_FILE else None,
         real_atomic(path, value)))
 
-    def start_helper(profile, kind, mode, hooks=None):
+    def start_helper(profile, kind, mode, hooks=None, only_if=None):
         if kind == "ptt":
             return Result("helper_exited", "the ptt helper stopped at once", {"helper": kind, "results": []})
         return Result("helper_started", "started", {"helper": kind, "results": [
@@ -253,7 +253,7 @@ def test_host_restarts_a_helper_when_its_mode_changes(tmp_path, monkeypatch):
                         else None)
     pids = iter(range(500, 600))
 
-    def start_helper(profile, kind, mode, hooks=None):
+    def start_helper(profile, kind, mode, hooks=None, only_if=None):
         world.calls.append((kind, mode))
         state = read_state(profile)
         pid = next(pids)
@@ -497,7 +497,7 @@ def test_elsewhere_ensure_starts_the_services_and_this_platforms_helpers(tmp_pat
         "barge": HelperSpec(["b"], "b", "b.log", (), True),
         "ptt": HelperSpec(["p"], "p", "p.log", ("no-such-platform",), False)})
     monkeypatch.setattr(host, "WINDOWS", False)
-    monkeypatch.setattr(host, "ensure_services", lambda p, pid, hooks=None: ({"tts": 1}, [Result("runtime_not_current")]))
+    monkeypatch.setattr(host, "ensure_services", lambda p, pid, hooks=None, resolved=None: ({"tts": 1}, [Result("runtime_not_current")]))
     helper_calls = []
     monkeypatch.setattr(host, "start_helper", lambda p, kind, mode=None, hooks=None: helper_calls.append(kind) or Result(
         "helper_started", "", {"helper": kind, "results": [Result("kill_incomplete", "old one lives")]}))
@@ -522,7 +522,7 @@ def _leases(monkeypatch, ticks):
 def _recording_start_helper(world, code="helper_started"):
     pids = iter(range(500, 600))
 
-    def start_helper(profile, kind, mode, hooks=None):
+    def start_helper(profile, kind, mode, hooks=None, only_if=None):
         world.calls.append((kind, mode))
         if code == "helper_started":
             state = read_state(profile)
@@ -589,7 +589,7 @@ def test_read_mode_off_stops_the_helper(tmp_path, monkeypatch):
 def test_elsewhere_ensure_stops_a_helper_whose_mode_is_off(tmp_path, monkeypatch):
     profile = make_profile(tmp_path / "voice", helpers={"barge": HelperSpec(["b"], "b", "b.log", (), True)})
     monkeypatch.setattr(host, "WINDOWS", False)
-    monkeypatch.setattr(host, "ensure_services", lambda p, pid, hooks=None: ({}, []))
+    monkeypatch.setattr(host, "ensure_services", lambda p, pid, hooks=None, resolved=None: ({}, []))
     monkeypatch.setattr(host, "read_mode", lambda p, kind, hooks, results: "Off")
     monkeypatch.setattr(host, "start_helper", lambda *a, **kw: pytest.fail("started"))
     monkeypatch.setattr(host, "stop_helper", lambda p, kind, hooks=None: Result(
@@ -756,9 +756,213 @@ def test_elsewhere_a_failing_read_mode_leaves_the_helper_as_it_is(tmp_path, monk
     host.atomic_json(profile.run_dir / "state.json", {"barge": {"pid": 5, "port": None, "marker": "b", "mode": "on"}})
     monkeypatch.setattr(host, "WINDOWS", False)
     monkeypatch.setattr(host, "owned", lambda entry: running and isinstance(entry, dict))
-    monkeypatch.setattr(host, "ensure_services", lambda p, pid, hooks=None: ({}, []))
+    monkeypatch.setattr(host, "ensure_services", lambda p, pid, hooks=None, resolved=None: ({}, []))
     monkeypatch.setattr(host, "read_mode", lambda p, kind, hooks, results: results.append(
         Result("hook_failed", "read_mode: boom")))
     monkeypatch.setattr(host, "start_helper", lambda *a, **kw: pytest.fail("started"))
     monkeypatch.setattr(host, "stop_helper", lambda *a, **kw: pytest.fail("stopped"))
     assert codes(host.ensure(profile, 11)[1]) == ["hook_failed"]
+
+
+# ----- final review I4: validate() at run time ---------------------------------------------------
+
+
+def _reserved_profile(tmp_path, **over):
+    return make_profile(tmp_path / "voice", services={
+        "tts": ServiceSpec(["tts", "--port", "{port}"], "tts", (8870, 8889), "/v1/models", "kokoro"),
+        "stt": ServiceSpec(["stt", "--port", "{port}"], "stt", (22022, 22041), "/health", "whisper")}, **over)
+
+
+def test_ensure_refuses_a_profile_whose_range_holds_a_reserved_port(tmp_path, monkeypatch):
+    profile = _reserved_profile(tmp_path)
+    monkeypatch.setattr(host, "ensure_services", lambda *a, **kw: pytest.fail("services were ensured"))
+    ports, results = host.ensure(profile, 11)
+    assert ports == {} and codes(results) == ["port_range_reserved"]
+    assert not (profile.run_dir / "clients" / "11").exists()
+
+
+def test_ensure_services_alone_refuses_it_too(tmp_path, monkeypatch):
+    profile = _reserved_profile(tmp_path)
+    monkeypatch.setattr(services, "write_lease", lambda *a: pytest.fail("a lease was written"))
+    ports, results = services.ensure_services(profile, 11)
+    assert ports == {} and codes(results) == ["port_range_reserved"]
+
+
+def test_an_unknown_hook_is_reported_and_does_not_block(tmp_path, monkeypatch):
+    profile = make_profile(tmp_path / "voice", hooks={"bogus": "nowhere:fn"})
+    monkeypatch.setattr(host, "WINDOWS", False)
+    monkeypatch.setattr(host, "ensure_services", lambda p, pid, hooks=None, resolved=None: ({"tts": 1}, []))
+    monkeypatch.setattr(host, "start_helper", lambda p, kind, mode=None, hooks=None: Result(
+        "helper_started", "", {"helper": kind, "results": []}))
+    ports, results = host.ensure(profile, 11)
+    assert ports == {"tts": 1} and codes(results)[0] == "hook_unknown"
+
+
+def test_the_host_refuses_to_run_an_invalid_profile(tmp_path, monkeypatch):
+    world = _host_world(tmp_path, monkeypatch)
+    bad = _reserved_profile(tmp_path)
+    bad = dataclasses.replace(bad, run_dir=world.profile.run_dir, root=world.root)
+    bad.to_file(world.file)
+    monkeypatch.setattr(host, "live_leases", lambda profile: pytest.fail("the host looked at leases"))
+    assert host.host_main(world.file) == 2
+    assert world.calls == [] and log_codes(world.profile) == ["port_range_reserved"]
+
+
+# ----- final review I1, I2, T5: a start the host could not make --------------------------------
+
+
+def _looks(profile, watch, n):
+    out = []
+    for _ in range(n):
+        results = []
+        host._host_services(profile, Hooks(), watch, results)
+        out.append(codes(results))
+    return out
+
+
+def _no_port_world(tmp_path, monkeypatch):
+    profile = make_profile(tmp_path / "voice")
+    profile.run_dir.mkdir(parents=True)
+    tried = []
+    monkeypatch.setattr(services, "choose_port", lambda p, kind, taken: tried.append(kind) or None)
+    monkeypatch.setattr(host, "owned", lambda entry: False)
+    monkeypatch.setattr(host.time, "monotonic", lambda: 1000.0)
+    return profile, tried
+
+
+def test_a_start_the_host_cannot_make_is_tried_within_the_restart_limit_and_said_once(tmp_path, monkeypatch):
+    """The probe (final review I2): every look tried again and logged again, ~57k watch.log lines a
+    day. A never-recorded service's start is under restart_limit, and each failure is said once."""
+    profile, tried = _no_port_world(tmp_path, monkeypatch)
+    looks = _looks(profile, host.WatchState(), 6)
+    assert tried.count("tts") == 3 and tried.count("stt") == 3   # restart_limit (3, 300 s)
+    flat = [code for look in looks for code in look]
+    assert flat.count("no_free_port") == 2                   # once for each service
+    assert flat.count("restart_limit_reached") == 2          # once for each service
+    assert looks[-1] == []
+
+
+def test_a_spawn_error_is_not_retried_every_look(tmp_path, monkeypatch):
+    from vml_supervisor.winjob import SpawnError
+    profile = make_profile(tmp_path / "voice")
+    profile.run_dir.mkdir(parents=True)
+    monkeypatch.setattr(host, "owned", lambda entry: False)
+    monkeypatch.setattr(services, "choose_port", lambda p, kind, taken: 28880 if kind == "tts" else 22022)
+    spawned = []
+
+    def spawn(argv, job, **kw):
+        spawned.append(argv[0])
+        raise SpawnError(Result("job_assign_failed", "access denied; process 9 was killed"))
+
+    monkeypatch.setattr(services, "spawn", spawn)
+    monkeypatch.setattr(host.time, "monotonic", lambda: 1000.0)
+    looks = _looks(profile, host.WatchState(), 5)
+    assert spawned.count("tts") == 3 and spawned.count("stt") == 3
+    assert [c for look in looks for c in look].count("job_assign_failed") == 2
+
+
+def test_the_host_records_a_failed_start_and_the_connector_gets_it_at_once(tmp_path, monkeypatch):
+    """Final review I1: the host's start failures never reached the connector, which waited 60 s
+    and pointed at a log that did not exist."""
+    profile, _ = _no_port_world(tmp_path, monkeypatch)
+    _looks(profile, host.WatchState(), 1)
+    state = read_state(profile)
+    assert state["tts"]["failed"] == "no_free_port" and "tts: tried" in state["tts"]["detail"]
+    clock = iter(range(0, 10**6))
+    monkeypatch.setattr(services.time, "monotonic", lambda: next(clock) * 0.001)
+    monkeypatch.setattr(services.time, "sleep", lambda s: pytest.fail("the connector waited"))
+    ready, results = services.wait_until_ready(profile, deadline=10**6)
+    assert ready == {} and codes(results) == ["no_free_port", "no_free_port"]
+    assert results[0].data["service"] == "tts"
+
+
+def test_a_recorded_service_that_died_is_noticed_at_once(tmp_path, monkeypatch):
+    """Final review T5: a service that dies after its record is said at once, not at the deadline."""
+    profile = make_profile(tmp_path / "voice")
+    profile.run_dir.mkdir(parents=True)
+    host.atomic_json(profile.run_dir / "state.json", {
+        "tts": {"pid": 70, "port": 28885, "marker": "tts", "log": "x", "command": ["tts", "--port", "28885"]}})
+    monkeypatch.setattr(services, "check_service", lambda *a: False)
+    monkeypatch.setattr(services, "owned", lambda entry: False)
+    monkeypatch.setattr(services.time, "sleep", lambda s: pytest.fail("waited for a dead service"))
+    ready, results = services.wait_until_ready(profile, kinds=["tts"], deadline=10**9)
+    assert ready == {} and codes(results) == ["service_exited"]
+    assert results[0].data["pid"] == 70
+
+
+# ----- final review I3: a stop sticks on Windows --------------------------------------------------
+
+
+@POSIX_ONLY
+def test_a_stop_sticks_until_the_next_launch(tmp_path, monkeypatch):
+    """Controller ruling I3: before this branch, and on POSIX, a stop stayed stopped. On Windows
+    every connector's check_host started the host again within 10 s."""
+    profile = make_profile(tmp_path / "voice")
+    _windows(monkeypatch, profile)
+    monkeypatch.setattr(services, "live_leases", lambda p: [11])
+    monkeypatch.setattr(host, "process_command", lambda pid: None)   # no host runs
+    services.stop(profile)
+    assert (profile.run_dir / "stopped").exists()
+    started = []
+    monkeypatch.setattr(host, "start_host", lambda p: started.append(p) or Result("host_started", "", {"pid": 5}))
+    results = host.check_host(profile)
+    assert started == [] and codes(results) == ["host_kept_stopped"]
+    results = []
+    assert host.ensure_host(profile, results) is False and started == []
+    # A new launch (the connector's ensure) lifts it.
+    ports, results = host.ensure(profile, 12)
+    assert started == [profile] and "host_started" in codes(results)
+    assert not (profile.run_dir / "stopped").exists()
+
+
+# ----- final review I6: a user-only ACL on run/host-profile.json (Windows, faked) -----------------
+
+
+@pytest.mark.parametrize("acl_code", [0, 5])
+def test_on_windows_the_host_profile_file_gets_a_user_only_acl(tmp_path, monkeypatch, acl_code):
+    profile = make_profile(tmp_path / "voice")
+    monkeypatch.setattr(host, "WINDOWS", True)
+    monkeypatch.setattr(host, "background_options", lambda: {})
+    monkeypatch.setenv("SystemRoot", r"C:\Windows")
+    monkeypatch.setenv("USERNAME", "alice")
+    runs = []
+
+    def run(argv, **kw):
+        runs.append(argv)
+        if argv[0].lower().endswith("icacls.exe"):
+            return SimpleNamespace(stdout="", stderr="Access is denied." if acl_code else "", returncode=acl_code)
+        return SimpleNamespace(stdout="0 5", stderr="", returncode=0)
+
+    monkeypatch.setattr(host.subprocess, "run", run)
+    started = host.start_host(profile)
+    profile_file = str(profile.run_dir / host.HOST_PROFILE)
+    assert runs[0] == [r"C:\Windows\System32\icacls.exe", profile_file, "/inheritance:r", "/grant:r", "alice:F"]
+    assert runs[1][0].endswith("powershell.exe")   # the ACL is set before the host can read the file
+    assert started.code == "host_started"
+    notes = [r.code for r in started.data.get("results", [])]
+    assert notes == ([] if acl_code == 0 else ["host_profile_acl_failed"])
+    # ensure_host passes the note on
+    monkeypatch.setattr(host, "require_psutil", lambda: None)
+    monkeypatch.setattr(host, "process_command", lambda pid: None)
+    results = []
+    assert host.ensure_host(profile, results) is True
+    assert codes(results) == ["host_started"] + ([] if acl_code == 0 else ["host_profile_acl_failed"])
+
+
+def test_the_host_starts_a_helper_only_while_a_lease_is_live(tmp_path, monkeypatch):
+    """Final review M3: the check is handed to start_helper, which makes it under its lock."""
+    world = _host_world(tmp_path, monkeypatch, helpers={"ptt": HelperSpec(["p"], "p", "p.log", (), False)})
+    _leases(monkeypatch, 1)
+    checks = []
+
+    def start_helper(profile, kind, mode, hooks=None, only_if=None):
+        checks.append(only_if)
+        return Result("helper_started", "", {"helper": kind, "results": []})
+
+    monkeypatch.setattr(host, "start_helper", start_helper)
+    host.host_main(world.file)
+    assert len(checks) == 1 and callable(checks[0])
+    monkeypatch.setattr(host, "live_leases", lambda profile: [])
+    assert checks[0]() is False
+    monkeypatch.setattr(host, "live_leases", lambda profile: [11])
+    assert checks[0]() is True
