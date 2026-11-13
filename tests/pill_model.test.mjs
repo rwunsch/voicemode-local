@@ -330,3 +330,25 @@ test("a barge click shows the wanted state at once, as pending, until the backen
   // backend never agrees: after PENDING_MS the real state shows again
   assert.deepEqual(bargeShown(true, p, 1000 + PENDING_MS + 1), { on: true, pending: false, keep: null });
 });
+
+test("On then Off before the backend moved: the switch stays Off while the backend passes through On", () => {
+  // Talos on FELIX #1813 (v1.2.8 head): the pending Off matched the cached Off snapshot and was
+  // dropped, so the backend's transient On flipped the switch back against the last click.
+  const { bargeShown, clickBarge } = model;
+  let pending = clickBarge(false, null, 1000);          // On clicked; backend still Off
+  assert.equal(bargeShown(false, pending, 1100).on, true);
+  pending = clickBarge(false, bargeShown(false, pending, 1200).keep, 1200);   // then Off
+  let s = bargeShown(false, pending, 1300);             // backend has not moved yet
+  assert.deepEqual([s.on, s.pending], [false, true]);
+  s = bargeShown(true, s.keep, 1500);                   // backend applies the first wish: On
+  assert.deepEqual([s.on, s.pending], [false, true]);
+  s = bargeShown(false, s.keep, 1900);                  // then the last wish: Off
+  assert.deepEqual([s.on, s.pending, s.keep], [false, false, null]);
+});
+
+test("a single click still clears as soon as the backend agrees", () => {
+  const { bargeShown, clickBarge } = model;
+  const p = clickBarge(true, null, 1000);               // Off clicked while backend On
+  assert.deepEqual([bargeShown(true, p, 1100).on, bargeShown(true, p, 1100).pending], [false, true]);
+  assert.deepEqual(bargeShown(false, p, 1300), { on: false, pending: false, keep: null });
+});
