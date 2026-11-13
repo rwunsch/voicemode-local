@@ -7,6 +7,11 @@
 > Windows from install to stop, with no audio. A real spoken conversation is
 > still unproven.
 
+> **Update (v1.2.0, not tagged yet):** the native launcher now runs on the shared `vml_supervisor`
+> package (`vml_profiles/claude.py` is its profile). Same behaviour, with the host outside every
+> chat, plus `host-profile.json`, `run/ports.json` and `run/modes.json`. See
+> `docs/felix-integration/README.md` and `vml_supervisor/README.md`.
+
 | Field        | Value |
 |--------------|-------|
 | Status       | In progress (tasks 4, 6, 7 and 8 of the native Windows plan done) |

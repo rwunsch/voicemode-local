@@ -1,6 +1,6 @@
 # Proposal: one shared voice supervisor and runtime builder
 
-Status: **APPROVED by Robert, 2026-11-12.** Agreed between the voicemode-local and FELIX-voice
+Status: **Plan A done on feature/shared-supervisor, not merged or tagged.** Approved by Robert, 2026-11-12. Agreed between the voicemode-local and FELIX-voice
 sessions, revision 3. Robert's decisions:
 1. The split: yes.
 2. Timing: route i. #1743 ships with FELIX's host fix now; the move into the shared module

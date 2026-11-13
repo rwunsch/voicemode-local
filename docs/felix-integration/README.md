@@ -25,6 +25,27 @@ another session (FELIX-MAC, FELIX-voice) and not re-run here; **inferred** = rea
 | Native install without WSL/Docker/admin | n/a | install.ps1 -Mode windows-native | install-mac.sh (v1.0.0) + `--barge` |
 | Live on/off switch | voicemode-switch | voicemode_native.py barge/pill on/off/status | voicemode-switch |
 
+## What v1.2.0 changes (not tagged yet)
+
+On `feature/shared-supervisor`: not merged, not tagged. The shared voice supervisor, `vml_supervisor/`,
+replaces the lifecycle code that voicemode-local's native launcher and FELIX's `voice.py` each carried.
+
+- **The shared supervisor and the extension pattern.** A core, a profile (plain data) and named
+  hooks. Fields, entry points, every Result code and the stability rule are in
+  `vml_supervisor/README.md`; the hook contract is the docstring of `vml_supervisor/hooks.py`.
+  `tests/test_supervisor_felix_profile.py` shows a FELIX-shaped profile (its ports, markers,
+  `ports.json` override and example hooks) running the service lifecycle.
+- **What FELIX vendors:** `vml_supervisor/*`, byte-identical at the tag, never patched locally.
+- **What FELIX and native users will notice:**
+  - On Windows the host runs outside every chat, so services and helpers survive a chat closing.
+  - `host-profile.json` (mode 0600) holds the environment the host hands to its processes.
+  - `run/ports.json` (the chosen ports) and `run/modes.json` (the latest helper modes) are new state files.
+  - A `read_mode` of "off" stops a running helper instead of leaving it.
+  - `host_requires_psutil`: on Windows a host is not started without `psutil`.
+  - `serve` on Windows may get its helpers from the host rather than start them itself.
+  - An in-place upgrade restarts old helpers once: their records lack a mode.
+- **What remains:** FELIX converts `voice.py` into a thin profile in its own PR. The tag waits for Robert's go.
+
 ## What v1.1.3 changes (tagged 2026-11-12, merged to main from fix/talos-review; fixes from Talos's review of FELIX #1743)
 
 27 findings on vendored files were checked against the code (all confirmed or partly), then
