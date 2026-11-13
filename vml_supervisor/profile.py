@@ -60,6 +60,10 @@ class HelperSpec:
 
 @dataclass(frozen=True)
 class PortOverride:
+    """kind "file": `path` is a JSON object keyed by service kind. kind "env": `keys` are environment
+    variable names, each either "kind=NAME" (names its own service kind) or a plain NAME belonging to
+    the kind at its position in SERVICE_KINDS (tts, stt). A plain name carries no kind of its own, so
+    position is the only reading it has; use "kind=NAME" where the order might be doubted."""
     kind: str  # "file" | "env" | "none"
     path: Path | None = None
     keys: tuple[str, ...] = ()

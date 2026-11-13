@@ -10,7 +10,7 @@ import json
 import os
 
 from .procs import port_free
-from .profile import BASE_RESERVED_PORTS, HostProfile
+from .profile import BASE_RESERVED_PORTS, SERVICE_KINDS, HostProfile
 from .result import Result
 
 
@@ -24,6 +24,19 @@ def _int_from_text(text):
         return int(str(text).strip())
     except ValueError:
         return None
+
+
+def _env_name(keys, kind: str):
+    """The environment variable for `kind`: an entry "kind=NAME" names its own kind; a plain entry
+    belongs to the kind at its position in SERVICE_KINDS (the order the profile format documents)."""
+    for position, key in enumerate(keys):
+        named_kind, separator, name = key.partition("=")
+        if separator:
+            if named_kind == kind:
+                return name or None
+        elif position < len(SERVICE_KINDS) and SERVICE_KINDS[position] == kind:
+            return key
+    return None
 
 
 def _override(profile: HostProfile, kind: str):
@@ -49,9 +62,7 @@ def _override(profile: HostProfile, kind: str):
             return None, source, None
         value = raw[kind]
     elif override.kind == "env":
-        # keys are positional by service kind: (tts, stt)
-        index = {"tts": 0, "stt": 1}.get(kind)
-        name = override.keys[index] if index is not None and index < len(override.keys) else None
+        name = _env_name(override.keys, kind)
         source = name or ""
         text = os.environ.get(name) if name else None
         if text is None or not text.strip():
