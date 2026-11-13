@@ -389,3 +389,46 @@ def test_a_failing_status_command_keeps_the_state_word(tmp_path, monkeypatch):
     stopped = helpers.stop_helper(world.profile, "barge")
     assert stopped.detail.startswith("stopped; log ")
     assert [r.code for r in stopped.data["results"]] == ["helper_status_failed"]
+
+
+# ----- final review I7, M3, M4 ----------------------------------------------------------------------
+
+
+def test_a_running_helpers_status_line_is_read_after_the_lock_is_released(tmp_path, monkeypatch):
+    """Final review I7: status_argv may take 10 s; it ran with the services lock and the stop
+    signals held, so every connector's start and stop waited behind it."""
+    import contextlib
+    world = _helper_world(tmp_path, monkeypatch)
+    held = []
+
+    @contextlib.contextmanager
+    def tracked_lock(run_dir):
+        held.append(True)
+        try:
+            yield
+        finally:
+            held.pop()
+
+    monkeypatch.setattr(helpers, "service_lock", tracked_lock)
+    assert helpers.start_helper(world.profile, "barge", "auto").code == "helper_started"
+    seen = []
+    monkeypatch.setattr(helpers, "_status_line", lambda *a: seen.append(list(held)) or "trigger: on (auto)")
+    result = helpers.start_helper(world.profile, "barge", "auto")
+    assert result.code == "helper_running" and result.detail == "trigger: on (auto)"
+    assert seen == [[]]
+
+
+def test_a_helper_is_not_started_once_the_last_lease_is_gone(tmp_path, monkeypatch):
+    """Final review M3: the host's look at its helpers runs outside the lock, so it could start the
+    mic-opening trigger after the last connector released. only_if is checked under the lock."""
+    world = _helper_world(tmp_path, monkeypatch)
+    result = helpers.start_helper(world.profile, "barge", "auto", only_if=lambda: False)
+    assert result.code == "helper_not_started" and world.started == []
+    assert helpers.start_helper(world.profile, "barge", "auto", only_if=lambda: True).code == "helper_started"
+
+
+def test_a_helper_record_names_its_runtime(tmp_path, monkeypatch):
+    """Final review M4: prune_runtimes keeps the runtimes in owned records; a helper's had none."""
+    world = _helper_world(tmp_path, monkeypatch)
+    assert helpers.start_helper(world.profile, "barge", "auto").code == "helper_started"
+    assert state_of(world)["barge"]["runtime"] == str(world.profile.runtime_dir)

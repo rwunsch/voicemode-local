@@ -27,7 +27,8 @@ Result codes
 - start_helper: helper_started, helper_running (owned, same mode: left alone), helper_restarted
   (the mode changed), helper_failed (the lock, OSError, a failed spawn, an old helper that would
   not die, or a record write: nothing new is left running), helper_exited (it stopped within
-  HELPER_START_CHECK: not recorded), helper_not_for_platform, helper_command_bad (empty marker),
+  HELPER_START_CHECK: not recorded), helper_not_started (only_if said no, under the lock),
+  helper_not_for_platform, helper_command_bad (empty marker),
   helper_command_unowned (the marker is not in the command), unknown_helper.
 - stop_helper: helper_stopped, helper_not_running, kill_incomplete (the entry is kept, so a later
   stop tries again), state_write_failed (also when run_dir cannot be created or locked),
@@ -168,6 +169,11 @@ def _fill(argv, mode: str | None) -> list[str]:
 def _environment(profile: HostProfile, hooks: Hooks, kind: str, mode, state: dict, results: list) -> dict:
     """The profile's (or its environment hook's) variables, with this helper's mode and the ports of
     the services running now, over the few the operating system needs."""
+    return _runtime_and_environment(profile, hooks, kind, mode, state, results)[1]
+
+
+def _runtime_and_environment(profile: HostProfile, hooks: Hooks, kind: str, mode, state: dict,
+                             results: list) -> tuple[str, dict]:
     (runtime, _current), problem = hook_calls.resolve_runtime(hooks, profile)
     if problem is not None:
         results.append(problem)
@@ -177,7 +183,7 @@ def _environment(profile: HostProfile, hooks: Hooks, kind: str, mode, state: dic
     env, problem = hook_calls.environment(hooks, profile, runtime, ports, {kind: mode})
     if problem is not None:
         results.append(problem)
-    return service_environment(env)
+    return runtime, service_environment(env)
 
 
 def _status_line(profile: HostProfile, spec: HelperSpec, kind: str, mode, env: dict, results: list) -> str | None:
@@ -214,13 +220,16 @@ def _lock(stack: contextlib.ExitStack, run_dir, held: bool) -> OSError | None:
     return None
 
 
-def start_helper(profile: HostProfile, kind: str, mode=_FROM_HOOK, hooks: Hooks | None = None) -> Result:
+def start_helper(profile: HostProfile, kind: str, mode=_FROM_HOOK, hooks: Hooks | None = None,
+                 only_if=None) -> Result:
     """Start the helper once per install, as a child of this process (in the services' Job Object
     on Windows), and record it in state.json. Restarted when its mode changed, because a helper
     reads its mode only when it starts.
 
     mode omitted: ask the read_mode hook (its failure is in data["results"]).
     mode=None: the helper's default mode. A string: that mode.
+    only_if: a callable checked under the lock before anything is started (the host passes "a
+    connector lease is live"); False gives helper_not_started and nothing is started.
 
     Under the lock with stop signals held: an owned entry in the same mode is left alone; otherwise
     the old one is stopped, then this install's unrecorded ones; if any of them survives, nothing
@@ -261,64 +270,72 @@ def start_helper(profile: HostProfile, kind: str, mode=_FROM_HOOK, hooks: Hooks 
         state = read_state(profile, results)
         current = state.pop(kind, None)
         if current and owned(current) and current.get("mode") == mode:
-            env = _environment(profile, hooks, kind, mode, state, results)
-            line = _status_line(profile, spec, kind, mode, env, results)
-            return done("helper_running", line or f"already running; log {log}", pid=current.get("pid"), mode=mode)
-        survivors = []
-        if current:
-            restarted = owned(current)
-            failed = stop_entry(profile, current)
-            if failed is not None:
-                results.append(failed)
-                survivors.append(failed)
-                state[kind] = current   # still alive: keep it on record, so a later stop tries again
-        unrecorded = stop_unrecorded(profile, kind)
-        results.extend(unrecorded)
-        survivors.extend(r for r in unrecorded if r.code == "kill_incomplete")
-        if survivors:
-            write_state(profile, state, results)
-            return done("helper_failed", f"the {kind} helper was not started: an old one is still running "
-                        f"({survivors[0].detail})", command=command)
-        job = None
-        if WINDOWS:
+            running = current
+        elif only_if is not None and not only_if():
+            return done("helper_not_started", f"the {kind} helper was not started: no connector is left")
+        else:
+            running = None
+        if running is None:
+            survivors = []
+            if current:
+                restarted = owned(current)
+                failed = stop_entry(profile, current)
+                if failed is not None:
+                    results.append(failed)
+                    survivors.append(failed)
+                    state[kind] = current   # still alive: keep it on record, so a later stop tries again
+            unrecorded = stop_unrecorded(profile, kind)
+            results.extend(unrecorded)
+            survivors.extend(r for r in unrecorded if r.code == "kill_incomplete")
+            if survivors:
+                write_state(profile, state, results)
+                return done("helper_failed", f"the {kind} helper was not started: an old one is still running "
+                            f"({survivors[0].detail})", command=command)
+            job = None
+            if WINDOWS:
+                try:
+                    job = services_job(profile)
+                except OSError as error:
+                    results.append(Result("job_unavailable", f"{profile.job_name}: {error}; {kind} starts "
+                                          "without the job"))
+            extra = {} if WINDOWS else {"preexec_fn": unblock_stop_signals}
             try:
-                job = services_job(profile)
+                working_dir.mkdir(parents=True, exist_ok=True)
+                log.parent.mkdir(parents=True, exist_ok=True)
+                runtime, env = _runtime_and_environment(profile, hooks, kind, mode, state, results)
+                with log.open("a") as output:
+                    # The child must not inherit the held stop signals, or it could only be killed.
+                    process, spawned = spawn(command, job, env=env, cwd=str(working_dir), stdin=subprocess.DEVNULL,
+                                             stdout=output, stderr=output, **background_options(), **extra)
+            except SpawnError as error:
+                results.append(error.result)
+                write_state(profile, state, results)
+                return done("helper_failed", f"the {kind} helper could not be started: {error.result.detail}",
+                            command=command)
             except OSError as error:
-                results.append(Result("job_unavailable", f"{profile.job_name}: {error}; {kind} starts "
-                                      "without the job"))
-        extra = {} if WINDOWS else {"preexec_fn": unblock_stop_signals}
-        try:
-            working_dir.mkdir(parents=True, exist_ok=True)
-            log.parent.mkdir(parents=True, exist_ok=True)
-            env = _environment(profile, hooks, kind, mode, state, results)
-            with log.open("a") as output:
-                # The child must not inherit the held stop signals, or it could only be killed.
-                process, spawned = spawn(command, job, env=env, cwd=str(working_dir), stdin=subprocess.DEVNULL,
-                                         stdout=output, stderr=output, **background_options(), **extra)
-        except SpawnError as error:
-            results.append(error.result)
-            write_state(profile, state, results)
-            return done("helper_failed", f"the {kind} helper could not be started: {error.result.detail}",
-                        command=command)
-        except OSError as error:
-            write_state(profile, state, results)
-            return done("helper_failed", f"the {kind} helper could not be started: {error}", command=command)
-        if spawned.code not in ("no_job", "breakaway"):
-            results.append(spawned)
-        state[kind] = {"pid": process.pid, "port": None, "marker": spec.marker, "log": str(log),
-                       "mode": mode, "command": command}
-        try:
-            written = write_state(profile, state, results)
-        except BaseException:
-            # Untracked, it would run beside the next one: stop it, then let the interrupt go on.
-            stop_entry(profile, state.pop(kind))
-            raise
-        if not written:
-            failed = stop_entry(profile, state.pop(kind))
-            if failed is not None:
-                results.append(failed)
-            return done("helper_failed", f"the {kind} helper was stopped: its record could not be written",
-                        command=command)
+                write_state(profile, state, results)
+                return done("helper_failed", f"the {kind} helper could not be started: {error}", command=command)
+            if spawned.code not in ("no_job", "breakaway"):
+                results.append(spawned)
+            state[kind] = {"pid": process.pid, "port": None, "marker": spec.marker, "log": str(log),
+                           "mode": mode, "command": command, "runtime": runtime}
+            try:
+                written = write_state(profile, state, results)
+            except BaseException:
+                # Untracked, it would run beside the next one: stop it, then let the interrupt go on.
+                stop_entry(profile, state.pop(kind))
+                raise
+            if not written:
+                failed = stop_entry(profile, state.pop(kind))
+                if failed is not None:
+                    results.append(failed)
+                return done("helper_failed", f"the {kind} helper was stopped: its record could not be written",
+                            command=command)
+    if running is not None:
+        # Outside the lock: status_argv may take STATUS_TIMEOUT seconds (final review I7).
+        env = _environment(profile, hooks, kind, mode, state, results)
+        line = _status_line(profile, spec, kind, mode, env, results)
+        return done("helper_running", line or f"already running; log {log}", pid=running.get("pid"), mode=mode)
     # The liveness check runs outside the lock, so other connectors' starts and stops do not wait.
     deadline = time.monotonic() + HELPER_START_CHECK
     while process.poll() is None and time.monotonic() < deadline:
