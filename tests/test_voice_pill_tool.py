@@ -31,6 +31,11 @@ def tool(monkeypatch, tmp_path):
 
     pa.ensure = ensure
     pa.backend_alive = lambda base=None: pa.alive
+    pa.kind, pa.autostart, pa.mac_venv = "windows", True, tmp_path / "pill-venv-python"
+    pa.platform_kind = lambda: pa.kind
+    pa.autostart_on = lambda: pa.autostart
+    pa.mac_python = lambda: str(pa.mac_venv)
+    pa.LAUNCH_SPACING_S = 20.0
 
     tools = []
     server = types.ModuleType("voice_mode.server")
@@ -76,11 +81,21 @@ def test_show_with_a_window_already_up(tool):
     assert "already" in out.lower()
 
 
-def test_show_says_when_the_window_could_not_start(tool):
+def test_show_names_why_the_window_was_not_started(tool):
+    """A chat asked to open the pill must be able to say why it did not: the reasons are the ones
+    pill_autostart.should_start/ensure already apply, so the tool names them, and a start that is
+    already under way is not reported as a failure."""
     mod, _, pa, _ = tool
     pa.result = False
+    pa.kind = None
+    assert "no pill window on this system" in run(mod, "show")
+    pa.kind, pa.autostart = "windows", False
+    assert "VOICEMODE_PILL_AUTOSTART" in run(mod, "show")
+    pa.kind, pa.autostart = "macos", True   # mac_venv does not exist
+    assert "voicemode-switch pill on" in run(mod, "show")
+    pa.kind = "windows"
     out = run(mod, "show")
-    assert "could not start" in out.lower() and "autostart.log" in out
+    assert "already" in out and "starting" in out and "could not" not in out.lower()
 
 
 def test_show_with_the_pill_off_does_not_start_it(tool, monkeypatch):

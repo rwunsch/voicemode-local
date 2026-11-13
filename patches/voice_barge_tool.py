@@ -58,7 +58,23 @@ def _pill_show() -> str:
         return "The pill window is starting; it shows while a voice session is live."
     if up:
         return "The pill is already showing (its window is running); any earlier close is undone."
-    return f"Could not start the pill window; see {_pill_log()}."
+    return _pill_why_not()
+
+
+def _pill_why_not() -> str:
+    """Why ensure() started nothing, in the order pill_autostart.should_start/ensure check it,
+    so a chat asked to open the pill can say why it did not."""
+    from pathlib import Path
+    kind = pill_autostart.platform_kind()
+    if kind is None:
+        return "There is no pill window on this system (it runs on Windows/WSL and macOS desktops)."
+    if not pill_autostart.autostart_on():
+        return ("The pill was not started: VOICEMODE_PILL_AUTOSTART is off. Remove that setting "
+                "or start it with `voicemode-switch pill on`.")
+    if kind == "macos" and not Path(pill_autostart.mac_python()).exists():
+        return "The Mac pill is not set up yet; run `voicemode-switch pill on` once."
+    return (f"A pill start was already tried in the last {int(pill_autostart.LAUNCH_SPACING_S)} s; "
+            f"it is probably still starting. If it does not appear, see {_pill_log()}.")
 
 
 def _pill_hide() -> str:
