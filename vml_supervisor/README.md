@@ -110,7 +110,7 @@ Every operation returns `Result(code, detail, data)` objects instead of raising.
 | `lease_remove_failed` | A connector's lease file could not be removed. |
 | `lease_write_failed` | A connector's lease file could not be written. |
 | `no_free_port` | No port in the service's candidates is free. |
-| `no_job` | No Job Object was used (not Windows, or none given). |
+| `no_job` | No Job Object was used (not Windows, or none given), or the parent is in no job so there was nothing to break away from. |
 | `override_port_taken` | The port override asked for a port that is taken; another port was used (data: `port`, `chosen`). |
 | `owner_other` | Another process answers on the service's port. |
 | `owner_unknown` | The port answered but no listener could be found to prove it is ours. |

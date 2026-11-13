@@ -60,6 +60,7 @@ def windows(monkeypatch):
     monkeypatch.setattr(winjob.subprocess, "Popen", FakePopen)
     resumed = []
     monkeypatch.setattr(winjob, "_resume_threads", resumed.append)
+    monkeypatch.setattr(winjob, "_parent_in_job", lambda: True)
     FakePopen.calls, FakePopen.killed, FakePopen.waited, FakePopen.refuse = [], [], [], 0
     return resumed
 
@@ -72,6 +73,14 @@ def test_breakaway_is_asked_for_and_recorded(windows):
     assert kwargs["creationflags"] == 0x08000000 | 0x4 | winjob.CREATE_BREAKAWAY_FROM_JOB
     assert kwargs["cwd"] == "C:\\w"
     assert job.assigned == [7] and windows == [4242]
+
+
+def test_a_parent_in_no_job_is_recorded_as_no_job_not_breakaway(windows, monkeypatch):
+    monkeypatch.setattr(winjob, "_parent_in_job", lambda: False)
+    job = FakeJob()
+    process, result = winjob.spawn(["x.exe"], job, creationflags=0x08000000)
+    assert result.code == "no_job"
+    assert job.assigned == [7] and windows == [4242]      # still suspended, in the job, then resumed
 
 
 def test_breakaway_refused_is_recorded(windows):

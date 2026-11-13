@@ -158,12 +158,26 @@ def _resume_threads(pid) -> None:
         raise RuntimeError(f"could not resume process {pid}")
 
 
+def _parent_in_job() -> bool:
+    """True when this process is in any Job Object (IsProcessInJob). Raises OSError if it cannot tell."""
+    import ctypes
+    from ctypes import wintypes
+    k = _kernel32()
+    k.GetCurrentProcess.restype = wintypes.HANDLE
+    k.IsProcessInJob.argtypes = [wintypes.HANDLE, wintypes.HANDLE, ctypes.POINTER(wintypes.BOOL)]
+    inside = wintypes.BOOL()
+    if not k.IsProcessInJob(k.GetCurrentProcess(), None, ctypes.byref(inside)):
+        raise _last_error()
+    return bool(inside.value)
+
+
 def spawn(argv, job: Job | None, **popen_kwargs) -> tuple[subprocess.Popen, Result]:
     """Popen; on Windows with a job, created suspended and put in the job before its first
     instruction, so nothing it starts can escape the job.
 
     It is first asked to leave the job this process is in (a process in an unrelated job cannot
-    join ours): Result("breakaway"). Where that job forbids it, it is created again without the
+    join ours): Result("breakaway"). When this process is in no job there is nothing to leave:
+    Result("no_job") (the child is still put in `job`). Where that job forbids it, it is created again without the
     request and stays in that job too, so it also dies with it: Result("breakaway_refused").
     Off Windows, or without a job, a plain Popen: Result("no_job").
 
@@ -174,7 +188,10 @@ def spawn(argv, job: Job | None, **popen_kwargs) -> tuple[subprocess.Popen, Resu
     flags = popen_kwargs.pop("creationflags", 0) | CREATE_SUSPENDED
     try:
         process = subprocess.Popen(argv, creationflags=flags | CREATE_BREAKAWAY_FROM_JOB, **popen_kwargs)
-        result = Result("breakaway")
+        try:
+            result = Result("breakaway" if _parent_in_job() else "no_job")
+        except OSError as error:
+            result = Result("breakaway", f"could not tell whether the parent is in a job: {error}")
     except PermissionError as refused:
         process = subprocess.Popen(argv, creationflags=flags, **popen_kwargs)
         result = Result("breakaway_refused",
