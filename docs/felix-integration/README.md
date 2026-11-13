@@ -38,7 +38,32 @@ replaces the lifecycle code that voicemode-local's native launcher and FELIX's `
 - **What FELIX vendors:** `vml_supervisor/*`, byte-identical at the tag, never patched locally.
 - **What FELIX and native users will notice:**
   - On Windows the host runs outside every chat, so services and helpers survive a chat closing.
-  - `host-profile.json` (mode 0600) holds the environment the host hands to its processes.
+  - **A stop sticks on Windows**, as on POSIX and before this branch: `stop` writes `run/stopped`,
+    and while it exists no connector's backstop (`check_host`, every 10 s) or `ensure_host` starts a
+    host (`host_kept_stopped`, said once). The next connector's `ensure` removes it.
+  - `host-profile.json` holds the environment the host hands to its processes: mode 0600, and on
+    Windows a user-only ACL (`icacls /inheritance:r /grant:r %USERNAME%:F`; a failure is
+    `host_profile_acl_failed`, and the host still starts). **The environment is an allowlist**
+    now, built by the profile owner: voicemode-local's keeps the OS essentials, `VOICEMODE_*` (no
+    `*API_KEY*`) and the keys its launcher sets itself. FELIX's profile should do the same; a
+    service that needs an unlisted variable will fail to start, and say so.
+  - **`validate()` refuses a start.** `ensure`, `ensure_services` and the host call it: a reserved
+    port in a range, overlapping ranges, a backwards or out-of-bounds range (`port_range_bad`), a
+    missing `tts` or `stt` (`service_missing`) or an unknown `ready_kind` (`ready_kind_unknown`)
+    returns at once with nothing started. An unknown hook (`hook_unknown`) is only reported.
+  - **`override_port_taken`:** a port override (`ports.json`, or our `VOICEMODE_NATIVE_*_PORT`) whose
+    port is taken is said; the range's next free port is used, as before.
+  - **The hooks are wired into `ensure()`**, on both platforms: before any lease or lock it
+    resolves the runtime, asks `environment` (no ports or modes yet), calls `prepare_home` and asks
+    `pre_start`. Refusal text from `pre_start` returns `pre_start_refused` with no lease and nothing
+    started; a `pre_start` that raises is recorded (`hook_failed`) and does not block. Every
+    Result of the `ensure` goes to `on_result` once, at the end.
+  - On Windows the host's start failures (`no_free_port`, `service_command_unowned`,
+    `job_assign_failed`, ...) are recorded in `state.json` and reach the connector at once instead
+    of after 60 s; a start it cannot make is tried at most `restart_limit` times per window, each
+    failure said once. A service that dies while a connector waits is `service_exited` at once.
+  - Helper problems (`helper_exited`, `helper_failed`, `helper_restart_limit_reached`) are said once
+    on the connector's stderr, on Windows from `run/helpers.json`.
   - `run/ports.json` (the chosen ports) and `run/modes.json` (the latest helper modes) are new state files.
   - A `read_mode` of "off" stops a running helper instead of leaving it.
   - `host_requires_psutil`: on Windows a host is not started without `psutil`.
