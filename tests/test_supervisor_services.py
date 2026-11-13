@@ -780,9 +780,22 @@ def test_a_failing_cleanup_does_not_replace_the_interrupt(world, monkeypatch):
     def cleanup_fails(pid, timeout):
         raise RuntimeError("cannot kill")
 
+    real_popen, launched = subprocess.Popen, []
+
+    def popen(*args, **kwargs):  # the faked cleanup kills nothing: the test ends what it started
+        process = real_popen(*args, **kwargs)
+        launched.append(process)
+        return process
+
+    monkeypatch.setattr(services.subprocess, "Popen", popen)
     monkeypatch.setattr(services, "atomic_json", interrupted)
     monkeypatch.setattr(services, "kill_tree", cleanup_fails)
-    with pytest.raises(SystemExit) as caught:
-        ensure_services(world.profile, world.connector.pid)
-    assert caught.value.code == 3
-    assert [r.code for r in caught.value.cleanup_results] == ["cleanup_failed"]
+    try:
+        with pytest.raises(SystemExit) as caught:
+            ensure_services(world.profile, world.connector.pid)
+        assert caught.value.code == 3
+        assert [r.code for r in caught.value.cleanup_results] == ["cleanup_failed"]
+    finally:
+        for process in launched:
+            process.kill()
+            process.wait(timeout=10)
