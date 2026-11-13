@@ -67,6 +67,7 @@
     {"copy": "mcp_progress.py", "to": "mcp_progress.py", "why": "MCP progress heartbeat so a 180 s client timeout does not cancel converse"},
     {"patch": "patch_conch_fairness.py", "targets": ["tools/converse.py"], "why": "fair holds, progress heartbeat, a cancelled wait is logged; needs conch_hold.py and mcp_progress.py"},
     {"patch": "patch_env_allowlist.py", "targets": ["config.py", "tools/configuration_management.py"], "why": "only voice settings travel from voicemode.env into the environment; update_config refuses other keys"},
+    {"patch": "patch_git_timeout.py", "targets": ["config.py"], "why": "the transcript-saving git call is bounded (5 s, stdin closed): it froze the voice server for 176 s on Windows"},
     {"patch": "patch_env_provider_keys.py", "targets": ["config.py", "tools/configuration_management.py"], "why": "optional: the two provider keys upstream reads may also come from voicemode.env; not in the Windows manifest or FELIX"}
   ]
 }
