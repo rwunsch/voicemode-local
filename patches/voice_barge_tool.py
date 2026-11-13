@@ -46,14 +46,17 @@ def _pill_log() -> str:
 
 def _pill_show() -> str:
     if not voice_pill_state.pill_enabled():
-        return ("The voice pill is turned off (VOICEMODE_PILL is not true), so it was not started. "
-                "Turn it on with `voicemode-switch pill on`.")
+        return ("The voice pill is switched off (VOICEMODE_PILL is not true), so it was not started. "
+                "Switching it on is part of this install's voice setup.")
     voice_pill_state.set_pill_closed(False)
     try:
-        started = pill_autostart.ensure()
+        outcome, why = pill_autostart.start()
         up = pill_autostart.backend_alive()
     except Exception as e:  # the tool answers in words, never with a traceback
         return f"Could not start the pill window ({type(e).__name__}: {e}); see {_pill_log()}."
+    if outcome == "failed":
+        return f"Could not start the pill window: {why}"
+    started = outcome == "started"
     if started:
         return "The pill window is starting; it shows while a voice session is live."
     if up:
@@ -69,10 +72,11 @@ def _pill_why_not() -> str:
     if kind is None:
         return "There is no pill window on this system (it runs on Windows/WSL and macOS desktops)."
     if not pill_autostart.autostart_on():
-        return ("The pill was not started: VOICEMODE_PILL_AUTOSTART is off. Remove that setting "
-                "or start it with `voicemode-switch pill on`.")
+        return ("The pill was not started: its autostart is switched off "
+                "(VOICEMODE_PILL_AUTOSTART is off).")
     if kind == "macos" and not Path(pill_autostart.mac_python()).exists():
-        return "The Mac pill is not set up yet; run `voicemode-switch pill on` once."
+        return ("The Mac pill is not set up yet: its window environment is missing. "
+                "Setting it up is part of this install's voice setup.")
     return (f"A pill start was already tried in the last {int(pill_autostart.LAUNCH_SPACING_S)} s; "
             f"it is probably still starting. If it does not appear, see {_pill_log()}.")
 

@@ -37,7 +37,7 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(pa, "platform_kind", lambda: "macos")
     monkeypatch.setenv("VOICEMODE_PILL_PYTHON", sys.executable)   # a pill venv that exists
     started = []
-    monkeypatch.setattr(pa, "spawn", lambda cmd, kind, base=None: started.append((kind, cmd)))
+    monkeypatch.setattr(pa, "spawn", lambda cmd, kind, base=None: started.append((kind, cmd)) or 4242)
     return tmp_path / "pill", started
 
 
@@ -252,3 +252,29 @@ def test_a_dead_backend_with_an_unknown_start_does_not_block(env):
     p.wait()
     st._write_json(st._base(base) / "backend.json", {"pid": p.pid, "start": None, "start_unknown": True})
     assert pa.ensure(base) is True
+
+
+def test_a_start_that_failed_is_not_reported_as_started(env, monkeypatch):
+    """Talos on FELIX #1813: a detached launch that fails returned None silently, and ensure()
+    still said a start happened, so voice_pill show said "starting" when nothing was created."""
+    base, started = env
+
+    def failing(cmd, kind, base=None):
+        pa.last_failure = "the middle process exited with 1: not executable"
+        return None
+    monkeypatch.setattr(pa, "spawn", failing)
+    assert pa.start(base) == ("failed", "the middle process exited with 1: not executable")
+    monkeypatch.setattr(pa, "_launch_due", lambda b: True)
+    assert pa.ensure(base) is False
+
+
+def test_start_says_started_or_not_due(env):
+    base, started = env
+    assert pa.start(base)[0] == "started" and len(started) == 1
+    assert pa.start(base)[0] == "not_due"     # within the launch spacing, or already up
+
+
+def test_the_middle_process_waits_seconds_not_a_minute():
+    """Talos on FELIX #1813: the middle process normally answers in well under a second; a
+    stalled one must not hold a start for 60 s."""
+    assert pa.DETACH_TIMEOUT_S <= 10

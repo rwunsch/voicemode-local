@@ -452,9 +452,34 @@ def test_enter_calls_the_autostart_hook_after_registering(base):
     st.autostart_hook = lambda b: seen.append([s["pid"] for s in st.live_sessions(base=b)])
     try:
         asyncio_run(st.enter(os.getpid(), "demo", None, base=base))
+        deadline = time.monotonic() + 5   # the hook runs on its own thread (see the test below)
+        while not seen and time.monotonic() < deadline:
+            time.sleep(0.01)
     finally:
         st.autostart_hook = None
     assert seen == [[os.getpid()]]
+
+
+def test_a_slow_autostart_never_holds_the_turn(base):
+    """Talos on FELIX #1813: enter() is async and called the hook directly, and the hook waits
+    for a middle process (up to 60 s), so a stalled start froze the server's event loop and
+    the turn. The pill start runs on its own thread; the turn goes on at once."""
+    done = []
+
+    def slow(b):
+        time.sleep(1.5)
+        done.append(1)
+    st.autostart_hook = slow
+    try:
+        began = time.monotonic()
+        asyncio_run(st.enter(os.getpid(), "demo", None, base=base))
+        assert time.monotonic() - began < 0.5
+        deadline = time.monotonic() + 5
+        while not done and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert done == [1]
+    finally:
+        st.autostart_hook = None
 
 
 def test_a_failing_autostart_hook_does_not_cost_the_turn(base):

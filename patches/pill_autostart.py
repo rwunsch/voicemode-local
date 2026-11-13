@@ -172,7 +172,8 @@ DETACH = (
     "                         start_new_session=True, close_fds=True)\n"
     "print(p.pid)\n"
 )
-DETACH_TIMEOUT_S = 60
+DETACH_TIMEOUT_S = 10   # the middle answers in well under a second; a stalled one must not hold a start
+last_failure = ""       # why the last start in this process did not happen (spawn sets it)
 
 
 def _detach(command: list[str], log_path) -> tuple[int | None, str]:
@@ -226,14 +227,26 @@ def spawn(command: list[str], kind: str, base=None):
             path = st._base(base) / "autostart.log"
         pid, reason = _detach(command, path)
         if pid is None:
+            global last_failure
+            last_failure = reason
             log.write(f"start failed: {reason}\n".encode())
         return pid
 
 
-def ensure(base=None) -> bool:
-    """Bring the window up if it should be up. True if a start was attempted."""
+def start(base=None) -> tuple[str, str]:
+    """Bring the window up if it should be up: ("started", ""), ("not_due", "") when it should
+    not or a start was claimed in the last LAUNCH_SPACING_S, or ("failed", why) when the start
+    did not happen (Talos on FELIX #1813: a failed detached launch used to count as started)."""
     if not should_start(base) or not _launch_due(base):
-        return False
+        return ("not_due", "")
+    global last_failure
+    last_failure = ""
     kind = platform_kind()
-    spawn(start_command(kind, base), kind, base)
-    return True
+    if spawn(start_command(kind, base), kind, base) is None:
+        return ("failed", last_failure or f"the window process could not be started; see {st._base(base) / 'autostart.log'}")
+    return ("started", "")
+
+
+def ensure(base=None) -> bool:
+    """Bring the window up if it should be up. True only if a window process was started."""
+    return start(base)[0] == "started"
