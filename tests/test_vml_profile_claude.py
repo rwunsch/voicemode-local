@@ -202,10 +202,10 @@ def test_environment_is_the_connectors_with_the_ports_and_the_mode(tmp_path):
 
 
 def test_the_environment_hook_passes_the_cores_shape_check(tmp_path):
-    p = _profile(tmp_path, env={"A": "1"})
+    p = _profile(tmp_path, env={"VOICEMODE_A": "1"})
     hooks, _ = load_hooks(p)
     env, problem = hook_calls.environment(hooks, p, str(p.runtime_dir), {"tts": 28880}, {})
-    assert problem is None and env["A"] == "1"
+    assert problem is None and env["VOICEMODE_A"] == "1"
     assert json.dumps(env)
 
 
@@ -249,3 +249,37 @@ def test_write_modes_holds_the_service_lock(tmp_path, monkeypatch):
     claude.write_modes(tmp_path / "run", {"barge": "auto"})
     assert held == [("in", {}), "out"]          # read and write both inside
     assert claude.read_modes(tmp_path / "run") == {"barge": "auto"}
+
+
+# ----- final review I6: profile.env is an allowlist, not the user's whole environment ----------
+
+SECRETS = {"AWS_SECRET_ACCESS_KEY": "s1", "GITHUB_TOKEN": "s2", "MY_DB_PASSWORD": "s3",
+           "VOICEMODE_SOMEPROVIDER_API_KEY": "s4", "PYTHONPATH": "/x"}
+
+
+@pytest.mark.parametrize("windows", [False, True])
+def test_profile_env_keeps_only_the_allowlist(tmp_path, windows):
+    os_keys = ({"SystemRoot": "C:\\Windows", "PATH": "C:\\bin", "USERPROFILE": "C:\\Users\\a", "TEMP": "C:\\t",
+                "LOCALAPPDATA": "C:\\l", "OS": "Windows_NT", "HOME": "/ignored-on-windows"}
+               if windows else {"HOME": "/home/a", "PATH": "/bin", "USER": "a", "LANG": "C.UTF-8",
+                                "LC_CTYPE": "C.UTF-8", "TMPDIR": "/tmp", "SYSTEMROOT": "nope"})
+    ours = {"VOICEMODE_TTS_BASE_URLS": "http://127.0.0.1:28880/v1", "VOICEMODE_NATIVE_ENV_SETTINGS": "",
+            "FASTMCP_CHECK_FOR_UPDATES": "off", "PYTHONUTF8": "1", "PYTHONNOUSERSITE": "1",
+            "NO_PROXY": "127.0.0.1", "no_proxy": "127.0.0.1"}
+    p = _profile(tmp_path, env={**os_keys, **ours, **SECRETS}, windows=windows)
+    assert not set(SECRETS) & set(p.env)
+    assert {k: v for k, v in ours.items()}.items() <= p.env.items()
+    kept = set(os_keys) - ({"HOME"} if windows else {"SYSTEMROOT"})
+    assert set(p.env) - set(ours) == kept
+
+
+def test_the_host_profile_file_holds_no_secret(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from vml_supervisor import host
+    p = _profile(tmp_path, env={"HOME": str(tmp_path), "PATH": "/bin", **SECRETS}, windows=False)
+    p = __import__("dataclasses").replace(p, host_command=[str(p.python), "voicemode_native.py host"])
+    monkeypatch.setattr(host.subprocess, "run", lambda argv, **kw: SimpleNamespace(stdout="0 5", stderr="", returncode=0))
+    monkeypatch.setattr(host, "background_options", lambda: {})
+    assert host.start_host(p).code == "host_started"
+    text = (p.run_dir / host.HOST_PROFILE).read_text()
+    assert not [value for value in SECRETS.values() if f'"{value}"' in text]

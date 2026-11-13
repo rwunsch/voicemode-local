@@ -63,6 +63,29 @@ RESTART_LIMIT = (3, 300.0)
 ALLOW_FLAG = "--allow-root-outside-profile"
 WINDOWS = sys.platform == "win32"
 
+# What profile.env may hold (final review I6): run/host-profile.json carries it, and before this
+# branch nothing persisted the environment. The OS essentials, our own VOICEMODE_* settings, and
+# the few keys runtime_environment sets itself; never a provider key or anything else of the user's.
+WINDOWS_ENV = ("SYSTEMROOT", "WINDIR", "TEMP", "TMP", "PATH", "PATHEXT", "COMSPEC", "USERPROFILE",
+               "HOMEDRIVE", "HOMEPATH", "APPDATA", "LOCALAPPDATA", "PROGRAMDATA", "NUMBER_OF_PROCESSORS",
+               "PROCESSOR_ARCHITECTURE", "OS")
+POSIX_ENV = ("HOME", "PATH", "USER", "LANG", "TMPDIR")
+OWN_ENV = ("FASTMCP_CHECK_FOR_UPDATES", "PYTHONUTF8", "PYTHONNOUSERSITE", "NO_PROXY", "no_proxy")
+
+
+def allowed_env(env: dict, windows: bool = WINDOWS) -> dict:
+    """env reduced to the allowlist above. Windows names are case-insensitive there."""
+    out = {}
+    for key, value in env.items():
+        key, value = str(key), str(value)
+        name = key.upper() if windows else key
+        if key.startswith("VOICEMODE_") and "API_KEY" not in key.upper():
+            out[key] = value
+        elif key in OWN_ENV or (windows and name in WINDOWS_ENV) or (
+                not windows and (name in POSIX_ENV or name.startswith("LC_"))):
+            out[key] = value
+    return out
+
 
 def _load_settings_reader():
     """patches/voice_pill_state.py, the shared settings parser, or None when it cannot load."""
@@ -174,7 +197,7 @@ def personal_profile(root: Path, runtime: Path, *, env: dict | None = None, allo
         runtime_dir=runtime,
         python=python,
         working_dir=root / "voice-mode",
-        env={str(k): str(v) for k, v in (env or {}).items()},
+        env=allowed_env(env or {}, windows),
         services=service_specs(runtime, windows),
         helpers=helper_specs(root, runtime, windows),
         reserved_ports=FELIX_PORTS,
