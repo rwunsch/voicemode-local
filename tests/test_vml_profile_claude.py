@@ -62,7 +62,8 @@ def test_the_profile_holds_the_launchers_values(tmp_path):
     assert p.watch_command[1:] == [str(SCRIPT), "watch"] and p.watch_marker == "voicemode_native.py watch"
     assert p.watch_marker in " ".join(p.watch_command)
     assert p.hooks == {"read_mode": "vml_profiles.claude:read_mode",
-                       "environment": "vml_profiles.claude:environment"}
+                       "environment": "vml_profiles.claude:environment",
+                       "on_result": "vml_profiles.claude:on_result"}
     assert p.hook_paths == (REPO,)
     assert p.validate() == []
 
@@ -126,7 +127,7 @@ def test_the_profile_survives_the_file_the_host_reads(tmp_path):
 
 def test_the_hooks_load(tmp_path):
     hooks, problems = load_hooks(_profile(tmp_path))
-    assert problems == [] and set(hooks.funcs) == {"read_mode", "environment"}
+    assert problems == [] and set(hooks.funcs) == {"read_mode", "environment", "on_result"}
 
 
 # -- read_mode ------------------------------------------------------------------
@@ -283,3 +284,39 @@ def test_the_host_profile_file_holds_no_secret(tmp_path, monkeypatch):
     assert host.start_host(p).code == "host_started"
     text = (p.run_dir / host.HOST_PROFILE).read_text()
     assert not [value for value in SECRETS.values() if f'"{value}"' in text]
+
+
+# ----- final review I8: helper problems reach the person, once --------------------------------
+
+
+@pytest.fixture
+def fresh_said(monkeypatch):
+    monkeypatch.setattr(claude, "_SAID", set())
+
+
+def test_the_on_result_hook_says_a_helper_problem_once(fresh_said, capsys, tmp_path):
+    p = _profile(tmp_path)
+    assert p.hooks["on_result"] == "vml_profiles.claude:on_result"
+    results = [{"code": "helper_exited", "detail": "barge: the barge helper stopped at once (exit code 1)"},
+               {"code": "service_restarted", "detail": "restarted tts"},
+               {"code": "helper_restart_limit_reached", "detail": "ptt stopped 3 times in 300 s"}]
+    claude.on_result(p.to_dict(), results)
+    claude.on_result(p.to_dict(), results)
+    assert capsys.readouterr().err.splitlines() == [
+        "voicemode-local: helper_exited: barge: the barge helper stopped at once (exit code 1)",
+        "voicemode-local: helper_restart_limit_reached: ptt stopped 3 times in 300 s"]
+
+
+def test_new_helper_problems_in_helpers_json_are_said_once(fresh_said, capsys, tmp_path):
+    run = tmp_path / "run"
+    run.mkdir()
+    (run / "helpers.json").write_text(json.dumps({
+        "barge": {"state": "failed", "code": "helper_failed", "detail": "barge: an old one is still running"},
+        "ptt": {"state": "running", "code": "helper_started", "detail": "ptt: started"}}))
+    claude.helper_problems(run)
+    claude.helper_problems(run)
+    assert capsys.readouterr().err.splitlines() == [
+        "voicemode-local: helper_failed: barge: an old one is still running"]
+    (run / "helpers.json").write_text("{not json")
+    claude.helper_problems(run)   # the host may be writing it: nothing to say, nothing raised
+    assert capsys.readouterr().err == ""

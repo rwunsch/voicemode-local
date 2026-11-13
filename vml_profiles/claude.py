@@ -215,7 +215,8 @@ def personal_profile(root: Path, runtime: Path, *, env: dict | None = None, allo
         watch_marker=WATCH_MARKER,
         job_name=job_name(root),
         hooks={"read_mode": "vml_profiles.claude:read_mode",
-               "environment": "vml_profiles.claude:environment"},
+               "environment": "vml_profiles.claude:environment",
+               "on_result": "vml_profiles.claude:on_result"},
         hook_paths=(REPO,),
     )
 
@@ -316,3 +317,45 @@ def environment(profile: dict, runtime: str, ports: dict, modes: dict) -> dict:
         if name and isinstance(mode, str) and mode != "off":
             env[name] = mode
     return env
+
+
+# -- what the person hears (final review I8) ----------------------------------------------------
+
+# A helper that could not run is news the person must hear once, not on every look.
+HELPER_PROBLEMS = ("helper_exited", "helper_failed", "helper_restart_limit_reached")
+_SAID: set = set()   # (code, detail) already said by this process
+
+
+def tell(code: str, detail: str) -> bool:
+    """One line on stderr in the launcher's wording, once per process; True when it was said."""
+    key = (str(code), str(detail))
+    if key in _SAID:
+        return False
+    _SAID.add(key)
+    try:
+        print(f"voicemode-local: {code}: {detail}", file=sys.stderr, flush=True)
+    except (OSError, ValueError, AttributeError):   # a host started with no console
+        pass
+    return True
+
+
+def on_result(profile: dict, results: list) -> None:
+    """The hook: each helper problem among an ensure's (or the host's) Results, said once."""
+    for result in results:
+        if isinstance(result, dict) and result.get("code") in HELPER_PROBLEMS:
+            tell(result["code"], result.get("detail", ""))
+
+
+def helper_problems(run_dir) -> None:
+    """On Windows the host starts the helpers and has no console: the connector reads
+    run/helpers.json ({kind: {state, code, detail, results}}) and says each new problem once.
+    A file being written (or gone) says nothing."""
+    try:
+        records = json.loads((Path(run_dir) / "helpers.json").read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError):
+        return
+    if not isinstance(records, dict):
+        return
+    for record in records.values():
+        if isinstance(record, dict) and record.get("code") in HELPER_PROBLEMS:
+            tell(record["code"], record.get("detail", ""))

@@ -771,10 +771,28 @@ def profile_of(root, runtime=None):
 
 
 def say(results, quiet=QUIET):
-    """Every Result that is news, one line each on stderr: nothing the package met goes unsaid."""
+    """Every Result that is news, one line each on stderr: nothing the package met goes unsaid. A
+    helper problem is said once per process (the on_result hook may have said it already)."""
     for result in results:
-        if result.code not in quiet:
+        if result.code in quiet:
+            continue
+        if result.code in profile_values.HELPER_PROBLEMS:
+            profile_values.tell(result.code, result.detail)
+        else:
             print(f"voicemode-local: {result.code}: {result.detail}", file=sys.stderr, flush=True)
+
+
+def host_backstop(profile, said):
+    """The connector's look every HOST_CHECK seconds on Windows: check_host (a host that ended
+    anyway is started again, unless a stop is kept), then the new helper problems in
+    run/helpers.json. Each (code, detail) is said once per launch (`said`), so a
+    host_restart_limit is not repeated every 10 s for ever."""
+    for result in sv_host.check_host(profile):
+        key = (result.code, result.detail)
+        if key not in said:
+            said.add(key)
+            say([result], quiet=())
+    profile_values.helper_problems(profile.run_dir)
 
 
 def port_setting(kind):
@@ -1248,6 +1266,7 @@ def launch(root):
                                  {"child": child.pid, "runtime": str(runtime),
                                   "control_channel": (env.get(CONTROL_CHANNEL) or "").strip().lower() == "true"})
             checked = time.monotonic()
+            said = set()
             while True:
                 try:
                     return child.wait(timeout=1)
@@ -1256,7 +1275,7 @@ def launch(root):
                         child.kill()
                     if procs.WINDOWS and time.monotonic() - checked >= sv_host.HOST_CHECK:
                         checked = time.monotonic()
-                        say(sv_host.check_host(profile), quiet=())
+                        host_backstop(profile, said)
     except Stopped as stopped:
         return 128 + stopped.args[0]
     finally:

@@ -322,9 +322,15 @@ def test_no_os_kill_zero_anywhere_in_the_launcher():
 
 class FakeWorld:
     """Fakes process creation and inspection in vml_supervisor's seams, and records what starts
-    in which order."""
+    in which order.
 
-    def __init__(self, vn, monkeypatch, root):
+    By default the package runs its POSIX path (the connector starts the services and a watchdog)
+    while the launcher believes it is on Windows. host=True runs the package's Windows path too
+    (final review M5): ensure_host starts a fake host, which makes one look in-process (its
+    services under the connector's lock, its helpers just before the connector waits), the way
+    the real host's first look does."""
+
+    def __init__(self, vn, monkeypatch, root, host=False):
         self.vn, self.root, self.events, self.commands, self.next_pid = vn, root, [], {}, 1000
         self.observers = []   # f(command, job, kwargs) for every start
         self.replace = {}     # kind -> f(command, kwargs) returning a real process
@@ -352,6 +358,34 @@ class FakeWorld:
         monkeypatch.setattr(sv_helpers, "HELPER_START_CHECK", 0)
         for module in (sv_helpers, sv_host):   # the trigger and the listener are Windows' helpers
             monkeypatch.setattr(module, "PLATFORM", "win32")
+        self.host_pid = None
+        if host:
+            for module in (sv_services, sv_host, sv_helpers):
+                monkeypatch.setattr(module, "WINDOWS", True)
+            monkeypatch.setattr(sv_host, "start_host", self.start_host)
+            self._pending_helpers = []
+            real_wait = sv_services.wait_until_ready
+
+            def wait_until_ready(*args, **kwargs):
+                while self._pending_helpers:
+                    self._pending_helpers.pop(0)()
+                return real_wait(*args, **kwargs)
+
+            monkeypatch.setattr(sv_services, "wait_until_ready", wait_until_ready)
+
+    def start_host(self, profile):
+        """The fake host: recorded as a live process carrying host_marker; its first look."""
+        pid, self.next_pid = self.next_pid, self.next_pid + 1
+        self.host_pid = pid
+        self.commands[pid] = f"python voicemode_native.py host {profile.run_dir / sv_host.HOST_PROFILE}"
+        self.events.append("host")
+        hooks, problems = load_hooks(profile)
+        assert not problems, problems
+        watch, records, results = sv_host.WatchState(), {}, []
+        sv_host._host_services(profile, hooks, watch, results)   # the connector holds the lock
+        self.host_results = results
+        self._pending_helpers.append(lambda: sv_host._host_helpers(profile, hooks, watch, records, results))
+        return Result("host_started", f"host {pid}", {"pid": pid, "command": []})
 
     def no_signals(self, pid, sig):
         if pid in self.allowed:
@@ -1780,3 +1814,95 @@ def test_a_launch_only_turns_a_helper_on(vn, home, tmp_path, monkeypatch, capsys
     assert s.state()["ptt"]["mode"] == "true"
     vn.switch(s.root, "ptt", "off")                               # the user does
     assert _host_mode(vn, s.root, "ptt") == ("off", None)
+
+
+# ----- final review I8 / M2: the launcher's host backstop says each thing once ------------------
+
+
+def test_the_host_backstop_says_each_problem_once_per_launch(vn, tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(vn.profile_values, "_SAID", set())
+    root = tmp_path / "root"
+    (root / "run").mkdir(parents=True)
+    profile = vn.profile_values.personal_profile(root, root / "runtime" / "x")
+    limit = Result("host_restart_limit", "the host was started 3 times in 300 s; not started again", {"starts": 3})
+    monkeypatch.setattr(vn.sv_host, "check_host", lambda p: [limit])
+    said = set()
+    for look in range(3):
+        if look == 1:
+            (root / "run" / "helpers.json").write_text(json.dumps({"ptt": {
+                "state": "failed", "code": "helper_restart_limit_reached",
+                "detail": "ptt: ptt stopped 3 times in 300 s; not started again"}}))
+        vn.host_backstop(profile, said)
+    assert capsys.readouterr().err.splitlines() == [
+        "voicemode-local: host_restart_limit: the host was started 3 times in 300 s; not started again",
+        "voicemode-local: helper_restart_limit_reached: ptt: ptt stopped 3 times in 300 s; not started again"]
+
+
+# ----- final review M5: the same launches through the package's Windows path (the host) -----------
+
+
+@pytest.mark.parametrize("enabled", [[], ["ptt"], ["barge"]])
+def test_start_order_through_the_host(vn, home, tmp_path, monkeypatch, enabled):
+    root = tmp_path / "root"
+    world = FakeWorld(vn, monkeypatch, root, host=True)
+    runtime = _fake_runtime(vn, root)
+    monkeypatch.setattr(vn, "configured_runtime", lambda root, expected: (runtime, True))
+    monkeypatch.setattr(vn, "check_models", lambda runtime: None)
+    for kind in enabled:
+        monkeypatch.setenv(_SETTING_OF[kind], "true")
+    assert vn.launch(root) == 0
+    assert "NO-LEASE" not in world.events          # the lease exists before the host starts anything
+    events = _non_events(world.events)
+    assert events[0] == "host" and "watchdog" not in events   # the host, not a watchdog
+    assert sorted(e for e in events if e.startswith("spawn:")) == sorted(
+        ["spawn:tts", "spawn:stt", "spawn:voice-mode"] + [f"spawn:{k}" for k in enabled])
+    at = events.index
+    assert at("spawn:tts") < at("spawn:stt") < at("ready:tts") < at("ready:stt") < at("spawn:voice-mode")
+    for kind in enabled:   # the host starts the helpers, before the connector's voice-mode
+        assert at("spawn:stt") < at(f"spawn:{kind}") < at("spawn:voice-mode")
+    stops = [e for e in world.events if e.startswith("kill:")]
+    assert sorted(stops) == sorted(["kill:tts", "kill:stt"] + [f"kill:{k}" for k in enabled])
+    assert (root / "run" / "host.pid").read_text() == str(world.host_pid)
+
+
+def test_services_are_reused_through_the_host(vn, home, tmp_path, monkeypatch):
+    root = tmp_path / "root"
+    world = FakeWorld(vn, monkeypatch, root, host=True)
+    runtime = _fake_runtime(vn, root)
+    first = _ensure(vn, root, runtime)
+    world.events.clear()
+    second = _ensure(vn, root, runtime)
+    assert first == second
+    assert not [e for e in world.events if e.startswith("spawn:") or e == "host"]   # the host still runs
+
+
+def test_a_port_the_host_cannot_get_fails_the_launch_at_once(vn, home, tmp_path, monkeypatch):
+    """Final review I1 through the launcher: the host's no_free_port reaches the connector at once,
+    worded as on POSIX, instead of a 60 s wait and a log that does not exist."""
+    root = tmp_path / "root"
+    world = FakeWorld(vn, monkeypatch, root, host=True)
+    _set_port_free(vn, monkeypatch, lambda p: False)
+    monkeypatch.setattr(sv_services.time, "sleep", lambda s: pytest.fail("the connector waited"))
+    with pytest.raises(vn.VoiceError, match="No free local port"):
+        _ensure(vn, root, _fake_runtime(vn, root))
+    assert world.events.count("host") == 1 and not [e for e in world.events if e.startswith("spawn:")]
+
+
+def test_a_stop_keeps_the_host_from_starting_again(vn, home, tmp_path, monkeypatch, capsys):
+    """Final review I3 through the launcher: after `stop`, a running connector's backstop starts no
+    host (said once), so the stop's message is true."""
+    monkeypatch.setattr(vn.profile_values, "_SAID", set())
+    root = tmp_path / "root"
+    world = FakeWorld(vn, monkeypatch, root, host=True)
+    runtime = _fake_runtime(vn, root)
+    monkeypatch.setattr(vn, "active_runtime", lambda root: runtime)
+    _ensure(vn, root, runtime)
+    vn.stop(root)
+    assert "voice connector(s) still running will have no speech until they restart" in capsys.readouterr().out
+    world.events.clear()
+    said = set()
+    profile = vn.profile_of(root, runtime)
+    for _ in range(3):
+        vn.host_backstop(profile, said)
+    assert "host" not in world.events
+    assert capsys.readouterr().err.count("host_kept_stopped") == 1
