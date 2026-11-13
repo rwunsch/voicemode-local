@@ -528,7 +528,11 @@ def get_override(pid: int, base=None) -> dict:
     now = process_start(pid)
     if now is None and data["start"] is not None:   # ps / OpenProcess failed just now:
         return {}                                    # unknown is not "another process"
-    if data["start"] != now:
+    if data["start"] is None and now is not None:
+        # set_override could not read the start then; this is the same process we cannot
+        # tell apart from another, so keep the choice and record the start from now on.
+        _write_json(path, {**data, "start": now})
+    elif data["start"] != now:
         _unlink(path)
         return {}
     return {k: data[k] for k in ("voice", "language") if data.get(k)}
