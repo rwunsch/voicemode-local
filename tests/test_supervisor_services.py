@@ -30,6 +30,7 @@ import pytest
 
 from vml_supervisor import ports as ports_module
 from vml_supervisor import services
+from vml_supervisor.procs import alive as procs_alive
 from vml_supervisor.hooks import Hooks
 from vml_supervisor.profile import HostProfile, PortOverride, ServiceSpec
 from vml_supervisor.services import (check_service, ensure_services, release, stop, stop_entry,
@@ -344,8 +345,12 @@ def test_stop_ends_a_service_that_ignores_the_stop_request(world):
         {"tts": {"pid": stubborn.pid, "port": None, "marker": "stubborn-service", "log": "x"}}))
     begin = time.monotonic()
     results = stop(profile)
-    assert time.monotonic() - begin < 8
-    assert stubborn.wait(timeout=5) == -signal.SIGKILL
+    elapsed = time.monotonic() - begin
+    assert profile.stop_timeout <= elapsed < 8   # it ignored SIGTERM, so stop had to wait, then kill
+    # -SIGKILL, or 0 when procs' alive check reaped our own exited child first (waitpid WNOHANG,
+    # the zombie fix) and Popen then got ECHILD: seen under load in the full suite, 2026-11-13.
+    assert stubborn.wait(timeout=5) in (-signal.SIGKILL, 0)
+    assert not procs_alive(stubborn.pid)
     assert read_state(profile) == {}
     assert [r for r in results if r.code == "services_stopped"][0].data["services"] == ["tts"]
 
