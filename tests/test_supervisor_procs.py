@@ -370,3 +370,109 @@ def test_the_group_check_reaps_our_own_exited_leader(monkeypatch):
 def test_a_process_that_is_not_our_child_is_still_seen_alive():
     from vml_supervisor import procs
     assert procs._alive(os.getppid()) is True and procs._alive(1) is True
+
+
+# ----- detach: a voice process must not be a descendant of a chat -----------------------------
+# FELIX-MAC, 2026-11-13 (n=1 each): the Copilot app kills a deleted chat's processes by ancestry.
+# start_new_session children died within 1 s; a process started through a short-lived middle
+# process (reparented to launchd) survived with the same pid and port.
+
+
+def _ppid(pid):
+    with open(f"/proc/{pid}/stat") as fh:
+        return int(fh.read().rsplit(")", 1)[1].split()[1])
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="reads /proc")
+def test_detach_starts_a_process_that_is_not_our_descendant(tmp_path):
+    from vml_supervisor import procs
+    log = tmp_path / "target.log"
+    result = procs.detach(["sleep", "30"], str(tmp_path), str(log))
+    assert result.code == "detached", result
+    pid = result.data["pid"]
+    try:
+        assert isinstance(pid, int) and procs.alive(pid)
+        assert _ppid(pid) != os.getpid()                 # reparented: not our child
+        assert os.getsid(pid) == pid                     # its own session, so its own group
+        assert os.getpgid(pid) == pid
+        assert "sleep 30" in procs.process_command(pid)
+    finally:
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(pid, signal.SIGKILL)
+    deadline = time.monotonic() + 5
+    while procs.alive(pid) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert not procs.alive(pid)
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="reads /proc")
+def test_detach_passes_env_cwd_and_log_and_unblocks_held_stop_signals(tmp_path):
+    """The target inherits env, runs in cwd, writes to the log, and is killable even when started
+    while the caller holds stop signals (services start under stop_signals_held)."""
+    from vml_supervisor import procs
+    log = tmp_path / "target.log"
+    script = ("import os, signal; print(os.environ.get('VML_DETACH_TEST'), os.getcwd(), "
+              "sorted(int(s) for s in signal.pthread_sigmask(signal.SIG_BLOCK, [])), flush=True)")
+    env = {**os.environ, "VML_DETACH_TEST": "seen"}
+    with procs.stop_signals_held():
+        result = procs.detach([sys.executable, "-c", script], str(tmp_path), str(log), env=env)
+    assert result.code == "detached", result
+    deadline = time.monotonic() + 10
+    while procs.alive(result.data["pid"]) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    words = log.read_text().split(None, 2)
+    assert words[0] == "seen" and words[1] == str(tmp_path)
+    blocked = json.loads(words[2])
+    assert not {int(s) for s in procs.STOP_SIGNALS} & set(blocked)
+
+
+@posix_only
+def test_detach_fails_with_the_reason_when_the_target_cannot_start(tmp_path):
+    from vml_supervisor import procs
+    result = procs.detach([str(tmp_path / "no-such-program")], str(tmp_path), str(tmp_path / "x.log"))
+    assert result.code == "detach_failed"
+    assert "no-such-program" in result.detail
+
+
+@pytest.mark.parametrize("reply, needle", [
+    ({"stdout": "hello\n", "stderr": "", "returncode": 0}, "hello"),
+    ({"stdout": "", "stderr": "x" * 400 + "Traceback: boom", "returncode": 1}, "Traceback: boom"),
+    ({"stdout": "123\n", "stderr": "bad", "returncode": 2}, "2"),
+])
+def test_detach_fails_when_the_middle_misbehaves(tmp_path, monkeypatch, reply, needle):
+    from types import SimpleNamespace
+    from vml_supervisor import procs
+    monkeypatch.setattr(procs, "WINDOWS", False)
+    seen = []
+    monkeypatch.setattr(procs.subprocess, "run", lambda argv, **kw: seen.append((argv, kw)) or SimpleNamespace(**reply))
+    result = procs.detach(["target", "--x"], str(tmp_path), str(tmp_path / "l.log"), env={"A": "1"}, timeout=7)
+    assert result.code == "detach_failed" and needle in result.detail
+    assert len(result.detail) < 400                           # only the tail of the middle's stderr
+    argv, kw = seen[0]
+    assert argv[0] == sys.executable and argv[-2:] == ["target", "--x"]
+    assert kw["env"] == {"A": "1"} and kw["timeout"] == 7 and kw["stdin"] == subprocess.DEVNULL
+
+
+def test_detach_fails_when_the_middle_times_out_or_cannot_run(tmp_path, monkeypatch):
+    from vml_supervisor import procs
+    monkeypatch.setattr(procs, "WINDOWS", False)
+
+    def slow(argv, **kw):
+        raise subprocess.TimeoutExpired(argv, kw["timeout"], stderr=b"stuck")
+    monkeypatch.setattr(procs.subprocess, "run", slow)
+    result = procs.detach(["target"], str(tmp_path), str(tmp_path / "l.log"), timeout=3)
+    assert result.code == "detach_failed" and "3" in result.detail and "timed out" in result.detail
+
+    def refused(argv, **kw):
+        raise PermissionError(13, "Permission denied")
+    monkeypatch.setattr(procs.subprocess, "run", refused)
+    result = procs.detach(["target"], str(tmp_path), str(tmp_path / "l.log"))
+    assert result.code == "detach_failed" and "Permission denied" in result.detail
+
+
+def test_detach_is_unsupported_on_windows(tmp_path, monkeypatch):
+    from vml_supervisor import procs
+    monkeypatch.setattr(procs, "WINDOWS", True)
+    monkeypatch.setattr(procs.subprocess, "run", lambda *a, **k: pytest.fail("ran the middle"))
+    result = procs.detach(["target"], str(tmp_path), str(tmp_path / "l.log"))
+    assert result.code == "detach_unsupported"
