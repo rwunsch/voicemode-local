@@ -158,3 +158,25 @@ def test_native_without_a_data_dir_is_refused_on_stderr():
     # No folder is known, so there is no log to write to.
     out = _run_ps1("-BackendExe", "C:\\none\\python.exe", "-Force")
     assert out.returncode == 1 and b"needs -DataDir" in out.stderr, out
+
+
+def test_every_download_has_a_timeout():
+    # Talos re-review 2026-11-13 (H2): the WebView2 fetch had no -TimeoutSec, so a stalled
+    # download held the pill's singleton mutex forever and no later start could run.
+    calls = re.findall(r"^.*Invoke-WebRequest.*$", TEXT, re.M)
+    assert calls, "the WebView2 download moved: update this test"
+    for line in calls:
+        assert re.search(r"-TimeoutSec\s+\d+", line), line
+    # WebClient has no timeout of its own; any download must go through Invoke-WebRequest.
+    assert "WebClient" not in TEXT and "DownloadFile" not in TEXT
+
+
+def test_a_failed_download_ends_the_start_and_releases_the_mutex():
+    # The download runs inside the try that owns the mutex: a timeout throws, the catch
+    # logs a FATAL reason, and the finally releases the mutex for the next start.
+    body = TEXT[TEXT.index("$mutex = New-Object Threading.Mutex"):]
+    assert body.index("$wv2 = Get-WebView2") < body.index("} catch {")
+    catch = body[body.index("} catch {"):body.index("} finally {")]
+    assert 'Log ("FATAL: "' in catch and "exit 1" in catch
+    final = body[body.index("} finally {"):]
+    assert "$mutex.ReleaseMutex()" in final

@@ -192,7 +192,9 @@ function Get-WebView2 {
     $url = "https://api.nuget.org/v3-flatcontainer/microsoft.web.webview2/$WebView2Version/microsoft.web.webview2.$WebView2Version.nupkg"
     $pkg = Join-Path $Local "webview2.nupkg.download"
     Log "fetching $url"
-    Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $pkg
+    # A timeout, so a stalled download fails: the start then logs FATAL and releases the
+    # mutex, instead of holding it with no window and blocking every later start.
+    Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $pkg -TimeoutSec 120
     $hash = (Get-FileHash -Algorithm SHA256 -Path $pkg).Hash
     if ($hash -ne $WebView2Sha256) {
         Remove-Item -Force $pkg
