@@ -959,3 +959,34 @@ class TestTriggerSurvives:
         with pytest.raises(RuntimeError):
             voice_barge.SoundDeviceCapture("")
         assert sd.streams[0].closed
+
+
+class TestBargeSendOutcome:
+    """Talos re-review 2026-11-13 (M2): a control write that failed was logged as
+    "barge-in sent", so the log claimed a barge the server never got."""
+
+    def test_send_barge_in_reports_delivery(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(voice_barge, "_exchange", lambda *a, **k: None)
+        assert voice_barge.send_barge_in(tmp_path / "sock") is True
+
+        def refuse(*a, **k):
+            raise ConnectionRefusedError("gone")
+        monkeypatch.setattr(voice_barge, "_exchange", refuse)
+        assert voice_barge.send_barge_in(tmp_path / "sock") is False
+
+    def _run(self, result, caplog):
+        h = Harness([True] * 10, [(SPEECH, LOUD)] * 10)
+        h.barge = lambda: result
+        with caplog.at_level("DEBUG", logger=voice_barge.logger.name):
+            h.run()
+        return [r.getMessage() for r in caplog.records]
+
+    def test_a_failed_send_is_logged_as_failed_not_sent(self, caplog):
+        lines = self._run(False, caplog)
+        assert not any("barge-in sent" in m for m in lines), lines
+        assert any("barge-in failed" in m for m in lines), lines
+
+    def test_a_delivered_send_is_logged_as_sent(self, caplog):
+        lines = self._run(True, caplog)
+        assert any("barge-in sent" in m for m in lines), lines
+        assert not any("barge-in failed" in m for m in lines), lines

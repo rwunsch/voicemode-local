@@ -1026,11 +1026,14 @@ def prepend_preroll(audio: np.ndarray, listen_started_at, sample_rate: int, path
     return np.concatenate([resampled.astype(np.int16), np.asarray(audio).reshape(-1).astype(np.int16)])
 
 
-def send_barge_in(path: Path) -> None:
+def send_barge_in(path: Path) -> bool:
+    """True if the barge_in command was written to the control socket."""
     try:
         _exchange(path, {"command": "barge_in"}, want_reply=False)
     except OSError as e:
         logger.debug("barge_in not delivered: %s", e)
+        return False
+    return True
 
 
 def _hand_off(capture, held, poll_listen_started, preroll_sink, poll_every_windows, clock,
@@ -1284,13 +1287,17 @@ def run(poll_speaking=None, open_capture=None, vad=None, detector=None, send_bar
                 db = window_db(window)
                 stretch.stats.add(db)
                 if detector.feed(prob, db):
-                    send_barge()
+                    delivered = send_barge()   # False: the control write failed (None: unknown)
                     if on_fire is not None:
                         try:
                             on_fire()
                         except Exception:
                             logger.exception("on_fire failed")
-                    logger.info("barge-in sent: prob=%.2f level=%.1f dBFS", prob, db)
+                    if delivered is False:
+                        logger.warning("barge-in failed: control write not delivered "
+                                       "(prob=%.2f level=%.1f dBFS)", prob, db)
+                    else:
+                        logger.info("barge-in sent: prob=%.2f level=%.1f dBFS", prob, db)
                     fired = True
                     if preroll_sink is not None:
                         _hand_off(capture, list(recent), poll_listen_started, preroll_sink,
