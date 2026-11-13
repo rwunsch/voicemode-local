@@ -761,3 +761,31 @@ def test_a_delivered_command_does_not_tell_the_page_it_was_dropped():
     app.stdin = Good()
     app.from_page('{"cmd":"stop"}')
     assert app.page == []
+
+
+def test_a_repause_that_could_not_be_sent_waits_for_the_next_backend(tmp_path, monkeypatch):
+    """The watchdog killed a paused backend; if the pause cannot reach the next one (it died
+    too), it is handed to the backend after that instead of being lost."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("VOICEMODE_PILL", "true")
+    (tmp_path / ".voicemode").mkdir()
+    (tmp_path / ".voicemode" / "voicemode.env").write_text("VOICEMODE_VOICES=af_sky\n")
+    monkeypatch.setattr(m.time, "sleep", lambda s: None)
+    app = m.App(False, [sys.executable, "-c", "print('{}')"])
+    app.repause = True
+    spawns, sent = [], []
+    real = app.spawn
+
+    def spawn():
+        spawns.append(1)
+        if len(spawns) >= 3:
+            app.closing = True
+        return real()
+
+    def send(line):
+        sent.append(line)
+        return len(sent) > 1  # the first pause finds no backend
+
+    app.spawn, app.send = spawn, send
+    app.supervise()
+    assert sent == ['{"cmd":"pause"}', '{"cmd":"pause"}']

@@ -545,9 +545,10 @@ class App:
                     lines += 1
                     self.last_line = time.monotonic()
                     if repause:  # the new backend is up: hand it the pause it lost
-                        repause = False
                         self.log("re-pausing: the backend the watchdog killed was paused")
-                        self.send('{"cmd":"pause"}')
+                        repause = not self.send('{"cmd":"pause"}')
+                        if repause:  # it died too: the next backend gets the pause
+                            self.log("re-pause not delivered; kept for the next backend")
                     self.on_line(line.strip())
                 p.wait()
                 repause, self.repause = repause or self.repause, False
