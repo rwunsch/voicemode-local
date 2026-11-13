@@ -85,10 +85,12 @@ def test_prune_of_a_gone_process_is_logged(tmp_path, pruned):
 
 
 def test_prune_of_a_record_without_a_start_token_is_logged(tmp_path, monkeypatch, pruned):
-    monkeypatch.setattr(st, "process_start", lambda pid: None)  # ps failed at registration
+    # A record with no start and no "start_unknown" marker (written before the marker, or by
+    # hand). Since 2026-11-13 a registration made while ps failed carries the marker and is
+    # kept while its pid lives (test_voice_pill_state), so it is not used here.
     base = tmp_path / "pill"
-    st.register_session(os.getpid(), "demo", None, base=base)
-    monkeypatch.undo()
+    st._write_json(st._session_path(os.getpid(), base), {"pid": os.getpid(), "label": "demo",
+                                                         "start": None})
     monkeypatch.setattr(st, "prune_log", pruned.append)
     assert st.live_sessions(base=base) == []
     assert len(pruned) == 1 and "no start token" in pruned[0]

@@ -630,3 +630,34 @@ def test_a_selection_made_while_process_start_failed_survives_the_next_lookup(ba
     monkeypatch.undo()
     assert st.get_override(pid, base=base) == {"voice": "bf_emma", "language": "German"}
     assert st.get_override(pid, base=base) == {"voice": "bf_emma", "language": "German"}
+
+
+def test_a_session_registered_while_process_start_failed_is_kept(base, monkeypatch):
+    # Talos re-review 2026-11-13 (M3a): register_session stored start=None when ps /
+    # OpenProcess failed for a moment, and the next live_sessions deleted the live
+    # registration as "no start token recorded". Unknown is not "another process".
+    pid = os.getpid()
+    monkeypatch.setattr(st, "process_start", lambda p: None)
+    st.register_session(pid, "demo", None, base=base)
+    monkeypatch.undo()
+    assert [s["pid"] for s in st.live_sessions(base=base)] == [pid]
+    assert (base / "sessions" / f"{pid}.json").exists()
+
+
+def test_a_pause_set_while_process_start_failed_stays_paused(base, monkeypatch):
+    # Talos re-review 2026-11-13 (M3b): the same None start made is_paused drop the Pause.
+    monkeypatch.setattr(st, "process_start", lambda p: None)
+    st.set_paused(True, os.getpid(), base=base)
+    monkeypatch.undo()
+    assert st.is_paused(base=base) is True
+    assert (base / "paused.json").exists()
+
+
+def test_records_with_an_unknown_start_still_go_when_their_process_does(base, monkeypatch):
+    pid = dead_pid()
+    monkeypatch.setattr(st, "process_start", lambda p: None)
+    st.register_session(pid, "ghost", None, base=base)
+    st.set_paused(True, pid, base=base)
+    monkeypatch.undo()
+    assert st.live_sessions(base=base) == []
+    assert st.is_paused(base=base) is False
