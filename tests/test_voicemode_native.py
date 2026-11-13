@@ -350,9 +350,13 @@ class FakeWorld:
         monkeypatch.setattr(sv_services, "process_tree", lambda pid: {pid})
         monkeypatch.setattr(sv_services, "listener_pids", self.listeners)
         monkeypatch.setattr(sv_services, "check_service", self.check)
-        # The real _start_watchdog runs; only its Popen is this world's (watched: the argv).
+        # The real _start_watchdog runs; only its procs.detach is this world's (watched: the argv).
+        # On POSIX the services, helpers and restarts start through detach too (2026-11-13).
         self.watched = []
-        monkeypatch.setattr(sv_services, "subprocess", _SubprocessWith(self.start_watchdog))
+        for module in (sv_services, sv_helpers, sv_host):
+            monkeypatch.setattr(module, "detach", self.detach)
+        for module in (sv_services, sv_helpers):
+            monkeypatch.setattr(module, "alive", lambda pid: pid in self.commands)
         _set_port_free(vn, monkeypatch, lambda p: True)
         monkeypatch.setattr(sv_helpers, "running_commands", lambda: (list(self.commands.items()), None))
         monkeypatch.setattr(sv_helpers, "HELPER_START_CHECK", 0)
@@ -415,6 +419,14 @@ class FakeWorld:
         self.commands[pid] = " ".join(map(str, argv))
         return FakeProcess(self, pid)
 
+    def detach(self, argv, cwd, log_path, env=None, timeout=60):
+        """procs.detach: the watchdog (its marker) or a service or helper; a Result with the pid."""
+        if "voicemode_native.py watch" in " ".join(map(str, argv)):
+            process = self.start_watchdog(argv)
+        else:
+            process = self.spawn(argv, job=None, env=env, cwd=cwd, log=log_path)
+        return Result("detached", f"process {process.pid}", {"pid": process.pid})
+
     def spawn_in_job(self, command, job, **kwargs):
         return self.spawn(command, job=job, **kwargs), Result("no_job")
 
@@ -438,17 +450,6 @@ class FakeWorld:
     def kill(self, pid, timeout=None):
         self.events.append(f"kill:{self.kind_of(self.commands.get(pid, '').split())}")
         self.commands.pop(pid, None)
-
-
-class _SubprocessWith:
-    """The subprocess module, with Popen replaced (for one module's global name only)."""
-
-    def __init__(self, popen):
-        self.Popen = popen
-
-    def __getattr__(self, name):
-        import subprocess
-        return getattr(subprocess, name)
 
 
 class FakeProcess:

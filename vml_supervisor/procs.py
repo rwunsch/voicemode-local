@@ -346,17 +346,17 @@ def detach(argv, cwd, log_path, env=None, timeout=60) -> Result:
         done = subprocess.run(command, env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True,
                               check=False, timeout=timeout)
     except subprocess.TimeoutExpired:
-        return Result("detach_failed", f"the middle process starting {argv} timed out after {timeout} s",
+        return Result("detach_failed", f"the middle process timed out after {timeout} s",
                       {"argv": [str(a) for a in argv]})
     except (OSError, subprocess.SubprocessError, ValueError) as error:
-        return Result("detach_failed", f"the middle process starting {argv} could not run: {error}",
+        return Result("detach_failed", f"the middle process could not run: {error}",
                       {"argv": [str(a) for a in argv]})
     out = (done.stdout or "").strip()
     err = (done.stderr or "").strip()[-300:]
     if done.returncode != 0:
-        return Result("detach_failed", f"the middle process starting {argv} exited with "
-                      f"{done.returncode}: {err}", {"argv": [str(a) for a in argv], "returncode": done.returncode})
+        return Result("detach_failed", f"the middle process exited with {done.returncode}: {err}",
+                      {"argv": [str(a) for a in argv], "returncode": done.returncode})
     if not out.isascii() or not out.isdigit():
-        return Result("detach_failed", f"the middle process starting {argv} printed {out[-100:]!r}, not a "
-                      f"pid: {err}", {"argv": [str(a) for a in argv]})
+        return Result("detach_failed", f"the middle process printed {out[-100:]!r}, not a pid: {err}",
+                      {"argv": [str(a) for a in argv]})
     return Result("detached", f"process {out}", {"pid": int(out)})

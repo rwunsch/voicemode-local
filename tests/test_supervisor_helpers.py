@@ -54,7 +54,7 @@ def make_profile(root: Path, **helper_over) -> HostProfile:
 
 
 def _helper_world(tmp_path, monkeypatch, *, exits=None, running=(), stubborn=(), **helper_over):
-    """A voice folder, a fake process table and a Popen that starts nothing."""
+    """A voice folder, a fake process table, and a Popen (Windows) and detach (POSIX) that start nothing."""
     root = tmp_path / "voice"
     (root / "run").mkdir(parents=True)
     stopped, started = [], []
@@ -80,6 +80,17 @@ def _helper_world(tmp_path, monkeypatch, *, exits=None, running=(), stubborn=(),
         return SimpleNamespace(pid=900 + len(started), poll=lambda: exits, returncode=exits)
 
     monkeypatch.setattr(helpers.subprocess, "Popen", popen)
+
+    def detach(argv, cwd, log_path, env=None, timeout=60):
+        if exits == "raise":
+            return helpers.Result("detach_failed", f"the middle process exited with 1: [Errno 2] No such file "
+                                  f"or directory: {argv[0]!r}")
+        started.append(list(argv))
+        options.append({"via": "detach", "cwd": cwd, "env": env, "log": log_path})
+        return helpers.Result("detached", "", {"pid": 900 + len(started)})
+
+    monkeypatch.setattr(helpers, "detach", detach)
+    monkeypatch.setattr(helpers, "alive", lambda pid: exits is None)   # detached: seen from its pid
     world = SimpleNamespace(profile=make_profile(root, **helper_over), root=root, started=started,
                             stopped=stopped, options=options)
     return world
@@ -134,12 +145,21 @@ def test_an_unrecorded_helper_of_this_install_is_stopped_before_a_new_one(tmp_pa
     assert [r.code for r in result.data["results"]] == ["helper_unrecorded_stopped"]
 
 
-def test_a_helper_that_stops_at_once_is_reported_not_recorded(tmp_path, monkeypatch):
-    """Review, 2026-11-11: a trigger or listener that exited at once went unnoticed, and voice said it was on."""
+@pytest.mark.parametrize("windows", [True, False])
+def test_a_helper_that_stops_at_once_is_reported_not_recorded(tmp_path, monkeypatch, windows):
+    """Review, 2026-11-11: a trigger or listener that exited at once went unnoticed, and voice said it was on.
+    On POSIX it is detached (2026-11-13), no child of ours: seen from its pid, with no exit code."""
     world = _helper_world(tmp_path, monkeypatch, exits=1)
+    monkeypatch.setattr(helpers, "WINDOWS", windows)
+    monkeypatch.setattr(helpers, "services_job", lambda profile: None)
     result = helpers.start_helper(world.profile, "barge", "auto")
     assert result.code == "helper_exited"
-    assert "exit code 1" in result.detail and "barge.log" in result.detail and result.data["exit_code"] == 1
+    assert world.options[0].get("via") == (None if windows else "detach")
+    assert "barge.log" in result.detail
+    if windows:
+        assert "exit code 1" in result.detail and result.data["exit_code"] == 1
+    else:
+        assert "exit code is unknown" in result.detail and result.data["exit_code"] is None
     assert "barge" not in state_of(world)
 
 
@@ -153,10 +173,12 @@ def test_a_helper_that_cannot_be_started_never_stops_voice(tmp_path, monkeypatch
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX signal mask")
 def test_a_mac_helper_does_not_inherit_held_stop_signals(tmp_path, monkeypatch):
-    """Second review, 2026-11-11: started while stop signals were held, the trigger could only be killed."""
+    """Second review, 2026-11-11: started while stop signals were held, the trigger could only be killed.
+    Since 2026-11-13 it starts through procs.detach, whose middle unblocks them in the target
+    (test_detach_passes_env_cwd_and_log_and_unblocks_held_stop_signals proves it on a real process)."""
     world = _helper_world(tmp_path, monkeypatch)
     helpers.start_helper(world.profile, "barge", "auto")
-    assert world.options[0].get("preexec_fn") is helpers.unblock_stop_signals
+    assert world.options[0]["via"] == "detach"
 
 
 def test_switching_off_stops_the_trigger_even_if_the_setting_cannot_be_written(tmp_path, monkeypatch):
@@ -449,3 +471,60 @@ def test_a_failing_cleanup_does_not_replace_the_interrupt(tmp_path, monkeypatch)
         helpers.start_helper(world.profile, "barge", "auto")
     assert [r.code for r in caught.value.cleanup_results] == ["cleanup_failed"]
     assert "cannot stop" in caught.value.cleanup_results[0].detail
+
+
+# ----- POSIX detach (FELIX-MAC, 2026-11-13): the app kills a deleted chat's processes by ancestry --
+
+REAL_MARKER = "vml-test-detached-helper"
+
+
+def _real_helper_profile(tmp_path, script):
+    root = tmp_path / "voice"
+    (root / "run").mkdir(parents=True)
+    spec = HelperSpec([sys.executable, "-c", script, REAL_MARKER, "--mode={mode}"], REAL_MARKER, "barge.log", (), True)
+    return make_profile(root, barge=spec)
+
+
+def _ppid(pid):
+    with open(f"/proc/{pid}/stat") as fh:
+        return int(fh.read().rsplit(")", 1)[1].split()[1])
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="reads /proc")
+def test_a_posix_helper_is_no_descendant_of_the_connector(tmp_path, monkeypatch):
+    monkeypatch.setattr(helpers, "HELPER_START_CHECK", 0.3)
+    profile = _real_helper_profile(tmp_path, "import time; time.sleep(30)")
+    result = helpers.start_helper(profile, "barge", "auto")
+    pid = result.data.get("pid")
+    try:
+        assert result.code == "helper_started", result
+        assert _ppid(pid) != os.getpid() and os.getsid(pid) == pid
+        assert json.loads((profile.run_dir / "state.json").read_text())["barge"]["pid"] == pid
+        assert helpers.stop_helper(profile, "barge").code == "helper_stopped"
+        assert not helpers.alive(pid)
+    finally:
+        if isinstance(pid, int):
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(pid, 9)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX detach")
+def test_a_posix_helper_that_exits_at_once_is_seen_from_its_pid(tmp_path, monkeypatch):
+    """Detached, it is no child of ours, so there is no exit code; it is still reported and not recorded."""
+    monkeypatch.setattr(helpers, "HELPER_START_CHECK", 1.0)
+    profile = _real_helper_profile(tmp_path, "import sys; sys.exit(1)")
+    result = helpers.start_helper(profile, "barge", "auto")
+    assert result.code == "helper_exited", result
+    assert "barge.log" in result.detail and result.data["exit_code"] is None
+    assert "barge" not in json.loads((profile.run_dir / "state.json").read_text())
+
+
+def test_a_posix_detach_failure_is_a_helper_failure(tmp_path, monkeypatch):
+    world = _helper_world(tmp_path, monkeypatch)
+    monkeypatch.setattr(helpers, "WINDOWS", False)
+    monkeypatch.setattr(helpers, "detach", lambda argv, cwd, log_path, env=None, timeout=60: helpers.Result(
+        "detach_failed", "the middle process exited with 1: boom"))
+    result = helpers.start_helper(world.profile, "barge", "auto")
+    assert result.code == "helper_failed" and "boom" in result.detail
+    assert result.data["detach"] == {"code": "detach_failed", "detail": "the middle process exited with 1: boom"}
+    assert "barge" not in state_of(world)
