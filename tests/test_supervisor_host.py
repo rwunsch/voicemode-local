@@ -105,6 +105,9 @@ def test_the_watchdog_restarts_a_dead_service_within_its_limit(world, monkeypatc
     entry = read_state(profile)["tts"]
     world.started.append(entry["pid"])
     assert entry["pid"] != old["pid"] and entry["port"] == old["port"] == chosen["tts"]
+    if sys.platform.startswith("linux"):   # restarted through detach: no child of the watchdog either
+        with open(f"/proc/{entry['pid']}/stat") as fh:
+            assert int(fh.read().rsplit(")", 1)[1].split()[1]) != os.getpid()
     deadline = time.monotonic() + 20
     while not check_service("kokoro", entry["port"], "/v1/models") and time.monotonic() < deadline:
         time.sleep(0.1)
@@ -117,8 +120,8 @@ def test_the_watchdog_restarts_a_dead_service_within_its_limit(world, monkeypatc
     assert wait_dead(entry["pid"])
     spawned = []
     monkeypatch.setattr(host, "port_free", lambda port: False)
-    monkeypatch.setattr(host, "spawn", lambda argv, job, **kw: spawned.append(argv) or (
-        SimpleNamespace(pid=4_000_000 + len(spawned)), Result("no_job")))
+    monkeypatch.setattr(host, "detach", lambda argv, cwd, log_path, env=None, timeout=60: spawned.append(argv) or
+                        Result("detached", "", {"pid": 4_000_000 + len(spawned)}))
     assert host.watch_tick(profile, Hooks(), watch) is True
     assert host.watch_tick(profile, Hooks(), watch) is True
     assert spawned == [] and log_codes(profile).count("restart_port_taken") == 1
@@ -281,8 +284,8 @@ def test_the_host_restarts_a_dead_service_on_its_recorded_port(tmp_path, monkeyp
     monkeypatch.setattr(host, "live_leases", lambda profile: next(leases))
     monkeypatch.setattr(host, "port_free", lambda port: port == 28885)
     spawned = []
-    monkeypatch.setattr(host, "spawn", lambda argv, job, **kw: spawned.append((argv, kw["cwd"])) or (
-        SimpleNamespace(pid=800), Result("no_job")))
+    monkeypatch.setattr(host, "detach", lambda argv, cwd, log_path, env=None, timeout=60: spawned.append(
+        (argv, cwd)) or Result("detached", "", {"pid": 800}))
     host.host_main(world.file)
     assert spawned == [(["tts", "--port", "28885"], str(world.profile.working_dir))]
     assert world.calls.count("services") == 1   # stt, whose port was taken, on another port
@@ -842,23 +845,34 @@ def test_a_start_the_host_cannot_make_is_tried_within_the_restart_limit_and_said
     assert looks[-1] == []
 
 
-def test_a_spawn_error_is_not_retried_every_look(tmp_path, monkeypatch):
+@pytest.mark.parametrize("windows", [True, False])
+def test_a_spawn_error_is_not_retried_every_look(tmp_path, monkeypatch, windows):
+    """Windows: a SpawnError (job_assign_failed). POSIX (2026-11-13): a failed procs.detach, said as
+    service_start_failed. Either way at most restart_limit tries, each failure said once."""
     from vml_supervisor.winjob import SpawnError
     profile = make_profile(tmp_path / "voice")
     profile.run_dir.mkdir(parents=True)
     monkeypatch.setattr(host, "owned", lambda entry: False)
     monkeypatch.setattr(services, "choose_port", lambda p, kind, taken: 28880 if kind == "tts" else 22022)
+    monkeypatch.setattr(services, "WINDOWS", windows)
+    monkeypatch.setattr(services, "services_job", lambda profile: None)
     spawned = []
 
     def spawn(argv, job, **kw):
         spawned.append(argv[0])
         raise SpawnError(Result("job_assign_failed", "access denied; process 9 was killed"))
 
-    monkeypatch.setattr(services, "spawn", spawn)
+    def detach(argv, cwd, log_path, env=None, timeout=60):
+        spawned.append(argv[0])
+        return Result("detach_failed", "the middle process exited with 1: boom")
+
+    monkeypatch.setattr(services, "spawn", spawn if windows else lambda *a, **k: pytest.fail("spawned"))
+    monkeypatch.setattr(services, "detach", detach if not windows else lambda *a, **k: pytest.fail("detached"))
     monkeypatch.setattr(host.time, "monotonic", lambda: 1000.0)
     looks = _looks(profile, host.WatchState(), 5)
     assert spawned.count("tts") == 3 and spawned.count("stt") == 3
-    assert [c for look in looks for c in look].count("job_assign_failed") == 2
+    code = "job_assign_failed" if windows else "service_start_failed"
+    assert [c for look in looks for c in look].count(code) == 2
 
 
 def test_the_host_records_a_failed_start_and_the_connector_gets_it_at_once(tmp_path, monkeypatch):
@@ -1011,3 +1025,32 @@ def test_a_connector_leaving_does_not_stop_voice_for_the_others(tmp_path, monkey
     assert world.calls.count("stopped") == 1 and world.calls[-1] == "stopped"
     stopped_at = world.calls.index("stopped")
     assert world.calls.count(("barge", None)) == 4 and stopped_at == len(world.calls) - 1
+
+
+# ----- POSIX detach (FELIX-MAC, 2026-11-13): a restarted service is no descendant either ----------
+
+
+def test_a_posix_restart_goes_through_detach_and_a_failure_is_a_restart_failure(tmp_path, monkeypatch):
+    profile = make_profile(tmp_path / "voice")
+    profile.run_dir.mkdir(parents=True)
+    monkeypatch.setattr(host, "WINDOWS", False)
+    monkeypatch.setattr(host, "owned", lambda entry: False)
+    monkeypatch.setattr(host, "port_free", lambda port: True)
+    monkeypatch.setattr(host, "spawn", lambda *a, **k: pytest.fail("started as a child, not detached"))
+    asked, replies = [], iter([Result("detached", "process 4242", {"pid": 4242}),
+                               Result("detach_failed", "the middle process exited with 1: boom")])
+    monkeypatch.setattr(host, "detach", lambda argv, cwd, log_path, env=None, timeout=60: asked.append(
+        (list(argv), cwd, str(log_path), env)) or next(replies))
+    log = str(profile.run_dir / "tts.log")
+    state = {"tts": {"pid": 70, "port": 28885, "marker": "tts", "log": log,
+                     "command": ["tts", "--port", "28885"], "runtime": "r"}}
+    results = []
+    host.restart_dead_services(profile, Hooks(), state, host.WatchState(), 1000.0, results)
+    assert codes(results) == ["service_restarted"] and state["tts"]["pid"] == 4242
+    assert asked[0][:3] == (["tts", "--port", "28885"], str(profile.working_dir), log) and asked[0][3]["NO_PROXY"]
+    assert json.loads((profile.run_dir / "state.json").read_text())["tts"]["pid"] == 4242
+    results = []
+    host.restart_dead_services(profile, Hooks(), state, host.WatchState(), 1000.0, results)
+    assert codes(results) == ["service_restart_failed"] and state["tts"]["pid"] == 4242
+    assert "boom" in results[0].detail
+    assert results[0].data["detach"] == {"code": "detach_failed", "detail": "the middle process exited with 1: boom"}

@@ -21,12 +21,14 @@ Result codes
   lease_write_failed (nothing is started), working_dir_unavailable (nothing is started),
   job_unavailable (Windows: services start without the job), watchdog_not_configured,
   watch_marker_empty,
-  watchdog_start_failed (POSIX; a watchdog whose pid could not be recorded is stopped),
+  watchdog_start_failed (POSIX; a watchdog whose pid could not be recorded is stopped; a failed
+  procs.detach, its Result in data["detach"]),
   state_corrupt / state_unreadable (read as empty, under the lock), port_override_invalid, unknown_service,
   override_port_taken (the override's port is taken: another is used), no_free_port,
   service_command_bad (empty marker: not started), service_command_unowned (the
   marker or `--port N` is missing from the command, so it could never be owned: not started),
-  breakaway_refused, job_assign_failed, resume_failed, service_start_failed,
+  breakaway_refused, job_assign_failed, resume_failed, service_start_failed (on POSIX also a failed
+  procs.detach, its Result in data["detach"]),
   state_write_failed (the new service was killed), kill_incomplete, service_exited,
   service_not_ready, owner_other (another process answers on the port), owner_unknown (the
   answer came, but no listener could be found to prove it is ours).
@@ -55,9 +57,8 @@ from urllib.request import ProxyHandler, build_opener
 from . import hooks as hook_calls
 from .hooks import Hooks, load_hooks
 from .ports import choose_port, port_candidates, requested_port
-from .procs import (LOOPBACK, WINDOWS, background_options, kill_tree, listener_pids, owned,
-                    process_command, process_tree, require_psutil, stop_signals_held,
-                    unblock_stop_signals)
+from .procs import (LOOPBACK, WINDOWS, alive, background_options, detach, kill_tree, listener_pids, owned,
+                    process_command, process_tree, require_psutil, stop_signals_held)
 from .profile import HostProfile, blocking
 from .result import Result
 from .state import atomic_json, live_leases, read_json, read_state, service_lock, write_lease, write_state
@@ -260,9 +261,15 @@ def service_environment(env: dict) -> dict:
     return base
 
 
+def _detach_data(started: Result) -> dict:
+    """A failed procs.detach, as it is kept in the data of the failure it causes."""
+    return {"detach": {"code": started.code, "detail": started.detail}}
+
+
 def _start_watchdog(profile: HostProfile, working_dir: Path, results: list) -> None:
     """POSIX: start (once) the process that stops the services when every connector is gone. On
-    Windows the host (host.py) holds that role."""
+    Windows the host (host.py) holds that role. Started through procs.detach, so it is no
+    descendant of the connector (the app kills a deleted chat's processes by ancestry)."""
     if WINDOWS:
         return
     if not profile.watch_command:
@@ -278,22 +285,21 @@ def _start_watchdog(profile: HostProfile, working_dir: Path, results: list) -> N
         command = process_command(int(pid_file.read_text()))
         if command and profile.watch_marker in command:
             return
-    try:
-        process = subprocess.Popen(list(profile.watch_command), cwd=str(working_dir), env=dict(os.environ),
-                                   stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                                   stderr=subprocess.DEVNULL, **background_options())
-    except OSError as error:
-        results.append(Result("watchdog_start_failed", f"{profile.watch_command}: {error}"))
+    started = detach(list(profile.watch_command), str(working_dir), os.devnull, env=dict(os.environ))
+    if started.code != "detached":
+        results.append(Result("watchdog_start_failed", f"{profile.watch_command}: {started.detail}",
+                              _detach_data(started)))
         return
+    pid = started.data["pid"]
     try:
-        pid_file.write_text(str(process.pid))
+        pid_file.write_text(str(pid))
     except OSError as error:
         # Untracked, it would run beside the next connector's watchdog: stop it.
-        failed = kill_tree(process.pid, profile.stop_timeout)
+        failed = kill_tree(pid, profile.stop_timeout)
         if failed is not None:
             results.append(failed)
-        results.append(Result("watchdog_start_failed", f"{pid_file}: {error}; watchdog {process.pid} "
-                              "was stopped", {"pid": process.pid}))
+        results.append(Result("watchdog_start_failed", f"{pid_file}: {error}; watchdog {pid} "
+                              "was stopped", {"pid": pid}))
 
 
 def _choose(profile: HostProfile, kind: str, state: dict, results: list) -> int | None:
@@ -332,7 +338,9 @@ def _unownable(command: list, marker: str, port: int):
 
 
 def _start(profile, hooks, kind, port, runtime, env, working_dir, job, state, results):
-    """Start one service and record it. The caller holds the lock. Returns the process or None."""
+    """Start one service and record it. The caller holds the lock. Returns the process (Windows),
+    its pid (POSIX: started through procs.detach, so no descendant of this process, which the app
+    would kill with a deleted chat) or None."""
     run_dir = Path(profile.run_dir)
     (command, marker), problem = hook_calls.service_command(hooks, profile, kind, runtime, port)
     if problem is not None:
@@ -342,22 +350,31 @@ def _start(profile, hooks, kind, port, runtime, env, working_dir, job, state, re
         results.append(Result(*unusable, {"service": kind, "command": list(command), "marker": marker}))
         return None
     log = run_dir / f"{kind}.log"
-    extra = {} if WINDOWS else {"preexec_fn": unblock_stop_signals}
     with stop_signals_held():
-        try:
-            with log.open("a") as output:
-                process, spawned = spawn(command, job, env=env, cwd=str(working_dir), stdin=subprocess.DEVNULL,
-                                         stdout=output, stderr=output, **background_options(), **extra)
-        except SpawnError as error:
-            results.append(error.result)
-            return None
-        except OSError as error:
-            results.append(Result("service_start_failed", f"{kind}: {command}: {error}",
-                                  {"service": kind, "log": str(log)}))
-            return None
-        if spawned.code not in ("no_job", "breakaway"):
-            results.append(Result(spawned.code, spawned.detail, {**spawned.data, "service": kind}))
-        state[kind] = {"pid": process.pid, "port": port, "marker": marker, "log": str(log),
+        if WINDOWS:
+            try:
+                with log.open("a") as output:
+                    process, spawned = spawn(command, job, env=env, cwd=str(working_dir), stdin=subprocess.DEVNULL,
+                                             stdout=output, stderr=output, **background_options())
+            except SpawnError as error:
+                results.append(error.result)
+                return None
+            except OSError as error:
+                results.append(Result("service_start_failed", f"{kind}: {command}: {error}",
+                                      {"service": kind, "log": str(log)}))
+                return None
+            if spawned.code not in ("no_job", "breakaway"):
+                results.append(Result(spawned.code, spawned.detail, {**spawned.data, "service": kind}))
+            pid = process.pid
+        else:
+            # The middle unblocks the held stop signals in the service, which must stop on SIGTERM.
+            started = detach(command, str(working_dir), str(log), env=env)
+            if started.code != "detached":
+                results.append(Result("service_start_failed", f"{kind}: {command}: {started.detail}",
+                                      {"service": kind, "log": str(log), **_detach_data(started)}))
+                return None
+            process = pid = started.data["pid"]
+        state[kind] = {"pid": pid, "port": port, "marker": marker, "log": str(log),
                        "command": [str(part) for part in command], "runtime": runtime}
         try:
             atomic_json(run_dir / "state.json", state)
@@ -365,22 +382,23 @@ def _start(profile, hooks, kind, port, runtime, env, working_dir, job, state, re
             # On Windows a venv's python.exe starts the real interpreter as a child: stop the tree.
             state.pop(kind, None)
             if not isinstance(error, Exception):
-                cleanup_for_interrupt(error, lambda: kill_tree(process.pid, profile.stop_timeout), results)
+                cleanup_for_interrupt(error, lambda: kill_tree(pid, profile.stop_timeout), results)
                 raise
-            failed = kill_tree(process.pid, profile.stop_timeout)
+            failed = kill_tree(pid, profile.stop_timeout)
             if failed is not None:
                 results.append(failed)
-            results.append(Result("state_write_failed", f"{kind}: {error}; process {process.pid} was stopped",
-                                  {"service": kind, "pid": process.pid}))
+            results.append(Result("state_write_failed", f"{kind}: {error}; process {pid} was stopped",
+                                  {"service": kind, "pid": pid}))
             return None
     return process
 
 
 def start_missing_services(profile: HostProfile, hooks: Hooks, runtime: str, state: dict, started: dict,
                            results: list, failures: dict | None = None) -> set[str]:
-    """Start the profile's services that are not running, as children of this process, and record
-    them in state (and state.json). The caller holds the service lock. Returns the services that
-    could not be started (each with its Result); the running and started ones are in state. With
+    """Start the profile's services that are not running, as children of this process (Windows)
+    or through procs.detach (POSIX), and record them in state (and state.json). The caller holds
+    the service lock. Returns the services that could not be started (each with its Result); the
+    running and started ones are in state (`started`: kind -> Popen on Windows, pid on POSIX). With
     `failures`, each service that could not be started maps to the Result that says why (the
     Windows host records it in state.json for the connectors waiting)."""
     failures = {} if failures is None else failures
@@ -475,7 +493,13 @@ def wait_until_ready(profile: HostProfile, started: dict | None = None, deadline
                             results.append(Result(note["code"], str(note.get("detail", "")), {"service": kind}))
                 break
             process = started.get(kind)
-            if process is not None and process.poll() is not None:
+            if isinstance(process, int) and not isinstance(process, bool):
+                # POSIX: detached, so no child of ours and no exit code; its pid says it is gone.
+                if not alive(process):
+                    results.append(Result("service_exited", f"{kind} (process {process}) exited; see {log}",
+                                          {"service": kind, "pid": process, "code": None, "log": log}))
+                    break
+            elif process is not None and process.poll() is not None:
                 results.append(Result("service_exited", f"{kind} exited with {process.returncode}; see {log}",
                                       {"service": kind, "code": process.returncode, "log": log}))
                 break
@@ -513,8 +537,9 @@ def ensure_services(profile: HostProfile, connector_pid: int, hooks: Hooks | Non
     resolve_runtime (host.ensure); without it this validates (a BLOCKING finding refuses the start)
     and resolves itself.
 
-    On Windows the services belong to the host (ensure_host, host.py); elsewhere a new session
-    already outlives the chat, so this connector starts them, with a watchdog."""
+    On Windows the services belong to the host (ensure_host, host.py); elsewhere this connector
+    starts them, with a watchdog, through procs.detach: a new session alone does not outlive the
+    chat, because the app kills a deleted chat's processes by ancestry (FELIX-MAC, 2026-11-13)."""
     results: list[Result] = []
     if hooks is None:
         hooks, loaded = load_hooks(profile)

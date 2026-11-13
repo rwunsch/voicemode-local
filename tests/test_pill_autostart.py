@@ -159,22 +159,62 @@ def test_wsl_command_goes_through_start_process(env, monkeypatch):
 
 # -- spawn ------------------------------------------------------------------
 
+def _wait_gone(pid, timeout=10):
+    """A detached window is no child of ours: no Popen to wait on, only its pid."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        try:
+            with open(f"/proc/{pid}/stat") as fh:
+                if fh.read().rsplit(")", 1)[1].split()[0] == "Z":
+                    return True
+        except OSError:
+            pass
+        time.sleep(0.05)
+    return False
+
+
+posix_only = pytest.mark.skipif(os.name == "nt", reason="POSIX detach")
+
+
+@posix_only
 def test_spawn_detaches_and_logs(tmp_path):
+    """FELIX-MAC, 2026-11-13: the app kills a deleted chat's processes by ancestry, so its own session
+    is not enough: the window starts through a middle process and is no child of the server."""
     base = tmp_path / "pill"
-    p = pa.spawn([sys.executable, "-c", "import os; print(os.getsid(0) == os.getpid())"], "wsl", base)
-    p.wait(10)
+    pid = pa.spawn([sys.executable, "-c", "import os; print(os.getsid(0) == os.getpid(), os.getppid())"],
+                   "wsl", base)
+    assert isinstance(pid, int) and _wait_gone(pid)
     log = (st._base(base) / "autostart.log").read_text()
-    assert "start:" in log and "True" in log   # its own session: not killed with the server's group
+    session, parent = log.splitlines()[-1].split()
+    assert "start:" in log and session == "True"   # its own session: not killed with the server's group
+    assert int(parent) != os.getpid()               # and not our child: not killed with the chat
 
 
+@posix_only
 def test_mac_window_logs_to_pill_window_log(tmp_path, monkeypatch):
     base = tmp_path / "pill"
     monkeypatch.setattr(st, "upstream_home", lambda: tmp_path / "home" / ".voicemode")
-    p = pa.spawn([sys.executable, "-c", "import sys; print('hb' + ' line', file=sys.stderr)"], "macos", base)
-    p.wait(10)
-    assert "hb line" in (tmp_path / "home" / ".voicemode" / "logs" / "pill-window.log").read_text()
+    pid = pa.spawn([sys.executable, "-c", "import os, sys; print('hb' + ' line', os.getppid(), file=sys.stderr)"],
+                   "macos", base)
+    assert isinstance(pid, int) and _wait_gone(pid)
+    text = (tmp_path / "home" / ".voicemode" / "logs" / "pill-window.log").read_text()
+    assert "hb line" in text and int(text.split()[-1]) != os.getpid()
     log = (st._base(base) / "autostart.log").read_text()
     assert "start:" in log and "hb line" not in log
+
+
+@posix_only
+@pytest.mark.parametrize("kind", ["wsl", "macos"])
+def test_a_window_that_cannot_start_is_logged_not_raised(tmp_path, monkeypatch, kind):
+    base = tmp_path / "pill"
+    monkeypatch.setattr(st, "upstream_home", lambda: tmp_path / "home" / ".voicemode")
+    assert pa.spawn([str(tmp_path / "no-such-window")], kind, base) is None
+    log = (st._base(base) / "autostart.log").read_text()
+    assert "start failed:" in log and "no-such-window" in log
 
 
 # -- wiring -------------------------------------------------------------------

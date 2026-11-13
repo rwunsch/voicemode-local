@@ -607,14 +607,22 @@ class App:
         r = route_page_message(text)
         if not r:
             return
+        if r[0] == "window" and isinstance(r[1].get("log"), str):
+            # The page's own trace (a click, a switch changing on screen): with the line below it
+            # shows which hop of a click was missing or late (Mac, 2026-11-13).
+            self.log("page: " + r[1]["log"][:200])
+            return
         if r[0] == "cmd":
             # Never kept to replay later (a Stop could land on a turn it was not meant for):
             # the page hears at once that it went nowhere, as in pill-windows.ps1.
-            if not self.send(r[1]):
-                cmd = json.loads(r[1]).get("cmd", "")
-                self.log(f"command not delivered, no backend: {cmd}")
+            cmd_name = json.loads(r[1]).get("cmd", "")
+            if self.send(r[1]):
+                if cmd_name != "save_ui":  # saved on every drag and resize: too many to log
+                    self.log(f"cmd -> backend: {cmd_name}")
+            else:
+                self.log(f"command not delivered, no backend: {cmd_name}")
                 if not self.closing:
-                    self.to_page(json.dumps({"window": {"dropped": cmd}}))
+                    self.to_page(json.dumps({"window": {"dropped": cmd_name}}))
             return
         prev = self.state.mode
         if "mode" in r[1]:

@@ -30,6 +30,7 @@ import pytest
 
 from vml_supervisor import ports as ports_module
 from vml_supervisor import services
+from vml_supervisor.procs import alive as procs_alive
 from vml_supervisor.hooks import Hooks
 from vml_supervisor.profile import HostProfile, PortOverride, ServiceSpec
 from vml_supervisor.services import (check_service, ensure_services, release, stop, stop_entry,
@@ -344,8 +345,12 @@ def test_stop_ends_a_service_that_ignores_the_stop_request(world):
         {"tts": {"pid": stubborn.pid, "port": None, "marker": "stubborn-service", "log": "x"}}))
     begin = time.monotonic()
     results = stop(profile)
-    assert time.monotonic() - begin < 8
-    assert stubborn.wait(timeout=5) == -signal.SIGKILL
+    elapsed = time.monotonic() - begin
+    assert profile.stop_timeout <= elapsed < 8   # it ignored SIGTERM, so stop had to wait, then kill
+    # -SIGKILL, or 0 when procs' alive check reaped our own exited child first (waitpid WNOHANG,
+    # the zombie fix) and Popen then got ECHILD: seen under load in the full suite, 2026-11-13.
+    assert stubborn.wait(timeout=5) in (-signal.SIGKILL, 0)
+    assert not procs_alive(stubborn.pid)
     assert read_state(profile) == {}
     assert [r for r in results if r.code == "services_stopped"][0].data["services"] == ["tts"]
 
@@ -438,23 +443,25 @@ def test_a_runtime_that_is_not_current_is_a_result(world):
 
 def test_a_service_that_cannot_be_recorded_is_killed(world, monkeypatch):
     profile = world.profile
-    real_spawn = services.spawn
+    real_detach = services.detach
     spawned = []
 
-    def spawn(*args, **kwargs):
-        process, result = real_spawn(*args, **kwargs)
-        spawned.append(process)
-        return process, result
+    def detach(argv, *args, **kwargs):
+        started = real_detach(argv, *args, **kwargs)
+        if str(world.fake) in argv:
+            spawned.append(started.data["pid"])
+            world.started.append(started.data["pid"])
+        return started
 
     def broken(path, value):
         raise OSError("disk full")
 
-    monkeypatch.setattr(services, "spawn", spawn)
+    monkeypatch.setattr(services, "detach", detach)
     monkeypatch.setattr(services, "atomic_json", broken)
     chosen, results = ensure_services(profile, world.connector.pid)
     assert chosen == {}
     assert codes(results).count("state_write_failed") == 2
-    assert spawned and all(p.wait(timeout=10) is not None for p in spawned)
+    assert len(spawned) == 2 and all(wait_dead(pid) for pid in spawned)
 
 
 def test_the_watchdog_is_started_once_and_carries_its_marker(world):
@@ -545,17 +552,17 @@ def test_two_connectors_at_once_start_one_tts_and_one_stt(world, monkeypatch):
     profile = world.profile
     second = sleeper("voice.py", "launch")
     world.started.append(second.pid)
-    real_spawn = services.spawn
+    real_detach = services.detach
     spawned = []
 
-    def spawn(argv, *args, **kwargs):
-        process, result = real_spawn(argv, *args, **kwargs)
-        world.started.append(process.pid)
+    def detach(argv, *args, **kwargs):
+        started = real_detach(argv, *args, **kwargs)
+        world.started.append(started.data["pid"])
         if str(world.fake) in argv:
-            spawned.append(process)
-        return process, result
+            spawned.append(started.data["pid"])
+        return started
 
-    monkeypatch.setattr(services, "spawn", spawn)
+    monkeypatch.setattr(services, "detach", detach)
     out = {}
     barrier = threading.Barrier(2)
 
@@ -679,21 +686,22 @@ def test_an_empty_watch_marker_is_a_result_not_a_match_for_any_process(world):
 
 def test_a_watchdog_that_cannot_be_recorded_is_stopped(world, monkeypatch):
     profile = world.profile
-    real_popen = subprocess.Popen
+    real_detach = services.detach
     launched = []
 
-    def popen(*args, **kwargs):
-        process = real_popen(*args, **kwargs)
-        launched.append(process)
-        return process
+    def detach(argv, *args, **kwargs):
+        started = real_detach(argv, *args, **kwargs)
+        world.started.append(started.data["pid"])
+        launched.append((list(argv), started.data["pid"]))
+        return started
 
-    monkeypatch.setattr(services.subprocess, "Popen", popen)
+    monkeypatch.setattr(services, "detach", detach)
     profile.run_dir.mkdir(parents=True)
     (profile.run_dir / "watch.pid").mkdir()  # writing the pid file fails
     chosen, results = ensure_services(profile, world.connector.pid)
     assert "watchdog_start_failed" in codes(results)
-    watchdogs = [p for p in launched if profile.watch_marker in p.args]
-    assert len(watchdogs) == 1 and watchdogs[0].wait(timeout=10) is not None
+    watchdogs = [pid for argv, pid in launched if profile.watch_marker in argv]
+    assert len(watchdogs) == 1 and wait_dead(watchdogs[0])
     release(profile, world.connector.pid)
 
 
@@ -780,14 +788,15 @@ def test_a_failing_cleanup_does_not_replace_the_interrupt(world, monkeypatch):
     def cleanup_fails(pid, timeout):
         raise RuntimeError("cannot kill")
 
-    real_popen, launched = subprocess.Popen, []
+    real_detach, launched = services.detach, []
 
-    def popen(*args, **kwargs):  # the faked cleanup kills nothing: the test ends what it started
-        process = real_popen(*args, **kwargs)
-        launched.append(process)
-        return process
+    def detach(*args, **kwargs):  # the faked cleanup kills nothing: the test ends what it started
+        started = real_detach(*args, **kwargs)
+        if started.code == "detached":
+            launched.append(started.data["pid"])
+        return started
 
-    monkeypatch.setattr(services.subprocess, "Popen", popen)
+    monkeypatch.setattr(services, "detach", detach)
     monkeypatch.setattr(services, "atomic_json", interrupted)
     monkeypatch.setattr(services, "kill_tree", cleanup_fails)
     try:
@@ -796,6 +805,68 @@ def test_a_failing_cleanup_does_not_replace_the_interrupt(world, monkeypatch):
         assert caught.value.code == 3
         assert [r.code for r in caught.value.cleanup_results] == ["cleanup_failed"]
     finally:
-        for process in launched:
-            process.kill()
-            process.wait(timeout=10)
+        for pid in launched:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(pid, signal.SIGKILL)
+            assert wait_dead(pid)
+
+
+# ----- POSIX detach (FELIX-MAC, 2026-11-13): the app kills a deleted chat's processes by ancestry --
+
+
+from vml_supervisor.result import Result  # noqa: E402
+
+
+def _ppid(pid):
+    with open(f"/proc/{pid}/stat") as fh:
+        return int(fh.read().rsplit(")", 1)[1].split()[1])
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="reads /proc")
+def test_services_and_the_watchdog_are_no_descendants_of_the_connector(world):
+    profile = world.profile
+    chosen, results = ensure_services(profile, world.connector.pid)
+    assert results == [] and set(chosen) == {"tts", "stt"}
+    state = read_state(profile)
+    watcher = int((profile.run_dir / "watch.pid").read_text())
+    for pid in (state["tts"]["pid"], state["stt"]["pid"], watcher):
+        assert _ppid(pid) != os.getpid()              # not our child: reparented through a middle
+        assert os.getsid(pid) == pid                   # its own session, so kill_tree stops its group
+    release(profile, world.connector.pid)
+    assert wait_dead(state["tts"]["pid"]) and wait_dead(state["stt"]["pid"])
+
+
+def test_a_detach_failure_is_a_service_and_watchdog_start_failure(world, monkeypatch):
+    calls = []
+
+    def failing(argv, cwd, log_path, env=None, timeout=60):
+        calls.append((list(argv), cwd, str(log_path), env))
+        return Result("detach_failed", "the middle process exited with 1: boom")
+
+    monkeypatch.setattr(services, "detach", failing)
+    profile = world.profile
+    chosen, results = ensure_services(profile, world.connector.pid)
+    assert chosen == {}
+    failed = [r for r in results if r.code == "service_start_failed"]
+    assert sorted(r.data["service"] for r in failed) == ["stt", "tts"]
+    assert all("boom" in r.detail and r.data["detach"] == {"code": "detach_failed",
+               "detail": "the middle process exited with 1: boom"} for r in failed)
+    watchdog = [r for r in results if r.code == "watchdog_start_failed"]
+    assert len(watchdog) == 1 and "boom" in watchdog[0].detail and watchdog[0].data["detach"]["code"] == "detach_failed"
+    assert read_state(profile) == {}
+    # what was asked: the profile's commands, in the working folder, logging to the service's log
+    tts = next(c for c in calls if "tts" in c[0])
+    assert tts[1] == str(profile.working_dir) and tts[2].endswith("tts.log") and tts[3]["NO_PROXY"]
+    release(profile, world.connector.pid)
+
+
+def test_a_service_that_exits_at_once_is_seen_from_its_pid(world, monkeypatch):
+    """Detached, the service is no child of ours: no Popen, no exit code; its pid is watched."""
+    hooks = _command_hook(lambda kind, port: [sys.executable, "-c", "import sys; sys.exit(3)",
+                                              f"{world.fake} {kind}", "--port", str(port)],
+                          lambda kind: f"{world.fake} {kind}")
+    chosen, results = ensure_services(world.profile, world.connector.pid, hooks)
+    assert chosen == {}
+    exited = [r for r in results if r.code == "service_exited"]
+    assert sorted(r.data["service"] for r in exited) == ["stt", "tts"]
+    release(world.profile, world.connector.pid)

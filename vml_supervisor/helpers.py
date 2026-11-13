@@ -25,9 +25,10 @@ Nothing here raises for an expected failure.
 
 Result codes
 - start_helper: helper_started, helper_running (owned, same mode: left alone), helper_restarted
-  (the mode changed), helper_failed (the lock, OSError, a failed spawn, an old helper that would
-  not die, or a record write: nothing new is left running), helper_exited (it stopped within
-  HELPER_START_CHECK: not recorded), helper_not_started (only_if said no, under the lock),
+  (the mode changed), helper_failed (the lock, OSError, a failed spawn or, on POSIX, a failed
+  procs.detach (its Result in data["detach"]), an old helper that would not die, or a record
+  write: nothing new is left running), helper_exited (it stopped within HELPER_START_CHECK: not
+  recorded; on POSIX it is detached, no child of ours, so data["exit_code"] is None), helper_not_started (only_if said no, under the lock),
   helper_not_for_platform, helper_command_bad (empty marker),
   helper_command_unowned (the marker is not in the command), unknown_helper.
 - stop_helper: helper_stopped, helper_not_running, kill_incomplete (the entry is kept, so a later
@@ -53,7 +54,7 @@ from pathlib import Path
 
 from . import hooks as hook_calls
 from .hooks import Hooks, load_hooks
-from .procs import WINDOWS, background_options, owned, stop_signals_held, unblock_stop_signals
+from .procs import WINDOWS, alive, background_options, detach, owned, stop_signals_held
 from .profile import HelperSpec, HostProfile
 from .result import Result
 from .services import cleanup_for_interrupt, service_environment, stop_entry
@@ -222,8 +223,9 @@ def _lock(stack: contextlib.ExitStack, run_dir, held: bool) -> OSError | None:
 
 def start_helper(profile: HostProfile, kind: str, mode=_FROM_HOOK, hooks: Hooks | None = None,
                  only_if=None) -> Result:
-    """Start the helper once per install, as a child of this process (in the services' Job Object
-    on Windows), and record it in state.json. Restarted when its mode changed, because a helper
+    """Start the helper once per install, as a child of this process in the services' Job Object
+    on Windows, through procs.detach on POSIX (no descendant of the connector, which the app would
+    kill with a deleted chat), and record it in state.json. Restarted when its mode changed, because a helper
     reads its mode only when it starts.
 
     mode omitted: ask the read_mode hook (its failure is in data["results"]).
@@ -298,15 +300,18 @@ def start_helper(profile: HostProfile, kind: str, mode=_FROM_HOOK, hooks: Hooks 
                 except OSError as error:
                     results.append(Result("job_unavailable", f"{profile.job_name}: {error}; {kind} starts "
                                           "without the job"))
-            extra = {} if WINDOWS else {"preexec_fn": unblock_stop_signals}
             try:
                 working_dir.mkdir(parents=True, exist_ok=True)
                 log.parent.mkdir(parents=True, exist_ok=True)
                 runtime, env = _runtime_and_environment(profile, hooks, kind, mode, state, results)
-                with log.open("a") as output:
-                    # The child must not inherit the held stop signals, or it could only be killed.
-                    process, spawned = spawn(command, job, env=env, cwd=str(working_dir), stdin=subprocess.DEVNULL,
-                                             stdout=output, stderr=output, **background_options(), **extra)
+                if WINDOWS:
+                    with log.open("a") as output:
+                        process, spawned = spawn(command, job, env=env, cwd=str(working_dir),
+                                                 stdin=subprocess.DEVNULL, stdout=output, stderr=output,
+                                                 **background_options())
+                else:
+                    # The middle unblocks the held stop signals in the helper, or it could only be killed.
+                    process, spawned = None, detach(command, str(working_dir), str(log), env=env)
             except SpawnError as error:
                 results.append(error.result)
                 write_state(profile, state, results)
@@ -315,9 +320,14 @@ def start_helper(profile: HostProfile, kind: str, mode=_FROM_HOOK, hooks: Hooks 
             except OSError as error:
                 write_state(profile, state, results)
                 return done("helper_failed", f"the {kind} helper could not be started: {error}", command=command)
-            if spawned.code not in ("no_job", "breakaway"):
+            if process is None and spawned.code != "detached":
+                write_state(profile, state, results)
+                return done("helper_failed", f"the {kind} helper could not be started: {spawned.detail}",
+                            command=command, detach={"code": spawned.code, "detail": spawned.detail})
+            pid = process.pid if process is not None else spawned.data["pid"]
+            if process is not None and spawned.code not in ("no_job", "breakaway"):
                 results.append(spawned)
-            state[kind] = {"pid": process.pid, "port": None, "marker": spec.marker, "log": str(log),
+            state[kind] = {"pid": pid, "port": None, "marker": spec.marker, "log": str(log),
                            "mode": mode, "command": command, "runtime": runtime}
             try:
                 written = write_state(profile, state, results)
@@ -338,13 +348,16 @@ def start_helper(profile: HostProfile, kind: str, mode=_FROM_HOOK, hooks: Hooks 
         line = _status_line(profile, spec, kind, mode, env, results)
         return done("helper_running", line or f"already running; log {log}", pid=running.get("pid"), mode=mode)
     # The liveness check runs outside the lock, so other connectors' starts and stops do not wait.
+    # POSIX: detached, the helper is no child of ours: its pid says whether it lives, and its exit
+    # code cannot be known.
+    running_now = (lambda: process.poll() is None) if process is not None else (lambda: alive(pid))
     deadline = time.monotonic() + HELPER_START_CHECK
-    while process.poll() is None and time.monotonic() < deadline:
+    while running_now() and time.monotonic() < deadline:
         time.sleep(0.1)
-    if process.poll() is None:
+    if running_now():
         word = "restarted" if restarted else "started"
         line = _status_line(profile, spec, kind, mode, env, results)
-        return done(f"helper_{word}", line or f"{word}; log {log}", pid=process.pid, mode=mode)
+        return done(f"helper_{word}", line or f"{word}; log {log}", pid=pid, mode=mode)
     with contextlib.ExitStack() as stack:
         error = _lock(stack, run_dir, held=False)
         if error is not None:
@@ -352,11 +365,13 @@ def start_helper(profile: HostProfile, kind: str, mode=_FROM_HOOK, hooks: Hooks 
         else:
             state = read_state(profile, results)
             entry = state.get(kind)
-            if isinstance(entry, dict) and entry.get("pid") == process.pid:
+            if isinstance(entry, dict) and entry.get("pid") == pid:
                 state.pop(kind)
                 write_state(profile, state, results)
-    return done("helper_exited", f"the {kind} helper stopped at once (exit code {process.returncode}); "
-                f"see {log}", pid=process.pid, exit_code=process.returncode, mode=mode)
+    exit_code = process.returncode if process is not None else None
+    how = f"exit code {exit_code}" if process is not None else "detached: its exit code is unknown"
+    return done("helper_exited", f"the {kind} helper stopped at once ({how}); see {log}",
+                pid=pid, exit_code=exit_code, mode=mode)
 
 
 def stop_helper(profile: HostProfile, kind: str, hooks: Hooks | None = None) -> Result:

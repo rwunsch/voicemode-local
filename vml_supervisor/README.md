@@ -49,6 +49,23 @@ must hold a non-empty marker and `--port {port}`, or it is not started
 (`service_command_bad`, `service_command_unowned`); a helper's or the host's command must hold
 its marker (`helper_command_unowned`, `host_command_unowned`).
 
+## Outliving the chat (POSIX)
+
+On macOS and Linux every process meant to outlive the connector (the services, the watchdog,
+the helpers, and a service the watchdog restarts) starts through `procs.detach`: a short-lived
+middle process (`sys.executable -I -c DETACH`) starts it in its own session, prints its pid and
+exits, so the process is reparented to launchd / init and is no descendant of the chat. Why:
+the app kills a deleted chat's processes by ancestry. On a Mac (FELIX-MAC, 2026-11-13, n=1
+each), children started with `start_new_session=True` still died within 1 s of the chat being
+deleted, while a process started through a middle process survived with the same pid and port,
+and so did its own children. Not `os.fork`: forking a threaded or asyncio process is unsafe on
+macOS. A detached process is no child of ours, so it is watched from its pid (`procs.alive`)
+and its exit code cannot be known (`helper_exited` then carries `exit_code` None). A failed
+detach (`detach_failed`) is reported as the failure of what it was starting
+(`service_start_failed`, `watchdog_start_failed`, `helper_failed`, `service_restart_failed`)
+with the detach Result in `data["detach"]`. Windows is unchanged: the host, started through
+Windows' process service, and the Job Object keep everything outside every chat.
+
 ## Validation
 
 `HostProfile.validate()` runs at every start (`ensure`, `ensure_services`, `host_main`): both
@@ -79,6 +96,9 @@ Every operation returns `Result(code, detail, data)` objects instead of raising.
 | `breakaway` | A Windows process was started outside its parent's job. |
 | `breakaway_refused` | The parent's job forbids breakaway; the child also dies with the parent. |
 | `cleanup_failed` | Stopping a process while an interrupt was handled failed; the interrupt still propagated, with this on its `cleanup_results`. |
+| `detach_failed` | POSIX: the middle process that starts a process outside this one's ancestry failed (detail: its exit code and stderr tail, its unexpected output, a timeout, or the OSError). |
+| `detach_unsupported` | `procs.detach` was called on Windows, which starts outside a chat through the host instead. |
+| `detached` | POSIX: a process was started through a middle process, so it is no descendant of the caller (data: `pid`). |
 | `helper_command_bad` | A helper's command could not be built or started. |
 | `helper_not_running` | A helper was asked to stop and was not running. |
 | `helper_not_started` | The host did not start a helper: no connector lease was live under the lock. |

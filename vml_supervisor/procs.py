@@ -296,3 +296,67 @@ def background_options() -> dict:
     if WINDOWS:
         return {"creationflags": subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP}
     return {"start_new_session": True}
+
+
+def alive(pid) -> bool:
+    """True while pid is a live, non-zombie process (POSIX). For a detached process, which is not
+    our child, this is how its exit is seen: there is no Popen and no exit code."""
+    return _alive(pid)
+
+
+# The middle process of detach: starts the target in its own session, prints its pid, exits at
+# once, so the target is reparented (to launchd / init) and is no descendant of this process. The
+# target must stop on SIGTERM even when the caller held stop signals (stop_signals_held), which a
+# child inherits: they are unblocked in the target only.
+DETACH = (
+    "import signal, subprocess, sys\n"
+    "cwd, log_path, *cmd = sys.argv[1:]\n"
+    "stops = {getattr(signal, n) for n in ('SIGTERM', 'SIGINT', 'SIGHUP') if hasattr(signal, n)}\n"
+    "def unblock():\n"
+    "    signal.pthread_sigmask(signal.SIG_UNBLOCK, stops)\n"
+    "with open(log_path, 'ab') as log:\n"
+    "    p = subprocess.Popen(cmd, cwd=cwd, stdin=subprocess.DEVNULL, stdout=log, stderr=log,\n"
+    "                         start_new_session=True, close_fds=True, preexec_fn=unblock)\n"
+    "print(p.pid)\n"
+)
+
+
+def detach(argv, cwd, log_path, env=None, timeout=60) -> Result:
+    """POSIX: start argv so that it is no descendant of this process, and return its pid.
+
+    Why: the Copilot app kills a deleted chat's processes by ancestry. On a Mac (FELIX-MAC,
+    2026-11-13, n=1 each) children started with start_new_session=True still died within 1 s of the
+    chat being deleted; a process started through a short-lived middle process (so reparented to
+    launchd) survived with the same pid and port, and so did its own children. This mirrors FELIX's
+    start_outside_chats (felix-framework 4cee983fc). Deliberately not os.fork: forking a threaded or
+    asyncio process is unsafe on macOS.
+
+    The middle runs `sys.executable -I -c DETACH cwd log_path *argv` with env (so the target inherits
+    it); its stdout must be the target's pid and its exit code 0. stdout and stderr of the target go
+    to log_path (opened for append).
+
+    Result("detached", data {"pid": int}); Result("detach_failed", reason) for a middle that
+    printed something else, exited non-zero (the tail of its stderr), timed out or could not run;
+    Result("detach_unsupported") on Windows, where the Job Object / host path is used instead."""
+    if WINDOWS:
+        return Result("detach_unsupported", "detach is POSIX only; Windows starts outside the chat's "
+                      "job through the host")
+    command = [sys.executable, "-I", "-c", DETACH, str(cwd), str(log_path), *[str(a) for a in argv]]
+    try:
+        done = subprocess.run(command, env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                              check=False, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return Result("detach_failed", f"the middle process timed out after {timeout} s",
+                      {"argv": [str(a) for a in argv]})
+    except (OSError, subprocess.SubprocessError, ValueError) as error:
+        return Result("detach_failed", f"the middle process could not run: {error}",
+                      {"argv": [str(a) for a in argv]})
+    out = (done.stdout or "").strip()
+    err = (done.stderr or "").strip()[-300:]
+    if done.returncode != 0:
+        return Result("detach_failed", f"the middle process exited with {done.returncode}: {err}",
+                      {"argv": [str(a) for a in argv], "returncode": done.returncode})
+    if not out.isascii() or not out.isdigit():
+        return Result("detach_failed", f"the middle process printed {out[-100:]!r}, not a pid: {err}",
+                      {"argv": [str(a) for a in argv]})
+    return Result("detached", f"process {out}", {"pid": int(out)})

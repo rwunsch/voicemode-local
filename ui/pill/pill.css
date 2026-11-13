@@ -55,3 +55,6 @@ html,body{height:100%}
 .wake:hover:not(:disabled),.wake.hover:not(:disabled){color:var(--g);border-color:var(--g)}
 .main .wakeicon{display:flex;align-items:center;justify-content:center}
 .main .sun{display:block;margin:auto}
+
+/* A barge click is shown at once, dimmed, until the backend agrees (model.js bargeShown). */
+#barge.pending { opacity: 0.6; }

@@ -789,3 +789,27 @@ def test_a_repause_that_could_not_be_sent_waits_for_the_next_backend(tmp_path, m
     app.spawn, app.send = spawn, send
     app.supervise()
     assert sent == ['{"cmd":"pause"}', '{"cmd":"pause"}']
+
+
+def test_a_click_leaves_a_line_at_each_hop_in_the_window_log(monkeypatch):
+    """Mac, 2026-11-13: a barge click seemed to do nothing, and nothing in pill-window.log could
+    tell a dropped click from a late one. The page's own log lines and each command handed to the
+    backend are written, so a repeat shows which hop was missing or late."""
+    app = m.App(False, [sys.executable, "-c", "pass"])
+    lines, sent = [], []
+    app.log = lines.append
+    app.send = lambda line: sent.append(line) or True
+    app.from_page('{"window": {"log": "click barge off"}}')
+    app.from_page('{"cmd": "set_barge", "on": false}')
+    app.from_page('{"cmd": "save_ui", "ui": {}}')
+    app.from_page('{"window": {"log": "barge shown off"}}')
+    assert lines == ["page: click barge off", "cmd -> backend: set_barge", "page: barge shown off"]
+    assert sent == ['{"cmd": "set_barge", "on": false}', '{"cmd": "save_ui", "ui": {}}']
+
+
+def test_a_page_log_line_is_kept_short(monkeypatch):
+    app = m.App(False, [sys.executable, "-c", "pass"])
+    lines = []
+    app.log = lines.append
+    app.from_page(json.dumps({"window": {"log": "x" * 1000}}))
+    assert len(lines) == 1 and len(lines[0]) <= 220

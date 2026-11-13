@@ -35,7 +35,8 @@ Result codes
   pre_start_refused (nothing else is done: no lease); then on Windows services.ensure_services's (which reaches ensure_host under the lock);
   elsewhere ensure_services's, then for each helper of this platform its start_helper Result
   followed by the Results in its data["results"].
-- watch_tick / the host's look (watch.log): service_restarted, service_restart_failed,
+- watch_tick / the host's look (watch.log): service_restarted, service_restart_failed (on POSIX
+  also a failed procs.detach, its Result in data["detach"]),
   restart_port_taken (POSIX: said once and left for the next connector; host: started on another
   port, service_moved), restart_limit_reached (said once per run of the limit; on the host also
   for a service that could not be started at all, which is tried at most restart_limit[0] times
@@ -70,9 +71,9 @@ from pathlib import Path
 from . import hooks as hook_calls
 from .helpers import PLATFORM, read_mode, running_commands, start_helper, stop_helper
 from .hooks import Hooks, load_hooks
-from .procs import (WINDOWS, background_options, kill_tree, owned, port_free, process_command,
+from .procs import (WINDOWS, background_options, detach, kill_tree, owned, port_free, process_command,
                     require_psutil)
-from .procs import stop_signals_held, unblock_stop_signals
+from .procs import stop_signals_held
 from .profile import HostProfile, blocking, load_profile
 from .result import Result
 from .services import (HOST_PID, HOST_STARTS, STOPPED, ensure_services, service_environment, start_missing_services,
@@ -132,8 +133,9 @@ def _recorded(entry) -> bool:
 def restart_dead_services(profile: HostProfile, hooks: Hooks, state: dict, watch: WatchState, now: float,
                           results: list) -> set[str]:
     """Start each recorded service that died again, with its recorded command on its recorded port,
-    at most restart_limit[0] times in restart_limit[1] seconds, as a child of this process (in the
-    services' Job Object on Windows). The caller holds the lock and writes nothing else. Returns the
+    at most restart_limit[0] times in restart_limit[1] seconds, as a child of this process in the
+    services' Job Object on Windows, through procs.detach on POSIX (so a restarted service is no
+    descendant of a chat either). The caller holds the lock and writes nothing else. Returns the
     services whose recorded port another program now holds (each restart_port_taken, said once):
     the caller decides whether to start them on another port."""
     count, window = profile.restart_limit
@@ -173,16 +175,20 @@ def restart_dead_services(profile: HostProfile, hooks: Hooks, state: dict, watch
         if problem is not None:
             results.append(problem)
         log = entry.get("log") if isinstance(entry.get("log"), str) else str(Path(profile.run_dir) / f"{kind}.log")
-        extra = {} if WINDOWS else {"preexec_fn": unblock_stop_signals}
         watch.restarts[kind].append(now)
         with stop_signals_held():
             try:
                 working_dir.mkdir(parents=True, exist_ok=True)
-                with open(log, "a") as output:
-                    process, spawned = spawn([str(a) for a in entry["command"]], job,
-                                             env=service_environment(env), cwd=str(working_dir),
-                                             stdin=subprocess.DEVNULL, stdout=output, stderr=output,
-                                             **background_options(), **extra)
+                if WINDOWS:
+                    with open(log, "a") as output:
+                        process, spawned = spawn([str(a) for a in entry["command"]], job,
+                                                 env=service_environment(env), cwd=str(working_dir),
+                                                 stdin=subprocess.DEVNULL, stdout=output, stderr=output,
+                                                 **background_options())
+                else:
+                    # The middle unblocks the held stop signals in the service.
+                    process, spawned = None, detach([str(a) for a in entry["command"]], str(working_dir), log,
+                                                    env=service_environment(env))
             except SpawnError as error:
                 results.append(error.result)
                 continue
@@ -190,17 +196,23 @@ def restart_dead_services(profile: HostProfile, hooks: Hooks, state: dict, watch
                 results.append(Result("service_restart_failed", f"{kind}: {entry['command']}: {error}",
                                       {"service": kind, "log": log}))
                 continue
-            if spawned.code not in ("no_job", "breakaway"):
+            if process is None and spawned.code != "detached":
+                results.append(Result("service_restart_failed", f"{kind}: {entry['command']}: {spawned.detail}",
+                                      {"service": kind, "log": log,
+                                       "detach": {"code": spawned.code, "detail": spawned.detail}}))
+                continue
+            pid = process.pid if process is not None else spawned.data["pid"]
+            if process is not None and spawned.code not in ("no_job", "breakaway"):
                 results.append(spawned)
-            entry["pid"] = process.pid
+            entry["pid"] = pid
             if not write_state(profile, state, results):
-                failed = kill_tree(process.pid, profile.stop_timeout)
+                failed = kill_tree(pid, profile.stop_timeout)
                 if failed is not None:
                     results.append(failed)
                 entry["pid"] = old
                 continue
-        results.append(Result("service_restarted", f"restarted {kind} on port {port}: process {process.pid} "
-                              f"(was {old})", {"service": kind, "port": port, "pid": process.pid, "was": old}))
+        results.append(Result("service_restarted", f"restarted {kind} on port {port}: process {pid} "
+                              f"(was {old})", {"service": kind, "port": port, "pid": pid, "was": old}))
     return taken
 
 

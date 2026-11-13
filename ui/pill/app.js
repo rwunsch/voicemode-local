@@ -4,6 +4,7 @@
 // {"window":{"drag":true}}. "hidden" is sent once on Dismiss; the wrapper then hides the window.
 (function () {
   var M = window.PillModel, $ = function (id) { return document.getElementById(id); };
+  var bargePending = null, bargeLastShown = null;
   var hidden = false, snapshot = null, lastSeen = null, ui = null, lastMode = null, lastPhase = null, floorPid = null, filled = false;
 
   function send(obj) {
@@ -76,8 +77,16 @@
     $("tab").textContent = vm.side === "left" ? "\u203A" : "\u2039";
     fill($("voice"), vm.voices, vm.voice); fill($("language"), vm.languages, vm.language); filled = true;
     $("bargeRow").style.display = vm.barge.visible ? "" : "none";
-    $("barge").textContent = vm.barge.on ? "On" : "Off";
-    $("barge").setAttribute("aria-checked", String(vm.barge.on));
+    var bs = M.bargeShown(vm.barge.on, bargePending, Date.now());
+    bargePending = bs.keep;
+    $("barge").textContent = bs.on ? "On" : "Off";
+    $("barge").setAttribute("aria-checked", String(bs.on));
+    $("barge").setAttribute("aria-busy", String(bs.pending));
+    $("barge").classList.toggle("pending", bs.pending);
+    if (bs.on !== bargeLastShown) { // the window log shows when the switch changed on screen
+      bargeLastShown = bs.on;
+      send({ window: { log: "barge shown " + (bs.on ? "on" : "off") + (bs.pending ? " (pending)" : "") } });
+    }
     $("beeps").textContent = vm.beeps.on ? "On" : "Off";
     $("beeps").setAttribute("aria-checked", String(vm.beeps.on));
     $("count").textContent = vm.barge.visible ? vm.barge.countText : "";
@@ -118,7 +127,13 @@
   $("dismiss").onclick = function () { send({ cmd: "dismiss" }); hidden = true; send({ window: { mode: "hidden" } }); render(); };
   $("voice").onchange = function () { send({ cmd: "set_voice", voice: this.value }); this.blur(); };
   $("language").onchange = function () { send({ cmd: "set_language", language: this.value }); this.blur(); };
-  $("barge").onclick = function () { send({ cmd: "set_barge", on: !(snapshot && snapshot.barge && snapshot.barge.enabled) }); };
+  $("barge").onclick = function () {
+    var shown = M.bargeShown(snapshot && snapshot.barge && snapshot.barge.enabled, bargePending, Date.now()).on;
+    bargePending = { on: !shown, at: Date.now() };
+    send({ window: { log: "click barge " + (!shown ? "on" : "off") } });
+    send({ cmd: "set_barge", on: !shown });
+    render();
+  };
   $("beeps").onclick = function () { send({ cmd: "set_beeps", on: !(snapshot && snapshot.beeps) }); };
   $("expand").onclick = function () { if (ui && ui.docked) { saveUi({ dockOpen: true }); return; } saveUi({ expanded: !(ui && ui.expanded) && !(ui && ui.docked), docked: false }); };
   $("minimize").onclick = function () { saveUi({ minimized: true }); };
