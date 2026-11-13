@@ -583,6 +583,17 @@ def _host_starts(profile: HostProfile, results: list) -> list | None:
     return starts
 
 
+def _drop_failures(profile: HostProfile, results: list) -> None:
+    """A new host is about to start: the {"failed": ...} records in state.json belong to a host
+    that ended (a reboot, a kill, a crash), and only the live host's count, or a connector would
+    fail at once on a failure the new host never met. The caller holds the lock."""
+    state = read_state(profile, results)
+    kept = {kind: entry for kind, entry in state.items()
+            if not (isinstance(entry, dict) and "failed" in entry)}
+    if kept != state:
+        write_state(profile, kept, results)
+
+
 def ensure_host(profile: HostProfile, results: list) -> bool:
     """Start the host once per install unless run/host.pid is a live process carrying host_marker.
     The caller holds the service lock, so two connectors start one host. True when it runs.
@@ -605,6 +616,7 @@ def ensure_host(profile: HostProfile, results: list) -> bool:
     starts = _host_starts(profile, results)
     if starts is None:
         return False
+    _drop_failures(profile, results)
     started = start_host(profile)
     results.append(started)
     results.extend(r for r in started.data.get("results", []) if isinstance(r, Result))

@@ -966,3 +966,33 @@ def test_the_host_starts_a_helper_only_while_a_lease_is_live(tmp_path, monkeypat
     assert checks[0]() is False
     monkeypatch.setattr(host, "live_leases", lambda profile: [11])
     assert checks[0]() is True
+
+
+# ----- re-review: a failure recorded by a host that ended uncleanly is not the new host's ---------
+
+
+def test_a_stale_failure_from_a_dead_host_does_not_fail_the_next_launch(tmp_path, monkeypatch):
+    """Re-review of I1: a {"failed"} record outlives a host that ended uncleanly (a reboot, a kill, a
+    crash after a failed start). The next connector starts a new host, and wait_until_ready read
+    the old record before the new host's first look: the launch failed at once."""
+    profile = make_profile(tmp_path / "voice", start_timeout=0.05)
+    profile.run_dir.mkdir(parents=True)
+    Path(profile.runtime_dir).mkdir(parents=True, exist_ok=True)
+    (Path(profile.runtime_dir) / ".complete.json").write_text("{}")
+    host.atomic_json(profile.run_dir / "state.json", {
+        "tts": {"failed": "no_free_port", "detail": "tts: tried 28880 to 28899", "data": {}},
+        "stt": {"failed": "no_free_port", "detail": "stt: tried 22022 to 22041", "data": {}},
+        "barge": {"pid": 77, "port": None, "marker": "voice_barge"}})
+    monkeypatch.setattr(services, "WINDOWS", True)
+    monkeypatch.setattr(host, "WINDOWS", True)
+    monkeypatch.setattr(services, "require_psutil", lambda: None)
+    monkeypatch.setattr(host, "require_psutil", lambda: None)
+    monkeypatch.setattr(host, "process_command", lambda pid: None)   # the old host is gone
+    started = []
+    monkeypatch.setattr(host, "start_host", lambda p: started.append(1) or Result("host_started", "h", {"pid": 4242}))
+    monkeypatch.setattr(services.time, "sleep", lambda s: None)
+    ports, results = services.ensure_services(profile, 11)
+    assert started == [1]
+    assert "no_free_port" not in codes(results)                     # the new host has not looked yet
+    assert codes(results).count("service_not_ready") == 2           # so the connector waited for it
+    assert read_state(profile) == {"barge": {"pid": 77, "port": None, "marker": "voice_barge"}}
