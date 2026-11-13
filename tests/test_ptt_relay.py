@@ -313,3 +313,13 @@ def test_two_relays_creating_the_token_at_once_agree(relay, tmp_path, monkeypatc
         return real_open(p, flags, *a)
     monkeypatch.setattr(relay.os, "open", racing_open)
     assert relay.load_or_create_token(path) == "cd" * 32
+
+
+def test_a_token_file_with_non_ascii_bytes_is_replaced(relay, tmp_path):
+    # Talos 2026-11-13: an undecodable file left text None, so creation hit FileExistsError and
+    # the re-read raised UnicodeDecodeError: the relay could not start.
+    path = tmp_path / "ptt-relay.token"
+    path.write_bytes(b"\xff\xfe\xc3\x28 not ascii")
+    token = relay.load_or_create_token(path)
+    assert re.fullmatch(r"[0-9a-f]{64}", token) and path.read_text().strip() == token
+    assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
