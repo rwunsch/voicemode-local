@@ -123,13 +123,13 @@ def test_progress_stops_when_the_call_ends():
 
     async def go():
         async with mp.heartbeat(ctx_getter=lambda: ctx, interval=0.05):
-            await asyncio.sleep(0.06)
+            await asyncio.sleep(0.5)  # wide: under full-suite load a 0.06 s window saw 0 beats
         n = len(ctx.calls)
-        await asyncio.sleep(0.15)
+        await asyncio.sleep(0.25)
         return n
     n_at_end = _run(go())
-    assert n_at_end == 1
-    assert len(ctx.calls) == n_at_end
+    assert n_at_end >= 1                  # it beat while the call ran
+    assert len(ctx.calls) == n_at_end     # and not once after it ended
 
 
 def test_no_context_means_no_heartbeat():
