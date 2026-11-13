@@ -317,3 +317,16 @@ test("German stays listed while it is the session's language, even when not avai
   const en = viewModel(snap({ language: "English", german_available: false }), 0, 0);
   assert.deepEqual(en.languages, ["English"]);
 });
+
+test("a barge click shows the wanted state at once, as pending, until the backend agrees", () => {
+  const { bargeShown, PENDING_MS } = model;
+  // no click: the backend's state
+  assert.deepEqual(bargeShown(true, null, 0), { on: true, pending: false, keep: null });
+  // clicked off at t=1000, backend still on: shown off, pending
+  const p = { on: false, at: 1000 };
+  assert.deepEqual(bargeShown(true, p, 1500), { on: false, pending: true, keep: p });
+  // backend agrees: pending ends
+  assert.deepEqual(bargeShown(false, p, 1800), { on: false, pending: false, keep: null });
+  // backend never agrees: after PENDING_MS the real state shows again
+  assert.deepEqual(bargeShown(true, p, 1000 + PENDING_MS + 1), { on: true, pending: false, keep: null });
+});

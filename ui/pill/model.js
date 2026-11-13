@@ -101,6 +101,18 @@
     return !(snapshotVisible === true && (wasStale || prevVisible === false));
   }
 
+  // A barge click: the switch shows the wanted state at once, marked pending, until a snapshot
+  // agrees or PENDING_MS passes (Mac, 2026-11-13: the label waited 1-2 s for the next tick, and
+  // a click with no visible change read as "I can't click it"). keep is what the page holds on to.
+  var PENDING_MS = 5000;
+  function bargeShown(enabled, pending, now) {
+    enabled = !!enabled;
+    if (!pending || pending.on === enabled || now - pending.at > PENDING_MS) {
+      return { on: enabled, pending: false, keep: null };
+    }
+    return { on: !!pending.on, pending: true, keep: pending };
+  }
+
   // What an incoming message is: the tray's "restore", a command the window could not
   // deliver ("dropped": the backend is restarting), another window message, or a snapshot.
   function incomingKind(s) {
@@ -110,7 +122,7 @@
     return "snapshot";
   }
 
-  var api = { incomingKind: incomingKind, nextHidden: nextHidden, viewModel: viewModel, VOICES: VOICES, GERMAN_VOICES: GERMAN_VOICES, LANGUAGES: LANGUAGES, STALE_MS: STALE_MS };
+  var api = { bargeShown: bargeShown, PENDING_MS: PENDING_MS, incomingKind: incomingKind, nextHidden: nextHidden, viewModel: viewModel, VOICES: VOICES, GERMAN_VOICES: GERMAN_VOICES, LANGUAGES: LANGUAGES, STALE_MS: STALE_MS };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   if (typeof window !== "undefined") window.PillModel = api;
 })();

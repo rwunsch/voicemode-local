@@ -534,9 +534,13 @@ document.addEventListener('DOMContentLoaded',function(){
         // A command the backend cannot take now (restarting, or its pipe broke) is not kept
         // to replay later, where a Stop could land on a turn it was never meant for: the page
         // hears at once that it went nowhere, and shows itself disconnected.
-        if (m.TryGetValue("cmd", out v) && !Send(stdin, text)) {
-            Log("command not delivered, no backend: " + v);
-            if (!closing && ctl != null) ctl.CoreWebView2.PostWebMessageAsString(Dropped(Convert.ToString(v)));
+        if (m.TryGetValue("cmd", out v)) {
+            if (Send(stdin, text)) {
+                if (Convert.ToString(v) != "save_ui") Log("cmd -> backend: " + v); // save_ui: every drag and resize
+            } else {
+                Log("command not delivered, no backend: " + v);
+                if (!closing && ctl != null) ctl.CoreWebView2.PostWebMessageAsString(Dropped(Convert.ToString(v)));
+            }
         }
     }
 
@@ -555,6 +559,9 @@ document.addEventListener('DOMContentLoaded',function(){
 
     void OnWindowMessage(Dictionary<string, object> w) {
         object v;
+        // The page's own trace (a click, a switch changing on screen): with "cmd -> backend" below,
+        // a repeat shows which hop of a click was missing or late (Mac, 2026-11-13; same here).
+        if (w.TryGetValue("log", out v) && v is string) { var t = (string)v; Log("page: " + (t.Length > 200 ? t.Substring(0, 200) : t)); return; }
         if (w.ContainsKey("drag")) { StartDrag(); return; }
         if (w.ContainsKey("slide")) { SlideOut(); return; }
         if (w.TryGetValue("phase", out v) && v is string) { phase = (string)v; UpdateTray(); return; }
