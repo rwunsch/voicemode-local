@@ -17,6 +17,17 @@ SCHEMA_VERSION = 1
 # The hooks a profile may name (each a plain-data function, see hooks.py).
 HOOK_NAMES = ("resolve_runtime", "environment", "service_command", "prepare_home",
               "pre_start", "read_mode", "on_result")
+# The services every profile has, and the readiness answers check_service understands.
+SERVICE_KINDS = ("tts", "stt")
+READY_KINDS = ("kokoro", "whisper")
+# validate() findings that refuse a start (ensure and the host); hook_unknown is only reported.
+BLOCKING = ("port_range_reserved", "port_ranges_overlap", "port_range_bad", "service_missing",
+            "ready_kind_unknown")
+
+
+def blocking(results) -> bool:
+    """True when validate()'s findings include one that must refuse a start."""
+    return any(r.code in BLOCKING for r in results)
 
 
 @dataclass(frozen=True)
@@ -110,9 +121,25 @@ class HostProfile:
 
     # -- validation ----------------------------------------------------
     def validate(self) -> list[Result]:
+        """Findings about the profile itself. ensure() and host_main() call it and refuse to start
+        on any code in BLOCKING; hook_unknown is reported and the hook is ignored."""
         out: list[Result] = []
+        for kind in SERVICE_KINDS:
+            if kind not in self.services:
+                out.append(Result("service_missing", f"the profile has no {kind!r} service", {"service": kind}))
+        for key, spec in self.services.items():
+            if spec.ready_kind not in READY_KINDS:
+                out.append(Result("ready_kind_unknown", f"{key}: ready_kind {spec.ready_kind!r} is not one of "
+                                  f"{', '.join(READY_KINDS)}", {"service": key, "ready_kind": spec.ready_kind}))
         reserved = set(BASE_RESERVED_PORTS) | set(self.reserved_ports)
-        ranges = {k: s.port_range for k, s in self.services.items()}
+        ranges = {}
+        for key, spec in self.services.items():
+            lo, hi = spec.port_range
+            if not (isinstance(lo, int) and isinstance(hi, int) and 1 <= lo <= hi <= 65535):
+                out.append(Result("port_range_bad", f"{key} range {lo}-{hi}: give 1 <= first <= last <= 65535",
+                                  {"service": key, "range": [lo, hi]}))
+                continue
+            ranges[key] = (lo, hi)
         for key, (lo, hi) in ranges.items():
             hit = sorted(p for p in reserved if lo <= p <= hi)
             if hit:

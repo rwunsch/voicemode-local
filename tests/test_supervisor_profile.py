@@ -260,3 +260,40 @@ def test_a_helpers_status_argv_round_trips_and_is_optional(tmp_path):
     f.write_text(json.dumps(data))
     loaded, problems = load_profile(f)
     assert problems == [] and loaded.helpers["barge"].status_argv == []
+
+
+# ----- final review I4 / T1: what validate() checks, and which findings refuse a start ----------
+
+
+@pytest.mark.parametrize("bad_range", [(8899, 8890), (0, 10), (65530, 65540)])
+def test_validate_flags_a_backwards_or_out_of_bounds_range(bad_range):
+    from vml_supervisor.profile import ServiceSpec
+    p = make_profile()
+    tts = ServiceSpec(["x"], "x", bad_range, "/", "kokoro")
+    bad = make_profile(services={"tts": tts, "stt": p.services["stt"]})
+    assert "port_range_bad" in [r.code for r in bad.validate()]
+
+
+@pytest.mark.parametrize("missing", ["tts", "stt"])
+def test_validate_needs_both_services(missing):
+    p = make_profile()
+    bad = make_profile(services={k: v for k, v in p.services.items() if k != missing})
+    found = [(r.code, r.data.get("service")) for r in bad.validate()]
+    assert ("service_missing", missing) in found
+
+
+def test_validate_flags_an_unknown_ready_kind():
+    from vml_supervisor.profile import ServiceSpec
+    p = make_profile()
+    stt = ServiceSpec(["x"], "x", (9010, 9019), "/", "vosk")
+    bad = make_profile(services={"tts": p.services["tts"], "stt": stt})
+    assert "ready_kind_unknown" in [r.code for r in bad.validate()]
+
+
+def test_blocking_names_the_findings_that_refuse_a_start():
+    from vml_supervisor.profile import blocking
+    from vml_supervisor.result import Result
+    for code in ("port_range_reserved", "port_ranges_overlap", "port_range_bad", "service_missing",
+                 "ready_kind_unknown"):
+        assert blocking([Result(code)]) is True
+    assert blocking([Result("hook_unknown", "bogus")]) is False and blocking([]) is False

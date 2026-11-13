@@ -26,12 +26,9 @@ def _int_from_text(text):
         return None
 
 
-def port_candidates(profile: HostProfile, kind: str) -> tuple[list[int], Result | None]:
-    spec = profile.services.get(kind)
-    if spec is None:
-        return [], Result("unknown_service", f"the profile has no {kind!r} service", {"service": kind})
-    lo, hi = spec.port_range
-    base = list(range(lo, hi + 1))
+def _override(profile: HostProfile, kind: str):
+    """(value, source, problem): the override's port for this kind when one is set and usable,
+    else (None, source, the Result saying why it is unusable, or None when none is set)."""
     reserved = set(BASE_RESERVED_PORTS) | set(profile.reserved_ports)
     override = profile.port_override
     source = ""
@@ -41,15 +38,15 @@ def port_candidates(profile: HostProfile, kind: str) -> tuple[list[int], Result 
         try:
             raw = json.loads(override.path.read_text(encoding="utf-8-sig"))
         except FileNotFoundError:
-            return base, None
+            return None, source, None
         except (OSError, ValueError) as error:
-            return base, Result("port_override_invalid", f"{source} cannot be read as JSON: {error}",
-                                {"source": source})
+            return None, source, Result("port_override_invalid", f"{source} cannot be read as JSON: {error}",
+                                        {"source": source})
         if not isinstance(raw, dict):
-            return base, Result("port_override_invalid", f"{source} must be a JSON object keyed by "
-                                "service kind", {"source": source})
+            return None, source, Result("port_override_invalid", f"{source} must be a JSON object keyed by "
+                                        "service kind", {"source": source})
         if raw.get(kind) is None:
-            return base, None
+            return None, source, None
         value = raw[kind]
     elif override.kind == "env":
         # keys are positional by service kind: (tts, stt)
@@ -58,18 +55,36 @@ def port_candidates(profile: HostProfile, kind: str) -> tuple[list[int], Result 
         source = name or ""
         text = os.environ.get(name) if name else None
         if text is None or not text.strip():
-            return base, None
+            return None, source, None
         value = _int_from_text(text)
         if value is None:
-            return base, Result("port_override_invalid", f"{name}={text!r} is not a number",
-                                {"source": source, "value": text})
+            return None, source, Result("port_override_invalid", f"{name}={text!r} is not a number",
+                                        {"source": source, "value": text})
     else:
-        return base, None
+        return None, source, None
     if not _usable(value, reserved):
-        return base, Result("port_override_invalid",
-                            f"{source} sets {kind} to {value!r}; use a number from 1024 to 65535 "
-                            f"other than {', '.join(map(str, sorted(reserved)))}",
-                            {"source": source, "value": value})
+        return None, source, Result("port_override_invalid",
+                                    f"{source} sets {kind} to {value!r}; use a number from 1024 to 65535 "
+                                    f"other than {', '.join(map(str, sorted(reserved)))}",
+                                    {"source": source, "value": value})
+    return value, source, None
+
+
+def requested_port(profile: HostProfile, kind: str) -> tuple[int | None, str]:
+    """(the port the override asks for, its source), or (None, source) when none usable is set."""
+    value, source, _ = _override(profile, kind)
+    return value, source
+
+
+def port_candidates(profile: HostProfile, kind: str) -> tuple[list[int], Result | None]:
+    spec = profile.services.get(kind)
+    if spec is None:
+        return [], Result("unknown_service", f"the profile has no {kind!r} service", {"service": kind})
+    lo, hi = spec.port_range
+    base = list(range(lo, hi + 1))
+    value, _, problem = _override(profile, kind)
+    if value is None:
+        return base, problem
     return [value, *[p for p in base if p != value]], None
 
 
