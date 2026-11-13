@@ -78,6 +78,7 @@ Every operation returns `Result(code, detail, data)` objects instead of raising.
 |---|---|
 | `breakaway` | A Windows process was started outside its parent's job. |
 | `breakaway_refused` | The parent's job forbids breakaway; the child also dies with the parent. |
+| `cleanup_failed` | Stopping a process while an interrupt was handled failed; the interrupt still propagated, with this on its `cleanup_results`. |
 | `helper_command_bad` | A helper's command could not be built or started. |
 | `helper_not_running` | A helper was asked to stop and was not running. |
 | `helper_not_started` | The host did not start a helper: no connector lease was live under the lock. |

@@ -122,6 +122,22 @@ def stop_entry(profile: HostProfile, entry) -> Result | None:
     return kill_tree(entry["pid"], profile.stop_timeout)
 
 
+def cleanup_for_interrupt(original: BaseException, action, results: list) -> None:
+    """Run `action` (returns a Result or None) while `original` (an interrupt) is being handled. A
+    failure of the cleanup, returned or raised, is recorded in `results` and on the interrupt as
+    `cleanup_results`; it never replaces the interrupt, which the caller then re-raises."""
+    try:
+        failed = action()
+    except Exception as error:  # the interrupt must survive a failing cleanup
+        failed = Result("cleanup_failed", f"{type(error).__name__}: {error}")
+    if failed is not None:
+        results.append(failed)
+        try:
+            original.cleanup_results = [*getattr(original, "cleanup_results", []), failed]
+        except AttributeError:
+            pass
+
+
 def stop_recorded(profile: HostProfile, state: dict) -> list[Result]:
     """Stop every recorded service and write the emptied state. The caller holds the lock."""
     results = []
@@ -348,11 +364,12 @@ def _start(profile, hooks, kind, port, runtime, env, working_dir, job, state, re
         except BaseException as error:
             # On Windows a venv's python.exe starts the real interpreter as a child: stop the tree.
             state.pop(kind, None)
+            if not isinstance(error, Exception):
+                cleanup_for_interrupt(error, lambda: kill_tree(process.pid, profile.stop_timeout), results)
+                raise
             failed = kill_tree(process.pid, profile.stop_timeout)
             if failed is not None:
                 results.append(failed)
-            if not isinstance(error, Exception):
-                raise
             results.append(Result("state_write_failed", f"{kind}: {error}; process {process.pid} was stopped",
                                   {"service": kind, "pid": process.pid}))
             return None

@@ -56,7 +56,7 @@ from .hooks import Hooks, load_hooks
 from .procs import WINDOWS, background_options, owned, stop_signals_held, unblock_stop_signals
 from .profile import HelperSpec, HostProfile
 from .result import Result
-from .services import service_environment, stop_entry
+from .services import cleanup_for_interrupt, service_environment, stop_entry
 from .state import read_state, service_lock, write_state
 from .winjob import SpawnError, services_job, spawn
 
@@ -321,9 +321,10 @@ def start_helper(profile: HostProfile, kind: str, mode=_FROM_HOOK, hooks: Hooks 
                            "mode": mode, "command": command, "runtime": runtime}
             try:
                 written = write_state(profile, state, results)
-            except BaseException:
+            except BaseException as interrupt:
                 # Untracked, it would run beside the next one: stop it, then let the interrupt go on.
-                stop_entry(profile, state.pop(kind))
+                entry = state.pop(kind)
+                cleanup_for_interrupt(interrupt, lambda: stop_entry(profile, entry), results)
                 raise
             if not written:
                 failed = stop_entry(profile, state.pop(kind))

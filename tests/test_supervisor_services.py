@@ -771,3 +771,18 @@ def test_a_lock_that_cannot_be_taken_is_a_result(world, monkeypatch, call):
         ports, results = services.ensure_services(world.profile, world.connector.pid)
         assert ports == {}
     assert "service_lock_failed" in codes(results)
+
+
+def test_a_failing_cleanup_does_not_replace_the_interrupt(world, monkeypatch):
+    def interrupted(path, value):
+        raise SystemExit(3)
+
+    def cleanup_fails(pid, timeout):
+        raise RuntimeError("cannot kill")
+
+    monkeypatch.setattr(services, "atomic_json", interrupted)
+    monkeypatch.setattr(services, "kill_tree", cleanup_fails)
+    with pytest.raises(SystemExit) as caught:
+        ensure_services(world.profile, world.connector.pid)
+    assert caught.value.code == 3
+    assert [r.code for r in caught.value.cleanup_results] == ["cleanup_failed"]

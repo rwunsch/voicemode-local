@@ -432,3 +432,20 @@ def test_a_helper_record_names_its_runtime(tmp_path, monkeypatch):
     world = _helper_world(tmp_path, monkeypatch)
     assert helpers.start_helper(world.profile, "barge", "auto").code == "helper_started"
     assert state_of(world)["barge"]["runtime"] == str(world.profile.runtime_dir)
+
+
+def test_a_failing_cleanup_does_not_replace_the_interrupt(tmp_path, monkeypatch):
+    from vml_supervisor import state as state_module
+    world = _helper_world(tmp_path, monkeypatch)
+
+    def interrupted(path, value):
+        raise KeyboardInterrupt
+
+    def cleanup_fails(profile, entry):
+        raise RuntimeError("cannot stop")
+    monkeypatch.setattr(state_module, "atomic_json", interrupted)
+    monkeypatch.setattr(helpers, "stop_entry", cleanup_fails)
+    with pytest.raises(KeyboardInterrupt) as caught:
+        helpers.start_helper(world.profile, "barge", "auto")
+    assert [r.code for r in caught.value.cleanup_results] == ["cleanup_failed"]
+    assert "cannot stop" in caught.value.cleanup_results[0].detail
