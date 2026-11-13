@@ -618,9 +618,11 @@ def test_voice_stop_removes_this_session(st, monkeypatch):
     barge = types.ModuleType("voice_mode.voice_barge")
     barge.barge_control = lambda a: a
     pkg = types.ModuleType("voice_mode")
-    pkg.voice_pill_state = st
+    autostart = types.ModuleType("voice_mode.pill_autostart")
+    pkg.voice_pill_state, pkg.pill_autostart = st, autostart
     for name, mod in (("voice_mode", pkg), ("voice_mode.server", server),
-                      ("voice_mode.voice_barge", barge), ("voice_mode.voice_pill_state", st)):
+                      ("voice_mode.voice_barge", barge), ("voice_mode.voice_pill_state", st),
+                      ("voice_mode.pill_autostart", autostart)):
         monkeypatch.setitem(sys.modules, name, mod)
     spec = importlib.util.spec_from_file_location("vbt_pill", PATCHES / "voice_barge_tool.py")
     mod = importlib.util.module_from_spec(spec)

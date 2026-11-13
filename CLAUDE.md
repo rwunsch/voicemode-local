@@ -114,6 +114,8 @@ been tested.
 
 When the user says "stop voice mode", call the `voice_stop` MCP tool and continue in text.
 
+When the user asks to show or hide the voice pill, call the `voice_pill` MCP tool (show / hide / status).
+
 ## Never End a Voice Conversation on Your Own Initiative
 
 Only the **user** ends a voice conversation (e.g. "goodbye", "that's all",
