@@ -217,6 +217,12 @@ audio length**, and compute mode changes the answer: GPU whisper `small` here is
 median 1.1s / p95 3.6s / max 6.6s (n=67), which is what 15 was sized on. Takes effect on a fresh voice-mode process (`/mcp` → reconnect;
 no full Claude Code restart needed).
 
+The same patch makes upstream's hardcoded **30s TTS timeout** configurable
+(`VOICEMODE_TTS_TIMEOUT`, `VOICEMODE_TTS_TIMEOUT_LOCAL`; defaults unchanged). A loaded
+local Kokoro can need longer for one long sentence (Windows 2026-11-13, n=1: 12.4s of
+audio in 40.9s), and with streaming off while barge-in may listen, the whole sentence
+must finish inside that timeout.
+
 Root cause is still open — see `docs/stt-61s-stall/README.md` for what has
 already been ruled out by measurement, so it doesn't get re-proposed.
 
