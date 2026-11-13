@@ -1,5 +1,6 @@
 """Mac pill wrapper: the logic that needs no GUI. pywebview is not imported here."""
 import importlib.util
+import json
 import sys
 from pathlib import Path
 
@@ -710,3 +711,53 @@ def test_backend_done_closes_the_window_for_good():
 def test_backend_done_matches_the_backend():
     backend = Path(__file__).resolve().parent.parent / "patches" / "voice_pill.py"
     assert f"EXIT_DONE = {m.BACKEND_DONE}\n" in backend.read_text()
+
+
+def _app_for_send():
+    app = m.App(False, [sys.executable, "-c", "pass"])
+    app.page = []
+    app.to_page = app.page.append
+    return app
+
+
+def test_send_reports_a_missing_backend_stdin():
+    # Talos 2026-11-13: a Stop clicked just after the backend exits vanished without a trace.
+    app = _app_for_send()
+    app.stdin = None
+    assert app.send('{"cmd":"stop"}') is False
+
+
+def test_send_reports_a_failed_write_and_a_good_one():
+    class Broken:
+        def write(self, s): raise BrokenPipeError()
+        def flush(self): pass
+
+    class Good:
+        def __init__(self): self.out = []
+        def write(self, s): self.out.append(s)
+        def flush(self): pass
+
+    app = _app_for_send()
+    app.stdin = Broken()
+    assert app.send('{"cmd":"stop"}') is False
+    app.stdin = Good()
+    assert app.send('{"cmd":"stop"}') is True
+
+
+def test_a_stop_that_reaches_no_backend_tells_the_page_like_the_windows_pill():
+    # pill-windows.ps1: "command not delivered" is logged and {"window":{"dropped":cmd}} is posted.
+    app = _app_for_send()
+    app.stdin = None
+    app.from_page('{"cmd":"stop"}')
+    assert [json.loads(p) for p in app.page] == [{"window": {"dropped": "stop"}}]
+
+
+def test_a_delivered_command_does_not_tell_the_page_it_was_dropped():
+    class Good:
+        def write(self, s): pass
+        def flush(self): pass
+
+    app = _app_for_send()
+    app.stdin = Good()
+    app.from_page('{"cmd":"stop"}')
+    assert app.page == []

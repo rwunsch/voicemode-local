@@ -581,6 +581,9 @@ class App:
         if v is not None and self.state.on_snapshot(v):
             self.note_state()
             self.apply()
+        self.to_page(line)
+
+    def to_page(self, line):
         wv = self.webview()
         if wv is not None and self.page_ready:
             js = js_call("pillReceive", line)
@@ -588,20 +591,29 @@ class App:
             AppHelper.callAfter(wv.evaluateJavaScript_completionHandler_, js, None)  # not pywebview's eval wrapper
 
     def send(self, line):
-        """One JSON line to the backend's stdin; a backend that is gone is ignored."""
+        """One JSON line to the backend's stdin. False when there is no backend to write to
+        or the write failed: the caller decides whether that matters."""
         try:
-            if self.stdin:
-                self.stdin.write(line + "\n")
-                self.stdin.flush()
+            if not self.stdin:
+                return False
+            self.stdin.write(line + "\n")
+            self.stdin.flush()
+            return True
         except (OSError, ValueError):
-            pass
+            return False
 
     def from_page(self, text):
         r = route_page_message(text)
         if not r:
             return
         if r[0] == "cmd":
-            self.send(r[1])
+            # Never kept to replay later (a Stop could land on a turn it was not meant for):
+            # the page hears at once that it went nowhere, as in pill-windows.ps1.
+            if not self.send(r[1]):
+                cmd = json.loads(r[1]).get("cmd", "")
+                self.log(f"command not delivered, no backend: {cmd}")
+                if not self.closing:
+                    self.to_page(json.dumps({"window": {"dropped": cmd}}))
             return
         prev = self.state.mode
         if "mode" in r[1]:
