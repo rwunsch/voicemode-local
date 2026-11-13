@@ -74,15 +74,17 @@ def atomic_json(path, value) -> None:
 
 
 def read_json(path, default=None):
-    """(value, None); a missing file is (default, None); a corrupt one (default, Result)."""
+    """(value, None); a missing file is (default, None); a corrupt one (default, state_corrupt); an unreadable one (default, state_unreadable)."""
     path = Path(path)
     try:
         # utf-8-sig: Windows PowerShell 5.1 writes a byte-order mark, which plain utf-8 rejects.
         return json.loads(path.read_text(encoding="utf-8-sig")), None
     except FileNotFoundError:
         return default, None
-    except (ValueError, OSError):
+    except ValueError:  # includes UnicodeDecodeError: the content is the problem
         return default, Result("state_corrupt", str(path))
+    except OSError as error:  # a sharing violation or permission problem is not corruption
+        return default, Result("state_unreadable", f"{path}: {error}")
 
 
 def write_lease(profile: HostProfile, pid: int, data: dict) -> None:

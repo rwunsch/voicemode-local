@@ -161,3 +161,15 @@ def test_write_state_reports_a_failed_write(tmp_path, monkeypatch):
     monkeypatch.setattr(state_module, "atomic_json", denied)
     assert state_module.write_state(profile, {"a": 2}, results) is False
     assert [r.code for r in results] == ["state_write_failed"] and "denied" in results[0].detail
+
+
+def test_an_unreadable_state_file_is_not_called_corrupt(tmp_path, monkeypatch):
+    p = tmp_path / "s.json"
+    p.write_text("{}")
+
+    def refuse(self, *args, **kwargs):
+        raise PermissionError("sharing violation")
+
+    monkeypatch.setattr(type(p), "read_text", refuse)
+    value, err = read_json(p, {"d": 1})
+    assert value == {"d": 1} and err.code == "state_unreadable" and "sharing violation" in err.detail

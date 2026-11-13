@@ -22,7 +22,7 @@ Result codes
   job_unavailable (Windows: services start without the job), watchdog_not_configured,
   watch_marker_empty,
   watchdog_start_failed (POSIX; a watchdog whose pid could not be recorded is stopped),
-  state_corrupt (read as empty, under the lock), port_override_invalid, unknown_service,
+  state_corrupt / state_unreadable (read as empty, under the lock), port_override_invalid, unknown_service,
   override_port_taken (the override's port is taken: another is used), no_free_port,
   service_command_bad (empty marker: not started), service_command_unowned (the
   marker or `--port N` is missing from the command, so it could never be owned: not started),
@@ -34,7 +34,7 @@ Result codes
   in state.json: no_free_port, service_command_unowned, job_assign_failed, ...) at once, a recorded
   note (breakaway_refused) with a ready service, service_exited (also when the recorded process is
   gone before it answered), service_not_ready, owner_other, owner_unknown.
-- from release: service_lock_failed, lease_remove_failed, state_corrupt, kill_incomplete, psutil_missing,
+- from release: service_lock_failed, lease_remove_failed, state_corrupt, state_unreadable, kill_incomplete, psutil_missing,
   state_write_failed.
 - from stop: service_lock_failed, stop_marker_write_failed (run/stopped, which keeps a host from
   starting again until the next connector's ensure), host_marker_empty (run/host.pid is left alone), kill_incomplete (the host would not

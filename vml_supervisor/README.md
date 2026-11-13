@@ -141,6 +141,7 @@ Every operation returns `Result(code, detail, data)` objects instead of raising.
 | `service_start_failed` | A service could not be started. |
 | `services_stopped` | `stop` finished; data says what was running. |
 | `state_corrupt` | A state file is not valid JSON or not an object; read as empty. |
+| `state_unreadable` | A state file could not be read (sharing violation, permission); read as empty, not corrupt. |
 | `state_write_failed` | The state could not be written (a newly started service is killed). |
 | `stop_marker_remove_failed` | `run/stopped` could not be removed by a new connector. |
 | `stop_marker_write_failed` | `stop` could not write `run/stopped`; a running connector may start the host again. |

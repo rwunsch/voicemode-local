@@ -37,7 +37,7 @@ Result codes
   psutil_missing / process_list_unavailable (the process list could not be read: nothing was
   looked for), helper_command_bad (empty marker: nothing is looked for), unknown_helper.
 - start_helper and stop_helper return one Result; what else happened is in data["results"]:
-  hook_failed / hook_bad_return (a hook; its default was used), state_corrupt (read as empty),
+  hook_failed / hook_bad_return (a hook; its default was used), state_corrupt (read as empty), state_unreadable (read as empty),
   state_write_failed, job_unavailable (Windows: started without the job), breakaway_refused,
   job_assign_failed, resume_failed, kill_incomplete, helper_status_failed, and stop_unrecorded's
   codes.
