@@ -236,3 +236,19 @@ def test_pill_python_from_the_environment_is_used(monkeypatch):
     monkeypatch.setenv(pa.PYTHON_SETTING, "/opt/py")
     monkeypatch.setattr(st, "setting_came_from_a_file", lambda name: False)
     assert pa.backend_python() == "/opt/py" and pa.mac_python() == "/opt/py"
+
+
+def test_a_backend_whose_start_could_not_be_read_still_blocks_a_second_window(env):
+    """Talos re-review 2026-11-13 (the M3 rule, for the pill's own alive file): a backend that
+    wrote backend.json while process_start failed is still that backend while its pid lives."""
+    base, started = env
+    st._write_json(st._base(base) / "backend.json", {"pid": os.getpid(), "start": None, "start_unknown": True})
+    assert pa.ensure(base) is False and started == []
+
+
+def test_a_dead_backend_with_an_unknown_start_does_not_block(env):
+    base, started = env
+    p = subprocess.Popen([sys.executable, "-c", "pass"])
+    p.wait()
+    st._write_json(st._base(base) / "backend.json", {"pid": p.pid, "start": None, "start_unknown": True})
+    assert pa.ensure(base) is True

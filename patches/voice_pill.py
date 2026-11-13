@@ -647,7 +647,7 @@ def main(argv=None) -> int:
     st.enable_backend_mode()  # this process may sleep on a busy file; the server may not
     _install_stop_signals()
     alive_file = ctx.base / "backend.json"  # pill_autostart: a window is already up
-    st._write_json(alive_file, {"pid": os.getpid(), "start": st.process_start(os.getpid())})
+    st._write_json(alive_file, {"pid": os.getpid(), **st._identity(os.getpid())})  # start_unknown if ps failed
     code = 0
     try:
         code = run_stdio(ctx) or 0

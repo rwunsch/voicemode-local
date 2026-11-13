@@ -191,8 +191,17 @@ class MacHotkey:
         self._gen = 0          # bumped when a tail is sent early: its timer then does nothing
         self._idle_down = None      # when an idle press went down
         self._last_wake = None
+        # The tail timer fires on its own thread. Every state change AND its emission
+        # happen under this lock, so a timer that has taken the pending release cannot
+        # land it after a new hold_start (Talos re-review, 2026-11-13). Re-entrant:
+        # space() sends a pending release through _send_pending.
+        self._lock = threading.RLock()
 
     def space(self, down: bool, ts: float, mods: bool) -> None:
+        with self._lock:
+            self._space(down, ts, mods)
+
+    def _space(self, down: bool, ts: float, mods: bool) -> None:
         if down:
             if self._held or self._idle_down is not None or not mods:
                 return  # auto-repeat, or not our hotkey
@@ -224,16 +233,21 @@ class MacHotkey:
             self._send(action)
 
     def _send_pending(self, gen=None) -> None:
-        if gen is not None and gen != self._gen:
-            return   # a timer from an earlier hold: its release was already sent
-        action, self._pending = getattr(self, "_pending", None), None
-        self._gen += 1   # any timer still waiting belongs to a hold that is over
-        self._send(action)
+        with self._lock:   # check, take and emit as one step against space()
+            if gen is not None and gen != self._gen:
+                return   # a timer from an earlier hold: its release was already sent
+            action, self._pending = getattr(self, "_pending", None), None
+            self._gen += 1   # any timer still waiting belongs to a hold that is over
+            self._send(action)
 
     def release_held(self, ts: float) -> None:
         """The listener is stopping. If a hold is active, send hold_release at
         once (no tail: the process is exiting) so the server's hold is not left
         latched with the mic open. Otherwise nothing."""
+        with self._lock:
+            self._release_held(ts)
+
+    def _release_held(self, ts: float) -> None:
         self._idle_down = None
         if getattr(self, "_pending", None) is not None:   # a release waiting out its tail
             self._send_pending()

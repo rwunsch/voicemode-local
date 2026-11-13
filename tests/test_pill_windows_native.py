@@ -158,3 +158,58 @@ def test_native_without_a_data_dir_is_refused_on_stderr():
     # No folder is known, so there is no log to write to.
     out = _run_ps1("-BackendExe", "C:\\none\\python.exe", "-Force")
     assert out.returncode == 1 and b"needs -DataDir" in out.stderr, out
+
+
+def test_every_download_has_a_timeout():
+    # Talos re-review 2026-11-13 (H2): the WebView2 fetch had no -TimeoutSec, so a stalled
+    # download held the pill's singleton mutex forever and no later start could run.
+    calls = re.findall(r"^.*Invoke-WebRequest.*$", TEXT, re.M)
+    assert calls, "the WebView2 download moved: update this test"
+    for line in calls:
+        assert re.search(r"-TimeoutSec\s+\d+", line), line
+    # WebClient has no timeout of its own; any download must go through Invoke-WebRequest.
+    assert "WebClient" not in TEXT and "DownloadFile" not in TEXT
+
+
+def test_a_failed_download_ends_the_start_and_releases_the_mutex():
+    # The download runs inside the try that owns the mutex: a timeout throws, the catch
+    # logs a FATAL reason, and the finally releases the mutex for the next start.
+    body = TEXT[TEXT.index("$mutex = New-Object Threading.Mutex"):]
+    assert body.index("$wv2 = Get-WebView2") < body.index("} catch {")
+    catch = body[body.index("} catch {"):body.index("} finally {")]
+    assert 'Log ("FATAL: "' in catch and "exit 1" in catch
+    final = body[body.index("} finally {"):]
+    assert "$mutex.ReleaseMutex()" in final
+
+
+@needs_powershell
+def test_native_mode_without_a_backend_is_refused_and_never_falls_to_wsl(tmp_path):
+    # Talos re-review 2026-11-13 (M4): run from a Windows folder with no -Distro, the script
+    # chose native mode on -DataDir alone; with -Force and no -BackendExe it then passed an
+    # empty exe to VmlPill.Run, which started wsl.exe -d "" instead. -PrintNames exits right
+    # after the mode checks, so nothing is started here either way.
+    import uuid
+    win_temp = Path("/mnt/c/Temp")
+    if not win_temp.is_dir():
+        pytest.skip("needs C:\\Temp")
+    folder = win_temp / f"vml-m4-{uuid.uuid4().hex[:8]}"
+    folder.mkdir()
+    try:
+        shutil.copy(PS1, folder / "pill-windows.ps1")
+        data = folder / "data"
+        script = subprocess.run(["wslpath", "-w", str(folder / "pill-windows.ps1")],
+                                capture_output=True, text=True, check=True).stdout.strip()
+        win_data = subprocess.run(["wslpath", "-w", str(data)], capture_output=True, text=True,
+                                  check=True).stdout.strip()
+        out = subprocess.run(["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script,
+                              "-DataDir", win_data, "-Force", "-PrintNames"], capture_output=True, timeout=60)
+        assert out.returncode == 1 and b"needs -BackendExe" in out.stderr, out
+    finally:
+        shutil.rmtree(folder, ignore_errors=True)
+
+
+def test_csharp_never_starts_wsl_for_a_native_start():
+    # The script refuses native mode without -BackendExe before Run; Run itself decides
+    # native by a non-empty exe, so the two agree only with that refusal in place.
+    assert re.search(r'if \(\$Native -and -not \$BackendExe\) \{ Refuse "native mode needs -BackendExe', TEXT)
+    assert TEXT.index("native mode needs -BackendExe") < TEXT.index("if ($PrintNames)")

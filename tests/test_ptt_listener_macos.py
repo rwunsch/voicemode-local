@@ -222,3 +222,40 @@ def test_a_press_in_the_release_tail_is_not_ended_by_the_earlier_holds_timer():
     rig.key.space(False, 9.0, mods=True)      # the real end of the second hold
     rig.flush()
     assert rig.sent == ["hold_start", "hold_release", "hold_start", "hold_release"]
+
+
+def test_a_tail_timer_mid_emit_cannot_land_its_release_after_a_new_hold_start():
+    # Talos re-review 2026-11-13 (H1): the timer thread took the pending release and was
+    # preempted before emitting it; a new press then saw nothing pending and sent hold_start,
+    # and the timer's stale hold_release landed after it, ending the new hold. The tail
+    # timer runs on its own thread (threading.Timer), so check-and-emit must be atomic with
+    # space(). Deterministic: the timer's emit is parked on a gate while space() runs.
+    import threading
+
+    wire, timers = [], []
+    in_emit, gate = threading.Event(), threading.Event()
+
+    def emit(action):
+        if threading.current_thread().name == "tail-timer":
+            in_emit.set()
+            gate.wait(5)          # parked mid-emission, the pending release already taken
+        wire.append(action)
+
+    key = mac.MacHotkey(core.PTTKeyState(), emit=emit, available=lambda: True,
+                        wake=lambda: None, timer=lambda d, fn: timers.append(fn),
+                        touch=lambda: None, release_tail=0.35)
+    key.space(True, 5.0, mods=True)
+    key.space(False, 7.0, mods=True)              # hold ends: its release waits for the tail
+    assert wire == ["hold_start"] and len(timers) == 1
+
+    timer = threading.Thread(target=timers[0], name="tail-timer")
+    timer.start()
+    assert in_emit.wait(5)
+    press = threading.Thread(target=key.space, args=(True, 7.1), kwargs={"mods": True})
+    press.start()
+    press.join(0.5)                               # unsynchronised: hold_start lands now
+    gate.set()
+    timer.join(5)
+    press.join(5)
+    assert not timer.is_alive() and not press.is_alive()
+    assert wire == ["hold_start", "hold_release", "hold_start"]

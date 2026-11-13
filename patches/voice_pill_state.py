@@ -290,20 +290,32 @@ def pid_exists(pid) -> bool:
     return True
 
 
-def _not_same_reason(pid, start):
+def _identity(pid) -> dict:
+    """The start token to record for pid. When it cannot be read just now (ps or OpenProcess
+    failed), the record says so with "start_unknown", so a reader can tell a transient failure
+    from a record that never had a start (Talos re-review, 2026-11-13)."""
+    start = process_start(pid)
+    return {"start": start} if start is not None else {"start": None, "start_unknown": True}
+
+
+def _not_same_reason(pid, start, start_unknown=False):
     """None if pid is the process recorded; else why not. A record without a start time never
-    matches, so a reused pid cannot inherit it. If only the current start is unknown (ps
-    failed), an alive pid is kept: losing a live session is worse."""
+    matches, so a reused pid cannot inherit it, unless it says the start was unknown when it
+    was written: then, as when only the current start is unknown (ps failed), an alive pid is
+    kept. Unknown is not "another process" (get_override's rule); losing a live session or
+    Pause is worse."""
     cur = process_start(pid)  # first, as before: same spawns on a Mac as before
-    if start is None:
+    if start is None and not start_unknown:
         return "no start token recorded"
+    if start is None:
+        return None if pid_exists(pid) else "process gone"
     if cur is not None:
         return None if cur == start else f"start token differs: stored {start!r}, now {cur!r}"
     return None if pid_exists(pid) else "process gone"
 
 
-def _alive_same(pid, start) -> bool:
-    return _not_same_reason(pid, start) is None
+def _alive_same(pid, start, start_unknown=False) -> bool:
+    return _not_same_reason(pid, start, start_unknown) is None
 
 
 prune_log = None  # the backend sets a function here; it reports each session file deleted
@@ -383,7 +395,7 @@ def _session_path(pid, base) -> Path:
 def register_session(pid: int, label: str, voice: str | None, base=None) -> None:
     _write_json(_session_path(pid, base), {
         "pid": int(pid), "label": label, "voice": voice,
-        "start": process_start(pid), "started_at": time.time(),
+        **_identity(pid), "started_at": time.time(),
         "last_voice_at": None,
     })
 
@@ -423,7 +435,8 @@ def live_sessions(base=None) -> list[dict]:
         if status == "unreadable":  # busy for a moment, or no access: never delete it
             continue
         pid = s.get("pid")
-        why = "pid is not an integer" if not isinstance(pid, int) else _not_same_reason(pid, s.get("start"))
+        why = ("pid is not an integer" if not isinstance(pid, int)
+               else _not_same_reason(pid, s.get("start"), s.get("start_unknown") is True))
         if why:
             if prune_log:
                 try:
@@ -465,8 +478,7 @@ def take_stop(pid: int, base=None) -> bool:
 def set_paused(on: bool, owner_pid: int, base=None) -> None:
     path = _base(base) / "paused.json"
     if on:
-        _write_json(path, {"owner": int(owner_pid),
-                           "start": process_start(owner_pid)})
+        _write_json(path, {"owner": int(owner_pid), **_identity(owner_pid)})
     else:
         _unlink(path)
 
@@ -480,7 +492,7 @@ def is_paused(base=None) -> bool:
     if not p:
         return False
     owner = p.get("owner")
-    if isinstance(owner, int) and _alive_same(owner, p.get("start")):
+    if isinstance(owner, int) and _alive_same(owner, p.get("start"), p.get("start_unknown") is True):
         return True
     # Remove it: on non-Linux every owner check spawns ps, and the recording loop
     # calls this each chunk, so a crashed pill must cost one spawn, not one per chunk.

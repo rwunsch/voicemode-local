@@ -73,7 +73,7 @@ def backend_alive(base=None) -> bool:
     """A pill backend has written its pid and is still that process."""
     info = st._read_json(st._base(base) / "backend.json")
     pid = info.get("pid")
-    return isinstance(pid, int) and st._alive_same(pid, info.get("start"))
+    return isinstance(pid, int) and st._alive_same(pid, info.get("start"), info.get("start_unknown") is True)
 
 
 def _launch_due(base) -> bool:

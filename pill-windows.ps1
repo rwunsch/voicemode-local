@@ -9,7 +9,8 @@
     Native mode (no WSL) starts the backend directly instead: -BackendExe and
     -BackendArgs, the files in -DataDir, and a mutex and stop event named after a hash
     of -DataDir, so each install has its own pill. It is chosen when -BackendExe is
-    given, or when there is no -Distro and this script is not on a \\wsl path.
+    given, or when there is no -Distro and this script is not on a \\wsl path (then
+    -BackendExe is required: native mode never starts WSL).
     scripts/windows/voicemode_native.py starts it so, and derives the same names.
 
     The window never takes focus: push-to-talk only fires while a terminal has it.
@@ -139,6 +140,9 @@ function Protect-CmdLine {
 }
 if ($Native -and $Distro) { Refuse "pass -Distro (WSL) or -BackendExe (native), not both" }
 if ($Native -and -not $DataDir) { Refuse "native mode needs -DataDir" }
+# Run decides native by a non-empty -BackendExe: without one it would start wsl.exe with no
+# distro, the opposite of the mode chosen here.
+if ($Native -and -not $BackendExe) { Refuse "native mode needs -BackendExe (or pass -Distro for WSL)" }
 if ($Native) {
     # One pill per install: the names carry a hash of the folder. voicemode_native.pill_names
     # computes the same: SHA-256 of the full long path, trailing slashes dropped, lowercased, UTF-8.
@@ -192,7 +196,9 @@ function Get-WebView2 {
     $url = "https://api.nuget.org/v3-flatcontainer/microsoft.web.webview2/$WebView2Version/microsoft.web.webview2.$WebView2Version.nupkg"
     $pkg = Join-Path $Local "webview2.nupkg.download"
     Log "fetching $url"
-    Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $pkg
+    # A timeout, so a stalled download fails: the start then logs FATAL and releases the
+    # mutex, instead of holding it with no window and blocking every later start.
+    Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $pkg -TimeoutSec 120
     $hash = (Get-FileHash -Algorithm SHA256 -Path $pkg).Hash
     if ($hash -ne $WebView2Sha256) {
         Remove-Item -Force $pkg
