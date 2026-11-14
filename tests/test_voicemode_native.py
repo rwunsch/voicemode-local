@@ -679,12 +679,12 @@ def kokoro(monkeypatch):
 
 
 def test_kokoro_host_defaults_to_todays_bind(kokoro, monkeypatch):
-    assert _serve_once(kokoro, monkeypatch, "HTTPServer", ["k", "--port", "18"]) == ("0.0.0.0", 18)
+    assert _serve_once(kokoro, monkeypatch, "ThreadingHTTPServer", ["k", "--port", "18"]) == ("0.0.0.0", 18)
 
 
 def test_kokoro_host_loopback(kokoro, monkeypatch):
     argv = ["k", "--host", "127.0.0.1", "--port", "19"]
-    assert _serve_once(kokoro, monkeypatch, "HTTPServer", argv) == ("127.0.0.1", 19)
+    assert _serve_once(kokoro, monkeypatch, "ThreadingHTTPServer", argv) == ("127.0.0.1", 19)
 
 
 def test_whisper_proxy_host_default_and_loopback(monkeypatch):

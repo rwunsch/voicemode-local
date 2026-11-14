@@ -225,6 +225,22 @@ local Kokoro can need longer for one long sentence (Windows 2026-11-13, n=1: 12.
 audio in 40.9s), and with streaming off while barge-in may listen, the whole sentence
 must finish inside that timeout.
 
+**Long replies (2026-11-14).** The local Kokoro server answers only when the whole audio is
+ready, so a long reply must be generated inside one timeout. On a Windows laptop 2.5-5x slower
+than real time, 1,178 characters (54 s of audio) took 134.7 s and timed out at 90 s; upstream
+then sent the same text again buffered, so the server generated it twice and the turn waited
+180 s for nothing. Three changes:
+- `VOICEMODE_TTS_CHUNK_CHARS` (default 0 = off): speak a reply in parts of at most that many
+  characters, split at sentence ends, one request each (`patches/tts_chunks.py`). A stop,
+  hold or barge-in ends the reply, also while the next part is generated; a failed part ends
+  it and its error says which part. Size it with `VOICEMODE_TTS_TIMEOUT_LOCAL` (the default
+  timeout is 30 s); limits are listed in the module docstring.
+- A streaming request to a local server that timed out is not sent again buffered; the error
+  says so (`patches/patch_tts_no_double_synthesis.py`). Other failures still fall back.
+- `kokoro-onnx-server.py` serves each request on its own thread, so `/health` answers during a
+  long synthesis; speech is still generated one request at a time.
+Parts are generated one after another, so a machine slower than real time pauses between them.
+
 Root cause is still open — see `docs/stt-61s-stall/README.md` for what has
 already been ruled out by measurement, so it doesn't get re-proposed.
 

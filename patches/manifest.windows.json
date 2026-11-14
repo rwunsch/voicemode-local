@@ -55,6 +55,9 @@
     {"patch": "patch_conch_fairness.py", "targets": ["tools/converse.py"], "why": "fair holds, progress heartbeat, a cancelled wait is logged; needs conch_hold.py and mcp_progress.py"},
     {"patch": "patch_env_allowlist.py", "targets": ["config.py", "tools/configuration_management.py"], "why": "only voice settings travel from voicemode.env into the environment; update_config refuses other keys"},
     {"patch": "patch_git_timeout.py", "targets": ["config.py"], "why": "the transcript-saving git call is bounded (5 s, stdin closed): it froze the voice server for 176 s on Windows"},
+    {"copy": "tts_chunks.py", "to": "tts_chunks.py", "why": "a long reply is spoken in parts, one TTS request each (VOICEMODE_TTS_CHUNK_CHARS, off by default)"},
+    {"patch": "patch_tts_chunks.py", "targets": ["simple_failover.py"], "why": "simple_tts_failover speaks a long reply in parts; needs tts_chunks.py"},
+    {"patch": "patch_tts_no_double_synthesis.py", "targets": ["core.py", "streaming.py"], "why": "a timed-out local TTS request is not sent again buffered, so the server never generates the same speech twice"},
     {"patch": "patch_windows_tempfile.py", "targets": ["core.py", "streaming.py"], "why": "close temp audio files before deleting them; Windows refuses to delete an open file (WinError 32)"},
     {"patch": "patch_native_client_folder.py", "targets": ["tools/converse.py"], "why": "the session label uses the client's folder; voice-mode itself runs in the runtime folder"}
   ]

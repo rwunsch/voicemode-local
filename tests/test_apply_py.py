@@ -106,6 +106,8 @@ INTENDED_SINCE_BASELINE = [
     ("patch_env_provider_keys.py", ["config.py", "tools/configuration_management.py"]),   # 2026-11-12: optional
     ("patch_simple_failover.py", ["simple_failover.py"]),   # 2026-11-13: TTS timeout knob (edit 3)
     ("patch_git_timeout.py", ["config.py"]),   # 2026-11-13: transcript-saving git call bounded (5 s, stdin closed)
+    ("patch_tts_chunks.py", ["simple_failover.py"]),   # 2026-11-14: long replies in parts
+    ("patch_tts_no_double_synthesis.py", ["core.py", "streaming.py"]),   # 2026-11-14: no second request after a timeout
 ]
 # Modules added as "copy" steps since the baseline (2026-11-07: session_wake.py).
 INTENDED_COPIES_SINCE_BASELINE = ["session_wake.py"]
@@ -115,6 +117,7 @@ INTENDED_COPIES_SINCE_BASELINE += ["pill_autostart.py", "pill-windows.ps1", "voi
                                    "ui/pill/pill.css"]
 INTENDED_COPIES_SINCE_BASELINE += ["conch_wakers.py"]   # 2026-11-11
 INTENDED_COPIES_SINCE_BASELINE += ["conch_hold.py", "mcp_progress.py"]   # 2026-11-11
+INTENDED_COPIES_SINCE_BASELINE += ["tts_chunks.py"]   # 2026-11-14
 
 
 def apply_intended(pkg: Path) -> None:
@@ -133,7 +136,8 @@ def apply_intended(pkg: Path) -> None:
 def without_intended_log(out: str) -> str:
     copied = tuple(f"[patches] installed {name}" for name in INTENDED_COPIES_SINCE_BASELINE)
     return "".join(line for line in out.splitlines(keepends=True)
-                   if "(ptt instant)" not in line and "(tts timeout knob)" not in line and not line.strip().startswith(copied))
+                   if "(ptt instant)" not in line and "(tts timeout knob)" not in line
+                   and "(tts chunks)" not in line and "(tts no double synthesis)" not in line and not line.strip().startswith(copied))
 
 
 def hardlink_core(venv: Path, outside: Path) -> None:
