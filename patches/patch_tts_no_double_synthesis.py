@@ -54,13 +54,11 @@ class VmlTtsTimeout(TimeoutError):
 
 
 def _vml_is_tts_timeout(error) -> bool:
-    kinds = [httpx.TimeoutException, TimeoutError, asyncio.TimeoutError]
-    try:
-        from openai import APITimeoutError
-        kinds.append(APITimeoutError)
-    except Exception:
-        pass
-    return isinstance(error, tuple(kinds))
+    if isinstance(error, (httpx.TimeoutException, TimeoutError, asyncio.TimeoutError)):
+        return True
+    # The OpenAI SDK's timeout (APITimeoutError) is matched by its class name, so this patch
+    # imports no model provider's library (FELIX vendors it and forbids such imports).
+    return any(kind.__name__ == "APITimeoutError" for kind in type(error).__mro__)
 
 
 def _vml_tts_timeout_error(client) -> "VmlTtsTimeout":
