@@ -84,6 +84,7 @@ FELIX_MARKERS = {
 }
 HOLD = "voicemode-local ptt hold"
 INSTANT = "voicemode-local ptt instant"
+NO_DOUBLE = "TTS NO DOUBLE SYNTHESIS (voicemode-local)"   # 2026-11-14
 
 
 def _src():
@@ -181,9 +182,9 @@ EXPECTED_MARKERS = {
     "full": {
         "control_channel.py": [HOLD, BARGE, PILL, INSTANT],
         "control_socket.py": [BARGE, PILL, TRANSPORT, INSTANT],
-        "core.py": ["voicemode-local hold barge-in", BARGE],
-        "streaming.py": ["voicemode-local hold barge-in", PILL],
-        "simple_failover.py": ["NO SILENT SWAP (voicemode-local)"],
+        "core.py": ["voicemode-local hold barge-in", BARGE, NO_DOUBLE],
+        "streaming.py": ["voicemode-local hold barge-in", PILL, NO_DOUBLE],
+        "simple_failover.py": ["NO SILENT SWAP (voicemode-local)", "TTS CHUNKS (voicemode-local)"],
         "tools/converse.py": ["voicemode-local listen overrun", "voicemode-local turns playback stop",
                               "voicemode-local session name", HOLD, "LANGUAGE-LOCKED VOICES",
                               BARGE, PILL, INSTANT, "VML: CONCH WAKERS", "VML: CONCH FAIRNESS"],

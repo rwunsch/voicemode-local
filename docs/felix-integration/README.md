@@ -25,6 +25,28 @@ another session (FELIX-MAC, FELIX-voice) and not re-run here; **inferred** = rea
 | Native install without WSL/Docker/admin | n/a | install.ps1 -Mode windows-native | install-mac.sh (v1.0.0) + `--barge` |
 | Live on/off switch | voicemode-switch | voicemode_native.py barge/pill on/off/status | voicemode-switch |
 
+## What the next release after v1.2.9 changes (branch fix/tts-long-text; not merged or tagged)
+
+Long spoken replies on a slow machine (FELIX, Windows laptop, 2026-11-14: 1,178 characters timed out
+twice, 90 s + 90 s, and nothing was spoken). What FELIX takes, and must do, when it re-pins:
+
+- **New in both patch lists:** copy `tts_chunks.py`, `patch_tts_chunks.py` (simple_failover.py) and
+  `patch_tts_no_double_synthesis.py` (core.py, streaming.py), after `patch_git_timeout.py`. FELIX's
+  `manifest.mac.json` needs the same three steps in the same place.
+- **A new setting FELIX must pass:** `VOICEMODE_TTS_CHUNK_CHARS`, the largest part in characters.
+  Unset or 0 keeps one request per reply. Size it so one part's generation stays well inside
+  `VOICEMODE_TTS_TIMEOUT_LOCAL`: at about 22 characters per second of audio and 5x slower than real
+  time, 200 characters is about 9 s of audio and up to about 46 s of generation, inside 90 s.
+- **No setting for the duplicate request:** a timed-out streaming request to a local server is
+  never sent again buffered. The error now reads "Request timed out after 90 s. Not sent again
+  without streaming: ...", and for a part: "... (part 3 of 6; 2 parts were spoken before it, ...)".
+- **`kokoro-onnx-server.py` is threaded** (`ThreadingHTTPServer`, one lock around
+  `Kokoro.create` and one around model loading). FELIX keeps its own copy of the server
+  (`kokoro_onnx_server.py`), so it has to carry the same change into that copy.
+- **Not changed:** parts are generated one after another, not ahead of playback, so a machine slower
+  than real time pauses between parts. Measured only with a fake server (tests); not yet on a real
+  slow machine.
+
 ## What v1.2.0 changes (not tagged yet)
 
 On `feature/shared-supervisor`: not merged, not tagged. The shared voice supervisor, `vml_supervisor/`,

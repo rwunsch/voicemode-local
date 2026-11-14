@@ -134,6 +134,13 @@ INTENDED_PATCHES.append(("patch_env_provider_keys.py", ["config.py", "tools/conf
 INTENDED_PATCHES.append(("patch_git_timeout.py", ["config.py"]))   # 2026-11-13: bounded git call
 INTENDED_PATCHES.append(("patch_simple_failover.py", ["simple_failover.py"]))   # 2026-11-13: TTS timeout knob (edit 3)
 INTENDED_COPIES += ["conch_hold.py", "mcp_progress.py"]
+# 2026-11-14: long replies in parts, and a timed-out local TTS request is not sent twice.
+INTENDED_STEP_LINES.append(b'    {"copy": "tts_chunks.py", "to": "tts_chunks.py", "why": "a long reply is spoken in parts, one TTS request each (VOICEMODE_TTS_CHUNK_CHARS, off by default)"},\n')
+INTENDED_STEP_LINES.append(b'    {"patch": "patch_tts_chunks.py", "targets": ["simple_failover.py"], "why": "simple_tts_failover speaks a long reply in parts; needs tts_chunks.py"},\n')
+INTENDED_STEP_LINES.append(b'    {"patch": "patch_tts_no_double_synthesis.py", "targets": ["core.py", "streaming.py"], "why": "a timed-out local TTS request is not sent again buffered, so the server never generates the same speech twice"},\n')
+INTENDED_PATCHES.append(("patch_tts_chunks.py", ["simple_failover.py"]))
+INTENDED_PATCHES.append(("patch_tts_no_double_synthesis.py", ["core.py", "streaming.py"]))
+INTENDED_COPIES += ["tts_chunks.py"]
 # Text edits those additions force on lines that were already there: (now, before).
 INTENDED_EDITS = [
     (b'    "streaming.py",\n    "conch_notify.py",\n    "conch_queue.py",\n    "conch.py",\n    "config.py",\n    "tools/configuration_management.py"\n', b'    "streaming.py"\n'),

@@ -19,8 +19,9 @@ import os
 import struct
 import sys
 import tempfile
+import threading
 import time
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.request import urlretrieve
 
@@ -30,6 +31,12 @@ VOICES_URL = "https://github.com/thewh1teagle/kokoro-onnx/releases/download/mode
 # Lazy-loaded globals
 _kokoro = None
 _model_dir = None
+
+# Requests are served on their own threads, so /health answers while a long synthesis
+# runs (2026-11-14: a 54 s reply took 134.7 s and the health checks timed out). One
+# ONNX session serves every request, so speech is generated one request at a time.
+_LOAD_LOCK = threading.Lock()
+_INFERENCE_LOCK = threading.Lock()
 
 # Optional German model: Kokoro-82M fine-tuned on one German speaker ("Martin").
 # Upstream Kokoro v1.0 has no German voices, and a voicepack only works with the
@@ -71,6 +78,11 @@ def ensure_models():
 
 def get_kokoro():
     """Lazy-load the kokoro-onnx model."""
+    with _LOAD_LOCK:
+        return _load_kokoro()
+
+
+def _load_kokoro():
     global _kokoro
     if _kokoro is None:
         try:
@@ -91,6 +103,11 @@ def get_kokoro_de():
 
     Fetch them with: python3 kokoro-onnx-server.py --download-german
     """
+    with _LOAD_LOCK:
+        return _load_kokoro_de()
+
+
+def _load_kokoro_de():
     global _kokoro_de
     if _kokoro_de is None:
         model_dir = _de_model_dir or Path("./models/kokoro-de-martin")
@@ -239,10 +256,13 @@ class TTSHandler(BaseHTTPRequestHandler):
                 kokoro = get_kokoro()
                 lang = "en-us"
             start = time.time()
-            samples, sample_rate = kokoro.create(text, voice=voice_id, speed=speed, lang=lang)
-            elapsed = time.time() - start
+            with _INFERENCE_LOCK:
+                waited = time.time() - start
+                samples, sample_rate = kokoro.create(text, voice=voice_id, speed=speed, lang=lang)
+            elapsed = time.time() - start - waited
             print(f"[kokoro-onnx] Generated {len(samples)/sample_rate:.1f}s audio "
-                  f"in {elapsed:.1f}s (voice={voice_id})")
+                  f"in {elapsed:.1f}s (voice={voice_id})"
+                  + (f", after waiting {waited:.1f}s for another request" if waited >= 0.1 else ""))
 
             body, content_type = encode_audio(samples, sample_rate, data.get("response_format"))
 
@@ -255,6 +275,14 @@ class TTSHandler(BaseHTTPRequestHandler):
         except Exception as e:
             print(f"[kokoro-onnx] Error: {e}")
             self._send_json(500, {"error": str(e)})
+
+
+def make_server(host, port):
+    """The HTTP server, one thread per request (daemon threads, so a client that left
+    cannot keep the process alive at shutdown)."""
+    server = ThreadingHTTPServer((host, port), TTSHandler)
+    server.daemon_threads = True
+    return server
 
 
 def main():
@@ -283,7 +311,7 @@ def main():
     get_kokoro()
     get_kokoro_de()
 
-    server = HTTPServer((args.host, args.port), TTSHandler)
+    server = make_server(args.host, args.port)
     print(f"Kokoro ONNX TTS server listening on {args.host}:{args.port}", flush=True)
     print(f"  POST /v1/audio/speech  - Generate speech")
     print(f"  GET  /v1/models        - List models")

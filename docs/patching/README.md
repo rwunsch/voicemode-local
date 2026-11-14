@@ -50,6 +50,13 @@ on every run, taking the old `patches/` from git.
 | 12 | patch_ptt_instant | control_channel, control_socket, converse | 5, 9, 11 |
 | 13 | patch_control_transport | control_socket | 10 |
 | 14 | copy voice_barge_tool | tools/ | none |
+| 15 | copy tts_chunks; patch_tts_chunks | simple_failover | 3 (patched file); tts_chunks first |
+| 16 | patch_tts_no_double_synthesis | core, streaming | none |
+
+Steps 15 and 16 (2026-11-14) run after the conch, allowlist and git-timeout steps, in both lists; on
+Windows before the two Windows-only steps, which stay last. Step 15 speaks a long reply in parts when
+`VOICEMODE_TTS_CHUNK_CHARS` is set (off by default). Step 16 stops a timed-out streaming request to a
+local server from being sent again buffered.
 
 Optional dependencies, so FELIX's tree (no hold or session-name patches) works:
 
