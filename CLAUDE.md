@@ -231,8 +231,10 @@ than real time, 1,178 characters (54 s of audio) took 134.7 s and timed out at 9
 then sent the same text again buffered, so the server generated it twice and the turn waited
 180 s for nothing. Three changes:
 - `VOICEMODE_TTS_CHUNK_CHARS` (default 0 = off): speak a reply in parts of at most that many
-  characters, split at sentence ends, one request each (`patches/tts_chunks.py`). A stop or
-  barge-in ends the reply; a failed part ends it and its error says which part.
+  characters, split at sentence ends, one request each (`patches/tts_chunks.py`). A stop,
+  hold or barge-in ends the reply, also while the next part is generated; a failed part ends
+  it and its error says which part. Size it with `VOICEMODE_TTS_TIMEOUT_LOCAL` (the default
+  timeout is 30 s); limits are listed in the module docstring.
 - A streaming request to a local server that timed out is not sent again buffered; the error
   says so (`patches/patch_tts_no_double_synthesis.py`). Other failures still fall back.
 - `kokoro-onnx-server.py` serves each request on its own thread, so `/health` answers during a

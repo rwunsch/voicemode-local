@@ -90,7 +90,8 @@ def test_lines_without_full_stops_are_separate_sentences():
 
 
 @pytest.mark.parametrize("raw,expected", [(None, 0), ("", 0), ("  ", 0), ("250", 250),
-                                           ("0", 0), ("-1", 0), ("lots", 0), ("12.5", 0)])
+                                           ("0", 0), ("-1", 0), ("lots", 0), ("12.5", 0),
+                                           ("40", 40), ("39", 40), ("5", 40)])
 def test_chunk_chars_setting(monkeypatch, raw, expected):
     if raw is None:
         monkeypatch.delenv(tc.SETTING, raising=False)
@@ -144,7 +145,10 @@ def test_each_part_is_spoken_in_order_and_the_metrics_add_up(monkeypatch):
     assert metrics["ttfa"] == 0.5, "time to first audio is the first part's"
     assert metrics["generation"] == pytest.approx(1.0 * len(parts))
     assert metrics["playback"] == pytest.approx(2.0 * len(parts))
-    assert metrics["audio_path"] == f"p{len(parts)}.wav"
+    # "repeat" plays metrics["audio_path"]; one part's file would repeat only that part, so a reply in
+    # parts has none and converse regenerates the whole reply instead (review, 2026-11-14).
+    assert "audio_path" not in metrics
+    assert metrics["audio_paths"] == [f"p{n}.wav" for n in range(1, len(parts) + 1)]
     assert config["part"] == 1
 
 
@@ -181,3 +185,117 @@ def test_a_failed_part_stops_the_reply_and_says_which_part(monkeypatch):
     error = config["attempted_endpoints"][0]["error"]
     assert error.startswith("Request timed out.")
     assert f"part 3 of {n}" in error and "2 parts were spoken" in error
+
+
+# --- stops, holds and barge-in between parts (review, 2026-11-14) ------------------------
+# voice-mode's control state: barge-in (request_barge_in) is refused unless a player is
+# speaking, and between parts none is. Push-to-talk's own wrapper already cancels on a stop
+# or hold; a skip-forward (voice barge-in, a key) must also end the reply in the gap.
+
+class Snap:
+    def __init__(self, state):
+        self.is_stopped = state == "stopped"
+        self.is_skip_forward = state == "skip_forward"
+        self.is_holding = state == "holding"
+
+
+class FakeControl:
+    def __init__(self):
+        self.state = "running"
+        self.speaking = False
+        self.speaking_log = []
+
+    def snapshot(self):
+        return Snap(self.state)
+
+    def set_speaking(self, value):
+        self.speaking = value
+        self.speaking_log.append(value)
+
+    @property
+    def is_speaking(self):
+        return self.speaking
+
+    def request_barge_in(self):
+        if not self.speaking or self.state == "stopped":
+            return False
+        self.state = "skip_forward"
+        return True
+
+
+class SlowWhole(FakeWhole):
+    """Part 2 takes `gen_s` to generate and is cancellable; it records a cancel."""
+
+    def __init__(self, gen_s=5.0, answers=None):
+        super().__init__(answers)
+        self.gen_s = gen_s
+        self.cancelled = []
+
+    async def __call__(self, text, voice, model=None, **kwargs):
+        if len(self.calls) == 1:  # the second call is being made
+            try:
+                await asyncio.sleep(self.gen_s)
+            except asyncio.CancelledError:
+                self.calls.append({"text": text, "cancelled": True})
+                self.cancelled.append(text)
+                raise
+        return await super().__call__(text, voice, model, **kwargs)
+
+
+def run_with(whole, control, monkeypatch, during=None, limit=200):
+    monkeypatch.setenv(tc.SETTING, str(limit))
+
+    async def go():
+        task = asyncio.ensure_future(tc.speak_in_chunks(whole, LONG, "af_sky", None, {},
+                                                        control_state=control))
+        if during:
+            await asyncio.sleep(0.3)
+            during()
+        return await task
+    return asyncio.run(go())
+
+
+@pytest.mark.parametrize("cut", ["skip_forward", "stopped", "holding"])
+def test_a_cut_while_the_next_part_is_generated_ends_the_reply(monkeypatch, cut):
+    control = FakeControl()
+    whole = SlowWhole()
+
+    def press():
+        control.state = cut
+    ok, metrics, config = run_with(whole, control, monkeypatch, during=press)
+    assert ok and config["part"] == 1
+    assert whole.cancelled and len([c for c in whole.calls if not c.get("cancelled")]) == 1
+    assert control.state == cut, "the cut is left for converse to act on"
+    assert control.speaking is False
+
+
+def test_voice_barge_in_is_accepted_between_parts(monkeypatch):
+    control = FakeControl()
+    whole = SlowWhole()
+    accepted = []
+    ok, _, _ = run_with(whole, control, monkeypatch,
+                        during=lambda: accepted.append(control.request_barge_in()))
+    assert accepted == [True], "barge-in must be possible while the next part is generated"
+    assert ok and whole.cancelled
+    assert control.state == "skip_forward"
+
+
+def test_a_cut_already_set_after_a_part_sends_nothing_more(monkeypatch):
+    control = FakeControl()
+
+    class CutAfterFirst(FakeWhole):
+        async def __call__(self, *a, **k):
+            result = await super().__call__(*a, **k)
+            control.state = "skip_forward"
+            return result
+    whole = CutAfterFirst()
+    ok, _, _ = run_with(whole, control, monkeypatch)
+    assert ok and len(whole.calls) == 1
+
+
+def test_without_a_cut_every_part_is_spoken_and_speaking_ends_false(monkeypatch):
+    control = FakeControl()
+    whole = SlowWhole(gen_s=0.01)
+    ok, _, _ = run_with(whole, control, monkeypatch)
+    assert ok and len(whole.calls) == len(tc.split_for_tts(LONG, 200)) and not whole.cancelled
+    assert control.speaking is False and True in control.speaking_log
