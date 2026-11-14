@@ -29,3 +29,37 @@ VENDORED = sorted((REPO / "patches").glob("*.py")) + [REPO / "kokoro-onnx-server
 def test_no_model_provider_import(path):
     found = IMPORT.findall(path.read_text(encoding="utf-8"))
     assert not found, f"{path.name} imports a model provider's library: {found}"
+
+
+# The helper the patch injects must still recognise the SDK's timeout without importing it.
+# Runs by default (no VM812_SRC): the helper text is executed with the names core.py gives it.
+def _is_tts_timeout():
+    import asyncio
+    import importlib.util
+    import httpx
+    spec = importlib.util.spec_from_file_location("nd_patch", REPO / "patches" / "patch_tts_no_double_synthesis.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    names = {"httpx": httpx, "asyncio": asyncio}
+    exec(module.C_HELPER, names)
+    return names["_vml_is_tts_timeout"]
+
+
+def test_the_sdk_timeout_is_recognised_by_its_class_name():
+    import asyncio
+    import httpx
+    is_timeout = _is_tts_timeout()
+
+    class APIConnectionError(Exception):
+        pass
+
+    class APITimeoutError(APIConnectionError):   # the SDK's shape: a connection error subclass
+        pass
+
+    class SlowerTimeout(APITimeoutError):
+        pass
+    for error in (APITimeoutError(), SlowerTimeout(), httpx.ReadTimeout("t"), TimeoutError(),
+                  asyncio.TimeoutError()):
+        assert is_timeout(error), type(error).__name__
+    for error in (APIConnectionError(), ConnectionError(), ValueError("APITimeoutError"), httpx.ConnectError("c")):
+        assert not is_timeout(error), type(error).__name__
