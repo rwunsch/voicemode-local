@@ -47,7 +47,8 @@ twice, 90 s + 90 s, and nothing was spoken). What FELIX takes, and must do, when
   (`kokoro_onnx_server.py`), so it has to carry the same change into that copy.
 - **Stops between parts:** from the end of the first part the speaking flag stays on, so a voice
   barge-in, a push-to-talk hold, a stop or a skip-forward while the next part is generated ends the
-  reply. "Repeat" regenerates the whole reply (a reply in parts has no single `audio_path`).
+  reply, after a grace of about 0.3-0.5 s (measured by the reviewer in a simulation, n=1 per cut type).
+  "Repeat" regenerates the whole reply (a reply in parts has no single `audio_path`).
 - **Known limits:** a skip-back replays only the current part, then listens (no voicemode-local or
   FELIX control sends skip-back); `turns` are not split; a request whose client gave up still keeps the
   server busy until it is done, and `/health` answers "ok" meanwhile.

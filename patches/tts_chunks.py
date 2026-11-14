@@ -26,6 +26,9 @@ text goes out as one request, exactly as before.
   replays the newest history entry, and each part is its own entry); no voicemode-local
   or FELIX control sends skip-back. Multi-utterance `turns` use a different path and are
   not split. A request whose client gave up keeps the server busy until it is done.
+  A cut while a later part is generated lands after a short grace (about 0.3 s for a
+  hold or stop, in converse's push-to-talk wrapper; 0.5 s for a barge-in, GRACE_S here),
+  because the speaking flag cannot tell the silent gap from a running player.
 - The setting is at least 40 characters; a smaller number is raised to 40.
 - A part that fails ends the reply too. Its error says which part failed and how many
   were already spoken, so nothing is spoken twice by a retry of the whole text.
@@ -148,9 +151,8 @@ def _combine(total: dict, metrics: dict) -> None:
     paths = total.setdefault("audio_paths", [])
     if metrics.get("audio_path"):
         paths.append(metrics["audio_path"])
-    first = len(total) == 1
     for key, value in metrics.items():
-        if key == "audio_path" or (key == "ttfa" and not first):
+        if key == "audio_path" or (key == "ttfa" and "ttfa" in total):
             continue
         if key in ("generation", "playback") and isinstance(value, (int, float)):
             total[key] = total.get(key, 0.0) + value

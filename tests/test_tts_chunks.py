@@ -299,3 +299,11 @@ def test_without_a_cut_every_part_is_spoken_and_speaking_ends_false(monkeypatch)
     ok, _, _ = run_with(whole, control, monkeypatch)
     assert ok and len(whole.calls) == len(tc.split_for_tts(LONG, 200)) and not whole.cancelled
     assert control.speaking is False and True in control.speaking_log
+
+
+def test_time_to_first_audio_is_the_first_part_that_reports_one():
+    total = {}
+    tc._combine(total, {"generation": 1.0})
+    tc._combine(total, {"ttfa": 2.0, "generation": 1.0})
+    tc._combine(total, {"ttfa": 3.0, "generation": 1.0})
+    assert total["ttfa"] == 2.0 and total["generation"] == 3.0
