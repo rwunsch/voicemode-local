@@ -35,6 +35,35 @@
   var LABELS = { speaking: "Speaking", listening: "Listening", holding: "Holding\u2026", working: "Between turns",
     idle: "Not in a voice turn", paused: "Paused", stopped: "Stopped", disconnected: "Disconnected" };
 
+  // The coloured indicator (2026-11-17): who is speaking, as a tone and always a text label too.
+  var TONES = { speaking: "speaking", listening: "listening", holding: "neutral", working: "neutral", idle: "neutral",
+    stopped: "neutral", paused: "muted", disconnected: "off" };
+  var TONE_TEXT = { speaking: "Assistant speaking", listening: "Listening to you", paused: "Paused",
+    interrupted: "Interrupted", disconnected: "Disconnected" };
+  function indicatorFor(phase, who, interrupted) {
+    if (phase === "disconnected") return { tone: "off", text: TONE_TEXT.disconnected, who: "" };
+    if (interrupted) return { tone: "interrupted", text: TONE_TEXT.interrupted, who: who };
+    return { tone: TONES[phase] || "neutral", text: TONE_TEXT[phase] || LABELS[phase] || LABELS.idle, who: who };
+  }
+  // The labelled controls in the panel: Pause/Resume and Stop/Wake, always in the same place.
+  function controlsFor(main, pause, inTurn, connected) {
+    var paused = pause.cmd === "resume";
+    return {
+      pause: { text: pause.label, icon: pause.icon, cmd: pause.cmd, pressed: paused,
+        aria: (paused ? "Resume" : "Pause") + " the voice turn", enabled: connected && inTurn },
+      main: { kind: main.kind, cmd: main.cmd, enabled: main.enabled,
+        text: main.kind === "wake" ? "Wake" : "Stop",
+        aria: main.kind === "wake" ? main.title : "Stop the voice turn" },
+    };
+  }
+  // When barge.count rises between two snapshots, "Interrupted" shows until the returned time.
+  // The first snapshot (prev null), the same count, or a lower one (a new day) change nothing.
+  var FLASH_MS = 1500;
+  function interruptFlash(prevCount, count, now, until) {
+    if (typeof prevCount === "number" && typeof count === "number" && count > prevCount) return now + FLASH_MS;
+    return until == null ? null : until;
+  }
+
   function ordinal(n) {
     var s = ["th", "st", "nd", "rd"], v = n % 100;
     return n + (s[(v - 20) % 10] || s[v] || s[0]);
@@ -54,14 +83,16 @@
     return [{ keys: ["Ctrl", "Space"], text: "tap: stop, hold: talk" }];
   }
 
-  function viewModel(snapshot, lastSeenMs, nowMs) {
+  function viewModel(snapshot, lastSeenMs, nowMs, extra) {
     var connected = !!snapshot && lastSeenMs != null && nowMs - lastSeenMs <= STALE_MS;
     var off = { enabled: false };
     if (!connected) {
       // Never show the last known state: a stale "Listening" is worse than none.
+      var offMain = { kind: "stop", cmd: "stop", title: "Stop", enabled: false };
+      var offPause = { visible: false, enabled: false, label: "Pause", cmd: "pause", icon: PAUSE };
       return { connected: false, phase: "disconnected", label: LABELS.disconnected, mode: "pill", side: null,
-        main: { kind: "stop", cmd: "stop", title: "Stop", enabled: false },
-        pause: { visible: false, enabled: false, label: "Pause", cmd: "pause", icon: PAUSE }, stop: off,
+        main: offMain, pause: offPause, stop: off,
+        controls: controlsFor(offMain, offPause, false, false), indicator: indicatorFor("disconnected", "", false),
         pickersEnabled: false, minimizeEnabled: true, dismissEnabled: true, queue: [], queueMore: "", voice: null, language: null, keys: [], session: "", stateText: LABELS.disconnected, waitingText: "",
         barge: { visible: false, on: false, enabled: false, countText: "" }, beeps: { on: false }, voices: VOICES, languages: LANGUAGES,
         wakeText: "" };
@@ -103,13 +134,17 @@
       ? { kind: "wake", cmd: "wake", title: "Wake " + (s.play.label || "the last session"), enabled: true }
       : { kind: "stop", cmd: "stop", title: "Stop", enabled: stopOn };
     var wakeText = s.wake && s.wake.text ? s.wake.text : "";
+    var interrupted = !!(extra && extra.interruptedUntil != null && nowMs < extra.interruptedUntil);
+    var pause = { visible: inTurn, enabled: true, label: phase === "paused" ? "Resume" : "Pause",
+      cmd: phase === "paused" ? "resume" : "pause", icon: phase === "paused" ? RESUME : PAUSE };
     var mode = ui.minimized ? "dot" : ui.docked ? (ui.tucked ? "tab" : ui.dockOpen ? "docked" : "rail") : ui.expanded ? "expanded" : "pill";
     return {
       connected: true, phase: phase, label: LABELS[phase] || LABELS.idle, mode: mode,
       side: mode === "docked" || mode === "rail" || mode === "tab" ? (ui.side === "left" ? "left" : "right") : null,
       main: main,
-      pause: { visible: inTurn, enabled: true, label: phase === "paused" ? "Resume" : "Pause",
-        cmd: phase === "paused" ? "resume" : "pause", icon: phase === "paused" ? RESUME : PAUSE },
+      pause: pause,
+      controls: controlsFor(main, pause, inTurn, true),
+      indicator: indicatorFor(phase, name, interrupted),
       stop: { enabled: !!s.floor && phase !== "stopped" },
       pickersEnabled: !!s.floor, minimizeEnabled: true, dismissEnabled: true,
       queue: rows.slice(0, MAX_ROWS).map(function (r) {
@@ -124,7 +159,7 @@
       beeps: { on: !!s.beeps },
       voices: voices, languages: languages,
       session: name,
-      stateText: wakeText || LABELS[phase] || LABELS.idle,
+      stateText: interrupted ? TONE_TEXT.interrupted : wakeText || LABELS[phase] || LABELS.idle,
       wakeText: wakeText,
       waitingText: waiting ? "+" + waiting + " waiting" : "",
     };
@@ -176,7 +211,7 @@
     return "snapshot";
   }
 
-  var api = { clickBarge: clickBarge, bargeShown: bargeShown, PENDING_MS: PENDING_MS, incomingKind: incomingKind, nextHidden: nextHidden, viewModel: viewModel, languageOf: languageOf, voiceForLanguage: voiceForLanguage, VOICES: VOICES, GERMAN_VOICES: GERMAN_VOICES, LANGUAGES: LANGUAGES, STALE_MS: STALE_MS };
+  var api = { interruptFlash: interruptFlash, FLASH_MS: FLASH_MS, clickBarge: clickBarge, bargeShown: bargeShown, PENDING_MS: PENDING_MS, incomingKind: incomingKind, nextHidden: nextHidden, viewModel: viewModel, languageOf: languageOf, voiceForLanguage: voiceForLanguage, VOICES: VOICES, GERMAN_VOICES: GERMAN_VOICES, LANGUAGES: LANGUAGES, STALE_MS: STALE_MS };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   if (typeof window !== "undefined") window.PillModel = api;
 })();
