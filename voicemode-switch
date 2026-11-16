@@ -266,11 +266,23 @@ cmd_status() {
         fi
         check_service "Kokoro ONNX TTS" "http://127.0.0.1:$onnx_port/health" || true
     fi
-    check_service "Whisper ASR" "http://127.0.0.1:9000/docs" || true
-    echo ""
-    echo "Proxy:"
-    check_proxy || true
-    check_service "Whisper Proxy (OpenAI-compat)" "http://127.0.0.1:2022/health" || true
+    if is_faster_whisper; then
+        echo ""
+        echo "Speech recognition (faster-whisper, native, port 2022):"
+        if [ -f "$FASTER_WHISPER_PID_FILE" ] && kill -0 "$(cat "$FASTER_WHISPER_PID_FILE")" 2>/dev/null; then
+            ok "faster-whisper server running (PID $(cat "$FASTER_WHISPER_PID_FILE"))"
+        else
+            fail "faster-whisper server not running (log: /tmp/faster-whisper-server.log)"
+        fi
+        # /health is 200 only once the model is loaded and warmed up.
+        check_service "faster-whisper STT (model loaded)" "http://127.0.0.1:2022/health" || true
+    else
+        check_service "Whisper ASR" "http://127.0.0.1:9000/docs" || true
+        echo ""
+        echo "Proxy:"
+        check_proxy || true
+        check_service "Whisper Proxy (OpenAI-compat)" "http://127.0.0.1:2022/health" || true
+    fi
 
     echo ""
     echo "Piper:"
@@ -349,6 +361,14 @@ print(" ".join(p for p in known if p in urls))
 PYEOF
 }
 
+# Speech recognition engine (STT_ENGINE in the config): docker (default: Docker
+# whisper behind whisper-proxy.py), whisper-cpp (WHISPER_CPP_MODEL), or
+# faster-whisper (native, faster-whisper-server.py on 2022). Anything but
+# faster-whisper keeps the behaviour from before STT_ENGINE existed.
+FASTER_WHISPER_PID_FILE="/tmp/faster-whisper-server.pid"
+is_faster_whisper() { [ "$(vm_read_config STT_ENGINE docker)" = "faster-whisper" ]; }
+faster_whisper_venv() { vm_read_config FASTER_WHISPER_VENV "$HOME/.voicemode-local/faster-whisper-venv"; }
+
 healthy() {
     # $1 = port. True if the local service answers /health or /v1/models.
     curl -sf --max-time 2 "http://127.0.0.1:$1/health"     > /dev/null 2>&1 && return 0
@@ -403,7 +423,15 @@ cmd_ensure() {
                 [ -n "$quiet" ] || echo "  ensured Piper (8881)" ;;
             2022)
                 local wcpp_model; wcpp_model="$(vm_read_config WHISPER_CPP_MODEL)"
-                if [ -n "$wcpp_model" ] && command -v whisper-server > /dev/null 2>&1; then
+                if is_faster_whisper; then
+                    # Native faster-whisper (GPU): serves the OpenAI path itself, so
+                    # no proxy and no Docker whisper. The wrapper sets the CUDA
+                    # library path before the server starts. See docs/native-gpu-stt.
+                    start_detached faster-whisper-server "$FASTER_WHISPER_PID_FILE" \
+                        "$SCRIPT_DIR/scripts/faster-whisper-start.sh" "$(faster_whisper_venv)" \
+                        --port 2022 --model "$(vm_read_config FASTER_WHISPER_MODEL small)"
+                    [ -n "$quiet" ] || echo "  ensured faster-whisper server (2022)"
+                elif [ -n "$wcpp_model" ] && command -v whisper-server > /dev/null 2>&1; then
                     # Native whisper.cpp (e.g. macOS + Metal): serves the
                     # OpenAI-compatible path itself, so no proxy / Docker backend.
                     start_detached whisper-server /tmp/whisper-server.pid \
@@ -699,27 +727,40 @@ cmd_start() {
     fi
 
     echo ""
-    echo "Starting Whisper proxy..."
-    if [ -f "$PROXY_PID_FILE" ] && kill -0 "$(cat "$PROXY_PID_FILE")" 2>/dev/null; then
-        warn "Proxy already running (PID $(cat "$PROXY_PID_FILE"))"
-    else
-        # Wait for whisper service
-        echo "  Waiting for Whisper ASR to be ready..."
-        for i in $(seq 1 30); do
-            if curl -sf --max-time 2 "http://127.0.0.1:9000/docs" > /dev/null 2>&1; then
-                break
-            fi
-            sleep 1
-        done
-
-        nohup python3 "$SCRIPT_DIR/whisper-proxy.py" --port 2022 --whisper-url http://127.0.0.1:9000 \
-            > /tmp/whisper-proxy.log 2>&1 &
-        echo $! > "$PROXY_PID_FILE"
+    if is_faster_whisper; then
+        echo "Starting faster-whisper server (native STT, port 2022)..."
+        start_detached faster-whisper-server "$FASTER_WHISPER_PID_FILE" \
+            "$SCRIPT_DIR/scripts/faster-whisper-start.sh" "$(faster_whisper_venv)" \
+            --port 2022 --model "$(vm_read_config FASTER_WHISPER_MODEL small)"
         sleep 1
-        if kill -0 "$(cat "$PROXY_PID_FILE")" 2>/dev/null; then
-            ok "Proxy started (PID $(cat "$PROXY_PID_FILE"))"
+        if kill -0 "$(cat "$FASTER_WHISPER_PID_FILE")" 2>/dev/null; then
+            ok "faster-whisper server started (PID $(cat "$FASTER_WHISPER_PID_FILE")); /health turns 200 once the model is loaded"
         else
-            fail "Proxy failed to start — check /tmp/whisper-proxy.log"
+            fail "faster-whisper server failed to start — check /tmp/faster-whisper-server.log"
+        fi
+    else
+        echo "Starting Whisper proxy..."
+        if [ -f "$PROXY_PID_FILE" ] && kill -0 "$(cat "$PROXY_PID_FILE")" 2>/dev/null; then
+            warn "Proxy already running (PID $(cat "$PROXY_PID_FILE"))"
+        else
+            # Wait for whisper service
+            echo "  Waiting for Whisper ASR to be ready..."
+            for i in $(seq 1 30); do
+                if curl -sf --max-time 2 "http://127.0.0.1:9000/docs" > /dev/null 2>&1; then
+                    break
+                fi
+                sleep 1
+            done
+
+            nohup python3 "$SCRIPT_DIR/whisper-proxy.py" --port 2022 --whisper-url http://127.0.0.1:9000 \
+                > /tmp/whisper-proxy.log 2>&1 &
+            echo $! > "$PROXY_PID_FILE"
+            sleep 1
+            if kill -0 "$(cat "$PROXY_PID_FILE")" 2>/dev/null; then
+                ok "Proxy started (PID $(cat "$PROXY_PID_FILE"))"
+            else
+                fail "Proxy failed to start — check /tmp/whisper-proxy.log"
+            fi
         fi
     fi
 
@@ -773,6 +814,13 @@ cmd_stop() {
         echo "Stopping whisper.cpp server..."
         kill "$(cat /tmp/whisper-server.pid)" 2>/dev/null && ok "whisper.cpp server stopped" || warn "whisper.cpp server was not running"
         rm -f /tmp/whisper-server.pid
+    fi
+
+    if [ -f "$FASTER_WHISPER_PID_FILE" ]; then
+        echo ""
+        echo "Stopping faster-whisper server..."
+        kill "$(cat "$FASTER_WHISPER_PID_FILE")" 2>/dev/null && ok "faster-whisper server stopped" || warn "faster-whisper server was not running"
+        rm -f "$FASTER_WHISPER_PID_FILE"
     fi
 
     echo ""
