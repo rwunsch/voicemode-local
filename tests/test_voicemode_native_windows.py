@@ -65,7 +65,7 @@ def _seed(root):
     if not source:
         return
     data = json.loads(DEPENDENCIES.read_text(encoding="utf-8"))
-    for item in [*data["models"], data["whisper"]]:
+    for item in [*data["models"], data["whisper"], data["whisper_cuda"]]:
         name = Path(item["path"]).name
         found = Path(source) / item["sha256"] / name
         if found.is_file():
@@ -125,7 +125,25 @@ def install():
         assert not base.exists()
 
 
-def test_setup_installs_and_selects_a_patched_runtime(install):
+def _launcher():
+    """The launcher in this process, for its pure functions (the GPU choice, the GPU check)."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("voicemode_native_windows_under_test", SCRIPT)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _choice_as_installed(install, monkeypatch):
+    """whisper_choice() with the install's settings: its HOME, no VOICEMODE_ variable but its own."""
+    for key in [k for k in os.environ if k.startswith("VOICEMODE_")]:
+        monkeypatch.delenv(key)
+    for key in ("HOME", "USERPROFILE"):
+        monkeypatch.setenv(key, install["env"][key])
+    return _launcher().whisper_choice()
+
+
+def test_setup_installs_and_selects_a_patched_runtime(install, monkeypatch):
     runtime, root = install["runtime"], install["root"]
     assert runtime.parent == root / "runtime"
     complete = json.loads((runtime / ".complete.json").read_text(encoding="utf-8"))
@@ -138,6 +156,15 @@ def test_setup_installs_and_selects_a_patched_runtime(install):
     assert "FELIX: NO FFMPEG" in converse and "FELIX: LOAD SCIPY EARLY" in converse
     assert "FELIX: NO FFMPEG WARNING" in (package / "server.py").read_text(encoding="utf-8")
     assert (runtime / "services" / "kokoro-onnx-server.py").is_file()
+    # The whisper build this machine's choice gives (auto: CUDA with an NVIDIA GPU), recorded, and
+    # on the GPU checked by setup itself.
+    choice = _choice_as_installed(install, monkeypatch)
+    print(f"\n[whisper] {complete['whisper']}")
+    assert complete["whisper"]["build"] == choice["build"]
+    cuda = (runtime / "services" / "whisper" / "ggml-cuda.dll").is_file()
+    assert cuda == (choice["build"] == "cuda")
+    if cuda:
+        assert "using CUDA" in complete["whisper"]["gpu_check"]
     for item in json.loads(DEPENDENCIES.read_text(encoding="utf-8"))["models"]:
         assert os.stat(runtime / item["path"]).st_nlink >= 2  # a hard link, not a copy
     assert not (root / ".uv-cache").exists()
@@ -199,6 +226,13 @@ def test_services_answer_on_loopback_only_then_stop(install):
             assert any(m["id"] == "kokoro-onnx" for m in json.load(r)["data"])
         with NO_PROXY.open(f"http://127.0.0.1:{ports['stt']}/health", timeout=5) as r:
             assert json.load(r)["status"] == "ok"
+        # The CUDA build, started as the service, runs on the GPU: its own line says so.
+        stt_log = json.loads((install["root"] / "run" / "state.json").read_text(encoding="utf-8"))["stt"]["log"]
+        if (install["runtime"] / "services" / "whisper" / "ggml-cuda.dll").is_file():
+            backend = [line for line in Path(stt_log).read_text(errors="replace").splitlines()
+                       if "whisper_backend_init_gpu" in line]
+            print(f"[serve] stt backend: {backend}")
+            assert any("using CUDA" in line for line in backend), backend
         others = _other_addresses()
         print(f"[serve] other addresses tried: {others}")
         assert others, "no non-loopback address to try: the check would prove nothing"
@@ -766,3 +800,88 @@ def test_install_ps1_native_end_to_end_under_windows_powershell(install):
 
 
 WSL_PILL_EXISTED = sys.platform == "win32" and (Path(os.environ.get("LOCALAPPDATA", "")) / "voicemode-local").exists()
+
+
+# -- speech recognition on an NVIDIA GPU, on this machine (no install, no service) -------------
+
+def test_gpu_detection_on_this_machine(monkeypatch):
+    """The real `nvidia-smi -L`: with it on PATH and a GPU listed, auto chooses the CUDA build."""
+    monkeypatch.delenv("VOICEMODE_WHISPER_GPU", raising=False)
+    vn = _launcher()
+    if vn.on_path("nvidia-smi") is None:
+        pytest.skip("no nvidia-smi on this machine's PATH")
+    started = time.monotonic()
+    gpus, reason = vn.nvidia_gpus()
+    print(f"\n[gpu] {gpus} ({reason}) in {time.monotonic() - started:.2f} s")
+    assert gpus, reason
+    monkeypatch.setenv("VOICEMODE_WHISPER_GPU", "auto")
+    choice = vn.whisper_choice()
+    assert choice["build"] == "cuda" and gpus[0] in choice["reason"]
+
+
+def _seeded(item):
+    source = os.environ.get("VML_MODEL_SOURCE")
+    found = Path(source) / item["sha256"] / Path(item["path"]).name if source else None
+    return found if found is not None and found.is_file() else None
+
+
+@pytest.fixture
+def builds(tmp_path):
+    """Both pinned whisper.cpp builds unpacked by install_whisper into runtimes of their own, each
+    with the pinned model linked, from VML_MODEL_SOURCE (only read)."""
+    vn = _launcher()
+    data = json.loads(DEPENDENCIES.read_text(encoding="utf-8"))
+    model = next(m for m in data["models"] if m["path"].endswith("ggml-base.bin"))
+    needed = [data["whisper"], data["whisper_cuda"], model]
+    if not all(_seeded(item) for item in needed):
+        pytest.skip("VML_MODEL_SOURCE lacks a whisper zip or ggml-base.bin")
+    if vn.on_path("nvidia-smi") is None or not vn.nvidia_gpus()[0]:
+        pytest.skip("no NVIDIA GPU here")
+    root = tmp_path / "r"
+    for item in needed:
+        target = root / "downloads" / item["sha256"] / Path(item["path"]).name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        try:   # a link, else a copy: the source is only read; download() checks size and SHA-256
+            os.link(_seeded(item), target)
+        except OSError:
+            shutil.copyfile(_seeded(item), target)
+    runtimes = {}
+    for build in ("cpu", "cuda"):
+        runtime = root / "runtime" / build
+        vn.install_whisper(data, root, runtime, build)
+        (runtime / "models" / "whisper").mkdir(parents=True)
+        os.link(root / "downloads" / model["sha256"] / "ggml-base.bin", runtime / model["path"])
+        runtimes[build] = runtime
+    yield vn, runtimes
+    left = _ours(tmp_path)
+    for pid in left:
+        subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True)
+    assert not left, f"a whisper-server was left running: {left}"
+
+
+def test_gpu_check_passes_on_the_real_cuda_build(builds):
+    vn, runtimes = builds
+    started = time.monotonic()
+    line = vn.check_whisper_gpu(runtimes["cuda"])
+    print(f"\n[gpu check] {line!r} in {time.monotonic() - started:.1f} s")
+    assert "using CUDA0 backend" in line
+
+
+def test_gpu_check_fails_on_the_real_cpu_build(builds):
+    vn, runtimes = builds
+    with pytest.raises(vn.VoiceError, match="whisper_gpu_failed: .*on the CPU") as raised:
+        vn.check_whisper_gpu(runtimes["cpu"])
+    print(f"\n[gpu check, cpu build] {raised.value}")
+    assert "no GPU found" in str(raised.value)
+    assert raised.value.next_step == vn.WHISPER_GPU_OFF_STEP
+
+
+def test_gpu_check_fails_on_the_cuda_build_with_the_gpu_turned_off(builds, monkeypatch):
+    """The CUDA build that ends up on the CPU (here forced by whisper.cpp's own --no-gpu) is a
+    failure said out loud, not a quiet CPU fallback."""
+    vn, runtimes = builds
+    real = vn.whisper_check_command
+    monkeypatch.setattr(vn, "whisper_check_command", lambda runtime, port: [*real(runtime, port), "--no-gpu"])
+    with pytest.raises(vn.VoiceError, match="whisper_gpu_failed: .*on the CPU") as raised:
+        vn.check_whisper_gpu(runtimes["cuda"])
+    print(f"\n[gpu check, --no-gpu] {raised.value}")
