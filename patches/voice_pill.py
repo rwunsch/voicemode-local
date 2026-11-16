@@ -211,6 +211,40 @@ def german_available(home=None) -> bool:
     return not found_english
 
 
+GERMAN_VOICES = ("dm_martin", "p_de_thorsten", "p_de_eva")
+
+
+def german_voices(home=None) -> list:
+    """The German voices that can speak here, for the pill's voice list (2026-11-16: dm_martin
+    was offered with Piper in the chain but no German Kokoro model, and failed on every server).
+    dm_martin needs the German Kokoro model; p_de_* need Piper in the TTS chain or a configured
+    p_de_* voice. With no evidence either way, all are offered, as before: a wrong no hides a
+    working voice."""
+    kokoro_german = None   # True: model found; False: English Kokoro found without it
+    for d in _install_dirs():
+        try:
+            if all((d / f).is_file() for f in GERMAN_MODEL):
+                kokoro_german = True
+                break
+            if (d / KOKORO_MODEL).is_file():
+                kokoro_german = False
+        except OSError:
+            continue
+    configured = []
+    for name in ("VOICEMODE_VOICES", "VOICEMODE_TTS_VOICE"):
+        configured += [v.strip() for v in (st.setting(name, "", home) or "").split(",")]
+    piper = (PIPER_PORT in (st.setting("VOICEMODE_TTS_BASE_URLS", "", home) or "")
+             or any(v.startswith("p_de_") for v in configured))
+    if kokoro_german is None and not piper:
+        return list(GERMAN_VOICES)
+    out = []
+    if kokoro_german is not False or "dm_martin" in configured:
+        out.append("dm_martin")
+    if piper:
+        out += ["p_de_thorsten", "p_de_eva"]
+    return out
+
+
 PTT_SETTING = "VOICEMODE_PTT_ENABLED"
 
 
@@ -244,7 +278,7 @@ def _floor_voice(floor, is_holder, sessions, conch, overrides):
 def build_snapshot(status, sessions, conch, *, paused=False, ptt=False, closed=False,
                    last_floor=None, overrides=None, barge=None, ui=None, platform=None, beeps=False,
                    default_voice=st.FALLBACK_VOICE, play=None, wake=None,
-                   german=True, ptt_listener=None) -> dict:
+                   german=True, ptt_listener=None, german_list=None) -> dict:
     overrides = overrides or {}
     floor, is_holder = _floor(sessions, conch, last_floor)
     visible = bool(sessions or ptt) and not closed
@@ -288,6 +322,7 @@ def build_snapshot(status, sessions, conch, *, paused=False, ptt=False, closed=F
             "beeps": beeps,
             "platform": platform, "ui": ui or {},
             "play": play, "wake": wake, "german_available": bool(german),
+            "german_voices": list(german_list) if german_list is not None else list(GERMAN_VOICES),
             "ptt": (platform != "mac") if ptt_listener is None else bool(ptt_listener)}
 
 
@@ -396,7 +431,8 @@ def gather(ctx) -> dict:
         barge=barge, ui=st.load_ui(ctx.base), beeps=_beeps_on(ctx),
         default_voice=st.default_voice(ctx.home),
         play={"label": play.label} if play else None, wake=wake_view(ctx), platform=platform,
-        german=german_available(ctx.home), ptt_listener=ptt_listening(platform, ctx.home))
+        german=german_available(ctx.home), ptt_listener=ptt_listening(platform, ctx.home),
+        german_list=german_voices(ctx.home))
 
 
 # -- commands ----------------------------------------------------------------

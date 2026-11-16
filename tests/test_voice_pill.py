@@ -291,7 +291,7 @@ def test_snapshot_shape_and_json_serialisable():
              barge={"enabled": True, "available": False, "count": 2})
     assert json.loads(json.dumps(s)) == s
     assert set(s) == {"visible", "phase", "floor", "sessions", "voice", "language",
-                      "barge", "beeps", "platform", "ui", "play", "wake", "german_available", "ptt"}
+                      "barge", "beeps", "platform", "ui", "play", "wake", "german_available", "german_voices", "ptt"}
     assert s["play"] is None and s["wake"] is None
     assert s["platform"] == "mac" and s["ui"] == {"docked": True}
     assert s["barge"] == {"enabled": True, "available": False, "count": 2}
@@ -945,3 +945,24 @@ def test_the_page_goes_disconnected_on_a_dropped_command():
     body = app.split("window.pillReceive = function", 1)[1].split("snapshot = s;", 1)[0]
     assert "M.incomingKind(s)" in body
     assert 'kind === "dropped"' in body and "lastSeen = null" in body
+
+
+# 2026-11-16 (business-assistant, WSL): the pill listed dm_martin with Piper in the chain but
+# no German Kokoro model, so choosing it failed on every server. Only voices that can speak.
+
+def test_dm_martin_is_not_offered_without_the_german_kokoro_model(no_german_hints, monkeypatch, tmp_path):
+    _models(tmp_path / "install", german=False)
+    monkeypatch.setattr(vp, "_install_dirs", lambda: [tmp_path / "install"])
+    monkeypatch.setenv("VOICEMODE_TTS_BASE_URLS", "http://127.0.0.1:8880/v1,http://127.0.0.1:8881/v1")
+    assert vp.gather(no_german_hints)["german_voices"] == ["p_de_thorsten", "p_de_eva"]
+
+
+def test_dm_martin_is_offered_with_the_german_kokoro_model(no_german_hints, monkeypatch, tmp_path):
+    _models(tmp_path / "install", german=True)
+    monkeypatch.setattr(vp, "_install_dirs", lambda: [tmp_path / "install"])
+    assert vp.gather(no_german_hints)["german_voices"] == ["dm_martin"]
+
+
+def test_german_voices_stay_all_offered_when_nothing_can_be_found(no_german_hints, monkeypatch):
+    monkeypatch.setattr(vp, "_install_dirs", lambda: [])
+    assert vp.gather(no_german_hints)["german_voices"] == ["dm_martin", "p_de_thorsten", "p_de_eva"]
