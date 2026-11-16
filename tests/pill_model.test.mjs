@@ -360,3 +360,81 @@ test("the German voice list is the backend's german_voices when it sends one", (
   const old = viewModel(snap({ german_available: true, voice: "p_de_thorsten", language: "German" }), 0, 0);
   assert.deepEqual(old.voices, ["dm_martin", "p_de_thorsten", "p_de_eva"]);   // older backend: as before
 });
+
+// 2026-11-16 (Robert): every local voice and language, from the backend's voices_by_language.
+const VBL = {
+  Spanish: ["ef_dora", "em_alex"], English: ["af_sky", "bm_george"], Dutch: ["p_nl_nathalie"],
+  German: ["p_de_thorsten", "p_de_eva"], French: ["ff_siwis"],
+};
+
+test("languages and voices come from voices_by_language: English first, then alphabetical", () => {
+  const vm = viewModel(snap({ voices_by_language: VBL }), 0, 0);
+  assert.deepEqual(vm.languages, ["English", "Dutch", "French", "German", "Spanish"]);
+  assert.deepEqual(vm.voices, ["af_sky", "bm_george"]);
+  const es = viewModel(snap({ voices_by_language: VBL, voice: "ef_dora", language: "Spanish" }), 0, 0);
+  assert.deepEqual(es.voices, ["ef_dora", "em_alex"]);
+  // the current voice stays listed even when its server does not list it
+  const odd = viewModel(snap({ voices_by_language: VBL, voice: "af_river", language: "English" }), 0, 0);
+  assert.deepEqual(odd.voices, ["af_sky", "bm_george", "af_river"]);
+  // the session's language stays listed, so the select shows its real value
+  const it = viewModel(snap({ voices_by_language: VBL, voice: "if_sara", language: "Italian" }), 0, 0);
+  assert.ok(it.languages.includes("Italian"));
+  assert.deepEqual(it.voices, ["if_sara"]);
+});
+
+test("without English the languages are alphabetical; German follows the list, not german_available", () => {
+  const vm = viewModel(snap({ voices_by_language: { Spanish: ["ef_dora"], Dutch: ["p_nl_nathalie"] },
+    voice: "ef_dora", language: "Spanish", german_available: true }), 0, 0);
+  assert.deepEqual(vm.languages, ["Dutch", "Spanish"]);
+});
+
+test("absent or empty voices_by_language: today's lists", () => {
+  for (const vbl of [undefined, null, {}, [], "x"]) {
+    const vm = viewModel(snap({ voices_by_language: vbl }), 0, 0);
+    assert.deepEqual(vm.languages, LANGUAGES);
+    assert.deepEqual(vm.voices, VOICES);
+    const de = viewModel(snap({ voices_by_language: vbl, voice: "dm_martin", language: "German",
+      german_voices: ["dm_martin"] }), 0, 0);
+    assert.deepEqual(de.voices, ["dm_martin"]);
+  }
+});
+
+test("languageOf knows every Kokoro prefix and Piper's language code", () => {
+  const { languageOf } = model;
+  assert.equal(languageOf("ef_dora"), "Spanish");
+  assert.equal(languageOf("ff_siwis"), "French");
+  assert.equal(languageOf("hm_omega"), "Hindi");
+  assert.equal(languageOf("im_nicola"), "Italian");
+  assert.equal(languageOf("jf_alpha"), "Japanese");
+  assert.equal(languageOf("pm_alex"), "Portuguese");
+  assert.equal(languageOf("zf_xiaobei"), "Chinese");
+  assert.equal(languageOf("dm_martin"), "German");
+  assert.equal(languageOf("bm_george"), "English");
+  assert.equal(languageOf("p_nl_nathalie"), "Dutch");
+  assert.equal(languageOf("p_de_eva"), "German");
+  assert.equal(languageOf("p_ko_hana"), "Korean");
+  assert.equal(languageOf("p_pl_gosia"), "Polish");
+  assert.equal(languageOf("p_ru_dmitri"), "Russian");
+  assert.equal(languageOf("xx_unknown"), "English");
+  assert.equal(languageOf(null), "English");
+  assert.equal(viewModel(snap({ voice: "ef_dora", language: null }), 0, 0).language, "Spanish");
+});
+
+test("voiceForLanguage keeps the current voice in that language, else picks its first voice", () => {
+  const { voiceForLanguage } = model;
+  assert.equal(voiceForLanguage(VBL, "Spanish", "af_sky"), "ef_dora");
+  assert.equal(voiceForLanguage(VBL, "Spanish", "em_alex"), "em_alex");
+  assert.equal(voiceForLanguage(VBL, "English", "af_sky"), "af_sky");
+  assert.equal(voiceForLanguage(VBL, "Italian", "af_sky"), null);   // not listed: nothing to send
+  assert.equal(voiceForLanguage(undefined, "German", "af_sky"), null);
+  assert.equal(voiceForLanguage({}, "German", "af_sky"), null);
+});
+
+test("app.js sends the language's voice before the language", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const app = await readFile(new URL("../ui/pill/app.js", import.meta.url), "utf8");
+  const body = app.split('$("language").onchange = function', 2)[1].split("};", 1)[0];
+  assert.ok(body.includes("M.voiceForLanguage("), body);
+  const voiceAt = body.indexOf('cmd: "set_voice"'), langAt = body.indexOf('cmd: "set_language"');
+  assert.ok(voiceAt >= 0 && langAt > voiceAt, body);
+});

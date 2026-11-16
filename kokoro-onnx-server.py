@@ -192,6 +192,35 @@ VOICE_MAP = {
 
 DEFAULT_VOICE = "af_sky"
 
+# A Kokoro voice's language is its first letter (a American, b British English).
+LANGUAGE_BY_PREFIX = {
+    "a": ("en", "English"), "b": ("en", "English"), "e": ("es", "Spanish"),
+    "f": ("fr", "French"), "h": ("hi", "Hindi"), "i": ("it", "Italian"),
+    "j": ("ja", "Japanese"), "p": ("pt", "Portuguese"), "z": ("zh", "Chinese"),
+    "d": ("de", "German"),
+}
+
+
+def german_files_exist():
+    """The German model's files are downloaded (checked without loading the model)."""
+    model_dir = _de_model_dir or Path("./models/kokoro-de-martin")
+    return all((model_dir / name).exists() for name in ("kokoro-martin.onnx", "voices-martin.npz"))
+
+
+def list_voices():
+    """The voices this server speaks, in the Piper proxy's shape, so the voice pill can
+    list them by language: every voice of the English model, plus dm_martin when the
+    German files exist. A voice with an unknown prefix is left out."""
+    ids = list(get_kokoro().get_voices())
+    if german_files_exist():
+        ids.append(DE_VOICE)
+    data = []
+    for voice in ids:
+        lang = LANGUAGE_BY_PREFIX.get(voice[:1])
+        if lang:
+            data.append({"id": voice, "language": lang[0], "language_name": lang[1]})
+    return {"object": "list", "data": data}
+
 
 class TTSHandler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
@@ -209,6 +238,12 @@ class TTSHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/health":
             self._send_json(200, {"status": "ok", "engine": "kokoro-onnx"})
+        elif self.path == "/v1/audio/voices":
+            try:
+                self._send_json(200, list_voices())
+            except Exception as e:
+                print(f"[kokoro-onnx] Error listing voices: {e}")
+                self._send_json(500, {"error": str(e)})
         elif self.path == "/v1/models":
             self._send_json(200, {
                 "object": "list",
@@ -315,6 +350,7 @@ def main():
     print(f"Kokoro ONNX TTS server listening on {args.host}:{args.port}", flush=True)
     print(f"  POST /v1/audio/speech  - Generate speech")
     print(f"  GET  /v1/models        - List models")
+    print(f"  GET  /v1/audio/voices  - List voices")
     print(f"  GET  /health           - Health check")
 
     try:
