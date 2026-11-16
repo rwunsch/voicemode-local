@@ -170,7 +170,9 @@ GERMAN_VOICE = "dm_martin"
 
 
 def voice_language(voice) -> str:
-    return "German" if isinstance(voice, str) and voice.startswith(GERMAN_PREFIXES) else "English"
+    """The language a voice speaks, from its id (language_from_id); English when unknown.
+    It knew only English and German until every local language reached the pill (2026-11-16)."""
+    return language_from_id(voice) or "English"
 
 
 LANGUAGES_SETTING = "VOICEMODE_PILL_LANGUAGES"   # e.g. "English" or "English,German"

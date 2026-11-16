@@ -1112,3 +1112,13 @@ def test_snapshot_carries_voices_by_language(ctx, monkeypatch):
     monkeypatch.setattr(vp, "_fetch_voices", lambda url: {"voices": ["af_sky", "ff_siwis"]})
     monkeypatch.setenv("VOICEMODE_TTS_BASE_URLS", "http://127.0.0.1:8880/v1")
     assert vp.gather(ctx)["voices_by_language"] == {"English": ["af_sky"], "French": ["ff_siwis"]}
+
+
+def test_a_voice_is_given_its_own_language_not_just_english_or_german():
+    """2026-11-16: with every local language in the pill, a default voice such as ef_dora showed
+    as English, because voice_language knew only English and German."""
+    assert vp.voice_language("ef_dora") == "Spanish"
+    assert vp.voice_language("p_nl_nathalie") == "Dutch"
+    assert vp.voice_language("dm_martin") == "German" and vp.voice_language("p_de_eva") == "German"
+    assert vp.voice_language("af_sky") == "English" and vp.voice_language("bm_george") == "English"
+    assert vp.voice_language("xx_unknown") == "English" and vp.voice_language(None) == "English"
