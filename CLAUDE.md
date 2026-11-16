@@ -164,6 +164,7 @@ No need to switch to Piper for German.
 | Service | Port | Purpose |
 |---------|------|---------|
 | whisper-proxy | 2022 | Translates OpenAI-compatible STT to Whisper `/asr` |
+| faster-whisper-server | 2022 | Native GPU STT, **instead of** whisper-proxy + Docker whisper when `STT_ENGINE=faster-whisper` in `~/.voicemode-local/config` (venv `FASTER_WHISPER_VENV`, model `FASTER_WHISPER_MODEL`, default small). Started via `scripts/faster-whisper-start.sh` (sets the CUDA library path first); `/health` is 503 until the model is loaded and warmed up. 127.0.0.1 only, WAV only. Back to Docker: `STT_ENGINE=docker`. See `docs/native-gpu-stt/README.md`. |
 | voicemode-whisper | 9000 | Whisper ASR (Docker) |
 | voicemode-kokoro | 8880 | Kokoro TTS (Docker mode, Kokoro-FastAPI) |
 | kokoro-onnx-server | 8882 | Kokoro TTS (native ONNX). **482 MB measured** — 144 MB venv + 338 MB models. The old "~92MB" here was never measured and was wrong. Set `KOKORO_ONNX=true` + `KOKORO_ONNX_PORT=8882` in `~/.voicemode-local/config`; `ensure` starts it. Runs ALONGSIDE the Docker Kokoro as the local last resort in the TTS chain — on 8880 it would replace it instead. |
