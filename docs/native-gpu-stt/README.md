@@ -46,7 +46,7 @@ packages; the `small` model is 464 MB in the Hugging Face cache, `base` 142 MB.
   - One transcription at a time (a lock around the model; the segment generator is consumed
     inside it, since faster-whisper does the work lazily). Requests that arrive meanwhile wait.
   - One flushed log line per request: audio seconds and transcription seconds.
-  - Args: `--port` (2022), `--model` (small), `--device` cuda|cpu|auto (auto),
+  - Args: `--host` (127.0.0.1), `--port` (2022), `--model` (small), `--device` cuda|cpu|auto (auto),
     `--compute-type` (float16 on cuda, int8 on cpu), `--model-dir` (default: HF cache).
   - If loading fails the process exits 1, so its PID file shows it dead.
 - `scripts/faster-whisper-start.sh <venv> [server args]`: sets `LD_LIBRARY_PATH` from the venv's
@@ -55,7 +55,8 @@ packages; the `small` model is 464 MB in the Hugging Face cache, `base` 142 MB.
 - `voicemode-switch`: config key `STT_ENGINE` in `~/.voicemode-local/config`.
   `faster-whisper`: `ensure` and `start` start the server on 2022 via the wrapper (venv from
   `FASTER_WHISPER_VENV`, default `~/.voicemode-local/faster-whisper-venv`; model from
-  `FASTER_WHISPER_MODEL`, default `small`) instead of whisper-proxy; `stop` and `status` handle
+  `FASTER_WHISPER_MODEL`, default `small`; bind from `FASTER_WHISPER_HOST`, default 0.0.0.0)
+  instead of whisper-proxy; `stop` and `status` handle
   `/tmp/faster-whisper-server.pid`. Unset, `docker` or `whisper-cpp`: exactly the behaviour from
   before (`whisper-cpp` is still selected by `WHISPER_CPP_MODEL`).
 - `install.sh` + `lib/stt.sh`: when `nvidia-smi -L` lists a GPU (Linux/WSL), asks with native
@@ -86,10 +87,12 @@ of the compose file (unused, but it uses memory).
    ffmpeg failing or timing out gets a **422** with ffmpeg's last error line. With no ffmpeg on
    PATH such uploads get a **415** naming the format (mp3, ogg, flac, m4a, webm, or
    unrecognised).
-3. The server binds **127.0.0.1 only**; whisper-proxy binds 0.0.0.0 so Windows can reach it
-   through WSL localhost forwarding. Sessions inside WSL are unaffected; the `wsl-mcp` bridge is
-   described (comment in `voicemode-switch` `update_env`) as running the WSL binary, so it should
-   be too, but that was not tested here.
+3. **Bind address.** The server's own default is 127.0.0.1 (`--host`). `voicemode-switch` and
+   `install.sh` pass `FASTER_WHISPER_HOST` from the config, default **0.0.0.0**: that is what
+   whisper-proxy.py binds (it is started without `--host`), so replacing the proxy keeps every
+   reachability it had, e.g. Windows reaching WSL's 2022 through localhost forwarding. Set
+   `FASTER_WHISPER_HOST=127.0.0.1` to keep it inside WSL. A test ties the switch default to the
+   proxy's default.
 4. `ensure` skips any port that already answers. A running whisper-proxy on 2022 therefore keeps
    the port: stop it before switching (see below).
 

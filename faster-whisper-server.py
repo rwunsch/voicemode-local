@@ -27,7 +27,7 @@ WAV when its first STT endpoint is local, but mp3 when a remote one comes first
 no ffmpeg it gets a 415 naming the format, and an ffmpeg failure gets a 422.
 
 Usage:
-    scripts/faster-whisper-start.sh <venv> [--port 2022] [--model small]
+    scripts/faster-whisper-start.sh <venv> [--host 127.0.0.1] [--port 2022] [--model small]
         [--device cuda|cpu|auto] [--compute-type float16|int8|...] [--model-dir DIR]
 """
 
@@ -47,7 +47,6 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import numpy as np
 
 SAMPLE_RATE = 16000
-HOST = "127.0.0.1"
 RESPONSE_FORMATS = ("json", "text", "verbose_json")
 FFMPEG_TIMEOUT_S = 30
 
@@ -370,8 +369,12 @@ def make_server(host, port, transcriber):
     return server
 
 
-def main(argv=None):
-    parser = argparse.ArgumentParser(description="faster-whisper OpenAI-compatible STT server (127.0.0.1 only)")
+def build_parser():
+    parser = argparse.ArgumentParser(description="faster-whisper OpenAI-compatible STT server")
+    # 127.0.0.1 by default. voicemode-switch passes FASTER_WHISPER_HOST, whose default
+    # (0.0.0.0) is what whisper-proxy.py binds, so Windows keeps reaching WSL's 2022
+    # through localhost forwarding when this server replaces the proxy.
+    parser.add_argument("--host", default="127.0.0.1", help="Address to bind (default: 127.0.0.1)")
     parser.add_argument("--port", type=int, default=2022, help="Port to listen on (default: 2022)")
     parser.add_argument("--model", default="small", help="Whisper model name or path (default: small)")
     parser.add_argument("--device", choices=("cuda", "cpu", "auto"), default="auto",
@@ -380,7 +383,11 @@ def main(argv=None):
                         help="CTranslate2 compute type (default: float16 on cuda, int8 on cpu)")
     parser.add_argument("--model-dir", default=None,
                         help="Download/cache dir for the model (default: the Hugging Face cache)")
-    args = parser.parse_args(argv)
+    return parser
+
+
+def main(argv=None):
+    args = build_parser().parse_args(argv)
 
     device = resolve_device(args.device)
     compute_type = args.compute_type or default_compute_type(device)
@@ -389,8 +396,8 @@ def main(argv=None):
 
     # Listen first, so /health can answer 503 while the model loads (small: ~110 s
     # the first time, when it downloads).
-    server = make_server(HOST, args.port, transcriber)
-    log(f"listening on http://{HOST}:{args.port} (model {args.model}, {device}, {compute_type}); loading...")
+    server = make_server(args.host, args.port, transcriber)
+    log(f"listening on http://{args.host}:{args.port} (model {args.model}, {device}, {compute_type}); loading...")
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:

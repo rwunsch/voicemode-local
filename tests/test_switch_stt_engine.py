@@ -64,7 +64,7 @@ def test_faster_whisper_ensure_starts_the_wrapper_with_venv_and_model(tmp_path):
     done = b.run("ensure")
     assert done.returncode == 0, done.stderr
     args = b.wait_for(b.wrapper_log)
-    assert args.strip() == "/opt/fw-venv --port 2022 --model base"
+    assert args.strip() == "/opt/fw-venv --host 0.0.0.0 --port 2022 --model base"
     assert (b.scratch / "faster-whisper-server.pid").exists()
     assert not (b.scratch / "whisper-proxy.pid").exists()
     assert not b.docker_log.exists()      # no Docker whisper needed
@@ -75,7 +75,27 @@ def test_faster_whisper_defaults_to_small_and_the_installer_venv(tmp_path):
     b = Box(tmp_path, "STT_ENGINE=faster-whisper\n")
     b.run("ensure", "--quiet")
     args = b.wait_for(b.wrapper_log).strip()
-    assert args == f"{b.home}/.voicemode-local/faster-whisper-venv --port 2022 --model small"
+    assert args == f"{b.home}/.voicemode-local/faster-whisper-venv --host 0.0.0.0 --port 2022 --model small"
+
+
+def test_faster_whisper_host_can_be_set(tmp_path):
+    b = Box(tmp_path, "STT_ENGINE=faster-whisper\nFASTER_WHISPER_HOST=127.0.0.1\n")
+    b.run("ensure", "--quiet")
+    assert "--host 127.0.0.1 --port 2022" in b.wait_for(b.wrapper_log)
+
+
+def test_the_default_host_is_the_one_whisper_proxy_binds_today():
+    """Replacing the proxy must keep every reachability it had (Windows reaching WSL's
+    2022): the proxy is started without --host, so it binds its own default."""
+    import re
+    proxy = (REPO / "whisper-proxy.py").read_text()
+    proxy_default = re.search(r'add_argument\("--host", default="([^"]+)"', proxy).group(1)
+    switch = SWITCH.read_text()
+    ensure_proxy = switch[switch.index("start_detached whisper-proxy"):]
+    ensure_proxy = ensure_proxy[:ensure_proxy.index(";;")]
+    assert "--host" not in ensure_proxy
+    m = re.search(r'vm_read_config FASTER_WHISPER_HOST ([^ );"]+)', switch)
+    assert m and m.group(1) == proxy_default == "0.0.0.0"
 
 
 def test_unset_engine_keeps_starting_the_whisper_proxy(tmp_path):

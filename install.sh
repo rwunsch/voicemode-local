@@ -417,6 +417,8 @@ if [ "$STT_ENGINE" = "faster-whisper" ]; then
     header "Step 7c: Native GPU speech recognition (faster-whisper)"
     FW_VENV="$(vm_read_config FASTER_WHISPER_VENV "$FASTER_WHISPER_DEFAULT_VENV")"
     FW_MODEL="$(vm_read_config FASTER_WHISPER_MODEL "$FASTER_WHISPER_DEFAULT_MODEL")"
+    # Same bind as whisper-proxy.py (0.0.0.0), so Windows still reaches WSL's 2022.
+    FW_HOST="$(vm_read_config FASTER_WHISPER_HOST 0.0.0.0)"
     echo "  Creating $FW_VENV (faster-whisper + CUDA libraries, about 2.6 GB)..."
     if vm_setup_faster_whisper "$FW_VENV" > /tmp/faster-whisper-install.log 2>&1; then
         ok "faster-whisper installed in $FW_VENV"
@@ -434,7 +436,7 @@ if [ "$STT_ENGINE" = "faster-whisper" ]; then
         kill "$(lsof -ti:2022)" 2>/dev/null
         sleep 1
     fi
-    nohup "$SCRIPT_DIR/scripts/faster-whisper-start.sh" "$FW_VENV" --port 2022 --model "$FW_MODEL" \
+    nohup "$SCRIPT_DIR/scripts/faster-whisper-start.sh" "$FW_VENV" --host "$FW_HOST" --port 2022 --model "$FW_MODEL" \
         > /tmp/faster-whisper-server.log 2>&1 &
     echo $! > /tmp/faster-whisper-server.pid
     sleep 1

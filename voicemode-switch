@@ -368,6 +368,9 @@ PYEOF
 FASTER_WHISPER_PID_FILE="/tmp/faster-whisper-server.pid"
 is_faster_whisper() { [ "$(vm_read_config STT_ENGINE docker)" = "faster-whisper" ]; }
 faster_whisper_venv() { vm_read_config FASTER_WHISPER_VENV "$HOME/.voicemode-local/faster-whisper-venv"; }
+# Default = what whisper-proxy.py binds (it is started without --host): 0.0.0.0, so
+# Windows reaches WSL's 2022 through localhost forwarding just as before.
+faster_whisper_host() { vm_read_config FASTER_WHISPER_HOST 0.0.0.0; }
 
 healthy() {
     # $1 = port. True if the local service answers /health or /v1/models.
@@ -429,6 +432,7 @@ cmd_ensure() {
                     # library path before the server starts. See docs/native-gpu-stt.
                     start_detached faster-whisper-server "$FASTER_WHISPER_PID_FILE" \
                         "$SCRIPT_DIR/scripts/faster-whisper-start.sh" "$(faster_whisper_venv)" \
+                        --host "$(faster_whisper_host)" \
                         --port 2022 --model "$(vm_read_config FASTER_WHISPER_MODEL small)"
                     [ -n "$quiet" ] || echo "  ensured faster-whisper server (2022)"
                 elif [ -n "$wcpp_model" ] && command -v whisper-server > /dev/null 2>&1; then
@@ -731,6 +735,7 @@ cmd_start() {
         echo "Starting faster-whisper server (native STT, port 2022)..."
         start_detached faster-whisper-server "$FASTER_WHISPER_PID_FILE" \
             "$SCRIPT_DIR/scripts/faster-whisper-start.sh" "$(faster_whisper_venv)" \
+            --host "$(faster_whisper_host)" \
             --port 2022 --model "$(vm_read_config FASTER_WHISPER_MODEL small)"
         sleep 1
         if kill -0 "$(cat "$FASTER_WHISPER_PID_FILE")" 2>/dev/null; then

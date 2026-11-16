@@ -213,3 +213,4 @@ def test_install_sets_up_the_venv_and_starts_through_the_wrapper():
     assert "vm_setup_faster_whisper" in tail
     assert "scripts/faster-whisper-start.sh" in tail
     assert "/tmp/faster-whisper-server.pid" in tail
+    assert '--host "$FW_HOST"' in tail and "vm_read_config FASTER_WHISPER_HOST 0.0.0.0" in tail

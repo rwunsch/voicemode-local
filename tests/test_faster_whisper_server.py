@@ -460,10 +460,29 @@ def test_compute_type_defaults_follow_the_device():
     assert fws.default_compute_type("cpu") == "int8"
 
 
+def test_host_defaults_to_loopback_and_can_be_set():
+    assert fws.build_parser().parse_args([]).host == "127.0.0.1"
+    assert fws.build_parser().parse_args(["--host", "0.0.0.0"]).host == "0.0.0.0"
+
+
+def test_main_binds_the_given_host(monkeypatch):
+    bound = {}
+
+    def fake_make_server(host, port, transcriber):
+        bound["host"], bound["port"] = host, port
+        raise SystemExit(0)
+
+    monkeypatch.setattr(fws, "make_server", fake_make_server)
+    monkeypatch.setattr(fws, "resolve_device", lambda device: "cpu")
+    with pytest.raises(SystemExit):
+        fws.main(["--host", "0.0.0.0", "--port", "12345"])
+    assert bound == {"host": "0.0.0.0", "port": 12345}
+
+
 def test_help_lists_the_arguments():
     done = subprocess.run([os.sys.executable, str(SERVER), "--help"], capture_output=True, text=True, timeout=30)
     assert done.returncode == 0
-    for flag in ("--port", "--model", "--device", "--compute-type", "--model-dir"):
+    for flag in ("--host", "--port", "--model", "--device", "--compute-type", "--model-dir"):
         assert flag in done.stdout
 
 
