@@ -15,6 +15,20 @@ by another session does not count.
    VM812_SRC=<pristine voice-mode 8.12.0 dir> VOICEMODE_RELEASE_CHECK=1 \
      .venv/bin/python -m pytest tests -q -p no:cacheprovider
    ```
+   `VM812_SRC` is a flat folder of pristine 8.12.0 files, `tools/X.py` stored as `X.py`. Keep
+   it outside /tmp (a cleared /tmp took it on 2026-11-16) and build it like this. The core
+   package must win name collisions (`conch.py`, `providers.py`, `statistics.py` exist in both
+   `voice_mode/` and `voice_mode/tools/`); copying `tools/` last made the tests patch the MCP
+   tool's `conch.py` and fail with "an anchor was found 0 times":
+   ```bash
+   D=~/.cache/voicemode-local/vm812
+   uv pip install --python .venv/bin/python3 --target "$D/pkg" --no-deps "voice-mode==8.12.0"
+   mkdir -p "$D/flat"
+   for f in "$D"/pkg/voice_mode/tools/*.py; do
+     [ "$(basename "$f")" = __init__.py ] || cp "$f" "$D/flat/"
+   done
+   cp "$D"/pkg/voice_mode/*.py "$D/flat/"     # core last: it wins
+   ```
    Also `node --test tests/pill_model.test.mjs` when `ui/pill/` changed, and
    `tests/run_windows_transport_tests.sh -k <one word>` when `pill-windows.ps1` changed
    (the runner splits its arguments on spaces).
