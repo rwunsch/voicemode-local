@@ -189,3 +189,64 @@ def test_two_syntheses_run_one_at_a_time(slow_server):
         t.join(10)
     assert results == {1: 200, 2: 200}
     assert fake.calls == 2 and fake.most_at_once == 1
+
+
+# --- Voice list (2026-11-16) ----------------------------------------------------------
+# The pill lists every local voice by language. FELIX runs only this server, so it must
+# answer GET /v1/audio/voices in the Piper proxy's shape: {"object": "list", "data":
+# [{"id", "language", "language_name"}]}. dm_martin only when the German files exist,
+# and the German model is never loaded just to list it.
+
+class _ListingKokoro:
+    def get_voices(self):
+        return ["af_sky", "bm_george", "ef_dora", "zf_xiaobei", "jm_kumo"]
+
+
+@pytest.fixture
+def listing_server(monkeypatch, tmp_path):
+    server = _server()
+    monkeypatch.setattr(server, "get_kokoro", lambda: _ListingKokoro())
+
+    def never():
+        raise AssertionError("the German model must not be loaded to list it")
+    monkeypatch.setattr(server, "get_kokoro_de", never)
+    monkeypatch.setattr(server, "_load_kokoro_de", never)
+    monkeypatch.setattr(server, "_de_model_dir", tmp_path / "de")
+    httpd = server.make_server("127.0.0.1", 0)
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{httpd.server_address[1]}", tmp_path / "de"
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def _voices(base):
+    with urllib.request.urlopen(f"{base}/v1/audio/voices", timeout=5) as resp:
+        assert resp.status == 200
+        return json.load(resp)
+
+
+def test_voices_lists_the_english_model_with_languages(listing_server):
+    base, _ = listing_server
+    body = _voices(base)
+    assert body["object"] == "list"
+    assert body["data"] == [
+        {"id": "af_sky", "language": "en", "language_name": "English"},
+        {"id": "bm_george", "language": "en", "language_name": "English"},
+        {"id": "ef_dora", "language": "es", "language_name": "Spanish"},
+        {"id": "zf_xiaobei", "language": "zh", "language_name": "Chinese"},
+        {"id": "jm_kumo", "language": "ja", "language_name": "Japanese"},
+    ]
+
+
+def test_voices_lists_dm_martin_only_when_the_german_files_exist(listing_server):
+    base, de = listing_server
+    assert "dm_martin" not in [v["id"] for v in _voices(base)["data"]]
+    de.mkdir()
+    (de / "kokoro-martin.onnx").write_text("")
+    assert "dm_martin" not in [v["id"] for v in _voices(base)["data"]]   # one file is not enough
+    (de / "voices-martin.npz").write_text("")
+    data = _voices(base)["data"]
+    assert data[-1] == {"id": "dm_martin", "language": "de", "language_name": "German"}
