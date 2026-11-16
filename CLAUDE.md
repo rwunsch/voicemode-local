@@ -7,7 +7,7 @@ Local voice services for Claude Code, with Whisper STT, Kokoro TTS, and Piper TT
 - **WSL2 on Windows 11** (primary, tested on Ubuntu 22.04 LTS)
 - **Ubuntu 22.04+** (native Linux, should work with PulseAudio/PipeWire)
 - **macOS** (partially tested — native mode: whisper.cpp via `WHISPER_CPP_MODEL`, Kokoro ONNX, Piper; see README "macOS (native, no Docker)")
-- **Windows (native)** — work in progress, see below
+- **Windows (native)** — work in progress, see below. Native STT is whisper.cpp from a pinned zip: the CUDA build when `nvidia-smi -L` lists a GPU (`VOICEMODE_WHISPER_GPU=auto|on|off`), checked on the GPU by setup, which fails with `whisper_gpu_failed` rather than falling back to the CPU without saying so. Median 0.21 s vs 6.94 s on the CPU for a 7.6 s clip (n=5 each, 2026-11-17); see docs/windows-native/README.md
 
 ## Windows Working Copy
 
