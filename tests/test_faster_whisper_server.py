@@ -254,14 +254,14 @@ def test_an_explicit_language_is_passed(running):
     assert model.calls[-1][1].get("language") == "de"
 
 
-def test_a_non_wav_upload_gets_415_naming_the_format(running):
+def test_a_non_wav_upload_gets_415_naming_the_format(running, no_ffmpeg):
     r = running()
     status, _, body = r.transcribe(wav_bytes=b"ID3\x04\x00" + b"\x00" * 200, filename="audio.mp3")
     assert status == 415
     assert "mp3" in json.loads(body)["error"]["message"]
 
 
-def test_an_unknown_upload_gets_415_not_a_crash(running):
+def test_an_unknown_upload_gets_415_not_a_crash(running, no_ffmpeg):
     r = running()
     status, _, body = r.transcribe(wav_bytes=b"garbage bytes that are no audio at all")
     assert status == 415
@@ -292,6 +292,104 @@ def test_an_unsupported_response_format_is_a_400(running):
 def test_unknown_paths_are_404(running):
     r = running()
     assert r.get("/nope")[0] == 404
+
+
+# --- non-WAV uploads through ffmpeg ----------------------------------------------------
+# hybrid mode (OpenAI first, local second) sends mp3 to the local fallback; with an
+# ffmpeg on PATH the server decodes it, without one it keeps the 415.
+
+FFMPEG_ARGS = "-i pipe:0 -f s16le -ac 1 -ar 16000 pipe:1"
+
+
+@pytest.fixture
+def no_ffmpeg(tmp_path, monkeypatch):
+    empty = tmp_path / "empty-bin"
+    empty.mkdir()
+    monkeypatch.setenv("PATH", str(empty))
+
+
+def _fake_ffmpeg(tmp_path, monkeypatch, body):
+    bin_dir = tmp_path / "ffmpeg-bin"
+    bin_dir.mkdir()
+    stub = bin_dir / "ffmpeg"
+    stub.write_text("#!/bin/bash\n" + body + "\n")
+    stub.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}:/usr/bin:/bin")
+    return bin_dir
+
+
+MP3 = b"ID3\x04\x00" + b"\x00" * 200
+
+
+def test_a_non_wav_upload_is_decoded_by_ffmpeg(running, tmp_path, monkeypatch):
+    known = (np.arange(8000, dtype=np.int16) - 4000).astype("<i2")
+    pcm = tmp_path / "known.pcm"
+    pcm.write_bytes(known.tobytes())
+    log, stdin_copy = tmp_path / "ffmpeg.log", tmp_path / "stdin.bin"
+    _fake_ffmpeg(tmp_path, monkeypatch,
+                 f'echo "$*" > "{log}"; cat > "{stdin_copy}"; cat "{pcm}"')
+    model = FakeModel(text="from mp3")
+    r = running(model)
+    status, _, body = r.transcribe(wav_bytes=MP3, filename="audio.mp3", response_format="text")
+    assert status == 200, body
+    assert body.decode() == "from mp3"
+    assert FFMPEG_ARGS in log.read_text()
+    assert stdin_copy.read_bytes() == MP3
+    audio = model.calls[-1][0]
+    assert audio.dtype == np.float32 and len(audio) == 8000
+    assert np.allclose(audio, known.astype(np.float32) / 32768.0)
+
+
+def test_ffmpeg_failing_is_a_clear_error_not_a_crash(running, tmp_path, monkeypatch):
+    _fake_ffmpeg(tmp_path, monkeypatch, 'cat > /dev/null; echo "Invalid data found when processing input" >&2; exit 1')
+    r = running()
+    status, _, body = r.transcribe(wav_bytes=MP3, filename="audio.mp3")
+    assert 400 <= status < 600 and status != 200
+    message = json.loads(body)["error"]["message"]
+    assert "ffmpeg" in message and "mp3" in message
+    assert "Invalid data found" in message
+    assert r.get("/health")[0] == 200   # still up
+
+
+def test_ffmpeg_producing_nothing_is_a_clear_error(running, tmp_path, monkeypatch):
+    _fake_ffmpeg(tmp_path, monkeypatch, 'cat > /dev/null; exit 0')
+    r = running()
+    status, _, body = r.transcribe(wav_bytes=MP3, filename="audio.mp3")
+    assert 400 <= status < 600 and status != 200
+    assert "ffmpeg" in json.loads(body)["error"]["message"]
+
+
+def test_ffmpeg_is_run_without_a_shell_and_with_a_timeout(tmp_path, monkeypatch):
+    seen = {}
+
+    def fake_run(cmd, **kwargs):
+        seen["cmd"], seen["kwargs"] = cmd, kwargs
+        return SimpleNamespace(returncode=0, stdout=b"\x00\x00" * 160, stderr=b"")
+
+    monkeypatch.setattr(fws.shutil, "which", lambda name: "/usr/bin/ffmpeg")
+    monkeypatch.setattr(fws.subprocess, "run", fake_run)
+    audio = fws.decode_audio(MP3)
+    assert len(audio) == 160
+    assert isinstance(seen["cmd"], list) and seen["cmd"][0] == "/usr/bin/ffmpeg"
+    assert " ".join(seen["cmd"]).endswith(FFMPEG_ARGS)
+    assert seen["kwargs"].get("shell") in (None, False)
+    assert 0 < seen["kwargs"]["timeout"] <= 60
+    assert seen["kwargs"]["input"] == MP3
+
+
+def test_ffmpeg_timing_out_is_a_clear_error(monkeypatch):
+    def slow(cmd, **kwargs):
+        raise fws.subprocess.TimeoutExpired(cmd, kwargs["timeout"])
+
+    monkeypatch.setattr(fws.shutil, "which", lambda name: "/usr/bin/ffmpeg")
+    monkeypatch.setattr(fws.subprocess, "run", slow)
+    with pytest.raises(fws.AudioDecodeError) as err:
+        fws.decode_audio(MP3)
+    assert "timed out" in str(err.value)
+
+
+def test_wav_does_not_need_ffmpeg(no_ffmpeg):
+    assert len(fws.decode_audio(_wav(seconds=0.5))) == 8000
 
 
 # --- health and warm-up --------------------------------------------------------------

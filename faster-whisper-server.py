@@ -18,10 +18,13 @@ come from the venv's nvidia-cublas-cu12 / nvidia-cudnn-cu12 packages, and
 ctranslate2 dlopens them at import, so LD_LIBRARY_PATH must be set before the
 process starts. See docs/native-gpu-stt/README.md.
 
-Audio: WAV only, decoded with the stdlib `wave` module + numpy (resampled to
-16 kHz mono float32). faster_whisper.decode_audio is not used: PyAV 19 breaks it
+Audio: WAV is decoded with the stdlib `wave` module + numpy (resampled to 16 kHz
+mono float32). faster_whisper.decode_audio is not used: PyAV 19 breaks it
 ("open() got an unexpected keyword argument 'metadata_errors'"). voice-mode sends
-WAV to a local endpoint; anything else gets a 415 naming the format.
+WAV when its first STT endpoint is local, but mp3 when a remote one comes first
+(hybrid mode: OpenAI, then this server). Anything that is not WAV goes through an
+`ffmpeg` binary on PATH (`ffmpeg -i pipe:0 -f s16le -ac 1 -ar 16000 pipe:1`); with
+no ffmpeg it gets a 415 naming the format, and an ffmpeg failure gets a 422.
 
 Usage:
     scripts/faster-whisper-start.sh <venv> [--port 2022] [--model small]
@@ -33,6 +36,8 @@ import io
 import itertools
 import json
 import re
+import shutil
+import subprocess
 import sys
 import threading
 import time
@@ -44,6 +49,7 @@ import numpy as np
 SAMPLE_RATE = 16000
 HOST = "127.0.0.1"
 RESPONSE_FORMATS = ("json", "text", "verbose_json")
+FFMPEG_TIMEOUT_S = 30
 
 
 def log(message):
@@ -56,6 +62,10 @@ def log(message):
 
 class UnsupportedAudio(ValueError):
     """The upload is not a WAV this server can decode. The message names what it is."""
+
+
+class AudioDecodeError(ValueError):
+    """ffmpeg was there but could not turn the upload into audio."""
 
 
 def sniff_format(data):
@@ -111,6 +121,42 @@ def decode_wav(data):
         x_new = np.arange(n_out, dtype=np.float64) / SAMPLE_RATE
         audio = np.interp(x_new, x_old, audio)
     return np.ascontiguousarray(audio, dtype=np.float32)
+
+
+def decode_with_ffmpeg(data, ffmpeg, kind):
+    """Any container ffmpeg reads -> 16 kHz mono float32. No shell; bounded in time."""
+    cmd = [ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error",
+           "-i", "pipe:0", "-f", "s16le", "-ac", "1", "-ar", str(SAMPLE_RATE), "pipe:1"]
+    try:
+        done = subprocess.run(cmd, input=data, capture_output=True, timeout=FFMPEG_TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        raise AudioDecodeError(f"ffmpeg timed out after {FFMPEG_TIMEOUT_S}s decoding the {kind} upload")
+    except OSError as e:
+        raise AudioDecodeError(f"ffmpeg could not be run to decode the {kind} upload: {e}")
+    if done.returncode != 0:
+        why = (done.stderr or b"").decode(errors="replace").strip().splitlines()
+        raise AudioDecodeError(f"ffmpeg could not decode the {kind} upload (exit {done.returncode}): "
+                               f"{why[-1] if why else 'no message'}")
+    pcm = done.stdout[: len(done.stdout) - len(done.stdout) % 2]
+    if not pcm:
+        raise AudioDecodeError(f"ffmpeg produced no audio from the {kind} upload")
+    return np.frombuffer(pcm, dtype="<i2").astype(np.float32) / 32768.0
+
+
+def decode_audio(data):
+    """Any upload -> 16 kHz mono float32. WAV in-process; the rest through ffmpeg if it
+    is on PATH. Raises UnsupportedAudio (no ffmpeg) or AudioDecodeError (ffmpeg failed)."""
+    kind = sniff_format(data)
+    if kind == "wav":
+        try:
+            return decode_wav(data)
+        except UnsupportedAudio:
+            if not shutil.which("ffmpeg"):
+                raise                     # e.g. a float WAV, and nothing else can read it
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        return decode_wav(data)           # raises UnsupportedAudio naming the format
+    return decode_with_ffmpeg(data, ffmpeg, "unrecognised" if kind == "unknown" else kind)
 
 
 # --- the model -----------------------------------------------------------------------
@@ -275,10 +321,14 @@ class Handler(BaseHTTPRequestHandler):
         prompt = fields.get("prompt") or None
 
         try:
-            audio = decode_wav(file_data)
+            audio = decode_audio(file_data)
         except UnsupportedAudio as e:
             log(f"#{rid} 415 {file_name}: {e}")
-            return self._error(415, f"{e} (file {file_name!r})", "unsupported_media_type")
+            return self._error(415, f"{e}; install ffmpeg to accept it (file {file_name!r})",
+                               "unsupported_media_type")
+        except AudioDecodeError as e:
+            log(f"#{rid} 422 {file_name}: {e}")
+            return self._error(422, f"{e} (file {file_name!r})")
 
         audio_s = len(audio) / SAMPLE_RATE
         t0 = time.perf_counter()

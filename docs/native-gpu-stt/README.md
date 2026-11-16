@@ -65,9 +65,8 @@ packages; the `small` model is 464 MB in the Hugging Face cache, `base` 142 MB.
   `--stt=docker` (or `VOICEMODE_STT=docker`) forces the Docker path; `--stt=native-gpu` forces
   native. A failed venv install falls back to Docker and rewrites `STT_ENGINE=docker`.
 
-Not done: the server does not decode MP3/OGG/etc. (see Gotchas); `voicemode-switch start`
-still brings up the Docker whisper container with the rest of the compose file (unused, but it
-uses memory).
+Not done: `voicemode-switch start` still brings up the Docker whisper container with the rest
+of the compose file (unused, but it uses memory).
 
 ## Gotchas
 
@@ -79,11 +78,14 @@ uses memory).
 2. **PyAV 19 breaks `faster_whisper.decode_audio`** (`open() got an unexpected keyword argument
    'metadata_errors'`), and `av<15` does not build here. So the server decodes WAV itself with
    the stdlib `wave` module + numpy (8/16/24/32-bit PCM, any rate, any channel count, mixed to
-   mono and resampled to 16 kHz float32) and hands the array to `model.transcribe`. Anything
-   else gets **415** with a message naming the format (mp3, ogg, flac, m4a, webm, or
-   unrecognised). voice-mode sends WAV when the **first** STT endpoint is local; with a remote
-   endpoint first (the `hybrid` mode: OpenAI, then local) it compresses to mp3, and this server
-   would answer 415 to that fallback. The Docker whisper (ffmpeg) accepted mp3.
+   mono and resampled to 16 kHz float32) and hands the array to `model.transcribe`.
+   voice-mode sends WAV when the **first** STT endpoint is local; with a remote endpoint first
+   (the `hybrid` mode: OpenAI, then local) it compresses to mp3. So anything that is not WAV
+   (and a WAV the `wave` module cannot read, e.g. float samples) is piped through an `ffmpeg`
+   binary on PATH: `ffmpeg -i pipe:0 -f s16le -ac 1 -ar 16000 pipe:1`, no shell, 30 s timeout.
+   ffmpeg failing or timing out gets a **422** with ffmpeg's last error line. With no ffmpeg on
+   PATH such uploads get a **415** naming the format (mp3, ogg, flac, m4a, webm, or
+   unrecognised).
 3. The server binds **127.0.0.1 only**; whisper-proxy binds 0.0.0.0 so Windows can reach it
    through WSL localhost forwarding. Sessions inside WSL are unaffected; the `wsl-mcp` bridge is
    described (comment in `voicemode-switch` `update_env`) as running the WSL binary, so it should
