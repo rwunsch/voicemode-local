@@ -18,7 +18,11 @@
 #
 # Usage:
 #   cd ~/git/voicemode-local
-#   ./install.sh [--openai-key sk-proj-...]
+#   ./install.sh [--openai-key sk-proj-...] [--stt=docker|native-gpu]
+#
+#   --stt=docker      keep speech recognition on the Docker whisper even with a GPU
+#                     (same as VOICEMODE_STT=docker)
+#   --stt=native-gpu  faster-whisper in its own venv (recommended with an NVIDIA GPU)
 
 set -euo pipefail
 
@@ -41,8 +45,10 @@ warn() { echo -e "  ${YELLOW}!${NC} $1"; }
 header() { echo -e "\n${BOLD}=== $1 ===${NC}"; }
 
 OPENAI_KEY=""
+STT_CHOICE=""
 for arg in "$@"; do
     case $arg in
+        --stt=*)        STT_CHOICE="${arg#*=}" ;;
         --openai-key=*) OPENAI_KEY="${arg#*=}" ;;
         --openai-key)   shift; OPENAI_KEY="${2:-}" ;;
     esac
@@ -147,6 +153,17 @@ fi
 WHISPER_MODEL="$(vm_recommended_whisper_model "$COMPUTE_MODE")"
 ok "Compute mode: $COMPUTE_MODE (Whisper model: $WHISPER_MODEL)"
 
+# ─── Speech recognition: native GPU (faster-whisper) or Docker whisper ─────
+# With an NVIDIA GPU, faster-whisper in its own venv is far faster than the
+# Docker whisper on the CPU and needs neither Docker nor sudo (the CUDA
+# libraries come from pip). See docs/native-gpu-stt/README.md.
+header "Speech recognition (STT)"
+# shellcheck source=lib/stt.sh
+. "$SCRIPT_DIR/lib/stt.sh"
+STT_ENGINE="docker"
+vm_choose_stt_engine || exit 1
+ok "Speech recognition: $STT_ENGINE"
+
 # Save config
 cat > "$CONFIG_FILE" << EOF
 INSTALL_MODE=$INSTALL_MODE
@@ -155,6 +172,7 @@ KOKORO_ONNX=$KOKORO_ONNX
 COMPUTE_MODE=$COMPUTE_MODE
 WHISPER_MODEL=$WHISPER_MODEL
 EOF
+vm_write_stt_config "$STT_ENGINE"
 ok "Config saved to $CONFIG_FILE"
 
 # ─── Step 1: System packages ─────────────────────────────────────────────────
@@ -394,20 +412,56 @@ if [ "$KOKORO_ONNX" = "true" ]; then
     fi
 fi
 
-echo "  Starting Whisper proxy..."
-if lsof -ti:2022 > /dev/null 2>&1; then
-    kill "$(lsof -ti:2022)" 2>/dev/null
-    sleep 1
+# ─── Step 7c: native GPU speech recognition (faster-whisper) ──────────────
+if [ "$STT_ENGINE" = "faster-whisper" ]; then
+    header "Step 7c: Native GPU speech recognition (faster-whisper)"
+    FW_VENV="$(vm_read_config FASTER_WHISPER_VENV "$FASTER_WHISPER_DEFAULT_VENV")"
+    FW_MODEL="$(vm_read_config FASTER_WHISPER_MODEL "$FASTER_WHISPER_DEFAULT_MODEL")"
+    # Same bind as whisper-proxy.py (0.0.0.0), so Windows still reaches WSL's 2022.
+    FW_HOST="$(vm_read_config FASTER_WHISPER_HOST 0.0.0.0)"
+    echo "  Creating $FW_VENV (faster-whisper + CUDA libraries, about 2.6 GB)..."
+    if vm_setup_faster_whisper "$FW_VENV" > /tmp/faster-whisper-install.log 2>&1; then
+        ok "faster-whisper installed in $FW_VENV"
+    else
+        tail -3 /tmp/faster-whisper-install.log | sed 's/^/  /'
+        fail "faster-whisper install failed (log: /tmp/faster-whisper-install.log) — falling back to the Docker whisper"
+        STT_ENGINE="docker"
+        vm_write_stt_config docker
+    fi
 fi
-nohup python3 "$SCRIPT_DIR/whisper-proxy.py" --port 2022 --whisper-url http://127.0.0.1:9000 \
-    > /tmp/whisper-proxy.log 2>&1 &
-echo $! > /tmp/whisper-proxy.pid
-sleep 1
 
-if kill -0 "$(cat /tmp/whisper-proxy.pid)" 2>/dev/null; then
-    ok "All services running"
+if [ "$STT_ENGINE" = "faster-whisper" ]; then
+    echo "  Starting faster-whisper server..."
+    if lsof -ti:2022 > /dev/null 2>&1; then
+        kill "$(lsof -ti:2022)" 2>/dev/null
+        sleep 1
+    fi
+    nohup "$SCRIPT_DIR/scripts/faster-whisper-start.sh" "$FW_VENV" --host "$FW_HOST" --port 2022 --model "$FW_MODEL" \
+        > /tmp/faster-whisper-server.log 2>&1 &
+    echo $! > /tmp/faster-whisper-server.pid
+    sleep 1
+    if kill -0 "$(cat /tmp/faster-whisper-server.pid)" 2>/dev/null; then
+        ok "faster-whisper server started; it answers once the model ($FW_MODEL) is loaded"
+        echo "  (the first start downloads the model; check: curl http://127.0.0.1:2022/health)"
+    else
+        fail "faster-whisper server failed — check /tmp/faster-whisper-server.log"
+    fi
 else
-    fail "Proxy failed — check /tmp/whisper-proxy.log"
+    echo "  Starting Whisper proxy..."
+    if lsof -ti:2022 > /dev/null 2>&1; then
+        kill "$(lsof -ti:2022)" 2>/dev/null
+        sleep 1
+    fi
+    nohup python3 "$SCRIPT_DIR/whisper-proxy.py" --port 2022 --whisper-url http://127.0.0.1:9000 \
+        > /tmp/whisper-proxy.log 2>&1 &
+    echo $! > /tmp/whisper-proxy.pid
+    sleep 1
+
+    if kill -0 "$(cat /tmp/whisper-proxy.pid)" 2>/dev/null; then
+        ok "All services running"
+    else
+        fail "Proxy failed — check /tmp/whisper-proxy.log"
+    fi
 fi
 
 # ─── Step 7b: Install Piper TTS ────────────────────────────────────────────

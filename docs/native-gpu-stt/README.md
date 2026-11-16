@@ -1,0 +1,141 @@
+# Native GPU speech recognition (faster-whisper)
+
+> **TL;DR:** With an NVIDIA GPU, speech recognition can run natively: `faster-whisper-server.py`
+> serves the OpenAI transcription API on port 2022 from its own venv, on the GPU, with no
+> Docker and no sudo. It replaces whisper-proxy + the Docker whisper when
+> `STT_ENGINE=faster-whisper`. The installer recommends it when `nvidia-smi` lists a GPU.
+> Switch back with `STT_ENGINE=docker`.
+
+| Field        | Value |
+|--------------|-------|
+| Status       | Built, wired into `voicemode-switch` and `install.sh`; not yet enabled on the dev machine |
+| Created      | 2026-11-16 |
+| Last Updated | 2026-11-16 |
+| Project      | voicemode-local |
+
+## Why
+
+Speech recognition was the slow part of a voice turn. Measured 2026-11-16 on the dev machine
+(RTX 4080 Laptop, WSL2), one 7.6 s spoken clip, n=5 runs each:
+
+| Engine | Median | Range |
+|---|---|---|
+| Docker openai-whisper-asr `base`, CPU | 11.2 s | 5.4-21.1 s |
+| faster-whisper `base`, GPU, float16 | 1.4 s | 1.2-1.5 s (first run 5.6 s) |
+| faster-whisper `small`, GPU, float16 | 2.6 s | 1.9-3.0 s |
+
+Model load: base 3.6 s; small 110 s the first time (that includes the download).
+
+Measured again 2026-11-16 through the start wrapper (`VML_GPU_TESTS=1` test, model small,
+already cached): ready (loaded + warm-up) in 11.7 s; a 2.8 s spoken clip (Kokoro af_sky,
+24 kHz WAV) took 0.55 / 1.08 / 0.81 s over three requests (n=3), transcript exact.
+
+Disk (measured 2026-11-16, `du`): the venv is 2.6 GB, of which 2.1 GB are the nvidia pip
+packages; the `small` model is 464 MB in the Hugging Face cache, `base` 142 MB.
+
+## What Was Done
+
+- `faster-whisper-server.py` (repo root): stdlib `ThreadingHTTPServer` on 127.0.0.1.
+  - `POST /v1/audio/transcriptions`: multipart `file`, `model` (ignored), `language`
+    (`auto` or empty = detect), `prompt` (passed as `initial_prompt`), `response_format`
+    `json` (default) | `text` | `verbose_json`. voice-mode sends `text` and `language=auto`.
+  - `GET /health`: 200 only once the model is loaded **and** a warm-up transcription of 1 s of
+    silence succeeded; 503 before, and after a failed load (with the error). The old
+    whisper-proxy answers 200 even when its backend is dead; this one does not.
+    `GET /v1/models` is 503 until ready too. Transcription requests before ready get 503.
+  - One transcription at a time (a lock around the model; the segment generator is consumed
+    inside it, since faster-whisper does the work lazily). Requests that arrive meanwhile wait.
+  - One flushed log line per request: audio seconds and transcription seconds.
+  - Args: `--host` (127.0.0.1), `--port` (2022), `--model` (small), `--device` cuda|cpu|auto (auto),
+    `--compute-type` (float16 on cuda, int8 on cpu), `--model-dir` (default: HF cache).
+  - If loading fails the process exits 1, so its PID file shows it dead.
+- `scripts/faster-whisper-start.sh <venv> [server args]`: sets `LD_LIBRARY_PATH` from the venv's
+  nvidia packages, then execs the server with the venv's python. `voicemode-switch` and
+  `install.sh` both start it this way.
+- `voicemode-switch`: config key `STT_ENGINE` in `~/.voicemode-local/config`.
+  `faster-whisper`: `ensure` and `start` start the server on 2022 via the wrapper (venv from
+  `FASTER_WHISPER_VENV`, default `~/.voicemode-local/faster-whisper-venv`; model from
+  `FASTER_WHISPER_MODEL`, default `small`; bind from `FASTER_WHISPER_HOST`, default 0.0.0.0)
+  instead of whisper-proxy; `stop` and `status` handle
+  `/tmp/faster-whisper-server.pid`. Unset, `docker` or `whisper-cpp`: exactly the behaviour from
+  before (`whisper-cpp` is still selected by `WHISPER_CPP_MODEL`).
+- `install.sh` + `lib/stt.sh`: when `nvidia-smi -L` lists a GPU (Linux/WSL), asks with native
+  GPU as the default; creates the venv (`uv venv` + `uv pip install faster-whisper
+  nvidia-cublas-cu12 "nvidia-cudnn-cu12==9.*"`) and writes `STT_ENGINE=faster-whisper`,
+  `FASTER_WHISPER_VENV`, `FASTER_WHISPER_MODEL=small`. Without a GPU nothing changes.
+  `--stt=docker` (or `VOICEMODE_STT=docker`) forces the Docker path; `--stt=native-gpu` forces
+  native. A failed venv install falls back to Docker and rewrites `STT_ENGINE=docker`.
+
+`voicemode-switch start` with `STT_ENGINE` other than `docker` brings up only the containers
+in use (Kokoro, plus Piper when `PIPER_ENABLED=true`), says it is not starting the Docker
+whisper, and starts the native engine (faster-whisper, or whisper.cpp for `whisper-cpp`).
+With `STT_ENGINE` unset or `docker`, `start` is unchanged.
+
+## Gotchas
+
+1. **The CUDA libraries must be on `LD_LIBRARY_PATH` before the process starts.** ctranslate2
+   dlopens cuBLAS and cuDNN at import; setting the variable in-process is too late. The pip
+   packages are namespace packages, so the lib dirs are `nvidia.cublas.__path__[0] + "/lib"` and
+   `nvidia.cudnn.__path__[0] + "/lib"`. Hence the wrapper. (Found in the 2026-11-16 measurement
+   session; the wrapper path itself is what the GPU test exercises.)
+2. **PyAV 19 breaks `faster_whisper.decode_audio`** (`open() got an unexpected keyword argument
+   'metadata_errors'`), and `av<15` does not build here. So the server decodes WAV itself with
+   the stdlib `wave` module + numpy (8/16/24/32-bit PCM, any rate, any channel count, mixed to
+   mono and resampled to 16 kHz float32) and hands the array to `model.transcribe`.
+   voice-mode sends WAV when the **first** STT endpoint is local; with a remote endpoint first
+   (the `hybrid` mode: OpenAI, then local) it compresses to mp3. So anything that is not WAV
+   (and a WAV the `wave` module cannot read, e.g. float samples) is piped through an `ffmpeg`
+   binary on PATH: `ffmpeg -i pipe:0 -f s16le -ac 1 -ar 16000 pipe:1`, no shell, 30 s timeout.
+   ffmpeg failing or timing out gets a **422** with ffmpeg's last error line. With no ffmpeg on
+   PATH such uploads get a **415** naming the format (mp3, ogg, flac, m4a, webm, or
+   unrecognised).
+3. **Bind address.** The server's own default is 127.0.0.1 (`--host`). `voicemode-switch` and
+   `install.sh` pass `FASTER_WHISPER_HOST` from the config, default **0.0.0.0**: that is what
+   whisper-proxy.py binds (it is started without `--host`), so replacing the proxy keeps every
+   reachability it had, e.g. Windows reaching WSL's 2022 through localhost forwarding. Set
+   `FASTER_WHISPER_HOST=127.0.0.1` to keep it inside WSL. A test ties the switch default to the
+   proxy's default.
+4. `ensure` skips any port that already answers. A running whisper-proxy on 2022 therefore keeps
+   the port: stop it before switching (see below).
+
+## How to switch
+
+To native (after a venv exists, e.g. from `install.sh`, or by hand:
+`uv venv ~/.voicemode-local/faster-whisper-venv && uv pip install --python
+~/.voicemode-local/faster-whisper-venv/bin/python faster-whisper nvidia-cublas-cu12
+"nvidia-cudnn-cu12==9.*"`):
+
+```bash
+# ~/.voicemode-local/config
+STT_ENGINE=faster-whisper
+FASTER_WHISPER_VENV=/home/<you>/.voicemode-local/faster-whisper-venv
+FASTER_WHISPER_MODEL=small
+
+kill "$(cat /tmp/whisper-proxy.pid)"      # free port 2022
+voicemode-switch ensure
+curl http://127.0.0.1:2022/health          # 503 while loading, then 200
+```
+
+Back to Docker:
+
+```bash
+# ~/.voicemode-local/config
+STT_ENGINE=docker
+
+voicemode-switch stop                      # or: kill "$(cat /tmp/faster-whisper-server.pid)"
+voicemode-switch start                     # or ensure
+```
+
+Routing in `~/.voicemode/voicemode.env` does not change: both engines serve
+`http://127.0.0.1:2022/v1`. No Claude Code restart is needed.
+
+## Verification
+
+- `voicemode-switch status` shows "faster-whisper server running (PID ...)" and the 2022 health.
+- `/tmp/faster-whisper-server.log` has `model small on cuda ready in ...` and one line per
+  request: `#N audio=7.60s transcribe=...s`.
+- Tests: `tests/test_faster_whisper_server.py` (fake model), `tests/test_faster_whisper_start.py`,
+  `tests/test_switch_stt_engine.py`, `tests/test_install_stt.py`. The real GPU path:
+  `VML_GPU_TESTS=1 pytest tests/test_faster_whisper_server.py -k real_gpu -s` (venv from
+  `VML_GPU_VENV`, default `~/.cache/voicemode-local/stt-gpu-venv`; model from `VML_GPU_MODEL`,
+  default small; speech generated in-process with kokoro-onnx).
