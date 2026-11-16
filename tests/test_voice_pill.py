@@ -52,6 +52,9 @@ def ctx(tmp_path, sock_dir, monkeypatch):
         monkeypatch.delenv(key, raising=False)
     # German follows the models installed: none found here, so it stays offered, as before.
     monkeypatch.setattr(vp, "_install_dirs", lambda: [])
+    # The voice list asks local TTS servers: never this machine's real ones from a test.
+    monkeypatch.setattr(vp, "_fetch_voices", lambda url: None, raising=False)
+    monkeypatch.setattr(vp, "_VOICES_CACHE", {}, raising=False)
     return vp.Context(base=tmp_path / "pill", home=tmp_path / "vm",
                       sock=sock_dir / "control.sock", switch=None)
 
@@ -291,7 +294,8 @@ def test_snapshot_shape_and_json_serialisable():
              barge={"enabled": True, "available": False, "count": 2})
     assert json.loads(json.dumps(s)) == s
     assert set(s) == {"visible", "phase", "floor", "sessions", "voice", "language",
-                      "barge", "beeps", "platform", "ui", "play", "wake", "german_available", "german_voices", "ptt"}
+                      "barge", "beeps", "platform", "ui", "play", "wake", "german_available", "german_voices", "ptt",
+                      "voices_by_language"}
     assert s["play"] is None and s["wake"] is None
     assert s["platform"] == "mac" and s["ui"] == {"docked": True}
     assert s["barge"] == {"enabled": True, "available": False, "count": 2}
@@ -966,3 +970,145 @@ def test_dm_martin_is_offered_with_the_german_kokoro_model(no_german_hints, monk
 def test_german_voices_stay_all_offered_when_nothing_can_be_found(no_german_hints, monkeypatch):
     monkeypatch.setattr(vp, "_install_dirs", lambda: [])
     assert vp.gather(no_german_hints)["german_voices"] == ["dm_martin", "p_de_thorsten", "p_de_eva"]
+
+
+# 2026-11-16 (Robert): the pill offered only English and German, from lists in model.js,
+# while this machine has 76 local voices in 14 languages. voices_by_language asks each local
+# TTS server for its voices (Piper proxy / kokoro-onnx shape {"data": [{id, language_name}]},
+# Kokoro-FastAPI shape {"voices": [ids]}) and groups them by language.
+
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+
+@pytest.fixture
+def voices_env(tmp_path, monkeypatch):
+    for key in ("VOICEMODE_TTS_BASE_URLS", "VOICEMODE_VOICES", "VOICEMODE_TTS_VOICE",
+                "VOICEMODE_PILL_LANGUAGES"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setattr(vp, "_VOICES_CACHE", {})
+    monkeypatch.setattr(vp, "_install_dirs", lambda: [])
+    return tmp_path / "vm"
+
+
+@pytest.fixture
+def voice_servers():
+    """Start fake TTS servers answering GET /v1/audio/voices with a given body; all are
+    shut down and closed at the end."""
+    started = []
+
+    def start(body):
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_GET(self):
+                if self.path != "/v1/audio/voices":
+                    self.send_response(404)
+                    self.end_headers()
+                    return
+                data = json.dumps(body).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+        httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        httpd.daemon_threads = True
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        started.append(httpd)
+        return httpd.server_address[1]
+
+    yield start
+    for httpd in started:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def _dead_port():
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
+
+
+def test_voices_by_language_groups_both_shapes_and_skips_a_dead_server(voices_env, voice_servers, monkeypatch):
+    kokoro = voice_servers({"voices": ["af_sky", "bm_george", "ef_dora", "xx_odd", "jm_kumo"]})
+    piper = voice_servers({"object": "list", "data": [
+        {"id": "p_de_thorsten", "language": "de", "language_name": "German"},
+        {"id": "p_nl_nathalie", "language": "nl", "language_name": "Dutch"},
+        {"id": "af_sky", "language": "en", "language_name": "English"}]})
+    monkeypatch.setenv("VOICEMODE_TTS_BASE_URLS", f"http://127.0.0.1:{kokoro}/v1,"
+                       f"http://127.0.0.1:{_dead_port()}/v1,http://localhost:{piper}/v1")
+    monkeypatch.setenv("http_proxy", f"http://127.0.0.1:{_dead_port()}")   # never used
+    monkeypatch.setenv("HTTP_PROXY", f"http://127.0.0.1:{_dead_port()}")
+    monkeypatch.delenv("no_proxy", raising=False)
+    monkeypatch.delenv("NO_PROXY", raising=False)
+    got = vp.voices_by_language(voices_env)
+    assert got == {"English": ["af_sky", "bm_george"], "Spanish": ["ef_dora"],
+                   "Japanese": ["jm_kumo"], "German": ["p_de_thorsten"], "Dutch": ["p_nl_nathalie"]}
+    assert list(got) == ["English", "Spanish", "Japanese", "German", "Dutch"]   # first server first
+
+
+def test_voices_by_language_asks_only_local_servers(voices_env, monkeypatch):
+    asked = []
+    monkeypatch.setattr(vp, "_fetch_voices", lambda url: asked.append(url) or {"voices": ["af_sky"]})
+    monkeypatch.setenv("VOICEMODE_TTS_BASE_URLS", "https://api.openai.com/v1, http://127.0.0.1:8880/v1,"
+                       "http://localhost:8881/v1/,http://10.0.0.5:8880/v1")
+    assert vp.voices_by_language(voices_env) == {"English": ["af_sky"]}
+    assert asked == ["http://127.0.0.1:8880/v1/audio/voices", "http://localhost:8881/v1/audio/voices"]
+
+
+def test_voices_by_language_never_raises_on_odd_answers(voices_env, monkeypatch):
+    answers = iter([["af_sky"], {"data": [1, {"id": 5}, {"id": "p_xx_who"}, {"language_name": "French"},
+                                          {"id": "ff_siwis"}]}, {"voices": "af_sky"}, None])
+    monkeypatch.setattr(vp, "_fetch_voices", lambda url: next(answers))
+    monkeypatch.setenv("VOICEMODE_TTS_BASE_URLS", ",".join(f"http://127.0.0.1:{p}/v1" for p in (1, 2, 3, 4)))
+    assert vp.voices_by_language(voices_env) == {"French": ["ff_siwis"]}
+
+    def boom(url):
+        raise RuntimeError("anything")
+    monkeypatch.setattr(vp, "_VOICES_CACHE", {})
+    monkeypatch.setattr(vp, "_fetch_voices", boom)
+    assert vp.voices_by_language(voices_env) == {}
+
+
+def test_voices_by_language_is_cached_for_a_minute(voices_env, monkeypatch):
+    asked = []
+    monkeypatch.setattr(vp, "_fetch_voices", lambda url: asked.append(url) or {"voices": ["af_sky"]})
+    clock = [1000.0]
+    monkeypatch.setattr(vp, "_clock", lambda: clock[0])
+    monkeypatch.setenv("VOICEMODE_TTS_BASE_URLS", "http://127.0.0.1:8880/v1")
+    assert vp.voices_by_language(voices_env) == {"English": ["af_sky"]}
+    clock[0] += 59
+    assert vp.voices_by_language(voices_env) == {"English": ["af_sky"]}
+    assert len(asked) == 1                                     # within 60 s: not asked again
+    clock[0] += 2
+    vp.voices_by_language(voices_env)
+    assert len(asked) == 2                                     # after 60 s: asked again
+    monkeypatch.setenv("VOICEMODE_TTS_BASE_URLS", "http://127.0.0.1:8881/v1")
+    vp.voices_by_language(voices_env)
+    assert asked[-1] == "http://127.0.0.1:8881/v1/audio/voices"   # a new setting: asked at once
+
+
+def test_voices_by_language_drops_german_voices_that_cannot_speak(voices_env, monkeypatch, tmp_path):
+    _models(tmp_path / "install", german=False)          # English Kokoro only: no dm_martin
+    monkeypatch.setattr(vp, "_install_dirs", lambda: [tmp_path / "install"])
+    monkeypatch.setattr(vp, "_fetch_voices", lambda url: {"data": [
+        {"id": "dm_martin", "language_name": "German"},
+        {"id": "p_de_thorsten", "language_name": "German"},
+        {"id": "p_de_kerstin", "language_name": "German"},
+        {"id": "af_sky", "language_name": "English"}]})
+    monkeypatch.setenv("VOICEMODE_TTS_BASE_URLS", "http://127.0.0.1:8880/v1,http://127.0.0.1:8881/v1")
+    got = vp.voices_by_language(voices_env)
+    # dm_martin needs the German model; a German voice german_voices() does not know is
+    # one its server says it speaks, so it stays.
+    assert got == {"German": ["p_de_thorsten", "p_de_kerstin"], "English": ["af_sky"]}
+
+
+def test_snapshot_carries_voices_by_language(ctx, monkeypatch):
+    assert snap()["voices_by_language"] == {}
+    assert vp.gather(ctx)["voices_by_language"] == {}    # nothing answered
+    monkeypatch.setattr(vp, "_fetch_voices", lambda url: {"voices": ["af_sky", "ff_siwis"]})
+    monkeypatch.setenv("VOICEMODE_TTS_BASE_URLS", "http://127.0.0.1:8880/v1")
+    assert vp.gather(ctx)["voices_by_language"] == {"English": ["af_sky"], "French": ["ff_siwis"]}

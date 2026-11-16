@@ -33,6 +33,8 @@ import shutil
 import sys
 import threading
 import time
+import urllib.parse
+import urllib.request
 from datetime import datetime
 from pathlib import Path
 
@@ -245,6 +247,104 @@ def german_voices(home=None) -> list:
     return out
 
 
+# -- every local voice, by language (2026-11-16) -----------------------------------------
+# The pill listed only English and German from lists in model.js. Each local TTS server says
+# which voices it has: the Piper proxy and kokoro-onnx-server answer {"data": [{id,
+# language_name}]}, Kokoro-FastAPI {"voices": [ids]}. Choosing any language already works:
+# voice_pill_state.language_note tells the model to write in it.
+
+KOKORO_LANGUAGES = {"a": "English", "b": "English", "e": "Spanish", "f": "French", "h": "Hindi",
+                    "i": "Italian", "j": "Japanese", "p": "Portuguese", "z": "Chinese", "d": "German"}
+PIPER_LANGUAGES = {"de": "German", "nl": "Dutch", "pl": "Polish", "ru": "Russian", "ko": "Korean"}
+LOCAL_HOSTS = ("127.0.0.1", "localhost")
+VOICES_TIMEOUT_S = 1.0
+VOICES_CACHE_S = 60.0          # the snapshot loop runs every 0.25-1 s: do not ask every tick
+_VOICES_CACHE = {}             # URL setting -> (time, {language: [voice ids]})
+_clock = time.monotonic
+
+
+def language_from_id(voice):
+    """A voice's language from its id alone: Piper's p_<code>_..., else Kokoro's first
+    letter. None when neither is known."""
+    if not isinstance(voice, str) or not voice:
+        return None
+    if voice.startswith("p_") and voice.count("_") >= 2:
+        return PIPER_LANGUAGES.get(voice.split("_")[1])
+    return KOKORO_LANGUAGES.get(voice[0])
+
+
+def _fetch_voices(url):
+    """The parsed JSON a server answers at url, without any proxy (they are local)."""
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    with opener.open(url, timeout=VOICES_TIMEOUT_S) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def _local_voice_urls(raw):
+    urls = []
+    for item in (raw or "").split(","):
+        item = item.strip()
+        try:
+            host = urllib.parse.urlsplit(item).hostname
+        except ValueError:
+            continue
+        if host in LOCAL_HOSTS:
+            urls.append(item.rstrip("/") + "/audio/voices")
+    return urls
+
+
+def _voice_pairs(body):
+    """[(voice id, language)] from either answer shape; anything else gives nothing."""
+    pairs = []
+    if isinstance(body, dict) and isinstance(body.get("data"), list):
+        for item in body["data"]:
+            if not isinstance(item, dict) or not isinstance(item.get("id"), str):
+                continue
+            name = item.get("language_name")
+            pairs.append((item["id"], name if isinstance(name, str) and name else language_from_id(item["id"])))
+    elif isinstance(body, dict) and isinstance(body.get("voices"), list):
+        pairs = [(v, language_from_id(v)) for v in body["voices"] if isinstance(v, str)]
+    return [(v, lang) for v, lang in pairs if lang]
+
+
+def _ask_servers(raw):
+    merged = {}
+    for url in _local_voice_urls(raw):
+        try:
+            pairs = _voice_pairs(_fetch_voices(url))
+        except Exception:  # noqa: BLE001 - a server that is down or odd is skipped
+            continue
+        for voice, lang in pairs:
+            ids = merged.setdefault(lang, [])
+            if voice not in ids:
+                ids.append(voice)
+    return merged
+
+
+def voices_by_language(home=None) -> dict:
+    """{language: [voice ids]} from the local TTS servers in VOICEMODE_TTS_BASE_URLS, in
+    server order (first server first). Cached for VOICES_CACHE_S per URL setting. Never
+    raises; {} when nothing answered. A German voice german_voices() knows but does not
+    offer here (dm_martin without its model) is dropped; one it does not know is kept,
+    because its server says it speaks it (Piper's p_de_kerstin)."""
+    try:
+        raw = st.setting("VOICEMODE_TTS_BASE_URLS", "", home) or ""
+        now = _clock()
+        hit = _VOICES_CACHE.get(raw)
+        if hit is None or now - hit[0] >= VOICES_CACHE_S:
+            hit = (now, _ask_servers(raw))
+            _VOICES_CACHE[raw] = hit
+        allowed = set(german_voices(home))
+        out = {}
+        for lang, ids in hit[1].items():
+            keep = [v for v in ids if v not in GERMAN_VOICES or v in allowed]
+            if keep:
+                out[lang] = keep
+        return out
+    except Exception:  # noqa: BLE001 - a broken list hides the menus, never the pill
+        return {}
+
+
 PTT_SETTING = "VOICEMODE_PTT_ENABLED"
 
 
@@ -278,7 +378,7 @@ def _floor_voice(floor, is_holder, sessions, conch, overrides):
 def build_snapshot(status, sessions, conch, *, paused=False, ptt=False, closed=False,
                    last_floor=None, overrides=None, barge=None, ui=None, platform=None, beeps=False,
                    default_voice=st.FALLBACK_VOICE, play=None, wake=None,
-                   german=True, ptt_listener=None, german_list=None) -> dict:
+                   german=True, ptt_listener=None, german_list=None, voices=None) -> dict:
     overrides = overrides or {}
     floor, is_holder = _floor(sessions, conch, last_floor)
     visible = bool(sessions or ptt) and not closed
@@ -323,7 +423,8 @@ def build_snapshot(status, sessions, conch, *, paused=False, ptt=False, closed=F
             "platform": platform, "ui": ui or {},
             "play": play, "wake": wake, "german_available": bool(german),
             "german_voices": list(german_list) if german_list is not None else list(GERMAN_VOICES),
-            "ptt": (platform != "mac") if ptt_listener is None else bool(ptt_listener)}
+            "ptt": (platform != "mac") if ptt_listener is None else bool(ptt_listener),
+            "voices_by_language": dict(voices or {})}
 
 
 def _barge_enabled(home) -> bool:
@@ -432,7 +533,7 @@ def gather(ctx) -> dict:
         default_voice=st.default_voice(ctx.home),
         play={"label": play.label} if play else None, wake=wake_view(ctx), platform=platform,
         german=german_available(ctx.home), ptt_listener=ptt_listening(platform, ctx.home),
-        german_list=german_voices(ctx.home))
+        german_list=german_voices(ctx.home), voices=voices_by_language(ctx.home))
 
 
 # -- commands ----------------------------------------------------------------
