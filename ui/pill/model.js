@@ -7,7 +7,30 @@
     "bf_alice", "bf_emma", "bf_lily", "bm_daniel", "bm_george", "bm_lewis"];
   var GERMAN_VOICES = ["dm_martin", "p_de_thorsten", "p_de_eva"];
   var LANGUAGES = ["English", "German"];
-  function languageOf(voice) { return voice && (voice.indexOf("dm_") === 0 || voice.indexOf("p_de_") === 0) ? "German" : "English"; }
+  // A voice's language from its id: Piper's p_<code>_..., else Kokoro's first letter; else English.
+  var KOKORO_LANGUAGES = { a: "English", b: "English", e: "Spanish", f: "French", h: "Hindi", i: "Italian",
+    j: "Japanese", p: "Portuguese", z: "Chinese", d: "German" };
+  var PIPER_LANGUAGES = { de: "German", nl: "Dutch", pl: "Polish", ru: "Russian", ko: "Korean" };
+  function languageOf(voice) {
+    if (typeof voice !== "string" || !voice) return "English";
+    var parts = voice.split("_");
+    if (parts[0] === "p" && parts.length >= 3) return PIPER_LANGUAGES[parts[1]] || "English";
+    return KOKORO_LANGUAGES[voice.charAt(0)] || "English";
+  }
+  // The backend's {language: [voice ids]} from the local TTS servers, or null when it has none
+  // (an older backend, or no server answered): then the lists above are used, as before.
+  function usableVbl(vbl) {
+    if (!vbl || typeof vbl !== "object" || Array.isArray(vbl)) return null;
+    var keys = Object.keys(vbl).filter(function (k) { return Array.isArray(vbl[k]) && vbl[k].length; });
+    return keys.length ? keys : null;
+  }
+  // The voice to send with a chosen language: the current one if it is in that language's list,
+  // else the list's first voice; null when the language has no list (send no voice).
+  function voiceForLanguage(vbl, language, current) {
+    var list = usableVbl(vbl) && Array.isArray(vbl[language]) ? vbl[language] : null;
+    if (!list || !list.length) return null;
+    return list.indexOf(current) >= 0 ? current : list[0];
+  }
   var PAUSE = "\u23F8\uFE0E", RESUME = "\u23EF\uFE0E"  /* play/pause, not a plain play: no second play-like icon */;
   var LABELS = { speaking: "Speaking", listening: "Listening", holding: "Holding\u2026", working: "Between turns",
     idle: "Not in a voice turn", paused: "Paused", stopped: "Stopped", disconnected: "Disconnected" };
@@ -54,10 +77,21 @@
     // German only where a German voice can speak; an older backend that does not say keeps it.
     var german = s.german_available !== false;
     // A session already in German keeps German listed, so the select shows its real value.
-    var languages = german || language === "German" ? LANGUAGES : ["English"];
-    // The German voices that can speak here (backend's german_voices); an older backend: all.
-    var germanList = Array.isArray(s.german_voices) && s.german_voices.length ? s.german_voices : GERMAN_VOICES;
-    var base = german && language === "German" ? germanList : VOICES;
+    var languages, base;
+    var vblKeys = usableVbl(s.voices_by_language);
+    if (vblKeys) {
+      // Every local language, English first, then alphabetical; the session's own stays listed.
+      languages = vblKeys.filter(function (k) { return k !== "English"; }).sort();
+      if (vblKeys.indexOf("English") >= 0) languages.unshift("English");
+      if (languages.indexOf(language) < 0) languages = languages.concat([language]);
+      base = s.voices_by_language[language] || [];
+      if (!base.length && !s.voice) base = s.voices_by_language[languages[0]] || []; // never an empty select
+    } else {
+      languages = german || language === "German" ? LANGUAGES : ["English"];
+      // The German voices that can speak here (backend's german_voices); an older backend: all.
+      var germanList = Array.isArray(s.german_voices) && s.german_voices.length ? s.german_voices : GERMAN_VOICES;
+      base = german && language === "German" ? germanList : VOICES;
+    }
     var voices = s.voice && base.indexOf(s.voice) < 0 ? base.concat([s.voice]) : base;
     // The main button is Wake between turns (idle, between turns, stopped) when the backend
     // can name a session to wake, and Stop otherwise. One button, never both. Pause/Resume
@@ -142,7 +176,7 @@
     return "snapshot";
   }
 
-  var api = { clickBarge: clickBarge, bargeShown: bargeShown, PENDING_MS: PENDING_MS, incomingKind: incomingKind, nextHidden: nextHidden, viewModel: viewModel, VOICES: VOICES, GERMAN_VOICES: GERMAN_VOICES, LANGUAGES: LANGUAGES, STALE_MS: STALE_MS };
+  var api = { clickBarge: clickBarge, bargeShown: bargeShown, PENDING_MS: PENDING_MS, incomingKind: incomingKind, nextHidden: nextHidden, viewModel: viewModel, languageOf: languageOf, voiceForLanguage: voiceForLanguage, VOICES: VOICES, GERMAN_VOICES: GERMAN_VOICES, LANGUAGES: LANGUAGES, STALE_MS: STALE_MS };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   if (typeof window !== "undefined") window.PillModel = api;
 })();
