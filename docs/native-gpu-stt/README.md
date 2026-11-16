@@ -66,8 +66,10 @@ packages; the `small` model is 464 MB in the Hugging Face cache, `base` 142 MB.
   `--stt=docker` (or `VOICEMODE_STT=docker`) forces the Docker path; `--stt=native-gpu` forces
   native. A failed venv install falls back to Docker and rewrites `STT_ENGINE=docker`.
 
-Not done: `voicemode-switch start` still brings up the Docker whisper container with the rest
-of the compose file (unused, but it uses memory).
+`voicemode-switch start` with `STT_ENGINE` other than `docker` brings up only the containers
+in use (Kokoro, plus Piper when `PIPER_ENABLED=true`), says it is not starting the Docker
+whisper, and starts the native engine (faster-whisper, or whisper.cpp for `whisper-cpp`).
+With `STT_ENGINE` unset or `docker`, `start` is unchanged.
 
 ## Gotchas
 

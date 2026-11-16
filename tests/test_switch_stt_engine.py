@@ -151,3 +151,44 @@ def test_status_without_the_engine_is_unchanged(tmp_path):
     assert "faster-whisper" not in done.stdout
     assert "Whisper proxy is not running" in done.stdout
 
+
+
+# --- `start` brings up only the containers that are used ------------------------------
+
+def _start(tmp_path, config):
+    b = Box(tmp_path, config)
+    _stub(b.bin / "sleep", "exit 0")   # the docker path waits up to 30 s for whisper on 9000
+    _stub(b.bin / "whisper-server", f'echo "whisper-server $*" >> "{b.scratch}/wcpp.log"')
+    done = b.run("start")
+    docker = b.docker_log.read_text() if b.docker_log.exists() else ""
+    return b, done, docker
+
+
+def test_start_with_docker_stt_is_unchanged(tmp_path):
+    b, done, docker = _start(tmp_path, "KOKORO_ONNX=false\n")
+    assert done.returncode == 0, done.stderr
+    assert docker.splitlines()[0] == f"compose -f {b.root}/docker-compose.yml up -d"
+    assert "Starting Whisper proxy..." in done.stdout
+    assert "Docker whisper" not in done.stdout
+
+
+def test_start_with_faster_whisper_starts_only_kokoro(tmp_path):
+    b, done, docker = _start(tmp_path, "KOKORO_ONNX=false\nSTT_ENGINE=faster-whisper\n")
+    assert done.returncode == 0, done.stderr
+    assert docker.splitlines()[0] == f"compose -f {b.root}/docker-compose.yml up -d kokoro"
+    assert "not starting the Docker whisper" in done.stdout
+    assert "Starting Whisper proxy..." not in done.stdout
+    assert "--port 2022" in b.wait_for(b.wrapper_log)
+
+
+def test_start_with_native_stt_keeps_piper_when_enabled(tmp_path):
+    b, _, docker = _start(tmp_path, "KOKORO_ONNX=false\nPIPER_ENABLED=true\nSTT_ENGINE=faster-whisper\n")
+    assert docker.splitlines()[0] == f"compose -f {b.root}/docker-compose.yml --profile piper up -d kokoro piper"
+
+
+def test_start_with_whisper_cpp_starts_whisper_cpp_and_only_kokoro(tmp_path):
+    b, done, docker = _start(tmp_path, "KOKORO_ONNX=false\nSTT_ENGINE=whisper-cpp\nWHISPER_CPP_MODEL=/m/ggml.bin\n")
+    assert done.returncode == 0, done.stderr
+    assert docker.splitlines()[0] == f"compose -f {b.root}/docker-compose.yml up -d kokoro"
+    assert "Starting Whisper proxy..." not in done.stdout
+    assert "-m /m/ggml.bin" in b.wait_for(b.scratch / "wcpp.log")

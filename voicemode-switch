@@ -726,8 +726,18 @@ cmd_start() {
         fi
     else
         echo ""
-        echo "Starting Docker containers..."
-        docker_compose_cmd up -d 2>&1 | sed 's/^/  /'
+        local stt_engine; stt_engine="$(vm_read_config STT_ENGINE docker)"
+        if [ "$stt_engine" = "docker" ]; then
+            echo "Starting Docker containers..."
+            docker_compose_cmd up -d 2>&1 | sed 's/^/  /'
+        else
+            # Native speech recognition: the Docker whisper would only take memory.
+            local services=(kokoro)
+            [ "$(vm_read_config PIPER_ENABLED false)" = "true" ] && services+=(piper)
+            echo "Starting Docker containers (${services[*]})..."
+            echo "  Speech recognition is native ($stt_engine): not starting the Docker whisper"
+            docker_compose_cmd up -d "${services[@]}" 2>&1 | sed 's/^/  /'
+        fi
     fi
 
     echo ""
@@ -742,6 +752,18 @@ cmd_start() {
             ok "faster-whisper server started (PID $(cat "$FASTER_WHISPER_PID_FILE")); /health turns 200 once the model is loaded"
         else
             fail "faster-whisper server failed to start — check /tmp/faster-whisper-server.log"
+        fi
+    elif [ "$(vm_read_config STT_ENGINE docker)" = "whisper-cpp" ]; then
+        echo "Starting whisper.cpp server (native STT, port 2022)..."
+        local wcpp_model; wcpp_model="$(vm_read_config WHISPER_CPP_MODEL)"
+        if [ -n "$wcpp_model" ] && command -v whisper-server > /dev/null 2>&1; then
+            # Same command as `ensure`.
+            start_detached whisper-server /tmp/whisper-server.pid \
+                whisper-server --host 127.0.0.1 --port 2022 -m "$wcpp_model" \
+                -l auto --convert --inference-path /v1/audio/transcriptions
+            ok "whisper.cpp server started (PID $(cat /tmp/whisper-server.pid))"
+        else
+            fail "STT_ENGINE=whisper-cpp needs WHISPER_CPP_MODEL in the config and whisper-server on PATH"
         fi
     else
         echo "Starting Whisper proxy..."
