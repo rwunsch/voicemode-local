@@ -10,6 +10,7 @@ import importlib.util
 import json
 import re
 import socket
+import subprocess
 import sys
 from pathlib import Path
 
@@ -47,14 +48,24 @@ def home(tmp_path, monkeypatch):
     monkeypatch.setenv("USERPROFILE", str(h))
     for key in ("VOICEMODE_PILL", "VOICEMODE_PTT_ENABLED", "VOICEMODE_VOICE_BARGE", "VOICEMODE_NATIVE_ROOT",
                 "VOICEMODE_NATIVE_TTS_PORT", "VOICEMODE_NATIVE_STT_PORT", "VOICEMODE_BASE_DIR",
-                "FELIX_HOME", "FELIX_VOICE_ROOT"):
+                "FELIX_HOME", "FELIX_VOICE_ROOT", "VOICEMODE_WHISPER_GPU"):
         monkeypatch.delenv(key, raising=False)
     return h
 
 
 @pytest.fixture
-def vn(home):
-    return _load(SCRIPT, "voicemode_native_under_test")
+def vn(home, monkeypatch):
+    module = _load(SCRIPT, "voicemode_native_under_test")
+    # No test runs this machine's nvidia-smi: the answer would depend on the machine. The GPU
+    # detection tests load the module without this (vn_gpu).
+    monkeypatch.setattr(module, "nvidia_gpus", lambda: ([], "nvidia-smi was not looked for (test)"))
+    return module
+
+
+@pytest.fixture
+def vn_gpu(home):
+    """The launcher with its real GPU detection; each test fakes nvidia-smi itself."""
+    return _load(SCRIPT, "voicemode_native_gpu_under_test")
 
 
 def _env_file(home, text):
@@ -1944,3 +1955,356 @@ def test_a_stop_keeps_the_host_from_starting_again(vn, home, tmp_path, monkeypat
         vn.host_backstop(profile, said)
     assert "host" not in world.events
     assert capsys.readouterr().err.count("host_kept_stopped") == 1
+
+
+# -- speech recognition on an NVIDIA GPU: the pinned whisper.cpp CUDA build ----------------
+# VOICEMODE_WHISPER_GPU = auto (default) | on | off. auto asks `nvidia-smi -L`; the choice goes
+# into the runtime digest, so changing it makes setup build a new runtime; setup checks that the
+# CUDA server really loads its model on the GPU; a failure says so, with the next step.
+
+_SMI_LINE = "GPU 0: NVIDIA GeForce RTX 4080 Laptop GPU (UUID: GPU-f69cada7-1dff-3a59-3f18-746738f9253b)\n"
+
+
+def _fake_smi(vn, monkeypatch, *, found=True, stdout=_SMI_LINE, code=0, error=None):
+    """nvidia-smi on PATH (found) answering `-L` with stdout and code, or raising error. Returns
+    the calls made."""
+    calls = []
+    real_on_path = vn.on_path
+    monkeypatch.setattr(vn, "on_path", lambda name: ("/fake/bin/nvidia-smi" if found else None)
+                        if name == "nvidia-smi" else real_on_path(name))
+
+    def run(args, **kwargs):
+        calls.append((list(args), kwargs))
+        if error is not None:
+            raise error
+        return vn.subprocess.CompletedProcess(args, code, stdout, "")
+
+    monkeypatch.setattr(vn.subprocess, "run", run)
+    return calls
+
+
+def test_whisper_cuda_is_pinned_like_the_cpu_zip(vn):
+    data = json.loads((REPO / "scripts" / "windows" / "dependencies.json").read_text(encoding="utf-8"))
+    cpu, cuda = data["whisper"], data["whisper_cuda"]
+    assert set(cuda) == set(cpu) == {"path", "url", "size", "sha256"}
+    assert cuda == {
+        "path": "whisper-bin-win-cuda-12.4.0-x64.zip",
+        "url": "https://github.com/ggml-org/whisper.cpp/releases/download/b5454/whisper-bin-win-cuda-12.4.0-x64.zip",
+        "size": 684913404,
+        "sha256": "afef0b881c500958921c3f5523b50e59ee2ec9b6f5cbd25b324c51ed308a957a"}
+    # The same release as the CPU zip: one whisper.cpp version, two builds.
+    assert cpu["url"].rsplit("/", 2)[-2] == cuda["url"].rsplit("/", 2)[-2] == "b5454"
+    assert "whisper_cuda" in data["_provenance"]
+
+
+def test_no_nvidia_smi_means_the_cpu_build(vn_gpu, monkeypatch):
+    calls = _fake_smi(vn_gpu, monkeypatch, found=False)
+    choice = vn_gpu.whisper_choice()
+    assert choice["build"] == "cpu" and choice["setting"] == "auto"
+    assert "nvidia-smi" in choice["reason"] and not calls
+
+
+def test_a_gpu_listed_by_nvidia_smi_means_the_cuda_build(vn_gpu, monkeypatch):
+    monkeypatch.setattr(vn_gpu, "WINDOWS", True)
+    no_window = getattr(vn_gpu.subprocess, "CREATE_NO_WINDOW", 0x08000000)
+    monkeypatch.setattr(vn_gpu.subprocess, "CREATE_NO_WINDOW", no_window, raising=False)
+    calls = _fake_smi(vn_gpu, monkeypatch)
+    choice = vn_gpu.whisper_choice()
+    assert choice["build"] == "cuda" and choice["setting"] == "auto"
+    assert "NVIDIA GeForce RTX 4080 Laptop GPU" in choice["reason"]
+    (args, kwargs), = calls
+    assert args == ["/fake/bin/nvidia-smi", "-L"]
+    assert 0 < kwargs["timeout"] <= 10
+    assert kwargs["creationflags"] == no_window
+
+
+@pytest.mark.parametrize("kwargs,why", [
+    ({"stdout": "No devices were found\n"}, "lists no GPU"),
+    ({"stdout": "", "code": 9}, "exited 9"),
+    ({"error": subprocess.TimeoutExpired(["nvidia-smi", "-L"], 5)}, "did not answer"),
+    ({"error": OSError("access denied")}, "access denied"),
+])
+def test_nvidia_smi_without_a_gpu_means_the_cpu_build_and_says_why(vn_gpu, monkeypatch, kwargs, why):
+    _fake_smi(vn_gpu, monkeypatch, **kwargs)
+    choice = vn_gpu.whisper_choice()
+    assert choice["build"] == "cpu"
+    assert why in choice["reason"]
+
+
+@pytest.mark.parametrize("where", ["env", "file"])
+@pytest.mark.parametrize("value,build", [("on", "cuda"), ("off", "cpu"), (" OFF ", "cpu"), ('"on"', "cuda")])
+def test_the_setting_overrides_detection(vn_gpu, home, monkeypatch, where, value, build):
+    calls = _fake_smi(vn_gpu, monkeypatch, found=build == "cpu")  # detection would say the opposite
+    if where == "env":
+        monkeypatch.setenv("VOICEMODE_WHISPER_GPU", value)
+    else:
+        _env_file(home, f"VOICEMODE_WHISPER_GPU={value}\n")
+    choice = vn_gpu.whisper_choice()
+    assert choice["build"] == build
+    assert choice["setting"] == value.strip().strip('"').lower()
+    assert "VOICEMODE_WHISPER_GPU" in choice["reason"]
+    assert not calls  # an override asks nvidia-smi nothing
+
+
+def test_an_unknown_setting_is_an_error_not_a_guess(vn_gpu, monkeypatch):
+    monkeypatch.setenv("VOICEMODE_WHISPER_GPU", "cuda")
+    with pytest.raises(vn_gpu.VoiceError, match="VOICEMODE_WHISPER_GPU") as raised:
+        vn_gpu.whisper_choice()
+    assert "auto, on or off" in raised.value.next_step
+
+
+def test_the_runtime_digest_covers_the_whisper_build(vn, monkeypatch):
+    cpu = {"build": "cpu", "setting": "auto", "reason": "r"}
+    cuda = {"build": "cuda", "setting": "auto", "reason": "r"}
+    assert vn.manifest(cpu)[1] != vn.manifest(cuda)[1]
+    # The reason and the setting are not inputs: auto and on with a GPU are the same runtime.
+    assert vn.manifest(cuda)[1] == vn.manifest({**cuda, "setting": "on", "reason": "other"})[1]
+    # Without a choice given, manifest() decides it as setup does.
+    monkeypatch.setattr(vn, "whisper_choice", lambda: cuda)
+    assert vn.manifest()[1] == vn.manifest(cuda)[1]
+
+
+def _zip_with(path, names):
+    import zipfile
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(path, "w") as bundle:
+        for name in names:
+            bundle.writestr(f"Release/{name}", name)
+
+
+@pytest.mark.parametrize("build,key", [("cpu", "whisper"), ("cuda", "whisper_cuda")])
+def test_install_whisper_unpacks_the_chosen_zip(vn, tmp_path, monkeypatch, build, key):
+    data = json.loads((REPO / "scripts" / "windows" / "dependencies.json").read_text(encoding="utf-8"))
+    fetched = []
+
+    def download(item, target):
+        fetched.append(item)
+        _zip_with(target, ["whisper-server.exe", "ggml-base.dll", "whisper-cli.exe",
+                           *(["ggml-cuda.dll", "cublas64_12.dll"] if build == "cuda" else [])])
+
+    monkeypatch.setattr(vn, "download", download)
+    root, runtime = tmp_path / "root", tmp_path / "root" / "runtime" / "abc"
+    vn.install_whisper(data, root, runtime, build)
+    assert fetched == [data[key]]
+    names = sorted(p.name for p in (runtime / "services" / "whisper").iterdir())
+    assert names == sorted(["whisper-server.exe", "ggml-base.dll",
+                            *(["ggml-cuda.dll", "cublas64_12.dll"] if build == "cuda" else [])])
+
+
+def _setup_world(vn, monkeypatch, gpu_check=None):
+    """setup with every outside step faked: uv, apply, the checks, the downloads. Records the
+    whisper build installed and every GPU check."""
+    seen = {"installed": [], "checked": []}
+    monkeypatch.setattr(vn, "check_machine", lambda: None)
+    monkeypatch.setattr(vn, "MAX_ESPEAK_PATH", 10_000)  # pytest's tmp paths are long
+    monkeypatch.setattr(vn, "LONGEST_RUNTIME_FILE", 0)
+    def download(item, target):
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"")
+
+    monkeypatch.setattr(vn, "download", download)
+    monkeypatch.setattr(vn, "run", lambda args, **kwargs: None)
+    monkeypatch.setattr(vn, "link_model", lambda destination, source: destination.write_bytes(b""))
+    monkeypatch.setenv("VOICEMODE_UV", "uv")
+
+    def install(data, root, runtime, build="cpu"):
+        seen["installed"].append(build)
+        # What uv would have made, so a later setup finds the runtime complete.
+        for name in [*vn.REQUIRED_FILES, vn.whisper_program(runtime).relative_to(runtime)]:
+            (runtime / name).parent.mkdir(parents=True, exist_ok=True)
+            (runtime / name).write_bytes(b"")
+
+    def check(runtime):
+        seen["checked"].append(runtime)
+        if gpu_check is not None:
+            return gpu_check(runtime)
+        return "whisper_backend_init_gpu: using CUDA0 backend"
+
+    monkeypatch.setattr(vn, "install_whisper", install)
+    monkeypatch.setattr(vn, "check_whisper_gpu", check)
+    return seen
+
+
+@pytest.mark.parametrize("value,build", [("off", "cpu"), ("on", "cuda")])
+def test_setup_installs_records_and_says_the_chosen_build(vn, home, tmp_path, monkeypatch, capsys, value, build):
+    root = tmp_path / "root"
+    seen = _setup_world(vn, monkeypatch)
+    monkeypatch.setenv("VOICEMODE_WHISPER_GPU", value)
+    runtime = vn.setup(root)
+    assert seen["installed"] == [build]
+    assert seen["checked"] == ([runtime] if build == "cuda" else [])
+    record = json.loads((runtime / ".complete.json").read_text())["whisper"]
+    assert record["build"] == build and record["setting"] == value
+    assert "VOICEMODE_WHISPER_GPU" in record["reason"]
+    if build == "cuda":
+        assert record["gpu_check"] == "whisper_backend_init_gpu: using CUDA0 backend"
+    out = capsys.readouterr().out
+    assert f"Speech recognition: whisper.cpp {'CUDA' if build == 'cuda' else 'CPU'} build" in out
+    assert record["reason"] in out
+
+
+def test_changing_the_setting_makes_setup_build_a_new_runtime(vn, home, tmp_path, monkeypatch, capsys):
+    root = tmp_path / "root"
+    seen = _setup_world(vn, monkeypatch)
+    monkeypatch.setenv("VOICEMODE_WHISPER_GPU", "off")
+    first = vn.setup(root)
+    monkeypatch.setenv("VOICEMODE_WHISPER_GPU", "on")
+    second = vn.setup(root)
+    assert seen["installed"] == ["cpu", "cuda"] and first != second
+    assert json.loads((root / "active.json").read_text())["runtime"] == second.name
+    assert not first.exists()  # the CPU runtime was pruned
+    monkeypatch.setenv("VOICEMODE_WHISPER_GPU", "auto")
+    monkeypatch.setattr(vn, "nvidia_gpus", lambda: (["NVIDIA GeForce RTX 4080 Laptop GPU"], "listed"))
+    assert vn.setup(root) == second  # auto with a GPU is the same CUDA runtime: nothing rebuilt
+    assert seen["installed"] == ["cpu", "cuda"]
+    assert "Already installed" in capsys.readouterr().out
+
+
+def test_a_failed_gpu_check_fails_setup_with_the_next_step_and_keeps_the_old_runtime(
+        vn, home, tmp_path, monkeypatch):
+    root = tmp_path / "root"
+
+    def broken(runtime):
+        raise vn.VoiceError("whisper_gpu_failed: whisper-server loaded the model on the CPU "
+                            "(whisper_backend_init_gpu: no GPU found)",
+                            vn.WHISPER_GPU_OFF_STEP)
+
+    _setup_world(vn, monkeypatch)
+    monkeypatch.setenv("VOICEMODE_WHISPER_GPU", "off")
+    old = vn.setup(root)
+    _setup_world(vn, monkeypatch, gpu_check=broken)
+    monkeypatch.setenv("VOICEMODE_WHISPER_GPU", "on")
+    with pytest.raises(vn.VoiceError, match="whisper_gpu_failed") as raised:
+        vn.setup(root)
+    assert "VOICEMODE_WHISPER_GPU=off" in raised.value.next_step and "setup" in raised.value.next_step
+    assert json.loads((root / "active.json").read_text())["runtime"] == old.name
+    assert sorted(p.name for p in (root / "runtime").iterdir()) == [old.name]
+
+
+_FAKE_WHISPER = r'''
+import os, sys, time
+from http.server import BaseHTTPRequestHandler, HTTPServer
+args = sys.argv[1:]
+port = int(args[args.index("--port") + 1])
+assert args[args.index("--host") + 1] == "127.0.0.1"
+sys.stderr.write(os.environ.get("FAKE_LINES", "") + "\n")
+sys.stderr.flush()
+if os.environ.get("FAKE_EXIT"):
+    sys.exit(int(os.environ["FAKE_EXIT"]))
+class H(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200 if self.path == "/health" else 404)
+        self.end_headers()
+        self.wfile.write(b'{"status":"ok"}')
+    def log_message(self, *a):
+        pass
+HTTPServer(("127.0.0.1", port), H).serve_forever()
+'''
+
+
+@pytest.fixture
+def fake_whisper(vn, tmp_path, monkeypatch):
+    """check_whisper_gpu against a real process: a Python stand-in for whisper-server that writes
+    FAKE_LINES to stderr, then answers /health (or exits with FAKE_EXIT)."""
+    script = tmp_path / "fake-whisper-server.py"
+    script.write_text(_FAKE_WHISPER)
+    runtime = tmp_path / "runtime" / "abc"
+    (runtime / "models" / "whisper").mkdir(parents=True)
+    monkeypatch.setattr(vn, "whisper_check_command",
+                        lambda runtime, port: [sys.executable, str(script), "--host", "127.0.0.1",
+                                               "--port", str(port)])
+    started = []
+    real_popen = vn.subprocess.Popen
+
+    def popen(*args, **kwargs):
+        process = real_popen(*args, **kwargs)
+        started.append(process)
+        return process
+
+    monkeypatch.setattr(vn.subprocess, "Popen", popen)
+    yield runtime, started
+    for process in started:
+        assert process.poll() is not None, "check_whisper_gpu left its server running"
+
+
+def test_the_gpu_check_passes_when_the_server_loads_on_cuda(vn, fake_whisper, monkeypatch):
+    runtime, started = fake_whisper
+    monkeypatch.setenv("FAKE_LINES", "ggml_cuda_init: found 1 CUDA devices:\n"
+                                     "whisper_backend_init_gpu: using CUDA0 backend")
+    line = vn.check_whisper_gpu(runtime)
+    assert "using CUDA0 backend" in line
+    assert len(started) == 1
+    assert sorted(p.name for p in runtime.rglob("*") if p.is_file()) == []  # its log is not left behind
+
+
+def test_the_gpu_check_fails_when_the_server_falls_back_to_the_cpu(vn, fake_whisper, monkeypatch):
+    runtime, _ = fake_whisper
+    monkeypatch.setenv("FAKE_LINES", "whisper_backend_init_gpu: no GPU found")
+    with pytest.raises(vn.VoiceError, match="whisper_gpu_failed") as raised:
+        vn.check_whisper_gpu(runtime)
+    assert "no GPU found" in str(raised.value)
+    assert raised.value.next_step == vn.WHISPER_GPU_OFF_STEP
+
+
+def test_the_gpu_check_fails_when_the_server_exits(vn, fake_whisper, monkeypatch):
+    runtime, _ = fake_whisper
+    monkeypatch.setenv("FAKE_LINES", "ggml_cuda_init: failed to initialize CUDA: no CUDA-capable device")
+    monkeypatch.setenv("FAKE_EXIT", "3")
+    with pytest.raises(vn.VoiceError, match="whisper_gpu_failed: whisper-server exited with 3") as raised:
+        vn.check_whisper_gpu(runtime)
+    assert "no CUDA-capable device" in str(raised.value)
+
+
+def test_the_gpu_check_fails_when_the_server_never_answers(vn, fake_whisper, monkeypatch):
+    runtime, started = fake_whisper
+    monkeypatch.setattr(vn, "WHISPER_CHECK_TIMEOUT", 1.5)
+    monkeypatch.setattr(vn, "whisper_check_command",
+                        lambda runtime, port: [sys.executable, "-c", "import time; time.sleep(60)"])
+    with pytest.raises(vn.VoiceError, match="whisper_gpu_failed: .*did not answer"):
+        vn.check_whisper_gpu(runtime)
+    assert started and started[0].poll() is not None
+
+
+def test_the_gpu_check_runs_the_real_server_command_on_loopback(vn, tmp_path):
+    runtime = tmp_path / "runtime" / "abc"
+    command = vn.whisper_check_command(runtime, 23456)
+    assert command[0] == str(vn.whisper_program(runtime))
+    assert command[command.index("--host") + 1] == "127.0.0.1"
+    assert command[command.index("--port") + 1] == "23456"
+    assert command[command.index("-m") + 1] == str(runtime / "models/whisper/ggml-base.bin")
+    assert "--no-gpu" not in command and "-ng" not in command
+
+
+def _service_failed(kind="stt", code="service_exited"):
+    return [Result(code, f"{kind} exited with 1; see C:/x/{kind}.log",
+                   {"service": kind, "code": 1, "log": f"C:/x/{kind}.log"})]
+
+
+def test_a_cuda_stt_that_fails_to_start_says_whisper_gpu_failed_and_the_next_step(vn, tmp_path):
+    runtime = tmp_path / "runtime" / "abc"
+    runtime.mkdir(parents=True)
+    vn.atomic_json(runtime / ".complete.json", {"manifest": "m", "layout": vn.LAYOUT,
+                                                "whisper": {"build": "cuda", "setting": "auto", "reason": "r"}})
+    error = vn.failure(_service_failed(), runtime)
+    assert "whisper_gpu_failed" in str(error)
+    assert "C:/x/stt.log" in str(error)
+    assert error.next_step == vn.WHISPER_GPU_OFF_STEP
+    # TTS failing on a CUDA runtime, and STT failing on a CPU runtime, are not a GPU matter.
+    assert "whisper_gpu_failed" not in str(vn.failure(_service_failed("tts"), runtime))
+    vn.atomic_json(runtime / ".complete.json", {"manifest": "m", "layout": vn.LAYOUT,
+                                                "whisper": {"build": "cpu", "setting": "off", "reason": "r"}})
+    assert "whisper_gpu_failed" not in str(vn.failure(_service_failed(), runtime))
+    assert vn.WHISPER_GPU_OFF_STEP == ("Set VOICEMODE_WHISPER_GPU=off (in the environment or "
+                                       "~/.voicemode/voicemode.env) and run setup again, then restart "
+                                       "the voice connector.")
+
+
+def test_status_says_which_whisper_build_runs(vn, home, tmp_path, monkeypatch, capsys):
+    root = tmp_path / "root"
+    _setup_world(vn, monkeypatch)
+    monkeypatch.setenv("VOICEMODE_WHISPER_GPU", "on")
+    runtime = vn.setup(root)
+    monkeypatch.setattr(vn, "check_models", lambda runtime: None)
+    capsys.readouterr()
+    assert vn.status(root) == 0
+    assert "Speech recognition: whisper.cpp CUDA build (VOICEMODE_WHISPER_GPU=on)" in capsys.readouterr().out

@@ -1,5 +1,5 @@
 {
-  "_provenance": "python, models and whisper copied from felix-framework plugins/voicemode/dependencies.json and dependencies.windows.json at commit aea841ffd (branch feat/voice-opt-in); lock from runtime/requirements.lock there.",
+  "_provenance": "python, models and whisper copied from felix-framework plugins/voicemode/dependencies.json and dependencies.windows.json at commit aea841ffd (branch feat/voice-opt-in); lock from runtime/requirements.lock there. whisper_cuda (added 2026-11-17) is the CUDA 12.4 build of the same whisper.cpp release b5454: size and sha256 from GitHub's asset digest, and checked by downloading it and hashing it.",
   "python": "3.12",
   "lock": "requirements.lock",
   "models": [
@@ -33,5 +33,11 @@
     "url": "https://github.com/ggml-org/whisper.cpp/releases/download/b5454/whisper-bin-x64.zip",
     "size": 8928640,
     "sha256": "6ba69e3482d7826214f90a6a9c84ca07782aec1e1d0c6a7c30c994fd5d816ccb"
+  },
+  "whisper_cuda": {
+    "path": "whisper-bin-win-cuda-12.4.0-x64.zip",
+    "url": "https://github.com/ggml-org/whisper.cpp/releases/download/b5454/whisper-bin-win-cuda-12.4.0-x64.zip",
+    "size": 684913404,
+    "sha256": "afef0b881c500958921c3f5523b50e59ee2ec9b6f5cbd25b324c51ed308a957a"
   }
 }
