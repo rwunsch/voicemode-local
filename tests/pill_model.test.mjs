@@ -429,3 +429,12 @@ test("voiceForLanguage keeps the current voice in that language, else picks its 
   assert.equal(voiceForLanguage(undefined, "German", "af_sky"), null);
   assert.equal(voiceForLanguage({}, "German", "af_sky"), null);
 });
+
+test("app.js sends the language's voice before the language", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const app = await readFile(new URL("../ui/pill/app.js", import.meta.url), "utf8");
+  const body = app.split('$("language").onchange = function', 2)[1].split("};", 1)[0];
+  assert.ok(body.includes("M.voiceForLanguage("), body);
+  const voiceAt = body.indexOf('cmd: "set_voice"'), langAt = body.indexOf('cmd: "set_language"');
+  assert.ok(voiceAt >= 0 && langAt > voiceAt, body);
+});

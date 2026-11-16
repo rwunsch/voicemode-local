@@ -126,7 +126,14 @@
   $("pause").onclick = function () { send({ cmd: M.viewModel(snapshot, lastSeen, Date.now()).pause.cmd }); };
   $("dismiss").onclick = function () { send({ cmd: "dismiss" }); hidden = true; send({ window: { mode: "hidden" } }); render(); };
   $("voice").onchange = function () { send({ cmd: "set_voice", voice: this.value }); this.blur(); };
-  $("language").onchange = function () { send({ cmd: "set_language", language: this.value }); this.blur(); };
+  $("language").onchange = function () {
+    // A voice speaks its own language: switch to that language's voice first (the current one if
+    // it is listed there, else the first), then the language. Nothing listed: the language alone.
+    var voice = M.voiceForLanguage(snapshot && snapshot.voices_by_language, this.value, snapshot && snapshot.voice);
+    if (voice && voice !== (snapshot && snapshot.voice)) send({ cmd: "set_voice", voice: voice });
+    send({ cmd: "set_language", language: this.value });
+    this.blur();
+  };
   $("barge").onclick = function () {
     bargePending = M.clickBarge(snapshot && snapshot.barge && snapshot.barge.enabled, bargePending, Date.now());
     send({ window: { log: "click barge " + (bargePending.on ? "on" : "off") } });
