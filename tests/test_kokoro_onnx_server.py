@@ -250,3 +250,63 @@ def test_voices_lists_dm_martin_only_when_the_german_files_exist(listing_server)
     (de / "voices-martin.npz").write_text("")
     data = _voices(base)["data"]
     assert data[-1] == {"id": "dm_martin", "language": "de", "language_name": "German"}
+
+
+# --- --no-download (FELIX runs the server against files it installed itself) ---------
+
+def _run_no_download(tmp_path, *present):
+    import subprocess
+    import sys
+    from pathlib import Path
+    for name in present:
+        (tmp_path / name).write_bytes(b"x")
+    script = Path(__file__).resolve().parent.parent / "kokoro-onnx-server.py"
+    return subprocess.run(
+        [sys.executable, str(script), "--host", "127.0.0.1", "--port", "0",
+         "--model-dir", str(tmp_path), "--no-download"],
+        capture_output=True, text=True, timeout=30)
+
+
+@pytest.mark.parametrize("present,missing", [
+    ((), "kokoro-v1.0.onnx"),
+    (("voices-v1.0.bin",), "kokoro-v1.0.onnx"),
+    (("kokoro-v1.0.onnx",), "voices-v1.0.bin"),
+])
+def test_no_download_exits_1_naming_the_missing_file(tmp_path, present, missing):
+    result = _run_no_download(tmp_path, *present)
+    assert result.returncode == 1, result.stderr
+    err = result.stderr
+    assert str(tmp_path / missing) in err
+    assert "--no-download" in err
+    # How to get it: the release URL of that file.
+    server = _server()
+    url = server.MODEL_URL if missing == "kokoro-v1.0.onnx" else server.VOICES_URL
+    assert url in err
+    # Nothing was fetched or created.
+    assert not (tmp_path / missing).exists()
+
+
+def test_no_download_never_calls_urlretrieve(tmp_path, monkeypatch):
+    server = _server()
+    calls = []
+    monkeypatch.setattr(server, "urlretrieve", lambda *a, **k: calls.append(a))
+    monkeypatch.setattr(server, "_model_dir", tmp_path)
+    monkeypatch.setattr(server, "_no_download", True)
+    with pytest.raises(SystemExit) as exc:
+        server.ensure_models()
+    assert exc.value.code == 1
+    assert calls == []
+
+
+def test_without_no_download_missing_files_are_still_downloaded(tmp_path, monkeypatch):
+    server = _server()
+    calls = []
+
+    def fake(url, path):
+        calls.append(url)
+        with open(path, "wb") as fh:
+            fh.write(b"x")
+    monkeypatch.setattr(server, "urlretrieve", fake)
+    monkeypatch.setattr(server, "_model_dir", tmp_path)
+    server.ensure_models()
+    assert calls == [server.MODEL_URL, server.VOICES_URL]
