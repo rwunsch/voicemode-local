@@ -352,3 +352,11 @@ test("a single click still clears as soon as the backend agrees", () => {
   assert.deepEqual([bargeShown(true, p, 1100).on, bargeShown(true, p, 1100).pending], [false, true]);
   assert.deepEqual(bargeShown(false, p, 1300), { on: false, pending: false, keep: null });
 });
+
+test("the German voice list is the backend's german_voices when it sends one", () => {
+  const vm = viewModel(snap({ german_available: true, voice: "p_de_thorsten", language: "German",
+                              german_voices: ["p_de_thorsten", "p_de_eva"] }), 0, 0);
+  assert.deepEqual(vm.voices, ["p_de_thorsten", "p_de_eva"]);
+  const old = viewModel(snap({ german_available: true, voice: "p_de_thorsten", language: "German" }), 0, 0);
+  assert.deepEqual(old.voices, ["dm_martin", "p_de_thorsten", "p_de_eva"]);   // older backend: as before
+});

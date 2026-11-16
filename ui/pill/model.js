@@ -55,7 +55,9 @@
     var german = s.german_available !== false;
     // A session already in German keeps German listed, so the select shows its real value.
     var languages = german || language === "German" ? LANGUAGES : ["English"];
-    var base = german && language === "German" ? GERMAN_VOICES : VOICES;
+    // The German voices that can speak here (backend's german_voices); an older backend: all.
+    var germanList = Array.isArray(s.german_voices) && s.german_voices.length ? s.german_voices : GERMAN_VOICES;
+    var base = german && language === "German" ? germanList : VOICES;
     var voices = s.voice && base.indexOf(s.voice) < 0 ? base.concat([s.voice]) : base;
     // The main button is Wake between turns (idle, between turns, stopped) when the backend
     // can name a session to wake, and Stop otherwise. One button, never both. Pause/Resume
