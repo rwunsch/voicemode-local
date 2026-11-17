@@ -70,3 +70,50 @@ def test_app_drives_the_labelled_controls_from_the_model():
                    '"aria-pressed", String(vm.controls.pause.pressed)',
                    '$("ctlPause").onclick', '$("ctlMain").onclick'):
         assert needle in js, needle
+
+
+TONE_TOKENS = ("--speak", "--listen", "--neutral", "--muted", "--interrupt")
+
+
+def _tokens(block):
+    out = {}
+    for name, h in re.findall(r"(--[\w-]+):\s*#([0-9a-fA-F]{6}|[0-9a-fA-F]{3})\b", block):
+        out[name] = "#" + (h if len(h) == 6 else "".join(c * 2 for c in h))
+    return out
+
+
+def _contrast(a, b):
+    def lum(h):
+        c = [int(h[i:i + 2], 16) / 255 for i in (1, 3, 5)]
+        c = [x / 12.92 if x <= 0.03928 else ((x + 0.055) / 1.055) ** 2.4 for x in c]
+        return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]
+    hi, lo = sorted((lum(a), lum(b)), reverse=True)
+    return (hi + 0.05) / (lo + 0.05)
+
+
+def test_indicator_colours_are_tokens_with_contrast_in_light_and_dark():
+    css = (UI / "pill.css").read_text(encoding="utf-8")
+    light = _tokens(re.search(r"^:root\{([^}]*)\}", css, re.M).group(1))
+    dark = _tokens(re.search(r"prefers-color-scheme:\s*dark\)\s*\{\s*:root\{([^}]*)\}", css).group(1))
+    for scheme, toks in (("light", light), ("dark", dark)):
+        for t in TONE_TOKENS:
+            assert t in toks, f"{t} missing in {scheme}"
+            # WCAG 1.4.11: a state shown by colour needs 3:1 against its background
+            assert _contrast(toks[t], toks["--bg"]) >= 3.0, (scheme, t, toks[t])
+        # Interrupted is also written in this colour: text needs 4.5:1
+        assert _contrast(toks["--interrupt"], toks["--bg"]) >= 4.5, scheme
+        assert len({toks[t] for t in TONE_TOKENS}) == len(TONE_TOKENS), f"{scheme}: two tones share a colour"
+    for tone, token in (("speaking", "--speak"), ("listening", "--listen"), ("neutral", "--neutral"),
+                        ("muted", "--muted"), ("interrupted", "--interrupt")):
+        assert re.search(r"\[data-tone=%s\] \.orb\{[^}]*var\(%s\)" % (tone, token), css), tone
+
+
+def test_the_indicator_dot_is_labelled_and_driven_by_the_model():
+    html = (UI / "index.html").read_text(encoding="utf-8")
+    m = re.search(r'<div id="orb" class="orb"([^>]*)>', html)
+    assert m and 'role="img"' in m.group(1) and "aria-label=" in m.group(1)
+    js = (UI / "app.js").read_text(encoding="utf-8")
+    for needle in ("document.body.dataset.tone = vm.indicator.tone",
+                   '$("orb").setAttribute("aria-label", ',
+                   "M.interruptFlash(", "{ interruptedUntil: interruptedUntil }"):
+        assert needle in js, needle

@@ -5,6 +5,7 @@
 (function () {
   var M = window.PillModel, $ = function (id) { return document.getElementById(id); };
   var bargePending = null, bargeLastShown = null;
+  var lastBargeCount = null, interruptedUntil = null;   // the Interrupted flash (model.js interruptFlash)
   var hidden = false, snapshot = null, lastSeen = null, ui = null, lastMode = null, lastPhase = null, floorPid = null, filled = false;
 
   function send(obj) {
@@ -37,13 +38,15 @@
   }
 
   function render() {
-    var vm = M.viewModel(snapshot, lastSeen, Date.now());
+    var vm = M.viewModel(snapshot, lastSeen, Date.now(), { interruptedUntil: interruptedUntil });
     if (ui) { // local ui wins: it is what the user just chose, and the backend echoes it back
       var mode = ui.minimized ? "dot" : ui.docked ? (ui.tucked ? "tab" : ui.dockOpen ? "docked" : "rail") : ui.expanded ? "expanded" : "pill";
       vm.mode = mode; vm.side = mode === "docked" || mode === "rail" || mode === "tab" ? (ui.side || "right") : null;
     }
     document.body.dataset.mode = vm.mode;
     document.body.dataset.phase = vm.phase;
+    document.body.dataset.tone = vm.indicator.tone;
+    $("orb").setAttribute("aria-label", [vm.indicator.who, vm.indicator.text].filter(Boolean).join(": "));
     $("label").textContent = vm.stateText;
     $("waiting").textContent = vm.waitingText;
     $("sub").textContent = vm.session || "Voice pill";
@@ -125,6 +128,9 @@
     var wasStale = lastSeen === null || Date.now() - lastSeen > M.STALE_MS;
     var prevVisible = snapshot ? snapshot.visible : null;
     snapshot = s; lastSeen = Date.now();
+    var count = s.barge && typeof s.barge.count === "number" ? s.barge.count : null;
+    interruptedUntil = M.interruptFlash(wasStale ? null : lastBargeCount, count, lastSeen, interruptedUntil);
+    lastBargeCount = count;
     var h = M.nextHidden(hidden, prevVisible, s.visible, wasStale);
     if (hidden && !h) lastMode = null; // resend the mode so the wrapper shows the window again
     hidden = h;
