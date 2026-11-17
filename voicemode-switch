@@ -1027,6 +1027,45 @@ start_kokoro_gpu_and_containers() {
     fi
 }
 
+# `start` with the CPU Kokoro ONNX on 8880: who holds 8880 decides what happens to it. This
+# replaced a kill of every pid `lsof -ti:8880` listed, whatever it was.
+#   this install's own earlier kokoro-onnx-server   stopped by exact pid (own_pids)
+#   a Docker container publishing 8880 whose image  `docker stop <its name>`
+#   name contains "kokoro"
+#   anything else                                   one line naming it; returns 1, kills nothing
+free_8880_for_cpu_onnx() {
+    local pids own name image other="" first
+    pids="$(lsof -ti:8880 2>/dev/null | tr '\n' ' ' | sed 's/ $//')" || pids=""
+    if [ -z "$pids" ] && ! healthy 8880; then return 0; fi
+    own="$(own_pids "$KOKORO_ONNX_PID_FILE" \
+        "([^ ]*python[0-9.]* $(script_dir_regex)/kokoro-onnx-server\\.py|$(script_dir_regex)/scripts/kokoro-(gpu|cpu)-start\\.sh) .*--port 8880( |\$)")" || own=""
+    if [ -n "$own" ]; then
+        echo "  8880 is held by this install's earlier kokoro-onnx-server (PID $own): stopping it"
+        stop_port_holders "$own" && return 0
+        fail "8880: PID $own did not stop; not starting Kokoro ONNX"
+        return 1
+    fi
+    if command -v docker > /dev/null 2>&1; then
+        while IFS=$'\t' read -r name image; do
+            [ -n "$name" ] || continue
+            case "$image" in
+                *kokoro*)
+                    echo "  8880 is held by the Docker container $name ($image): stopping it"
+                    if docker stop "$name" > /dev/null 2>&1; then return 0; fi
+                    fail "8880: docker stop $name failed; not starting Kokoro ONNX"
+                    return 1 ;;
+            esac
+            other="the Docker container $name ($image)"
+        done < <(docker ps --filter publish=8880 --format '{{.Names}}{{"\t"}}{{.Image}}' 2>/dev/null || true)
+    fi
+    if [ -z "$other" ] && [ -n "$pids" ]; then
+        first="${pids%% *}"
+        other="PID $pids ($(ps -o comm= -p "$first" 2>/dev/null || echo unknown))"
+    fi
+    fail "8880 is held by ${other:-an unidentified service}, not by voicemode's own Kokoro; not stopping it (free the port, or set KOKORO_ONNX_PORT)"
+    return 1
+}
+
 # `start`: the configured CPU fallbacks, each after the GPU engine it stands in for.
 start_cpu_fallbacks_verbose() {
     local port
@@ -1084,9 +1123,8 @@ cmd_start() {
             # Only clear the port when ONNX is taking 8880 FROM the Docker
             # Kokoro. On a separate port (8882) there is nothing to displace,
             # and killing whatever answers there would be gratuitous.
-            if [ "$ONNX_PORT" = "8880" ] && lsof -ti:8880 > /dev/null 2>&1; then
-                kill "$(lsof -ti:8880)" 2>/dev/null
-                sleep 1
+            if [ "$ONNX_PORT" = "8880" ] && ! free_8880_for_cpu_onnx; then
+                exit 1
             fi
             nohup "$VENV_PY" "$SCRIPT_DIR/kokoro-onnx-server.py" --port "$ONNX_PORT" \
                 --model-dir "$SCRIPT_DIR/models/kokoro" \
