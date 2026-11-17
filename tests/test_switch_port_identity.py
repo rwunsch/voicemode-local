@@ -247,3 +247,58 @@ def test_cpu_kokoro_configuration_does_not_check_the_provider(made):
     assert done.returncode == 0
     assert done.stderr == ""
     assert b.alive(pid)
+
+
+# --- the fallback scan is anchored to THIS install's directory ----------------------
+
+def _elsewhere_cmd(b, tmp_path, name, *args):
+    """A fake whose basename and --port match but whose directory is not the switch's."""
+    other = tmp_path / "other-checkout"
+    other.mkdir(exist_ok=True)
+    script = other / name
+    script.write_text("import time\ntime.sleep(60)\n")
+    return ["python3", str(script), *args]
+
+
+def test_a_lookalike_in_another_directory_is_never_killed_on_2022(made, tmp_path):
+    b = made(FW, STT_URLS)
+    lookalike = b.holder(2022, '{"status":"ok"}', _elsewhere_cmd(b, tmp_path, "whisper-proxy.py", "--port", "2022"))
+    done = b.run("ensure", "--quiet")
+    assert done.returncode != 0
+    assert "2022 is held by an unidentified service" in done.stderr
+    assert b.alive(lookalike)
+
+
+def test_a_lookalike_in_another_directory_is_never_killed_on_8880(made, tmp_path):
+    b = made(GPU, TTS_URLS)
+    lookalike = b.holder(8880, '{"provider":"CPUExecutionProvider"}',
+                         _elsewhere_cmd(b, tmp_path, "kokoro-onnx-server.py", "--port", "8880"))
+    done = b.run("ensure", "--quiet")
+    assert done.returncode != 0
+    assert "8880 is held by an unidentified service" in done.stderr
+    assert b.alive(lookalike)
+
+
+def test_only_the_holder_at_this_install_is_stopped_when_a_lookalike_also_runs(made, tmp_path):
+    b = made(FW, STT_URLS)
+    lookalike = b.holder(9998, "", _elsewhere_cmd(b, tmp_path, "whisper-proxy.py", "--port", "2022"))
+    ours = b.holder(2022, '{"status":"ok"}', b.fake_script_cmd("whisper-proxy.py", "--port", "2022"))  # no pid file
+    done = b.run("ensure", "--quiet")
+    assert done.returncode == 0, done.stderr
+    assert not b.alive(ours)
+    assert b.alive(lookalike)
+
+
+def test_a_sibling_directory_with_a_shared_prefix_is_not_matched(made, tmp_path):
+    """A sibling directory sharing a prefix with the install directory does not match."""
+    app = tmp_path / "app"
+    twin = tmp_path / "apX"   # would match "ap." if the dot were left unescaped
+    b = made(FW, STT_URLS)
+    twin.mkdir()
+    script = twin / "whisper-proxy.py"
+    script.write_text("import time\ntime.sleep(60)\n")
+    assert app.name == "app"
+    lookalike = b.holder(2022, '{"status":"ok"}', ["python3", str(script), "--port", "2022"])
+    done = b.run("ensure", "--quiet")
+    assert done.returncode != 0
+    assert b.alive(lookalike)

@@ -147,7 +147,9 @@ about 7 hours. Three guards, all tested:
   (`2022 is held by whisper-proxy (PID n), not the configured faster-whisper engine`). It is
   stopped, by exact pid, only if `/tmp/whisper-proxy.pid` or the command line
   (`python3 .../whisper-proxy.py --port 2022`) proves it is voicemode's own; the pid file wins
-  when it matches. If the holder cannot be proven ours, nothing is killed, the line says so and
+  when it matches. Without a pid file, only processes of the current user whose command line
+  contains THIS install's script path (`<install dir>/whisper-proxy.py`, regex-escaped) match, so
+  a lookalike from another checkout or a test is never stopped. If the holder cannot be proven ours, nothing is killed, the line says so and
   `ensure` exits non-zero. The same rule covers native GPU Kokoro: with `KOKORO_ONNX_GPU=true`,
   8880 is healthy only if `/health` says provider `CUDAExecutionProvider` (our own server that
   reports no provider yet is still loading and is left alone). Tests:
