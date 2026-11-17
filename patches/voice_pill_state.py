@@ -29,6 +29,7 @@ import asyncio
 import importlib.util
 import json
 import logging
+import math
 import os
 import re
 import shutil
@@ -746,23 +747,39 @@ async def enter(pid: int, label: str, voice: str | None, base=None) -> str | Non
 
 # -- interruptions (append-only log of timestamps) --------------------------
 
-def record_interruption(t: float, base=None) -> None:
+def record_interruption(t: float, base=None, latency_ms=None) -> None:
+    """Append one interruption: its time, and when known the latency (speech onset to stop
+    sent, in ms) on a line of its own. The latency line is not a number, so a reader of the
+    old format (``float(line)`` per line, others skipped) still counts exactly one per
+    interruption."""
     path = _base(base) / "interruptions.log"
+    try:
+        ok = latency_ms is not None and math.isfinite(float(latency_ms)) and float(latency_ms) >= 0
+    except (TypeError, ValueError):
+        ok = False
+    extra = f"latency_ms={float(latency_ms):.1f}\n" if ok else ""
     # Leading newline so a torn previous line cannot swallow this one.
     fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
     try:
-        os.write(fd, f"\n{float(t)!r}\n".encode())
+        os.write(fd, f"\n{float(t)!r}\n{extra}".encode())
     finally:
         os.close(fd)
     try:
         if path.stat().st_size > _MAX_INTERRUPTION_BYTES:
-            keep = _interruption_times(path)[-_KEEP_INTERRUPTIONS:]
-            _write_atomic(path, "".join(f"\n{x!r}\n" for x in keep))
+            keep = _interruption_records(path)[-_KEEP_INTERRUPTIONS:]
+            _write_atomic(path, "".join(_record_text(x, ms) for x, ms in keep))
     except OSError:
         pass
 
 
-def _interruption_times(path: Path) -> list[float]:
+def _record_text(t: float, latency_ms) -> str:
+    extra = f"latency_ms={latency_ms:.1f}\n" if latency_ms is not None else ""
+    return f"\n{t!r}\n{extra}"
+
+
+def _interruption_records(path: Path) -> list:
+    """[(time, latency_ms or None)] in file order. A ``latency_ms=`` line belongs to the
+    time line before it."""
     try:
         lines = _read_policy(path).decode("utf-8", errors="replace").splitlines()
     except OSError:
@@ -770,15 +787,51 @@ def _interruption_times(path: Path) -> list[float]:
     out = []
     for ln in lines:
         try:
-            out.append(float(ln))
+            out.append((float(ln), None))
+            continue
         except ValueError:
             pass
+        if ln.startswith("latency_ms=") and out and out[-1][1] is None:
+            try:
+                ms = float(ln[len("latency_ms="):])
+            except ValueError:
+                continue
+            if math.isfinite(ms) and ms >= 0:
+                out[-1] = (out[-1][0], ms)
     return out
+
+
+def _interruption_times(path: Path) -> list[float]:
+    return [t for t, _ in _interruption_records(path)]
+
+
+def interruption_records(base=None) -> list:
+    return _interruption_records(_base(base) / "interruptions.log")
 
 
 def interruptions_since(t: float, base=None) -> int:
     return sum(1 for x in _interruption_times(_base(base) / "interruptions.log")
                if x >= t)
+
+
+LATENCY_WINDOW = 50
+
+
+def latency_summary(base=None) -> str:
+    """n, median and p90 (nearest rank) of the latencies of the last 50 interruptions."""
+    records = interruption_records(base)[-LATENCY_WINDOW:]
+    if not records:
+        return "no interruptions recorded yet"
+    values = sorted(ms for _, ms in records if ms is not None)
+    if not values:
+        n = len(records)
+        return (f"no interruption latency recorded yet ({n} interruption{'s were' if n != 1 else ' was'} "
+                "recorded before it was measured)")
+    mid = len(values) // 2
+    median = values[mid] if len(values) % 2 else (values[mid - 1] + values[mid]) / 2
+    p90 = values[max(0, math.ceil(0.9 * len(values)) - 1)]
+    return (f"interruption latency (speech onset to stop sent), last {len(values)}: "
+            f"median {median:.0f} ms, p90 {p90:.0f} ms")
 
 
 # -- push-to-talk recency ---------------------------------------------------

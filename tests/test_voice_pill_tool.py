@@ -185,3 +185,34 @@ def test_show_says_a_failed_start_failed_and_why(tool):
     pa.start_result = ("failed", "the middle process exited with 1: not executable")
     out = run(mod, "show")
     assert "could not start" in out.lower() and "not executable" in out and "starting" not in out.lower()
+
+
+# -- voice_barge status shows the recorded interruption latency ----------------
+
+def _barge(mod, action):
+    return asyncio.run(mod.voice_barge(action))
+
+
+def test_barge_status_says_no_interruptions_yet(tool):
+    mod, _, _, _ = tool
+    assert _barge(mod, "status") == "status\nno interruptions recorded yet"
+
+
+def test_barge_status_shows_n_median_and_p90(tool):
+    mod, st, _, _ = tool
+    for i, ms in enumerate((200.0, 300.0, 400.0), 1):
+        st.record_interruption(float(i), latency_ms=ms)
+    out = _barge(mod, "status")
+    assert out.startswith("status\n") and "last 3: median 300 ms, p90 400 ms" in out
+
+
+def test_other_barge_actions_are_not_changed(tool):
+    mod, st, _, _ = tool
+    st.record_interruption(1.0, latency_ms=200.0)
+    assert _barge(mod, "off") == "off"
+
+
+def test_a_broken_latency_log_never_breaks_barge_status(tool, monkeypatch):
+    mod, st, _, _ = tool
+    monkeypatch.setattr(st, "latency_summary", lambda *a, **k: (_ for _ in ()).throw(OSError("x")))
+    assert _barge(mod, "status") == "status"

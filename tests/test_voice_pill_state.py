@@ -102,6 +102,83 @@ def test_interruptions_counted_since_time(base):
     assert st.interruptions_since(100.0, base=base) == 0
 
 
+def test_latency_is_recorded_and_the_count_does_not_change(base):
+    st.record_interruption(10.0, base=base, latency_ms=250.0)
+    st.record_interruption(20.0, base=base)
+    st.record_interruption(30.0, base=base, latency_ms=310.5)
+    assert st.interruptions_since(0, base=base) == 3
+    assert st.interruptions_since(15.0, base=base) == 2
+    assert st.interruption_records(base=base) == [(10.0, 250.0), (20.0, None), (30.0, 310.5)]
+
+
+def test_an_old_reader_still_counts_a_log_with_latencies(base):
+    """The pill running the previous code counts lines that parse as a float and skips the
+    rest: a latency must sit on a line of its own that is not a number."""
+    st.record_interruption(10.0, base=base, latency_ms=250.0)
+    st.record_interruption(20.0, base=base, latency_ms=300.0)
+    old_count = 0
+    for line in (base / "interruptions.log").read_text().splitlines():
+        try:
+            float(line)
+            old_count += 1
+        except ValueError:
+            pass
+    assert old_count == 2
+
+
+def test_old_format_lines_are_read_with_no_latency(base):
+    base.mkdir(parents=True)
+    (base / "interruptions.log").write_text("\n5.0\n\n6.5\n")
+    assert st.interruption_records(base=base) == [(5.0, None), (6.5, None)]
+    assert st.interruptions_since(0, base=base) == 2
+
+
+def test_a_bad_latency_is_not_written_as_one(base):
+    for bad in (float("nan"), float("inf"), -1.0, "x"):
+        st.record_interruption(1.0, base=base, latency_ms=bad)
+    assert st.interruption_records(base=base) == [(1.0, None)] * 4
+
+
+def test_the_trimmed_log_keeps_the_latencies(base, monkeypatch):
+    monkeypatch.setattr(st, "_MAX_INTERRUPTION_BYTES", 200)
+    monkeypatch.setattr(st, "_KEEP_INTERRUPTIONS", 3)
+    for i in range(1, 21):
+        st.record_interruption(float(i), base=base, latency_ms=float(i) * 10)
+    assert st.interruption_records(base=base)[-3:] == [(18.0, 180.0), (19.0, 190.0), (20.0, 200.0)]
+    assert len(st.interruption_records(base=base)) <= 20
+
+
+def test_latency_summary_with_none_one_and_many(base):
+    assert st.latency_summary(base=base) == "no interruptions recorded yet"
+    st.record_interruption(1.0, base=base, latency_ms=240.0)
+    assert st.latency_summary(base=base) == (
+        "interruption latency (speech onset to stop sent), last 1: median 240 ms, p90 240 ms")
+    for i in range(2, 11):   # 240, 100, 200, ..., 900: sorted 100..900 and 240
+        st.record_interruption(float(i), base=base, latency_ms=float(i - 1) * 100)
+    text = st.latency_summary(base=base)
+    # values: 240, 100, 200, 300, 400, 500, 600, 700, 800, 900 -> n=10, median 450, p90 (nearest rank) 800
+    assert "last 10: median 450 ms, p90 800 ms" in text
+
+
+def test_latency_summary_uses_only_the_last_50(base):
+    for i in range(1, 61):
+        st.record_interruption(float(i), base=base, latency_ms=1000.0 if i <= 10 else 200.0)
+    assert "last 50: median 200 ms, p90 200 ms" in st.latency_summary(base=base)
+
+
+def test_latency_summary_with_only_old_records(base):
+    base.mkdir(parents=True)
+    (base / "interruptions.log").write_text("\n5.0\n")
+    assert st.latency_summary(base=base) == (
+        "no interruption latency recorded yet (1 interruption was recorded before it was measured)")
+
+
+def test_a_failed_write_never_raises_from_the_trigger_hook(base, monkeypatch):
+    monkeypatch.setattr(st.os, "open", lambda *a, **k: (_ for _ in ()).throw(OSError("disk full")))
+    with pytest.raises(OSError):
+        st.record_interruption(1.0, base=base, latency_ms=5.0)   # the writer reports; run() isolates it
+
+
 def test_ptt_recent_expires_after_120s(base):
     assert st.ptt_recent(base=base) is False
     st.touch_ptt(base=base)
