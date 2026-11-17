@@ -201,6 +201,61 @@ if old:
 else:
     body = txt.rstrip("\n")
     out = (body + "\n\n" if body else "") + block_text
+
+# voice_mode.config keeps the FIRST assignment of a key, so an active line for a key the block
+# writes (voice-mode's template has VOICEMODE_STT_BASE_URLS=... near the top) shadows the block.
+# Comment such lines out in place with a reversible marker; put a marked line back once the
+# block no longer writes its key. Only lines the loader would read are touched.
+SUPERSEDED = "# superseded by voicemode-switch managed block: "
+
+def loader_key(line):
+    s = line.strip()
+    if not s or s.startswith("#") or "=" not in s:
+        return None
+    return s.split("=", 1)[0].strip()
+
+def opens_multiline(line):
+    v = line.strip().split("=", 1)[1].strip()
+    return bool(v) and v[0] in "\"'" and not (len(v) > 1 and v[-1] == v[0])
+
+written = {loader_key(l) for l in block if loader_key(l)}
+lines = out.splitlines(keepends=True)
+superseded, restored = [], []
+in_block, quote = False, None
+for i, raw in enumerate(lines):
+    line = raw.rstrip("\r\n")
+    nl = raw[len(line):]
+    if quote:                       # inside a multiline quoted value: not a key
+        if line.endswith(quote):
+            quote = None
+        continue
+    if line == BEGIN:
+        in_block = True
+        continue
+    if line == END:
+        in_block = False
+        continue
+    if in_block:
+        continue
+    key = loader_key(line)
+    if key:
+        if opens_multiline(line):
+            quote = line.strip().split("=", 1)[1].strip()[0]
+        if key in written:
+            lines[i] = SUPERSEDED + line + nl
+            superseded.append(f"{key} (line {i + 1})")
+    elif line.startswith(SUPERSEDED):
+        original = line[len(SUPERSEDED):]
+        k = loader_key(original)
+        if k and k not in written:
+            lines[i] = original + nl
+            restored.append(f"{k} (line {i + 1})")
+out = "".join(lines)
+if superseded:
+    print("  Commented out (they came first, so voice-mode would ignore the block): " + ", ".join(superseded))
+if restored:
+    print("  Restored (the block no longer sets them): " + ", ".join(restored))
+
 if out == txt and os.path.exists(envfile):
     print(f"  {envfile} already set (mode: {mode})")
 else:
@@ -209,6 +264,7 @@ else:
 os.chmod(envfile, 0o600)
 PYEOF
     strip_claude_json_routing
+    verify_routing
 }
 
 # Remove routing vars from ~/.claude.json so they don't override voicemode.env
@@ -241,6 +297,81 @@ vm["env"] = env
 json.dump(data, open(p, "w"), indent=2)
 print("  Cleaned routing vars from ~/.claude.json (now sourced from voicemode.env)")
 PYEOF
+}
+
+# Load voicemode.env through the installed voice_mode.config (the loader voice-mode itself
+# uses) and print the STT/TTS lists it ends up with. If they differ from the managed block,
+# one warning per key names the line that shadows it. VOICEMODE_* variables of this shell are
+# left out, so the result is what the file says. Python: $VOICEMODE_CONFIG_PY, else the repo .venv.
+_VERIFY_ROUTING_PY='import os, sys
+envfile = sys.argv[1]
+BEGIN = "# >>> voicemode-switch managed (do not edit inside this block) >>>"
+END = "# <<< voicemode-switch managed <<<"
+for k in [k for k in os.environ if k.startswith("VOICEMODE_")]:
+    del os.environ[k]
+os.chdir(os.path.expanduser("~"))   # no project .voicemode.env from the current directory
+try:
+    from voice_mode import config
+except Exception as e:
+    print(f"NOTCHECKED|voice_mode.config could not be loaded ({type(e).__name__})")
+    sys.exit(0)
+
+def key_of(line):
+    s = line.strip()
+    if not s or s.startswith("#") or "=" not in s:
+        return None
+    return s.split("=", 1)[0].strip()
+
+first, in_block_val = {}, {}   # key -> (line no, line) of the first assignment; key -> block value
+in_block, quote = False, None
+for n, raw in enumerate(open(envfile).read().splitlines(), 1):
+    line = raw.rstrip("\r")
+    if quote:
+        if line.endswith(quote):
+            quote = None
+        continue
+    if line == BEGIN:
+        in_block = True
+        continue
+    if line == END:
+        in_block = False
+        continue
+    k = key_of(line)
+    if not k:
+        continue
+    v = line.strip().split("=", 1)[1].strip()
+    if v and v[0] in "\"\x27" and not (len(v) > 1 and v[-1] == v[0]):
+        quote = v[0]
+    first.setdefault(k, (n, line.strip(), in_block))
+    if in_block:
+        in_block_val.setdefault(k, v)
+
+split = lambda s: [x.strip() for x in s.split(",") if x.strip()]
+for label, key, eff in (("STT", "VOICEMODE_STT_BASE_URLS", config.STT_BASE_URLS),
+                        ("TTS", "VOICEMODE_TTS_BASE_URLS", config.TTS_BASE_URLS)):
+    print(f"OK|{label}: " + ", ".join(eff))
+    if key in in_block_val and split(in_block_val[key]) != list(eff):
+        n, line, inside = first.get(key, (0, "", True))
+        if inside:
+            print(f"WARN|{key} in the managed block is not what voice-mode reads, and no earlier line shadows it")
+        else:
+            print(f"WARN|{key} in the managed block is shadowed by line {n} of {envfile} ({line}): voice-mode uses the first assignment")
+'
+verify_routing() {
+    local envfile="$HOME/.voicemode/voicemode.env" py="${VOICEMODE_CONFIG_PY:-$VENV_PY}" out tag text
+    [ -f "$envfile" ] || return 0
+    echo "  Effective routing (as voice-mode reads $envfile):"
+    if ! out="$("$py" -c "$_VERIFY_ROUTING_PY" "$envfile" 2>/dev/null)"; then
+        echo "    (not checked: $py could not run the check)"
+        return 0
+    fi
+    while IFS='|' read -r tag text; do
+        case "$tag" in
+            OK)         echo "    $text" ;;
+            WARN)       warn "$text" ;;
+            NOTCHECKED) echo "    (not checked: $text)" ;;
+        esac
+    done <<< "$out"
 }
 
 cmd_status() {
@@ -335,6 +466,7 @@ import json
 ce = json.load(open(os.path.expanduser('~/.claude.json'))).get('mcpServers', {}).get('voicemode', {}).get('env', {}) if os.path.exists(os.path.expanduser('~/.claude.json')) else {}
 print(f'  OpenAI key (in .claude.json): {\"set\" if ce.get(\"OPENAI_API_KEY\") else \"NOT SET\"}')
 "
+    verify_routing
 }
 
 # The CPU fallbacks in `status`: process (pid file), and what /health says it runs on.

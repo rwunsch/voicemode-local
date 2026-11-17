@@ -196,7 +196,8 @@ model; `health` lists it.
 **Routing.** `voicemode-switch local|localonly|hybrid|piper` put `http://127.0.0.1:2023/v1` right
 after 2022 in `VOICEMODE_STT_BASE_URLS` (local: `2022, 2023, OpenAI`). With the fallback off the
 list is exactly as before. Takes effect after the voice-mode reconnect (`/mcp`), like any routing
-change.
+change. An earlier active `VOICEMODE_STT_BASE_URLS` line in voicemode.env used to hide this list
+from voice-mode; see `docs/routing-shadow`.
 
 **Cost and model choice.** Measured 2026-11-17 on this machine (14 cores), the 7.6 s clip
 `~/.cache/voicemode-local/stt-bench/speech.wav`, the server on a spare port through the wrapper,
