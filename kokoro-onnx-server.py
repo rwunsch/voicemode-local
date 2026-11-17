@@ -249,6 +249,21 @@ ESPEAK_LANG_BY_PREFIX = {
 }
 
 
+# Voice quality by espeak language (2026-11-17, round trips: speak a sentence, transcribe it
+# back, n=1 per language). This server phonemises every language with espeak-ng only (no
+# misaki), which cannot do Japanese or Chinese well. A language not listed here is "good".
+QUALITY_NOTES = {
+    "ja": "Japanese: audio far too long, nonsense when transcribed (2026-11-17, n=1)",
+    "cmn": "Chinese: fragments with wrong words when transcribed (2026-11-17, n=1)",
+}
+
+
+def voice_quality(voice):
+    """("good", None) or ("experimental", note) for a voice id, by its espeak language."""
+    note = QUALITY_NOTES.get(ESPEAK_LANG_BY_PREFIX.get(voice[:1]))
+    return ("experimental", note) if note else ("good", None)
+
+
 def session_providers(kokoro):
     """The providers of the onnxruntime session kokoro_onnx actually created
     (Kokoro.sess), in priority order; None if the object has no readable session."""
@@ -321,7 +336,11 @@ def list_voices():
     for voice in ids:
         lang = LANGUAGE_BY_PREFIX.get(voice[:1])
         if lang:
-            data.append({"id": voice, "language": lang[0], "language_name": lang[1]})
+            entry = {"id": voice, "language": lang[0], "language_name": lang[1]}
+            entry["quality"], note = voice_quality(voice)
+            if note:
+                entry["quality_note"] = note
+            data.append(entry)
     return {"object": "list", "data": data}
 
 

@@ -1033,7 +1033,7 @@ def _dead_port():
 
 
 def test_voices_by_language_groups_both_shapes_and_skips_a_dead_server(voices_env, voice_servers, monkeypatch):
-    kokoro = voice_servers({"voices": ["af_sky", "bm_george", "ef_dora", "xx_odd", "jm_kumo"]})
+    kokoro = voice_servers({"voices": ["af_sky", "bm_george", "ef_dora", "xx_odd", "im_nicola"]})
     piper = voice_servers({"object": "list", "data": [
         {"id": "p_de_thorsten", "language": "de", "language_name": "German"},
         {"id": "p_nl_nathalie", "language": "nl", "language_name": "Dutch"},
@@ -1046,8 +1046,8 @@ def test_voices_by_language_groups_both_shapes_and_skips_a_dead_server(voices_en
     monkeypatch.delenv("NO_PROXY", raising=False)
     got = vp.voices_by_language(voices_env)
     assert got == {"English": ["af_sky", "bm_george"], "Spanish": ["ef_dora"],
-                   "Japanese": ["jm_kumo"], "German": ["p_de_thorsten"], "Dutch": ["p_nl_nathalie"]}
-    assert list(got) == ["English", "Spanish", "Japanese", "German", "Dutch"]   # first server first
+                   "Italian": ["im_nicola"], "German": ["p_de_thorsten"], "Dutch": ["p_nl_nathalie"]}
+    assert list(got) == ["English", "Spanish", "Italian", "German", "Dutch"]   # first server first
 
 
 def test_voices_by_language_asks_only_local_servers(voices_env, monkeypatch):
@@ -1137,6 +1137,52 @@ def test_voices_by_language_unset_offers_every_language(voices_env, monkeypatch)
     assert list(vp.voices_by_language(voices_env)) == ["English", "Spanish", "French"]
     monkeypatch.setenv("VOICEMODE_PILL_LANGUAGES", "  ")   # blank counts as unset, as for German
     assert list(vp.voices_by_language(voices_env)) == ["English", "Spanish", "French"]
+
+
+# -- voice quality (2026-11-17) --------------------------------------------------------------
+# kokoro-onnx-server marks each voice "quality": "good" | "experimental" (Japanese and Chinese:
+# round trips n=1 came back as nonsense). The pill hides experimental voices unless the language
+# is named in VOICEMODE_PILL_LANGUAGES. Servers that say nothing are classed by the voice id's
+# prefix (j, z), Piper's p_<code>_ voices are good. An unknown quality value counts as good.
+
+def _quality_servers(voice_servers, monkeypatch):
+    onnx = voice_servers({"object": "list", "data": [
+        {"id": "af_sky", "language": "en", "language_name": "English", "quality": "good"},
+        {"id": "jf_alpha", "language": "ja", "language_name": "Japanese",
+         "quality": "experimental", "quality_note": "n"},
+        {"id": "zf_xiaobei", "language": "zh", "language_name": "Chinese", "quality": "experimental"},
+        {"id": "hf_alpha", "language": "hi", "language_name": "Hindi", "quality": "strange"}]})
+    fastapi = voice_servers({"voices": ["ef_dora", "jm_kumo", "zm_yunxi"]})
+    piper = voice_servers({"object": "list", "data": [
+        {"id": "p_de_eva", "language_name": "German"}, {"id": "p_ko_hana", "language_name": "Korean"}]})
+    monkeypatch.setenv("VOICEMODE_TTS_BASE_URLS", ",".join(
+        f"http://127.0.0.1:{p}/v1" for p in (onnx, fastapi, piper)))
+
+
+def test_pill_hides_experimental_voices_by_default(voices_env, voice_servers, monkeypatch):
+    _quality_servers(voice_servers, monkeypatch)
+    got = vp.voices_by_language(voices_env)
+    assert got == {"English": ["af_sky"], "Hindi": ["hf_alpha"], "Spanish": ["ef_dora"],
+                   "German": ["p_de_eva"], "Korean": ["p_ko_hana"]}
+    assert "Japanese" not in got and "Chinese" not in got
+
+
+def test_pill_shows_an_experimental_language_that_is_named_explicitly(voices_env, voice_servers, monkeypatch):
+    _quality_servers(voice_servers, monkeypatch)
+    monkeypatch.setenv("VOICEMODE_PILL_LANGUAGES", "English, japanese")
+    assert vp.voices_by_language(voices_env) == {"English": ["af_sky"], "Japanese": ["jf_alpha", "jm_kumo"]}
+
+
+def test_pill_hides_ja_and_zh_voices_of_a_server_that_gives_no_quality(voices_env, monkeypatch):
+    monkeypatch.setattr(vp, "_fetch_voices", lambda url: {"voices": ["af_sky", "jf_alpha", "zf_xiaobei"]})
+    monkeypatch.setenv("VOICEMODE_TTS_BASE_URLS", "http://127.0.0.1:8880/v1")
+    assert vp.voices_by_language(voices_env) == {"English": ["af_sky"]}
+
+
+def test_snapshot_voices_by_language_hides_experimental(ctx, monkeypatch):
+    monkeypatch.setattr(vp, "_fetch_voices", lambda url: {"voices": ["af_sky", "jf_alpha"]})
+    monkeypatch.setenv("VOICEMODE_TTS_BASE_URLS", "http://127.0.0.1:8880/v1")
+    assert vp.gather(ctx)["voices_by_language"] == {"English": ["af_sky"]}
 
 
 def test_a_voice_is_given_its_own_language_not_just_english_or_german():

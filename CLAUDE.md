@@ -145,9 +145,11 @@ so out loud and keep the conversation open.
 - Italian: `if_sara` (F), `im_nicola` (M)
 - Spanish: `ef_dora` (F), `em_alex` (M)
 - Hindi: `hf_alpha` (F), `hm_omega` (M)
-- Japanese: `jf_alpha` (F), `jm_kumo` (M)
+- Japanese: `jf_alpha` (F), `jm_kumo` (M) — experimental, see below
 - Portuguese: `pf_dora` (F), `pm_alex` (M)
-- Chinese: `zf_xiaobei` (F), `zm_yunxi` (M)
+- Chinese: `zf_xiaobei` (F), `zm_yunxi` (M) — experimental, see below
+
+Japanese and Chinese are marked `"quality": "experimental"` by the Kokoro server and hidden in the voice pill unless named in `VOICEMODE_PILL_LANGUAGES`: espeak-ng alone phonemises them, and n=1 round trips on 2026-11-17 came back as nonsense (`docs/voice-pill/README.md`, "Languages and quality").
 
 ### German (Kokoro)
 Kokoro handles German well with existing voices — just switch to German language in conversation.

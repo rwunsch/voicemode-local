@@ -232,13 +232,27 @@ def test_voices_lists_the_english_model_with_languages(listing_server):
     base, _ = listing_server
     body = _voices(base)
     assert body["object"] == "list"
+    server = _server()
     assert body["data"] == [
-        {"id": "af_sky", "language": "en", "language_name": "English"},
-        {"id": "bm_george", "language": "en", "language_name": "English"},
-        {"id": "ef_dora", "language": "es", "language_name": "Spanish"},
-        {"id": "zf_xiaobei", "language": "zh", "language_name": "Chinese"},
-        {"id": "jm_kumo", "language": "ja", "language_name": "Japanese"},
+        {"id": "af_sky", "language": "en", "language_name": "English", "quality": "good"},
+        {"id": "bm_george", "language": "en", "language_name": "English", "quality": "good"},
+        {"id": "ef_dora", "language": "es", "language_name": "Spanish", "quality": "good"},
+        {"id": "zf_xiaobei", "language": "zh", "language_name": "Chinese",
+         "quality": "experimental", "quality_note": server.QUALITY_NOTES["cmn"]},
+        {"id": "jm_kumo", "language": "ja", "language_name": "Japanese",
+         "quality": "experimental", "quality_note": server.QUALITY_NOTES["ja"]},
     ]
+
+
+def test_voices_marks_ja_and_zh_experimental_with_a_dated_note(listing_server):
+    server = _server()
+    for key in ("ja", "cmn"):
+        note = server.QUALITY_NOTES[key]
+        assert "2026-11-17" in note and len(note) < 120
+    base, _ = listing_server
+    by_id = {v["id"]: v for v in _voices(base)["data"]}
+    assert {i for i, v in by_id.items() if v["quality"] == "experimental"} == {"zf_xiaobei", "jm_kumo"}
+    assert all("quality_note" not in v for v in by_id.values() if v["quality"] == "good")
 
 
 def test_voices_lists_dm_martin_only_when_the_german_files_exist(listing_server):
@@ -249,7 +263,8 @@ def test_voices_lists_dm_martin_only_when_the_german_files_exist(listing_server)
     assert "dm_martin" not in [v["id"] for v in _voices(base)["data"]]   # one file is not enough
     (de / "voices-martin.npz").write_text("")
     data = _voices(base)["data"]
-    assert data[-1] == {"id": "dm_martin", "language": "de", "language_name": "German"}
+    assert data[-1] == {"id": "dm_martin", "language": "de", "language_name": "German",
+                        "quality": "good"}
 
 
 # --- An unknown voice is a 404 that names it (2026-11-17) --------------------------------
