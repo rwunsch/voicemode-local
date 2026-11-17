@@ -1,9 +1,9 @@
 """Which language a local voice speaks, and the ISO code of a language name.
 
 Stdlib only, no imports from voice_mode: copied into the package (manifest "copy" step) for
-voice_fallback.py and the STT language patch, and loaded on its own by the tests. The same
-tables as voice_pill.py's (KOKORO_LANGUAGES, PIPER_LANGUAGES), whose language names the
-pill's override holds ("English", "German", ...).
+voice_fallback.py, the STT language patch and voice_pill.py, and loaded on its own by the tests.
+The one voice-id -> language table: the pill imports it (it had its own, which drifted),
+and its language names are what the pill's override holds ("English", "German", ...).
 
 A voice id says its language: Piper's p_<code>_<name>, else Kokoro's first letter
 (a/b English, e Spanish, f French, h Hindi, i Italian, j Japanese, p Portuguese,

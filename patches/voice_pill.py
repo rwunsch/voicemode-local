@@ -51,6 +51,12 @@ except ImportError:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     import voice_pill_state as st
 
+try:  # the one voice-id -> language table, shared with the unknown-voice fallback (manifest copy)
+    from voice_languages import language_from_id, voice_pairs
+except ImportError:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from voice_languages import language_from_id, voice_pairs
+
 try:  # Wake: wake the last voice session. Absent on an install that never copied it.
     import session_wake as sw
 except ImportError:
@@ -277,25 +283,16 @@ def german_voices(home=None) -> list:
 # language_name}]}, Kokoro-FastAPI {"voices": [ids]}. Choosing any language already works:
 # voice_pill_state.language_note tells the model to write in it.
 
-KOKORO_LANGUAGES = {"a": "English", "b": "English", "e": "Spanish", "f": "French", "h": "Hindi",
-                    "i": "Italian", "j": "Japanese", "p": "Portuguese", "z": "Chinese", "d": "German"}
-EXPERIMENTAL_PREFIXES = ("j", "z")   # Kokoro Japanese / Chinese: espeak-only phonemising, 2026-11-17
-PIPER_LANGUAGES = {"de": "German", "nl": "Dutch", "pl": "Polish", "ru": "Russian", "ko": "Korean"}
+EXPERIMENTAL_LANGUAGES = ("Japanese", "Chinese")   # Kokoro ja / zh: espeak-only phonemising, 2026-11-17
 LOCAL_HOSTS = ("127.0.0.1", "localhost")
 VOICES_TIMEOUT_S = 1.0
 VOICES_CACHE_S = 60.0          # the snapshot loop runs every 0.25-1 s: do not ask every tick
 _VOICES_CACHE = {}             # URL setting -> (time, ({language: [voice ids]}, {experimental ids}))
 _clock = time.monotonic
-
-
-def language_from_id(voice):
-    """A voice's language from its id alone: Piper's p_<code>_..., else Kokoro's first
-    letter. None when neither is known."""
-    if not isinstance(voice, str) or not voice:
-        return None
-    if voice.startswith("p_") and voice.count("_") >= 2:
-        return PIPER_LANGUAGES.get(voice.split("_")[1])
-    return KOKORO_LANGUAGES.get(voice[0])
+BACKGROUND_REFRESH = True      # the snapshot path refreshes the list in a thread; tests turn it off
+_REFRESH_LOCK = threading.Lock()
+_REFRESH_THREAD = None         # the one refresh thread, while it runs
+_REFRESH_WARNED = False
 
 
 def _fetch_voices(url):
@@ -327,9 +324,9 @@ def _id_quality(voice):
     """A voice's quality from its id alone, for servers that say nothing: Kokoro's j (Japanese)
     and z (Chinese) voices are experimental (2026-11-17, round trips n=1); Piper's p_<code>_
     voices and every other Kokoro voice are good."""
-    if not isinstance(voice, str) or not voice or voice.startswith("p_"):
+    if not isinstance(voice, str) or voice.startswith("p_"):
         return "good"
-    return "experimental" if voice[0] in EXPERIMENTAL_PREFIXES else "good"
+    return "experimental" if language_from_id(voice) in EXPERIMENTAL_LANGUAGES else "good"
 
 
 def _voice_entries(body):
@@ -352,11 +349,6 @@ def _voice_entries(body):
     return [(v, lang, q) for v, lang, q in out if lang]
 
 
-def _voice_pairs(body):
-    """[(voice id, language)] from either answer shape; anything else gives nothing."""
-    return [(v, lang) for v, lang, _ in _voice_entries(body)]
-
-
 def _ask_servers(raw):
     """({language: [voice ids]}, {experimental voice ids}); the first server naming a voice
     decides its quality."""
@@ -377,10 +369,42 @@ def _ask_servers(raw):
     return merged, experimental
 
 
-def voices_by_language(home=None) -> dict:
+def _refresh_voices(raw):
+    """Ask the servers and store the answer under raw (runs in the refresh thread). A refresh
+    that raises, or that finds no voice at all while some were known, keeps the old list; the
+    stamp is renewed either way so a dead endpoint is asked once per VOICES_CACHE_S, not per tick."""
+    global _REFRESH_WARNED
+    old = _VOICES_CACHE.get(raw)
+    try:
+        fresh = _ask_servers(raw)
+        if old is not None and not fresh[0] and old[1][0]:
+            fresh = old[1]
+    except Exception as e:  # noqa: BLE001 - never kills the thread, says so once
+        if not _REFRESH_WARNED:
+            _REFRESH_WARNED = True
+            print(f"voice_pill: voice list refresh failed: {e}", file=sys.stderr, flush=True)
+        fresh = old[1] if old is not None else ({}, set())
+    _VOICES_CACHE[raw] = (_clock(), fresh)
+
+
+def _start_refresh(raw):
+    """Start the refresh thread unless one is running. Never two at once."""
+    global _REFRESH_THREAD
+    with _REFRESH_LOCK:
+        if _REFRESH_THREAD is not None and _REFRESH_THREAD.is_alive():
+            return
+        _REFRESH_THREAD = threading.Thread(target=_refresh_voices, args=(raw,), daemon=True,
+                                           name="voice-pill-voices")
+        _REFRESH_THREAD.start()
+
+
+def voices_by_language(home=None, wait=True) -> dict:
     """{language: [voice ids]} from the local TTS servers in VOICEMODE_TTS_BASE_URLS, in
     server order (first server first). Cached for VOICES_CACHE_S per URL setting. Never
-    raises; {} when nothing answered. VOICEMODE_PILL_LANGUAGES, when set, keeps only the
+    raises; {} when nothing answered. wait=False (the snapshot path, which runs in the command
+    loop: Stop and Pause queue behind it) never asks a server itself: it answers from the cache,
+    stale or not, ({} before the first refresh) and has a single background thread refresh an
+    expired entry. VOICEMODE_PILL_LANGUAGES, when set, keeps only the
     languages it lists. Voices a server marks "experimental" (Japanese, Chinese: round trips came
     back as nonsense, 2026-11-17) are hidden unless their language is named in that setting;
     a server that gives no quality is classed by the voice id (j, z). A German voice german_voices() knows but does not
@@ -391,8 +415,13 @@ def voices_by_language(home=None) -> dict:
         now = _clock()
         hit = _VOICES_CACHE.get(raw)
         if hit is None or now - hit[0] >= VOICES_CACHE_S:
-            hit = (now, _ask_servers(raw))
-            _VOICES_CACHE[raw] = hit
+            if wait:
+                hit = (now, _ask_servers(raw))
+                _VOICES_CACHE[raw] = hit
+            elif BACKGROUND_REFRESH:
+                _start_refresh(raw)
+        if hit is None:
+            return {}
         allowed = set(german_voices(home))
         listed = listed_languages(home)   # VOICEMODE_PILL_LANGUAGES: only these, when set
         out = {}
@@ -598,7 +627,7 @@ def gather(ctx) -> dict:
         default_voice=st.default_voice(ctx.home),
         play={"label": play.label} if play else None, wake=wake_view(ctx), platform=platform,
         german=german_available(ctx.home), ptt_listener=ptt_listening(platform, ctx.home),
-        german_list=german_voices(ctx.home), voices=voices_by_language(ctx.home))
+        german_list=german_voices(ctx.home), voices=voices_by_language(ctx.home, wait=False))
 
 
 # -- voice preview (2026-11-17) ----------------------------------------------------------------
@@ -637,7 +666,7 @@ def preview_owner(voice, home=None):
     """(base URL, language) of the first local TTS server that lists the voice, else (None, None)."""
     for base in _local_base_urls(st.setting("VOICEMODE_TTS_BASE_URLS", "", home) or ""):
         try:
-            pairs = _voice_pairs(_fetch_voices(base + "/audio/voices"))
+            pairs = voice_pairs(_fetch_voices(base + "/audio/voices"))
         except Exception:  # noqa: BLE001 - a server that is down or odd is skipped
             continue
         for v, lang in pairs:

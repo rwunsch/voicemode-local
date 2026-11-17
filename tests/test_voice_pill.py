@@ -55,6 +55,8 @@ def ctx(tmp_path, sock_dir, monkeypatch):
     # The voice list asks local TTS servers: never this machine's real ones from a test.
     monkeypatch.setattr(vp, "_fetch_voices", lambda url: None, raising=False)
     monkeypatch.setattr(vp, "_VOICES_CACHE", {}, raising=False)
+    # gather() refreshes that list in a thread; not here unless a test asks (the swr fixture).
+    monkeypatch.setattr(vp, "BACKGROUND_REFRESH", False, raising=False)
     return vp.Context(base=tmp_path / "pill", home=tmp_path / "vm",
                       sock=sock_dir / "control.sock", switch=None)
 
@@ -1111,6 +1113,7 @@ def test_snapshot_carries_voices_by_language(ctx, monkeypatch):
     assert vp.gather(ctx)["voices_by_language"] == {}    # nothing answered
     monkeypatch.setattr(vp, "_fetch_voices", lambda url: {"voices": ["af_sky", "ff_siwis"]})
     monkeypatch.setenv("VOICEMODE_TTS_BASE_URLS", "http://127.0.0.1:8880/v1")
+    vp.voices_by_language(ctx.home)       # the refresh the snapshot path leaves to its thread
     assert vp.gather(ctx)["voices_by_language"] == {"English": ["af_sky"], "French": ["ff_siwis"]}
 
 
@@ -1182,6 +1185,7 @@ def test_pill_hides_ja_and_zh_voices_of_a_server_that_gives_no_quality(voices_en
 def test_snapshot_voices_by_language_hides_experimental(ctx, monkeypatch):
     monkeypatch.setattr(vp, "_fetch_voices", lambda url: {"voices": ["af_sky", "jf_alpha"]})
     monkeypatch.setenv("VOICEMODE_TTS_BASE_URLS", "http://127.0.0.1:8880/v1")
+    vp.voices_by_language(ctx.home)       # the refresh the snapshot path leaves to its thread
     assert vp.gather(ctx)["voices_by_language"] == {"English": ["af_sky"]}
 
 
@@ -1590,3 +1594,165 @@ def test_the_play_wav_child_rejects_bad_input_before_touching_audio(tmp_path):
     out = subprocess.run([sys.executable, str(PATCHES / "voice_pill.py"), "--play-wav"],
                          input=b"not a wav", capture_output=True, env=env, timeout=30)
     assert out.returncode not in (0, 99), out
+
+
+# -- one language table (2026-11-17, Talos note on FELIX PR #1840) ----------------------------
+# voice_pill.py kept its own KOKORO_LANGUAGES / PIPER_LANGUAGES / language_from_id beside
+# voice_languages.py's (copied into the package for the unknown-voice fallback). They had drifted:
+# the pill read "p_x" and "pizza" as Portuguese and "p_en_amy" as unknown, the fallback the
+# other way round. The pill now uses voice_languages; one voice id has one language.
+
+vl = _load("voice_languages")
+
+ID_CASES = ["af_sky", "am_adam", "bf_emma", "bm_george", "ef_dora", "em_alex", "ff_siwis", "hf_alpha",
+            "if_sara", "im_nicola", "jf_alpha", "jm_kumo", "pf_dora", "pm_alex", "zf_xiaobei",
+            "zm_yunxi", "df_x", "dm_martin", "p_de_thorsten", "p_de_eva", "p_nl_nathalie",
+            "p_pl_gosia", "p_ru_dmitri", "p_ko_hana", "p_en_amy", "p_xx_who", "p_x", "p_", "p",
+            "pizza", "afoo", "nova", "xf_x", "xx_unknown", "a", "af", "", None, 5, b"af_sky", ["af_sky"]]
+
+
+@pytest.mark.parametrize("voice", ID_CASES, ids=repr)
+def test_the_pill_and_the_fallback_read_a_voice_id_the_same(voice):
+    assert vp.language_from_id(voice) == vl.language_from_id(voice)
+
+
+def test_the_pill_holds_no_language_table_of_its_own():
+    assert not hasattr(vp, "KOKORO_LANGUAGES") and not hasattr(vp, "PIPER_LANGUAGES")
+    assert vp.language_from_id.__module__ == "voice_languages"
+
+
+@pytest.mark.parametrize("voice,quality", [
+    ("jf_alpha", "experimental"), ("jm_kumo", "experimental"), ("zf_xiaobei", "experimental"),
+    ("af_sky", "good"), ("ef_dora", "good"), ("p_ko_hana", "good"), ("p_de_eva", "good"),
+    ("pizza", "good"), ("jizz", "good"), ("zebra", "good")])
+def test_voice_quality_from_the_id_builds_on_the_shared_language(voice, quality):
+    assert vp._id_quality(voice) == quality
+
+
+# -- the voice list never blocks the command loop (2026-11-17, Talos note on FELIX PR #1840) ----
+# gather() ran voices_by_language in the command loop thread: with a local TTS endpoint
+# stalled, a snapshot (and so Stop / Pause behind it) waited up to VOICES_TIMEOUT_S per endpoint.
+# Now stale-while-revalidate: gather() answers from the cache at once ({} before the first
+# refresh) and ONE background daemon thread refreshes it when it is older than VOICES_CACHE_S.
+
+@pytest.fixture
+def swr(ctx, monkeypatch):
+    """A ctx whose gather() may start the refresh thread; the thread is awaited at the end."""
+    monkeypatch.setattr(vp, "BACKGROUND_REFRESH", True, raising=False)
+    monkeypatch.setattr(vp, "_REFRESH_THREAD", None, raising=False)
+    monkeypatch.setattr(vp, "_REFRESH_WARNED", False, raising=False)
+    monkeypatch.setenv("VOICEMODE_TTS_BASE_URLS", "http://127.0.0.1:8880/v1")
+    release = threading.Event()
+    yield ctx, release
+    release.set()
+    t = vp._REFRESH_THREAD
+    if t is not None:
+        t.join(5)
+
+
+def _wait_refresh():
+    t = vp._REFRESH_THREAD
+    if t is not None:
+        t.join(5)
+        assert not t.is_alive()
+
+
+def test_gather_does_not_wait_for_a_stalled_endpoint(swr, monkeypatch):
+    ctx, release = swr
+    monkeypatch.setattr(vp, "_fetch_voices",
+                        lambda url: release.wait(3) and {"voices": ["af_sky", "ff_siwis"]})
+    t0 = time.monotonic()
+    first = vp.gather(ctx)
+    assert time.monotonic() - t0 < 0.1
+    assert first["voices_by_language"] == {}               # nothing known yet
+    release.set()
+    _wait_refresh()
+    assert vp.gather(ctx)["voices_by_language"] == {"English": ["af_sky"], "French": ["ff_siwis"]}
+
+
+def test_a_stale_list_is_served_at_once_while_it_is_refreshed(swr, monkeypatch):
+    ctx, release = swr
+    monkeypatch.setattr(vp, "_fetch_voices", lambda url: {"voices": ["af_sky"]})
+    clock = [1000.0]
+    monkeypatch.setattr(vp, "_clock", lambda: clock[0])
+    vp.gather(ctx)
+    _wait_refresh()
+    assert vp.gather(ctx)["voices_by_language"] == {"English": ["af_sky"]}
+    clock[0] += 61
+    monkeypatch.setattr(vp, "_fetch_voices", lambda url: release.wait(3) and {"voices": ["ef_dora"]})
+    t0 = time.monotonic()
+    assert vp.gather(ctx)["voices_by_language"] == {"English": ["af_sky"]}   # the old one, now
+    assert time.monotonic() - t0 < 0.1
+    release.set()
+    _wait_refresh()
+    assert vp.gather(ctx)["voices_by_language"] == {"Spanish": ["ef_dora"]}
+
+
+def test_quick_gathers_start_one_refresh_thread(swr, monkeypatch):
+    ctx, release = swr
+    monkeypatch.setattr(vp, "_fetch_voices", lambda url: release.wait(3) and {"voices": []})
+    started = []
+    real = threading.Thread
+
+    class Spy(real):
+        def __init__(self, *a, **kw):
+            super().__init__(*a, **kw)
+            started.append(self)
+    monkeypatch.setattr(vp.threading, "Thread", Spy)
+    for _ in range(5):
+        vp.gather(ctx)
+    assert len(started) == 1 and started[0].daemon is True
+
+
+def test_a_failing_refresh_keeps_the_old_list_and_says_so_once(swr, monkeypatch, capsys):
+    ctx, release = swr
+    clock = [1000.0]
+    monkeypatch.setattr(vp, "_clock", lambda: clock[0])
+    monkeypatch.setattr(vp, "_fetch_voices", lambda url: {"voices": ["af_sky"]})
+    vp.gather(ctx)
+    _wait_refresh()
+
+    def boom(url):
+        raise OSError("endpoint down")
+    monkeypatch.setattr(vp, "_fetch_voices", boom)
+    for _ in range(2):                       # an endpoint that is down: every refresh finds nothing
+        clock[0] += 61
+        vp.gather(ctx)
+        _wait_refresh()
+        assert vp.gather(ctx)["voices_by_language"] == {"English": ["af_sky"]}
+
+    def broken(raw):
+        raise RuntimeError("discovery broke")
+    monkeypatch.setattr(vp, "_ask_servers", broken)   # a refresh that itself raises
+    for _ in range(2):
+        clock[0] += 61
+        vp.gather(ctx)
+        _wait_refresh()
+        assert vp.gather(ctx)["voices_by_language"] == {"English": ["af_sky"]}
+    assert capsys.readouterr().err.count("voice list refresh failed") == 1
+
+
+def test_the_refresh_thread_is_a_daemon_so_shutdown_does_not_wait_for_it(swr, monkeypatch):
+    ctx, release = swr
+    monkeypatch.setattr(vp, "_fetch_voices", lambda url: release.wait(30))
+    vp.gather(ctx)
+    assert vp._REFRESH_THREAD.is_alive() and vp._REFRESH_THREAD.daemon is True
+
+
+def test_gather_starts_no_thread_unless_background_refresh_is_on(ctx, monkeypatch):
+    monkeypatch.setattr(vp, "_REFRESH_THREAD", None, raising=False)
+    monkeypatch.setenv("VOICEMODE_TTS_BASE_URLS", "http://127.0.0.1:8880/v1")
+    vp.gather(ctx)
+    assert vp._REFRESH_THREAD is None
+
+
+def test_the_preview_does_its_network_io_off_the_command_thread(ctx, monkeypatch):
+    """preview_owner fetches voice lists; _preview only starts the worker thread that calls it."""
+    names = []
+    monkeypatch.setattr(vp, "preview_owner", lambda voice, home=None: names.append(
+        threading.current_thread().name) or (None, None))
+    monkeypatch.setattr(vp, "_player_unavailable", lambda: None)
+    monkeypatch.setattr(vp, "_turn_active", lambda c: False)
+    assert vp._preview(ctx, "af_sky") is None
+    ctx.preview_thread.join(5)
+    assert names == ["voice-pill-preview"]
