@@ -237,10 +237,11 @@ not a number, so the pill (and any older reader that counts lines that parse as 
 still counts one per interruption. Lines from before v1.2.18 have no latency and are still
 counted.
 
-How to read it: `voice_barge status` (the MCP tool; also asked in chat) ends with one line,
-for example `interruption latency (speech onset to stop sent), last 12: median 310 ms, p90
-480 ms`, over the last 50 interruptions that have a latency, or `no interruptions recorded
-yet`. Median is the typical wait; p90 is the wait you feel on a bad one in ten. The numbers
+How to read it: once at least one interruption has been measured, `voice_barge status` (the
+MCP tool; also asked in chat) ends with one more line, for example `interruption latency
+(speech onset to stop sent), last 12: median 310 ms, p90 480 ms`, over the last 50
+interruptions that have a latency. Until then the status answer is exactly what it was before
+(scripts and a real-Windows test pin its lines). Median is the typical wait; p90 is the wait you feel on a bad one in ten. The numbers
 are only as good as n: under about 10, treat them as an example.
 
 What to try once there are real numbers (nothing is changed for you):

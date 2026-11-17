@@ -21,13 +21,17 @@ async def voice_barge(action: str = "status") -> str:
 
     Args:
         action: "on", "off", "auto" or "status". auto listens only while the sound plays
-            to headphones or a headset, decided at each reply. status also gives the measured
-            interruption latency (median and p90 of the last 50).
+            to headphones or a headset, decided at each reply. once interruptions have been measured, status also gives their
+            latency (median and p90 of the last 50).
     """
     out = await asyncio.to_thread(barge_control, action)
     if isinstance(action, str) and action.strip().lower() == "status":
         try:
-            out = f"{out}\n{await asyncio.to_thread(voice_pill_state.latency_summary)}"
+            summary = await asyncio.to_thread(voice_pill_state.latency_summary)
+            # Only once there is something measured: the status answer is read by scripts and tests
+            # that pin its exact lines, so it stays unchanged until then (real Windows, 2026-11-17).
+            if summary and not summary.startswith("no interruption"):
+                out = f"{out}\n{summary}"
         except Exception:  # the status itself must still answer
             pass
     return out

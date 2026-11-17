@@ -193,9 +193,13 @@ def _barge(mod, action):
     return asyncio.run(mod.voice_barge(action))
 
 
-def test_barge_status_says_no_interruptions_yet(tool):
-    mod, _, _, _ = tool
-    assert _barge(mod, "status") == "status\nno interruptions recorded yet"
+def test_barge_status_is_unchanged_until_a_latency_is_measured(tool):
+    """Real Windows (2026-11-17): the status answer is read by scripts and tests that pin its exact
+    lines, so it only grows a latency line once there is a measured interruption."""
+    mod, st, _, _ = tool
+    assert _barge(mod, "status") == "status"
+    st.record_interruption(1.0)    # an old-format record: counted, but no latency to report
+    assert _barge(mod, "status") == "status"
 
 
 def test_barge_status_shows_n_median_and_p90(tool):
