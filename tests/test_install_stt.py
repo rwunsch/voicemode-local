@@ -175,7 +175,7 @@ def _install_setup(tmp_path: Path, gpu=True, args=(), stdin="1\nn\n\n"):
     (repo / "lib").mkdir(parents=True)
     (repo / "install.sh").write_text(text[:cut] + "exit 0\n")
     (repo / "install.sh").chmod(0o755)
-    for name in ("compute.sh", "stt.sh"):
+    for name in ("compute.sh", "stt.sh", "tts.sh"):
         (repo / "lib" / name).write_text((REPO / "lib" / name).read_text())
     _stub(b.bin / "docker", 'exit 0')
     done = subprocess.run([str(repo / "install.sh"), *args], input=stdin, capture_output=True, text=True,

@@ -256,7 +256,24 @@ cmd_status() {
             fail "Kokoro TTS is not reachable (http://127.0.0.1:8880)"
         fi
     fi
-    if is_kokoro_onnx; then
+    if is_kokoro_onnx_gpu; then
+        echo "Kokoro ONNX (native GPU, port $onnx_port):"
+        if [ -f "$KOKORO_ONNX_PID_FILE" ] && kill -0 "$(cat "$KOKORO_ONNX_PID_FILE")" 2>/dev/null; then
+            ok "Kokoro ONNX server running (PID $(cat "$KOKORO_ONNX_PID_FILE"))"
+        else
+            fail "Kokoro ONNX server not running (log: /tmp/kokoro-onnx-server.log)"
+        fi
+        check_service "Kokoro ONNX TTS" "http://127.0.0.1:$onnx_port/health" || true
+        # /health names the provider the session really runs on.
+        local provider
+        provider="$(curl -sf --max-time 2 "http://127.0.0.1:$onnx_port/health" 2>/dev/null \
+            | python3 -c 'import json, sys; print(json.load(sys.stdin).get("provider") or "unknown")' 2>/dev/null || true)"
+        if [ "$provider" = "CUDAExecutionProvider" ]; then
+            ok "Provider: $provider"
+        elif [ -n "$provider" ]; then
+            fail "Provider: $provider (not on the GPU; the server should have exited with --require-gpu)"
+        fi
+    elif is_kokoro_onnx; then
         echo "Kokoro ONNX (native, port $onnx_port):"
         KOKORO_ONNX_PID_FILE="/tmp/kokoro-onnx-server.pid"
         if [ -f "$KOKORO_ONNX_PID_FILE" ] && kill -0 "$(cat "$KOKORO_ONNX_PID_FILE")" 2>/dev/null; then
@@ -339,6 +356,29 @@ kokoro_onnx_port() {
     echo "${p:-8880}"
 }
 
+# Native Kokoro on the GPU: KOKORO_ONNX_GPU=true (with KOKORO_ONNX=true) runs the same
+# server from its own venv (KOKORO_ONNX_VENV) through scripts/kokoro-gpu-start.sh, which
+# puts the venv's CUDA libraries on LD_LIBRARY_PATH, with --require-gpu, so a CUDA
+# provider that fails to load ends the server rather than running it on the CPU.
+# Unset or false: the CPU server from the repo venv, as before. See docs/native-gpu-tts.
+KOKORO_ONNX_PID_FILE="/tmp/kokoro-onnx-server.pid"
+is_kokoro_onnx_gpu() { is_kokoro_onnx && [ "$(vm_read_config KOKORO_ONNX_GPU false)" = "true" ]; }
+kokoro_onnx_venv() { vm_read_config KOKORO_ONNX_VENV "$HOME/.voicemode-local/kokoro-gpu-venv"; }
+
+# Start the ONNX Kokoro server detached on port $1 (CPU or GPU, as configured).
+start_kokoro_onnx() {
+    local port="$1"
+    if is_kokoro_onnx_gpu; then
+        start_detached kokoro-onnx-server "$KOKORO_ONNX_PID_FILE" \
+            "$SCRIPT_DIR/scripts/kokoro-gpu-start.sh" "$(kokoro_onnx_venv)" --port "$port" \
+            --model-dir "$SCRIPT_DIR/models/kokoro" --require-gpu
+    else
+        start_detached kokoro-onnx-server "$KOKORO_ONNX_PID_FILE" \
+            "$VENV_PY" "$SCRIPT_DIR/kokoro-onnx-server.py" --port "$port" \
+            --model-dir "$SCRIPT_DIR/models/kokoro"
+    fi
+}
+
 # Which local proxy ports the *current* config (voicemode.env) actually uses.
 configured_local_ports() {
     KOKORO_ONNX_PORT="$(kokoro_onnx_port)" python3 - << 'PYEOF'
@@ -411,13 +451,15 @@ cmd_ensure() {
                 # the port, keep it after Docker arrives, and (via the shared
                 # PID file) stop the real ONNX fallback port from starting.
                 if is_kokoro_onnx && [ "$onnx_port" = "8880" ]; then
-                    start_detached kokoro-onnx-server /tmp/kokoro-onnx-server.pid \
-                        "$VENV_PY" "$SCRIPT_DIR/kokoro-onnx-server.py" --port 8880 \
-                        --model-dir "$SCRIPT_DIR/models/kokoro"
+                    start_kokoro_onnx 8880
                 else
                     docker_compose_cmd up -d > /dev/null 2>&1 || true
                 fi
-                [ -n "$quiet" ] || echo "  ensured Kokoro (8880)" ;;
+                if is_kokoro_onnx_gpu && [ "$onnx_port" = "8880" ]; then
+                    [ -n "$quiet" ] || echo "  ensured Kokoro ONNX on the GPU (8880)"
+                else
+                    [ -n "$quiet" ] || echo "  ensured Kokoro (8880)"
+                fi ;;
             8881)
                 start_detached piper-proxy /tmp/piper-proxy.pid \
                     "$VENV_PY" "$SCRIPT_DIR/piper-proxy.py" --port 8881 \
@@ -451,10 +493,12 @@ cmd_ensure() {
             "$onnx_port")
                 # Only reached when KOKORO_ONNX_PORT is NOT 8880 — i.e. ONNX is
                 # running alongside the Docker Kokoro rather than instead of it.
-                start_detached kokoro-onnx-server /tmp/kokoro-onnx-server.pid \
-                    "$VENV_PY" "$SCRIPT_DIR/kokoro-onnx-server.py" --port "$onnx_port" \
-                    --model-dir "$SCRIPT_DIR/models/kokoro"
-                [ -n "$quiet" ] || echo "  ensured Kokoro ONNX ($onnx_port)" ;;
+                start_kokoro_onnx "$onnx_port"
+                if is_kokoro_onnx_gpu; then
+                    [ -n "$quiet" ] || echo "  ensured Kokoro ONNX on the GPU ($onnx_port)"
+                else
+                    [ -n "$quiet" ] || echo "  ensured Kokoro ONNX ($onnx_port)"
+                fi ;;
         esac
     done
     expose_barge_tool
@@ -695,10 +739,53 @@ cmd_health() {
     return $all_up
 }
 
+# `start` with native GPU Kokoro: the server through the GPU wrapper, then only the
+# containers still in use. On 8880 it replaces the Docker Kokoro, so that container is
+# not started (and is stopped if it holds the port); the Docker whisper only when
+# STT_ENGINE is docker; Piper when PIPER_ENABLED=true.
+start_kokoro_gpu_and_containers() {
+    local onnx_port; onnx_port="$(kokoro_onnx_port)"
+    echo ""
+    echo "Starting Kokoro ONNX server (native GPU, port $onnx_port)..."
+    if [ -f "$KOKORO_ONNX_PID_FILE" ] && kill -0 "$(cat "$KOKORO_ONNX_PID_FILE")" 2>/dev/null; then
+        warn "Kokoro ONNX server already running (PID $(cat "$KOKORO_ONNX_PID_FILE"))"
+    else
+        if [ "$onnx_port" = "8880" ] && healthy 8880; then
+            echo "  Port 8880 answers: stopping the Docker kokoro so the native server can take it"
+            docker_compose_cmd stop kokoro 2>&1 | sed 's/^/  /' || true
+        fi
+        start_kokoro_onnx "$onnx_port"
+        sleep 2
+        if kill -0 "$(cat "$KOKORO_ONNX_PID_FILE")" 2>/dev/null; then
+            ok "Kokoro ONNX server started (PID $(cat "$KOKORO_ONNX_PID_FILE")); with --require-gpu it exits if CUDA does not load (log: /tmp/kokoro-onnx-server.log)"
+        else
+            fail "Kokoro ONNX server failed - check /tmp/kokoro-onnx-server.log"
+        fi
+    fi
+
+    echo ""
+    local services=()
+    if [ "$onnx_port" = "8880" ]; then
+        echo "Speech output is native GPU Kokoro on 8880: not starting the Docker kokoro"
+    else
+        services+=(kokoro)
+    fi
+    if [ "$(vm_read_config STT_ENGINE docker)" = "docker" ]; then services+=(whisper); fi
+    if [ "$(vm_read_config PIPER_ENABLED false)" = "true" ]; then services+=(piper); fi
+    if [ ${#services[@]} -eq 0 ]; then
+        echo "No Docker containers needed"
+    else
+        echo "Starting Docker containers (${services[*]})..."
+        docker_compose_cmd up -d "${services[@]}" 2>&1 | sed 's/^/  /'
+    fi
+}
+
 cmd_start() {
     echo "=== Starting Local VoiceMode Services ==="
 
-    if is_kokoro_onnx; then
+    if is_kokoro_onnx_gpu; then
+        start_kokoro_gpu_and_containers
+    elif is_kokoro_onnx; then
         ONNX_PORT="$(kokoro_onnx_port)"
         echo ""
         echo "Starting Kokoro ONNX server (native, port $ONNX_PORT)..."

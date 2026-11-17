@@ -18,11 +18,14 @@
 #
 # Usage:
 #   cd ~/git/voicemode-local
-#   ./install.sh [--openai-key sk-proj-...] [--stt=docker|native-gpu]
+#   ./install.sh [--openai-key sk-proj-...] [--stt=docker|native-gpu] [--tts=docker|native-gpu]
 #
 #   --stt=docker      keep speech recognition on the Docker whisper even with a GPU
 #                     (same as VOICEMODE_STT=docker)
 #   --stt=native-gpu  faster-whisper in its own venv (recommended with an NVIDIA GPU)
+#   --tts=docker      keep speech output on the Docker Kokoro even with a GPU
+#                     (same as VOICEMODE_TTS=docker)
+#   --tts=native-gpu  kokoro-onnx on CUDA in its own venv, on 8880 (recommended with an NVIDIA GPU)
 
 set -euo pipefail
 
@@ -46,9 +49,11 @@ header() { echo -e "\n${BOLD}=== $1 ===${NC}"; }
 
 OPENAI_KEY=""
 STT_CHOICE=""
+TTS_CHOICE=""
 for arg in "$@"; do
     case $arg in
         --stt=*)        STT_CHOICE="${arg#*=}" ;;
+        --tts=*)        TTS_CHOICE="${arg#*=}" ;;
         --openai-key=*) OPENAI_KEY="${arg#*=}" ;;
         --openai-key)   shift; OPENAI_KEY="${2:-}" ;;
     esac
@@ -164,6 +169,19 @@ STT_ENGINE="docker"
 vm_choose_stt_engine || exit 1
 ok "Speech recognition: $STT_ENGINE"
 
+# ─── Speech output: native GPU Kokoro (kokoro-onnx on CUDA) or Docker Kokoro ─
+# With an NVIDIA GPU, kokoro-onnx in its own venv on CUDA replaces the Docker Kokoro
+# on 8880, without Docker or sudo. See docs/native-gpu-tts/README.md.
+header "Speech output (TTS)"
+# shellcheck source=lib/tts.sh
+. "$SCRIPT_DIR/lib/tts.sh"
+TTS_ENGINE="docker"
+vm_choose_tts_engine || exit 1
+if [ "$TTS_ENGINE" = "native-gpu" ]; then
+    KOKORO_ONNX="true"
+fi
+ok "Speech output: $TTS_ENGINE"
+
 # Save config
 cat > "$CONFIG_FILE" << EOF
 INSTALL_MODE=$INSTALL_MODE
@@ -173,6 +191,7 @@ COMPUTE_MODE=$COMPUTE_MODE
 WHISPER_MODEL=$WHISPER_MODEL
 EOF
 vm_write_stt_config "$STT_ENGINE"
+vm_write_tts_config "$TTS_ENGINE"
 ok "Config saved to $CONFIG_FILE"
 
 # ─── Step 1: System packages ─────────────────────────────────────────────────
@@ -353,10 +372,17 @@ if [ "$INSTALL_MODE" = "docker" ]; then
             [ -f "$SCRIPT_DIR/docker-compose.hybrid.yml" ] && COMPOSE_FILES+=(-f "$SCRIPT_DIR/docker-compose.hybrid.yml")
             echo "  (Kokoro GPU image will download on first start — this can take a few minutes)" ;;
     esac
+    # Native GPU Kokoro takes 8880 (Step 7a), so the Docker kokoro is not started.
+    DOCKER_SERVICES=()
+    if [ "$TTS_ENGINE" = "native-gpu" ]; then
+        DOCKER_SERVICES=(whisper)
+        [ "$PIPER_ENABLED" = "true" ] && DOCKER_SERVICES+=(piper)
+        echo "  Speech output is native GPU Kokoro: not starting the Docker kokoro"
+    fi
     if [ "$PIPER_ENABLED" = "true" ]; then
-        docker compose "${COMPOSE_FILES[@]}" --profile piper up -d 2>&1 | sed 's/^/  /'
+        docker compose "${COMPOSE_FILES[@]}" --profile piper up -d ${DOCKER_SERVICES[@]+"${DOCKER_SERVICES[@]}"} 2>&1 | sed 's/^/  /'
     else
-        docker compose "${COMPOSE_FILES[@]}" up -d 2>&1 | sed 's/^/  /'
+        docker compose "${COMPOSE_FILES[@]}" up -d ${DOCKER_SERVICES[@]+"${DOCKER_SERVICES[@]}"} 2>&1 | sed 's/^/  /'
     fi
 
     echo "  Waiting for Whisper to be ready..."
@@ -370,13 +396,39 @@ else
     warn "Native mode: Docker containers skipped. Start STT/TTS services manually."
 fi
 
+# ─── Step 7a-gpu: native GPU Kokoro venv ───────────────────────────────────
+# A failed install falls back to the Docker Kokoro (docker install mode) or to
+# Kokoro ONNX on the CPU (native install mode, which has no Docker).
+if [ "$TTS_ENGINE" = "native-gpu" ]; then
+    header "Step 7a-gpu: Native GPU Kokoro (kokoro-onnx on CUDA)"
+    KG_VENV="$(vm_read_config KOKORO_ONNX_VENV "$KOKORO_GPU_DEFAULT_VENV")"
+    echo "  Creating $KG_VENV (kokoro-onnx + onnxruntime-gpu 1.23.2 + CUDA libraries, about 3.3 GB)..."
+    if vm_setup_kokoro_gpu "$KG_VENV" > /tmp/kokoro-gpu-install.log 2>&1; then
+        ok "Native GPU Kokoro installed in $KG_VENV"
+    else
+        tail -3 /tmp/kokoro-gpu-install.log | sed 's/^/  /'
+        TTS_ENGINE="docker"
+        vm_write_tts_config docker
+        if [ "$INSTALL_MODE" = "docker" ]; then
+            fail "Native GPU Kokoro install failed (log: /tmp/kokoro-gpu-install.log) — falling back to the Docker Kokoro"
+            KOKORO_ONNX="false"
+            vm_write_config KOKORO_ONNX false
+            docker compose "${COMPOSE_FILES[@]}" up -d kokoro 2>&1 | sed 's/^/  /'
+        else
+            fail "Native GPU Kokoro install failed (log: /tmp/kokoro-gpu-install.log) — falling back to Kokoro ONNX on the CPU"
+        fi
+    fi
+fi
+
 # ─── Step 7a: Kokoro ONNX (native TTS) ─────────────────────────────────────
 if [ "$KOKORO_ONNX" = "true" ]; then
     header "Step 7a: Kokoro ONNX (native TTS)"
 
-    echo "  Installing kokoro-onnx..."
-    pip3 install --user kokoro-onnx soundfile numpy 2>&1 | tail -1 | sed 's/^/  /'
-    ok "kokoro-onnx installed"
+    if [ "$TTS_ENGINE" != "native-gpu" ]; then
+        echo "  Installing kokoro-onnx..."
+        pip3 install --user kokoro-onnx soundfile numpy 2>&1 | tail -1 | sed 's/^/  /'
+        ok "kokoro-onnx installed"
+    fi
 
     mkdir -p "$SCRIPT_DIR/models/kokoro"
 
@@ -398,9 +450,17 @@ if [ "$KOKORO_ONNX" = "true" ]; then
             kill "$(lsof -ti:8880)" 2>/dev/null
             sleep 1
         fi
-        nohup python3 "$SCRIPT_DIR/kokoro-onnx-server.py" --port 8880 \
-            --model-dir "$SCRIPT_DIR/models/kokoro" \
-            > /tmp/kokoro-onnx-server.log 2>&1 &
+        if [ "$TTS_ENGINE" = "native-gpu" ]; then
+            # The wrapper puts the venv's CUDA libraries on LD_LIBRARY_PATH; --require-gpu
+            # exits rather than run on the CPU (check the log if it is gone).
+            nohup "$SCRIPT_DIR/scripts/kokoro-gpu-start.sh" "$KG_VENV" --port 8880 \
+                --model-dir "$SCRIPT_DIR/models/kokoro" --require-gpu \
+                > /tmp/kokoro-onnx-server.log 2>&1 &
+        else
+            nohup python3 "$SCRIPT_DIR/kokoro-onnx-server.py" --port 8880 \
+                --model-dir "$SCRIPT_DIR/models/kokoro" \
+                > /tmp/kokoro-onnx-server.log 2>&1 &
+        fi
         echo $! > "$KOKORO_ONNX_PID_FILE"
         echo "  Model will download on first request (~326 MB)..."
         sleep 2
