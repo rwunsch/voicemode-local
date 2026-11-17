@@ -1590,3 +1590,36 @@ def test_the_play_wav_child_rejects_bad_input_before_touching_audio(tmp_path):
     out = subprocess.run([sys.executable, str(PATCHES / "voice_pill.py"), "--play-wav"],
                          input=b"not a wav", capture_output=True, env=env, timeout=30)
     assert out.returncode not in (0, 99), out
+
+
+# -- one language table (2026-11-17, Talos note on FELIX PR #1840) ----------------------------
+# voice_pill.py kept its own KOKORO_LANGUAGES / PIPER_LANGUAGES / language_from_id beside
+# voice_languages.py's (copied into the package for the unknown-voice fallback). They had drifted:
+# the pill read "p_x" and "pizza" as Portuguese and "p_en_amy" as unknown, the fallback the
+# other way round. The pill now uses voice_languages; one voice id has one language.
+
+vl = _load("voice_languages")
+
+ID_CASES = ["af_sky", "am_adam", "bf_emma", "bm_george", "ef_dora", "em_alex", "ff_siwis", "hf_alpha",
+            "if_sara", "im_nicola", "jf_alpha", "jm_kumo", "pf_dora", "pm_alex", "zf_xiaobei",
+            "zm_yunxi", "df_x", "dm_martin", "p_de_thorsten", "p_de_eva", "p_nl_nathalie",
+            "p_pl_gosia", "p_ru_dmitri", "p_ko_hana", "p_en_amy", "p_xx_who", "p_x", "p_", "p",
+            "pizza", "afoo", "nova", "xf_x", "xx_unknown", "a", "af", "", None, 5, b"af_sky", ["af_sky"]]
+
+
+@pytest.mark.parametrize("voice", ID_CASES, ids=repr)
+def test_the_pill_and_the_fallback_read_a_voice_id_the_same(voice):
+    assert vp.language_from_id(voice) == vl.language_from_id(voice)
+
+
+def test_the_pill_holds_no_language_table_of_its_own():
+    assert not hasattr(vp, "KOKORO_LANGUAGES") and not hasattr(vp, "PIPER_LANGUAGES")
+    assert vp.language_from_id.__module__ == "voice_languages"
+
+
+@pytest.mark.parametrize("voice,quality", [
+    ("jf_alpha", "experimental"), ("jm_kumo", "experimental"), ("zf_xiaobei", "experimental"),
+    ("af_sky", "good"), ("ef_dora", "good"), ("p_ko_hana", "good"), ("p_de_eva", "good"),
+    ("pizza", "good"), ("jizz", "good"), ("zebra", "good")])
+def test_voice_quality_from_the_id_builds_on_the_shared_language(voice, quality):
+    assert vp._id_quality(voice) == quality

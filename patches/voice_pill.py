@@ -51,6 +51,12 @@ except ImportError:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     import voice_pill_state as st
 
+try:  # the one voice-id -> language table, shared with the unknown-voice fallback (manifest copy)
+    from voice_languages import language_from_id, voice_pairs
+except ImportError:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from voice_languages import language_from_id, voice_pairs
+
 try:  # Wake: wake the last voice session. Absent on an install that never copied it.
     import session_wake as sw
 except ImportError:
@@ -277,25 +283,12 @@ def german_voices(home=None) -> list:
 # language_name}]}, Kokoro-FastAPI {"voices": [ids]}. Choosing any language already works:
 # voice_pill_state.language_note tells the model to write in it.
 
-KOKORO_LANGUAGES = {"a": "English", "b": "English", "e": "Spanish", "f": "French", "h": "Hindi",
-                    "i": "Italian", "j": "Japanese", "p": "Portuguese", "z": "Chinese", "d": "German"}
-EXPERIMENTAL_PREFIXES = ("j", "z")   # Kokoro Japanese / Chinese: espeak-only phonemising, 2026-11-17
-PIPER_LANGUAGES = {"de": "German", "nl": "Dutch", "pl": "Polish", "ru": "Russian", "ko": "Korean"}
+EXPERIMENTAL_LANGUAGES = ("Japanese", "Chinese")   # Kokoro ja / zh: espeak-only phonemising, 2026-11-17
 LOCAL_HOSTS = ("127.0.0.1", "localhost")
 VOICES_TIMEOUT_S = 1.0
 VOICES_CACHE_S = 60.0          # the snapshot loop runs every 0.25-1 s: do not ask every tick
 _VOICES_CACHE = {}             # URL setting -> (time, ({language: [voice ids]}, {experimental ids}))
 _clock = time.monotonic
-
-
-def language_from_id(voice):
-    """A voice's language from its id alone: Piper's p_<code>_..., else Kokoro's first
-    letter. None when neither is known."""
-    if not isinstance(voice, str) or not voice:
-        return None
-    if voice.startswith("p_") and voice.count("_") >= 2:
-        return PIPER_LANGUAGES.get(voice.split("_")[1])
-    return KOKORO_LANGUAGES.get(voice[0])
 
 
 def _fetch_voices(url):
@@ -327,9 +320,9 @@ def _id_quality(voice):
     """A voice's quality from its id alone, for servers that say nothing: Kokoro's j (Japanese)
     and z (Chinese) voices are experimental (2026-11-17, round trips n=1); Piper's p_<code>_
     voices and every other Kokoro voice are good."""
-    if not isinstance(voice, str) or not voice or voice.startswith("p_"):
+    if not isinstance(voice, str) or voice.startswith("p_"):
         return "good"
-    return "experimental" if voice[0] in EXPERIMENTAL_PREFIXES else "good"
+    return "experimental" if language_from_id(voice) in EXPERIMENTAL_LANGUAGES else "good"
 
 
 def _voice_entries(body):
@@ -350,11 +343,6 @@ def _voice_entries(body):
     elif isinstance(body, dict) and isinstance(body.get("voices"), list):
         out = [(v, language_from_id(v), _id_quality(v)) for v in body["voices"] if isinstance(v, str)]
     return [(v, lang, q) for v, lang, q in out if lang]
-
-
-def _voice_pairs(body):
-    """[(voice id, language)] from either answer shape; anything else gives nothing."""
-    return [(v, lang) for v, lang, _ in _voice_entries(body)]
 
 
 def _ask_servers(raw):
@@ -637,7 +625,7 @@ def preview_owner(voice, home=None):
     """(base URL, language) of the first local TTS server that lists the voice, else (None, None)."""
     for base in _local_base_urls(st.setting("VOICEMODE_TTS_BASE_URLS", "", home) or ""):
         try:
-            pairs = _voice_pairs(_fetch_voices(base + "/audio/voices"))
+            pairs = voice_pairs(_fetch_voices(base + "/audio/voices"))
         except Exception:  # noqa: BLE001 - a server that is down or odd is skipped
             continue
         for v, lang in pairs:
