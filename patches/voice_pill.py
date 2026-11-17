@@ -279,11 +279,12 @@ def german_voices(home=None) -> list:
 
 KOKORO_LANGUAGES = {"a": "English", "b": "English", "e": "Spanish", "f": "French", "h": "Hindi",
                     "i": "Italian", "j": "Japanese", "p": "Portuguese", "z": "Chinese", "d": "German"}
+EXPERIMENTAL_PREFIXES = ("j", "z")   # Kokoro Japanese / Chinese: espeak-only phonemising, 2026-11-17
 PIPER_LANGUAGES = {"de": "German", "nl": "Dutch", "pl": "Polish", "ru": "Russian", "ko": "Korean"}
 LOCAL_HOSTS = ("127.0.0.1", "localhost")
 VOICES_TIMEOUT_S = 1.0
 VOICES_CACHE_S = 60.0          # the snapshot loop runs every 0.25-1 s: do not ask every tick
-_VOICES_CACHE = {}             # URL setting -> (time, {language: [voice ids]})
+_VOICES_CACHE = {}             # URL setting -> (time, ({language: [voice ids]}, {experimental ids}))
 _clock = time.monotonic
 
 
@@ -322,39 +323,67 @@ def _local_voice_urls(raw):
     return [u + "/audio/voices" for u in _local_base_urls(raw)]
 
 
-def _voice_pairs(body):
-    """[(voice id, language)] from either answer shape; anything else gives nothing."""
-    pairs = []
+def _id_quality(voice):
+    """A voice's quality from its id alone, for servers that say nothing: Kokoro's j (Japanese)
+    and z (Chinese) voices are experimental (2026-11-17, round trips n=1); Piper's p_<code>_
+    voices and every other Kokoro voice are good."""
+    if not isinstance(voice, str) or not voice or voice.startswith("p_"):
+        return "good"
+    return "experimental" if voice[0] in EXPERIMENTAL_PREFIXES else "good"
+
+
+def _voice_entries(body):
+    """[(voice id, language, quality)] from either answer shape; anything else gives nothing.
+    quality is the server's own "quality" when it is "experimental", else classed by the id
+    when the server gave none; an unknown value counts as good."""
+    out = []
     if isinstance(body, dict) and isinstance(body.get("data"), list):
         for item in body["data"]:
             if not isinstance(item, dict) or not isinstance(item.get("id"), str):
                 continue
             name = item.get("language_name")
-            pairs.append((item["id"], name if isinstance(name, str) and name else language_from_id(item["id"])))
+            lang = name if isinstance(name, str) and name else language_from_id(item["id"])
+            said = item.get("quality")
+            quality = ("experimental" if said == "experimental" else "good") if isinstance(said, str) \
+                else _id_quality(item["id"])
+            out.append((item["id"], lang, quality))
     elif isinstance(body, dict) and isinstance(body.get("voices"), list):
-        pairs = [(v, language_from_id(v)) for v in body["voices"] if isinstance(v, str)]
-    return [(v, lang) for v, lang in pairs if lang]
+        out = [(v, language_from_id(v), _id_quality(v)) for v in body["voices"] if isinstance(v, str)]
+    return [(v, lang, q) for v, lang, q in out if lang]
+
+
+def _voice_pairs(body):
+    """[(voice id, language)] from either answer shape; anything else gives nothing."""
+    return [(v, lang) for v, lang, _ in _voice_entries(body)]
 
 
 def _ask_servers(raw):
-    merged = {}
+    """({language: [voice ids]}, {experimental voice ids}); the first server naming a voice
+    decides its quality."""
+    merged, experimental, seen = {}, set(), set()
     for url in _local_voice_urls(raw):
         try:
-            pairs = _voice_pairs(_fetch_voices(url))
+            entries = _voice_entries(_fetch_voices(url))
         except Exception:  # noqa: BLE001 - a server that is down or odd is skipped
             continue
-        for voice, lang in pairs:
+        for voice, lang, quality in entries:
             ids = merged.setdefault(lang, [])
             if voice not in ids:
                 ids.append(voice)
-    return merged
+            if voice not in seen:
+                seen.add(voice)
+                if quality == "experimental":
+                    experimental.add(voice)
+    return merged, experimental
 
 
 def voices_by_language(home=None) -> dict:
     """{language: [voice ids]} from the local TTS servers in VOICEMODE_TTS_BASE_URLS, in
     server order (first server first). Cached for VOICES_CACHE_S per URL setting. Never
     raises; {} when nothing answered. VOICEMODE_PILL_LANGUAGES, when set, keeps only the
-    languages it lists. A German voice german_voices() knows but does not
+    languages it lists. Voices a server marks "experimental" (Japanese, Chinese: round trips came
+    back as nonsense, 2026-11-17) are hidden unless their language is named in that setting;
+    a server that gives no quality is classed by the voice id (j, z). A German voice german_voices() knows but does not
     offer here (dm_martin without its model) is dropped; one it does not know is kept,
     because its server says it speaks it (Piper's p_de_kerstin)."""
     try:
@@ -367,10 +396,13 @@ def voices_by_language(home=None) -> dict:
         allowed = set(german_voices(home))
         listed = listed_languages(home)   # VOICEMODE_PILL_LANGUAGES: only these, when set
         out = {}
-        for lang, ids in hit[1].items():
+        by_lang, experimental = hit[1]
+        for lang, ids in by_lang.items():
             if listed is not None and lang.lower() not in listed:
                 continue
-            keep = [v for v in ids if v not in GERMAN_VOICES or v in allowed]
+            opted_in = listed is not None and lang.lower() in listed   # naming a language opts in
+            keep = [v for v in ids if (v not in GERMAN_VOICES or v in allowed)
+                    and (opted_in or v not in experimental)]
             if keep:
                 out[lang] = keep
         return out
