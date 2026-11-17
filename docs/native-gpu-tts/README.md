@@ -144,6 +144,73 @@ voicemode-switch start                     # or ensure
 Routing in `~/.voicemode/voicemode.env` does not change: both serve
 `http://127.0.0.1:8880/v1`. No Claude Code restart is needed.
 
+## CPU fallback
+
+**Why.** On 2026-11-17 the GPU Kokoro on 8880 was killed (by a test) and, with the Docker
+Kokoro gone, nothing local spoke English until a session ran `ensure`. A Kokoro on the CPU
+fails independently of CUDA, so routed after 8880 it keeps speech output local.
+
+**Config** (`~/.voicemode-local/config`; default off, so an existing setup is unchanged):
+
+| Key | Default | Meaning |
+|---|---|---|
+| `KOKORO_CPU_FALLBACK` | false | `true` runs the CPU twin (only with `KOKORO_ONNX=true` + `KOKORO_ONNX_GPU=true`) |
+| `KOKORO_CPU_FALLBACK_PORT` | 8882 | its port; must differ from `KOKORO_ONNX_PORT` (if equal it is not started, and `ensure`/`start` say so) |
+
+`install.sh` writes `KOKORO_CPU_FALLBACK=true` when it sets up the native GPU Kokoro; opt out
+with `--no-cpu-fallback` or `VOICEMODE_CPU_FALLBACK=false`.
+
+**What runs.** `ensure` and `start` run `scripts/kokoro-cpu-start.sh <KOKORO_ONNX_VENV> --port
+8882 --model-dir <install>/models/kokoro --no-download`, detached (`setsid`), pid file
+`/tmp/kokoro-cpu-fallback.pid`, log `/tmp/kokoro-cpu-fallback.log`. The wrapper runs the server
+from the **same GPU venv** (onnxruntime-gpu also has `CPUExecutionProvider`; no second venv),
+sets `ONNX_PROVIDER=CPUExecutionProvider`, puts no CUDA libraries on the path, drops
+`--require-gpu` and clears `VOICEMODE_KOKORO_REQUIRE_GPU`; without that venv it uses the repo's
+`.venv` python. The bind is the server default (0.0.0.0), as for the GPU server. `ensure`
+starts it whenever the GPU Kokoro's port is among the configured local ports. The port counts
+as healthy only if `/health` says `"provider": "CPUExecutionProvider"`; any other holder is
+stopped only when its pid file or command line proves it is this install's own
+(`<install dir>/kokoro-onnx-server.py ... --port 8882`, exact pid), otherwise `ensure` names it
+in one line, kills nothing and exits non-zero. `stop` stops it the same way (a stale pid
+file's unrelated pid is never killed); `status` shows it with its provider; `health` lists it.
+
+**Routing.** `voicemode-switch local|localonly|hybrid|piper` put `http://127.0.0.1:8882/v1`
+after the Kokoro and Piper URLs, before OpenAI (local: `8880, 8881, 8882, OpenAI`; piper:
+`8881, 8880, 8882, OpenAI`). They also write `VOICEMODE_TTS_TIMEOUT_LOCAL=90` into the managed
+block, **unless** `voicemode.env` already sets it (a value you set is never overwritten, and an
+`export`ed one counts too); the default 30 s cuts a CPU Kokoro off on longer parts (measured
+earlier: 3-4.5x slower than real time on a loaded machine). Turning the fallback off and
+re-running the mode removes both lines. With the fallback off the lists are exactly as before.
+A user value set in the real environment instead of the file is not seen by the switch.
+
+**Cost.** Measured 2026-11-17 on this machine: `kokoro-cpu-start.sh` with the real
+`~/.voicemode-local/kokoro-gpu-venv` on a spare port, passed `--require-gpu` on purpose: it ran,
+`/health` said `CPUExecutionProvider`, the process env had `ONNX_PROVIDER=CPUExecutionProvider`;
+ready in 3.1 s; idle RSS 453 MiB, 746 MiB after three requests; a 108-character sentence (6.2 s
+of audio, af_sky) took 4.91 / 4.90 / 4.80 s (n=3) at load 3.4-4.3 on 14 cores. That is faster
+than real time on a quiet machine; under load expect the 3-4.5x slower-than-real-time figure
+above. No extra disk: the venv and the model files are the GPU server's.
+
+**What a failover looks like.** With 8880 down (connection refused, or an error) voice-mode
+moves to the next URL: Piper, which rejects Kokoro voices fast, then 8882. English speech keeps
+the same voice, slower, and `/tmp/kokoro-cpu-fallback.log` shows the requests. A long part may
+still exceed 90 s on a loaded machine; `VOICEMODE_TTS_CHUNK_CHARS` (default 300) keeps parts
+short. Not observed end to end in a live voice session yet.
+
+**Switch it off:** `KOKORO_CPU_FALLBACK=false` in the config, `voicemode-switch stop` (or
+`kill "$(cat /tmp/kokoro-cpu-fallback.pid)"`), and re-run your mode (`voicemode-switch local`).
+
+## `start` and a holder of 8880 (CPU Kokoro ONNX)
+
+`voicemode-switch start` with the CPU Kokoro ONNX on 8880 (`KOKORO_ONNX=true`, no GPU) used to
+run `kill` on every pid `lsof -ti:8880` listed. Now: this install's own earlier
+`kokoro-onnx-server.py --port 8880` is stopped by exact pid; a Docker container publishing 8880
+whose image name contains `kokoro` is stopped with `docker stop <name>` (the name `docker ps
+--filter publish=8880` reported); anything else gets one line naming it and `start` exits 1,
+killing nothing. Behaviour change: a foreign holder of 8880 now stops `start` instead of being
+killed; free the port yourself or set `KOKORO_ONNX_PORT`. Tests:
+`tests/test_switch_start_8880.py`.
+
 ## Verification
 
 - `voicemode-switch status`: "Kokoro ONNX (native GPU, port 8880)", the PID, and
@@ -151,7 +218,9 @@ Routing in `~/.voicemode/voicemode.env` does not change: both serve
 - `/tmp/kokoro-onnx-server.log`: "Kokoro ONNX provider: CUDAExecutionProvider", or the
   `--require-gpu` error and the server gone.
 - Tests: `tests/test_kokoro_onnx_require_gpu.py` (fake kokoro_onnx), `tests/test_kokoro_gpu_start.py`,
-  `tests/test_switch_kokoro_gpu.py`, `tests/test_install_tts.py`. The real GPU path:
+  `tests/test_switch_kokoro_gpu.py`, `tests/test_install_tts.py`; the CPU fallback:
+  `tests/test_kokoro_cpu_start.py`, `tests/test_switch_cpu_fallback.py`,
+  `tests/test_switch_fallback_routing.py`. The real GPU path:
   `VML_GPU_TESTS=1 VML_KOKORO_GPU_VENV=<venv> pytest tests/test_kokoro_onnx_require_gpu.py -k real -s`
   (model dir from `VML_KOKORO_MODEL_DIR`, default `models/kokoro` in the checkout).
 

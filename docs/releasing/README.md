@@ -36,6 +36,13 @@ by another session does not count.
    the merged result.
 3. **Tag** with an annotated tag whose message is the release notes:
    `git tag -a vX.Y.Z -m "vX.Y.Z: …"`.
+   **Name every changed default** in the notes, one line each, in this form:
+   `behaviour change: <what>, old behaviour via <SETTING>=<value>`
+   (for example `behaviour change: the installer turns on the CPU fallbacks with a native
+   GPU engine, old behaviour via VOICEMODE_CPU_FALLBACK=false`). Go through the diff since
+   the last tag for changed defaults, new defaults that are on, and anything that now stops
+   or refuses where it used to go ahead. Where no setting restores the old behaviour, say so
+   (`old behaviour: none`). The same lines go into the message to FELIX-voice (step 7).
 4. **Push**: `gh auth switch --user rwunsch`, then `git push origin main vX.Y.Z`. Check
    with `git ls-remote origin refs/heads/main refs/tags/vX.Y.Z`.
 5. **GitHub Release** from the tag notes:
@@ -55,4 +62,5 @@ by another session does not count.
    `.venv/lib/python3.12/site-packages/voice_mode/`, by grepping for the text each patch adds.
    Running voice-mode servers keep the code they loaded: a session gets the new code when
    its voice mode reconnects (`/mcp`) or the session restarts. Say so in the release message.
-7. **Tell FELIX-voice** the tag and what changed. FELIX takes releases through its own pin.
+7. **Tell FELIX-voice** the tag and what changed, including every `behaviour change:` line
+   from the tag notes, word for word. FELIX takes releases through its own pin.

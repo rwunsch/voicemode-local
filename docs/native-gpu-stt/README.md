@@ -10,7 +10,7 @@
 |--------------|-------|
 | Status       | Built, wired into `voicemode-switch` and `install.sh`; not yet enabled on the dev machine |
 | Created      | 2026-11-16 |
-| Last Updated | 2026-11-16 |
+| Last Updated | 2026-11-17 (CPU fallback) |
 | Project      | voicemode-local |
 
 ## Why
@@ -155,13 +155,73 @@ about 7 hours. Three guards, all tested:
   reports no provider yet is still loading and is left alone). Tests:
   `tests/test_switch_port_identity.py`, `tests/test_whisper_proxy.py`.
 
+## CPU fallback
+
+**Why.** On 2026-11-17 a WSL restart killed the GPU engine on 2022 and speech input was gone
+until a session ran `ensure` again. A second faster-whisper on the CPU fails independently of
+CUDA, so with it routed after 2022, voice-mode moves on to it when 2022 refuses or errors.
+
+**Config** (`~/.voicemode-local/config`; all default off, so an existing setup is unchanged):
+
+| Key | Default | Meaning |
+|---|---|---|
+| `STT_CPU_FALLBACK` | false | `true` runs the CPU twin (only with `STT_ENGINE=faster-whisper`) |
+| `STT_CPU_FALLBACK_PORT` | 2023 | its port |
+| `STT_CPU_FALLBACK_MODEL` | base | its model |
+
+`install.sh` writes `STT_CPU_FALLBACK=true` when it sets up the native GPU engine; opt out with
+`--no-cpu-fallback` or `VOICEMODE_CPU_FALLBACK=false` (then it writes `false`).
+
+**What runs.** `ensure` and `start` run `scripts/faster-whisper-start.sh <FASTER_WHISPER_VENV>
+--host <FASTER_WHISPER_HOST> --port 2023 --model base --device cpu --compute-type int8`, detached
+(`setsid`), pid file `/tmp/faster-whisper-cpu.pid`, log `/tmp/faster-whisper-cpu.log`. Same
+venv as the GPU engine: no second install. `ensure` starts it whenever 2022 is among the
+configured local ports, even before the routing names 2023. The port counts as healthy only if
+`/health` says `"engine": "faster-whisper"` and `"device": "cpu"`; our own server still loading
+(503, `"status": "loading"`, `"device": "cpu"`) is left alone. Any other holder is stopped only
+when its pid file or command line proves it is this install's own (`<install
+dir>/faster-whisper-server.py ... --port 2023`, exact pid); otherwise `ensure` names it in one
+line, kills nothing and exits non-zero. `stop` stops it the same way (a stale pid file whose pid
+now belongs to something else is removed, not killed); `status` shows it with its device and
+model; `health` lists it.
+
+**Routing.** `voicemode-switch local|localonly|hybrid|piper` put `http://127.0.0.1:2023/v1` right
+after 2022 in `VOICEMODE_STT_BASE_URLS` (local: `2022, 2023, OpenAI`). With the fallback off the
+list is exactly as before. Takes effect after the voice-mode reconnect (`/mcp`), like any routing
+change.
+
+**Cost and model choice.** Measured 2026-11-17 on this machine (14 cores), the 7.6 s clip
+`~/.cache/voicemode-local/stt-bench/speech.wav`, the server on a spare port through the wrapper,
+`curl -F file=@speech.wav .../v1/audio/transcriptions`, n=3 per model, every transcript exact:
+
+| Model (CPU int8) | load ~5 | load ~25 | idle RSS | disk |
+|---|---|---|---|---|
+| base | 2.5 / 3.9 / 5.4 s | 23.3 / 27.3 / 29.8 s | 256 MiB (268 MiB after use) | 142 MB |
+| small | 14.3 / 16.7 / 16.9 s | 28.0 / 41.3 / 47.2 s | 716 MiB (728 MiB after use) | 464 MB |
+
+("load" is the 1-minute load average at each run; during the quiet small runs it rose from 8 to
+13.) Only base stays within 1.5x the clip length (11.4 s), and only on a quiet machine: under load
+~25 both are 3-6x slower than the clip. The fallback is a degraded mode, not a replacement.
+Model load to ready: base 7 s quiet / 111 s loaded, small 16 s / 48 s.
+
+**What a failover looks like.** With 2022 down (connection refused) voice-mode tries 2023 at
+once; the turn is slower (seconds on a quiet machine, tens of seconds under load) and
+`/tmp/faster-whisper-cpu.log` gets the request line (`#N audio=... transcribe=...`). If 2022
+is up but hangs, voice-mode waits for its STT timeout first (`VOICEMODE_STT_TIMEOUT_LOCAL`,
+see `docs/stt-61s-stall`). Not observed end to end in a live voice session yet.
+
+**Switch it off:** `STT_CPU_FALLBACK=false` in the config, `voicemode-switch stop` (or
+`kill "$(cat /tmp/faster-whisper-cpu.pid)"`), and re-run your mode (`voicemode-switch local`) to
+take 2023 out of the routing.
+
 ## Verification
 
 - `voicemode-switch status` shows "faster-whisper server running (PID ...)" and the 2022 health.
 - `/tmp/faster-whisper-server.log` has `model small on cuda ready in ...` and one line per
   request: `#N audio=7.60s transcribe=...s`.
 - Tests: `tests/test_faster_whisper_server.py` (fake model), `tests/test_faster_whisper_start.py`,
-  `tests/test_switch_stt_engine.py`, `tests/test_install_stt.py`. The real GPU path:
+  `tests/test_switch_stt_engine.py`, `tests/test_install_stt.py`; the CPU fallback:
+  `tests/test_switch_cpu_fallback.py`, `tests/test_switch_fallback_routing.py`. The real GPU path:
   `VML_GPU_TESTS=1 pytest tests/test_faster_whisper_server.py -k real_gpu -s` (venv from
   `VML_GPU_VENV`, default `~/.cache/voicemode-local/stt-gpu-venv`; model from `VML_GPU_MODEL`,
   default small; speech generated in-process with kokoro-onnx).
