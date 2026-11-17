@@ -135,7 +135,7 @@ INTENDED_PATCHES.append(("patch_git_timeout.py", ["config.py"]))   # 2026-11-13:
 INTENDED_PATCHES.append(("patch_simple_failover.py", ["simple_failover.py"]))   # 2026-11-13: TTS timeout knob (edit 3)
 INTENDED_COPIES += ["conch_hold.py", "mcp_progress.py"]
 # 2026-11-14: long replies in parts, and a timed-out local TTS request is not sent twice.
-INTENDED_STEP_LINES.append(b'    {"copy": "tts_chunks.py", "to": "tts_chunks.py", "why": "a long reply is spoken in parts, one TTS request each (VOICEMODE_TTS_CHUNK_CHARS, off by default)"},\n')
+INTENDED_STEP_LINES.append(b'    {"copy": "tts_chunks.py", "to": "tts_chunks.py", "why": "a long reply is spoken in parts, one TTS request each (VOICEMODE_TTS_CHUNK_CHARS, default 300)"},\n')
 INTENDED_STEP_LINES.append(b'    {"patch": "patch_tts_chunks.py", "targets": ["simple_failover.py"], "why": "simple_tts_failover speaks a long reply in parts; needs tts_chunks.py"},\n')
 INTENDED_STEP_LINES.append(b'    {"patch": "patch_tts_no_double_synthesis.py", "targets": ["core.py", "streaming.py"], "why": "a timed-out local TTS request is not sent again buffered, so the server never generates the same speech twice"},\n')
 INTENDED_PATCHES.append(("patch_tts_chunks.py", ["simple_failover.py"]))

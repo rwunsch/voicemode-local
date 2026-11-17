@@ -3,7 +3,7 @@
 
 Upstream's simple_tts_failover becomes _vml_simple_tts_failover_whole, unchanged, and a
 new simple_tts_failover at the end of the file hands it to tts_chunks.speak_in_chunks,
-which calls it once per part. With VOICEMODE_TTS_CHUNK_CHARS unset or 0 it is called
+which calls it once per part. With a reply no longer than VOICEMODE_TTS_CHUNK_CHARS (default 300), or the setting 0, it is called
 once with the whole text, as before. Why, and what a stop or a failed part does:
 tts_chunks.py.
 
@@ -25,7 +25,7 @@ WRAPPER = '''
 
 # TTS CHUNKS (voicemode-local): a long reply is spoken in parts of at most
 # VOICEMODE_TTS_CHUNK_CHARS characters, one request each, so no request comes near the
-# TTS timeout on a slow machine. Off (one request, as upstream) when unset or 0.
+# TTS timeout on a slow machine. Default 300; 0 is off (one request, as upstream).
 # See voice_mode/tts_chunks.py.
 async def simple_tts_failover(
     text: str,

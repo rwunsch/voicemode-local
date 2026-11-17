@@ -89,8 +89,8 @@ def test_lines_without_full_stops_are_separate_sentences():
     assert words(parts) == text.split()
 
 
-@pytest.mark.parametrize("raw,expected", [(None, 0), ("", 0), ("  ", 0), ("250", 250),
-                                           ("0", 0), ("-1", 0), ("lots", 0), ("12.5", 0),
+@pytest.mark.parametrize("raw,expected", [(None, 300), ("", 300), ("  ", 300), ("250", 250),
+                                           ("0", 0), ("-1", 300), ("lots", 300), ("12.5", 300),
                                            ("40", 40), ("39", 40), ("5", 40)])
 def test_chunk_chars_setting(monkeypatch, raw, expected):
     if raw is None:
@@ -100,10 +100,49 @@ def test_chunk_chars_setting(monkeypatch, raw, expected):
     assert tc.chunk_chars() == expected
 
 
-def test_the_setting_is_off_by_default(monkeypatch):
+def test_the_setting_defaults_to_300_and_zero_turns_it_off(monkeypatch):
+    """2026-11-17: long replies are spoken in parts by default (first audio of a 980-char
+    text: 15.9-19.4 s whole vs 3.3-3.8 s in 300-char parts on GPU, n=2-3)."""
     monkeypatch.delenv(tc.SETTING, raising=False)
     assert tc.SETTING == "VOICEMODE_TTS_CHUNK_CHARS"
+    assert tc.DEFAULT_CHARS == 300 and tc.chunk_chars() == 300
+    monkeypatch.setenv(tc.SETTING, "0")
     assert tc.chunk_chars() == 0
+
+
+def test_an_invalid_value_is_logged_once_not_silently(monkeypatch, caplog):
+    monkeypatch.setenv(tc.SETTING, "lots")
+    tc._warned.clear()
+    with caplog.at_level("WARNING", logger="voicemode"):
+        assert tc.chunk_chars() == 300
+        assert tc.chunk_chars() == 300
+        assert tc.chunk_chars() == 300
+    warnings = [r for r in caplog.records if tc.SETTING in r.getMessage()]
+    assert len(warnings) == 1 and "300" in warnings[0].getMessage()
+
+
+def test_a_reply_in_parts_by_default(monkeypatch):
+    monkeypatch.delenv(tc.SETTING, raising=False)
+    whole = FakeWhole()
+    ok, metrics, _ = asyncio.run(tc.speak_in_chunks(whole, LONG, "af_sky", None, {}))
+    assert ok
+    assert [c["text"] for c in whole.calls] == tc.split_for_tts(LONG, 300)
+    assert len(whole.calls) > 1 and all(len(c["text"]) <= 300 for c in whole.calls)
+    assert "audio_path" not in metrics, "repeat regenerates the whole reply"
+
+
+def test_a_short_reply_is_one_request_with_no_extra_work_or_log(monkeypatch, caplog):
+    monkeypatch.delenv(tc.SETTING, raising=False)
+    monkeypatch.setattr(tc, "_control_state", lambda: pytest.fail("short reply must not touch control state"))
+    whole = FakeWhole()
+    text = "x" * 299 + "."  # exactly the limit
+    assert len(text) == 300
+    with caplog.at_level("DEBUG", logger="voicemode"):
+        result = asyncio.run(tc.speak_in_chunks(whole, text, "af_sky", None, {"speed": 1.1}))
+    assert [c["text"] for c in whole.calls] == [text]
+    assert whole.calls[0]["kwargs"] == {"speed": 1.1}
+    assert result[1]["audio_path"] == "p1.wav", "an untouched single-request result"
+    assert caplog.records == []
 
 
 # --- speak_in_chunks: drives the real (whole-text) failover once per part ----------------

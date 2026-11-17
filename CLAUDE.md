@@ -234,7 +234,8 @@ ready, so a long reply must be generated inside one timeout. On a Windows laptop
 than real time, 1,178 characters (54 s of audio) took 134.7 s and timed out at 90 s; upstream
 then sent the same text again buffered, so the server generated it twice and the turn waited
 180 s for nothing. Three changes:
-- `VOICEMODE_TTS_CHUNK_CHARS` (default 0 = off): speak a reply in parts of at most that many
+- `VOICEMODE_TTS_CHUNK_CHARS` (default 300 since 2026-11-17; 0 = off; an invalid value falls
+  back to 300 and is logged once): speak a reply in parts of at most that many
   characters, split at sentence ends, one request each (`patches/tts_chunks.py`). A stop,
   hold or barge-in ends the reply, also while the next part is generated; a failed part ends
   it and its error says which part. Size it with `VOICEMODE_TTS_TIMEOUT_LOCAL` (the default
@@ -244,6 +245,12 @@ then sent the same text again buffered, so the server generated it twice and the
 - `kokoro-onnx-server.py` serves each request on its own thread, so `/health` answers during a
   long synthesis; speech is still generated one request at a time.
 Parts are generated one after another, so a machine slower than real time pauses between them.
+Default 300 approved by the owner 2026-11-17, from a measurement (load 23-53, n=2-3, indicative)
+of time to first audio for a 980-character text: whole text GPU 15.9-19.4 s, CPU 157 s;
+500-character parts 7-10 s GPU / 31 s CPU; 300-character parts 3.3-3.8 s GPU / 38 s CPU;
+150-character parts 2.4-3.1 s GPU / 12 s CPU. On GPU each 300-character part generated 3-5x
+faster than it plays (no pauses); on CPU every part is slower than playback (gaps of about
+0.4-20 s). A reply of at most 300 characters is still one request, with no extra log line.
 
 Root cause is still open — see `docs/stt-61s-stall/README.md` for what has
 already been ruled out by measurement, so it doesn't get re-proposed.

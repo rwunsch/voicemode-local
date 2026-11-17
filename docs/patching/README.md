@@ -58,7 +58,7 @@ on every run, taking the old `patches/` from git.
 
 Steps 15 and 16 (2026-11-14) run after the conch, allowlist and git-timeout steps, in both lists; on
 Windows before the two Windows-only steps, which stay last. Step 15 speaks a long reply in parts when
-`VOICEMODE_TTS_CHUNK_CHARS` is set (off by default). Step 16 stops a timed-out streaming request to a
+a reply is longer than `VOICEMODE_TTS_CHUNK_CHARS` (default 300, 0 = off). Step 16 stops a timed-out streaming request to a
 local server from being sent again buffered.
 
 Steps 17-19 (2026-11-17) follow 16 in both lists, Windows-only steps still last. Step 17 wraps

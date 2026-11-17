@@ -6,12 +6,21 @@ TTS timeout. On a Windows laptop that generates 2.5-5x slower than real time (n 
 25 log lines), a 1,178-character reply (about 54 s of audio) took 134.7 s and the
 request timed out at 90 s: the reply was never spoken.
 
-With VOICEMODE_TTS_CHUNK_CHARS set to a positive number, simple_tts_failover splits the
+VOICEMODE_TTS_CHUNK_CHARS defaults to 300 (2026-11-17; 0 turns it off, a value that is
+not a whole number falls back to 300 and is logged once). Measured 2026-11-17, load 23-53,
+n=2-3, indicative: time to first audio for a 980-character text was 15.9-19.4 s on GPU and
+157 s on CPU as one request; 500-character parts 7-10 s GPU / 31 s CPU; 300-character parts
+3.3-3.8 s GPU / 38 s CPU; 150-character parts 2.4-3.1 s GPU / 12 s CPU. On GPU every
+300-character part generated 3-5x faster than it plays; on CPU every part is slower than
+playback (gaps of about 0.4-20 s between parts). A reply of at most 300 characters is one
+request, as before (no extra latency, no log line).
+
+With the setting a positive number, simple_tts_failover splits the
 text at sentence ends into parts of at most that many characters (a longer sentence at
 commas, semicolons and dashes, then between words), and speaks the parts in order, each
 through the normal failover. Each request stays small, so it ends well inside the
-timeout, and the first part starts playing sooner. Unset, empty or 0 means off: the
-text goes out as one request, exactly as before.
+timeout, and the first part starts playing sooner. 0 means off: the text goes out as one
+request, exactly as before.
 
 - A stop, barge-in, hold or skip (control_stopped / transport_interrupted on a part)
   ends the reply: the remaining parts are not spoken. Between parts nothing is playing,
@@ -56,6 +65,10 @@ _CLAUSE = re.compile(r"(?<=[,;:–—])\s+")
 STOP_FLAGS = ("control_stopped", "transport_interrupted")
 # Smallest part size: below this, parts cut words apart and requests multiply.
 MIN_CHARS = 40
+# The part size when the setting is unset (2026-11-17). 0 turns parts off.
+DEFAULT_CHARS = 300
+# Settings already warned about, so a bad value is logged once, not on every reply.
+_warned = set()
 # How often a later part's generation checks for a stop, hold or skip-forward, and how
 # long it then lets a running player stop by itself before cancelling the request
 # (the same pattern as push-to-talk's cut in converse).
@@ -63,22 +76,30 @@ POLL_S = 0.05
 GRACE_S = 0.5
 
 
+def _warn_once(key, message, *args) -> None:
+    if key in _warned:
+        return
+    _warned.add(key)
+    logger.warning(message, *args)
+
+
 def chunk_chars() -> int:
-    """The part size from VOICEMODE_TTS_CHUNK_CHARS; 0 (off) when unset or not a whole
-    number above zero."""
+    """The part size from VOICEMODE_TTS_CHUNK_CHARS: DEFAULT_CHARS when unset or empty,
+    0 (off) when set to 0, and DEFAULT_CHARS (logged once) when not a whole number of
+    characters."""
     raw = os.environ.get(SETTING)
     if raw is None or not raw.strip():
-        return 0
+        return DEFAULT_CHARS
     try:
         value = int(raw.strip())
     except ValueError:
         value = -1
     if value < 0:
-        logger.warning("%s=%r is not a whole number of characters; speaking replies in one part",
-                       SETTING, raw)
-        return 0
+        _warn_once((SETTING, raw), "%s=%r is not a whole number of characters; using the default of %d",
+                   SETTING, raw, DEFAULT_CHARS)
+        return DEFAULT_CHARS
     if 0 < value < MIN_CHARS:
-        logger.warning("%s=%r is below %d; using %d", SETTING, raw, MIN_CHARS, MIN_CHARS)
+        _warn_once((SETTING, raw), "%s=%r is below %d; using %d", SETTING, raw, MIN_CHARS, MIN_CHARS)
         return MIN_CHARS
     return value
 
