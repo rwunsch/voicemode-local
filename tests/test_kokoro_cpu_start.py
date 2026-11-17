@@ -120,3 +120,26 @@ def test_with_neither_venv_it_fails_loud_naming_both(tmp_path):
 def test_no_arguments_prints_usage(tmp_path):
     done = _run(_app(tmp_path), [])
     assert done.returncode != 0 and "usage" in done.stderr.lower()
+
+
+# --- --provider / --threads (2026-11-17) ----------------------------------------------
+# The fallback exists for the times CUDA failed, so it never takes a provider from the
+# caller: --provider (both spellings) and VOICEMODE_KOKORO_PROVIDER are dropped, and
+# ONNX_PROVIDER stays CPUExecutionProvider. --threads is passed on.
+
+def test_a_provider_is_never_passed_on_but_threads_are(tmp_path):
+    app = _app(tmp_path)
+    _py(tmp_path / "kgpu" / "bin" / "python")
+    done = _run(app, [str(tmp_path / "kgpu"), "--port", "8882", "--provider", "cuda",
+                      "--provider=auto", "--threads", "4"])
+    assert done.returncode == 0, done.stderr
+    assert _value(done.stdout, "ARGS") == f"{app / 'kokoro-onnx-server.py'} --port 8882 --threads 4"
+
+
+def test_the_provider_environment_switch_is_cleared(tmp_path):
+    app = _app(tmp_path)
+    py = tmp_path / "kgpu" / "bin" / "python"
+    _py(py)
+    py.write_text(FAKE_PY + 'echo "VKP=${VOICEMODE_KOKORO_PROVIDER:-unset}"\n')
+    done = _run(app, [str(tmp_path / "kgpu")], {"VOICEMODE_KOKORO_PROVIDER": "cuda"})
+    assert _value(done.stdout, "VKP") == "unset"

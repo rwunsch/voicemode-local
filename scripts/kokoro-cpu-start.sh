@@ -33,11 +33,20 @@ if [ ! -x "$PY" ]; then
     fi
 fi
 
+# --require-gpu and --provider (both spellings) are dropped: the fallback is always the CPU.
+# --threads is passed on.
 args=()
+skip_next=false
 for a in "$@"; do
-    [ "$a" = "--require-gpu" ] || args+=("$a")
+    if $skip_next; then skip_next=false; continue; fi
+    case "$a" in
+        --require-gpu|--provider=*) ;;
+        --provider) skip_next=true ;;
+        *) args+=("$a") ;;
+    esac
 done
 
 export ONNX_PROVIDER=CPUExecutionProvider
 unset VOICEMODE_KOKORO_REQUIRE_GPU   # the server's env twin of --require-gpu
+unset VOICEMODE_KOKORO_PROVIDER      # ... and of --provider
 exec "$PY" "$REPO_DIR/kokoro-onnx-server.py" ${args[@]+"${args[@]}"}

@@ -12,7 +12,9 @@
 # each lib dir is nvidia.<pkg>.__path__[0]/lib. Every such dir in the venv goes on
 # LD_LIBRARY_PATH. kokoro_onnx picks the provider from ONNX_PROVIDER (the server passes
 # none), so it is set to CUDAExecutionProvider. Pass --require-gpu so a CUDA provider
-# that fails to load ends the server instead of running it on the CPU.
+# that fails to load ends the server instead of running it on the CPU. --provider and
+# --threads (KOKORO_PROVIDER / KOKORO_THREADS in the config) are passed on unchanged: the
+# server then builds its session itself and ONNX_PROVIDER no longer decides.
 # See docs/native-gpu-tts/README.md.
 
 set -euo pipefail

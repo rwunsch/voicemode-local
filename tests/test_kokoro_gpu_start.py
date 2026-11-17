@@ -102,3 +102,13 @@ def test_a_missing_venv_fails_loud(tmp_path):
 def test_no_arguments_prints_usage():
     done = _run([])
     assert done.returncode != 0 and "usage" in done.stderr.lower()
+
+
+def test_provider_and_threads_are_passed_on_unchanged(tmp_path):
+    """The server applies --provider/--threads itself; the CUDA library path is still
+    needed for auto and cuda, so the wrapper sets it as before and passes them through."""
+    venv, _ = _fake_venv(tmp_path)
+    done = _run([str(venv), "--port", "8880", "--provider", "auto", "--threads", "4"])
+    assert done.returncode == 0, done.stderr
+    assert _value(done.stdout, "ARGS").endswith("--port 8880 --provider auto --threads 4")
+    assert _value(done.stdout, "LD")
