@@ -208,6 +208,105 @@ short. Not observed end to end in a live voice session yet.
 **Switch it off:** `KOKORO_CPU_FALLBACK=false` in the config, `voicemode-switch stop` (or
 `kill "$(cat /tmp/kokoro-cpu-fallback.pid)"`), and re-run your mode (`voicemode-switch local`).
 
+## Provider and threads
+
+Robert, 2026-11-17: "include as options, GPU as default as long as a supported GPU is
+available", and "users should be able to decide by install and configuration". Before this
+the server set no provider and no session options: the provider came from kokoro-onnx's
+`ONNX_PROVIDER`, the threads from onnxruntime's default.
+
+| Setting | Server | Meaning |
+|---|---|---|
+| `KOKORO_PROVIDER=auto` | `--provider auto` / `VOICEMODE_KOKORO_PROVIDER=auto` | CUDA when onnxruntime offers it **and** the session really runs on it; else the CPU, with one log line saying why and `/health` `fallback_reason`. Never picks DirectML or CoreML. |
+| `KOKORO_PROVIDER=cuda` | `--provider cuda` | CUDA or exit 1 naming the cause (the `--require-gpu` rule). |
+| `KOKORO_PROVIDER=cpu` | `--provider cpu` | CPUExecutionProvider only. |
+| `KOKORO_PROVIDER=directml` / `coreml` | `--provider directml` / `coreml` | DmlExecutionProvider / CoreMLExecutionProvider, or exit 1. Accepted, never offered by the installer. |
+| unset | nothing passed | exactly as before (`kokoro_onnx.Kokoro(model, voices)`; GPU engine: `--require-gpu`). |
+| `KOKORO_THREADS=N` | `--threads N` / `VOICEMODE_KOKORO_THREADS` | onnxruntime intra-op threads; 0 or unset = its default. Also passed to the CPU fallback. |
+
+The flag wins over the environment. With the GPU engine a `KOKORO_PROVIDER` **replaces**
+`--require-gpu`; `--require-gpu` with a provider other than cuda is refused (exit 2). The CPU
+fallback (`scripts/kokoro-cpu-start.sh`) drops any provider: it is always the CPU.
+
+**How it is applied.** With a provider or threads the server builds the onnxruntime session
+itself (`SessionOptions.intra_op_num_threads`, the provider list) and passes it to
+`kokoro_onnx.Kokoro.from_session`, which exists in kokoro-onnx 0.6.1 (ours) and 0.4.9
+(FELIX; read from the 0.4.9 wheel on PyPI, 2026-11-17). Nothing in onnxruntime is patched.
+With only threads set, the provider list is what kokoro-onnx would pick (`ONNX_PROVIDER`, else
+its `resolve_providers`, else the CPU).
+
+**Logs and status.** The first log line is `Kokoro ONNX options: provider requested auto,
+threads 4`; after loading, `Kokoro ONNX provider: CUDAExecutionProvider (requested: auto),
+threads: 4` (with `reason: ...` when auto fell back). With neither option set the log is as
+before. `/health` adds `provider_requested`, `fallback_reason` (auto) and `threads` when set.
+`voicemode-switch status` shows the settings and how to change them.
+
+**Installer.** With the GPU engine `install.sh` asks auto / cpu / cuda (default auto, also with
+no input) and writes `KOKORO_PROVIDER` and `KOKORO_THREADS=0` (an existing value is kept) to
+`~/.voicemode-local/config`. `--kokoro-provider <name>` or `VOICEMODE_KOKORO_PROVIDER`
+decides without asking. Without the GPU engine nothing is asked or written unless forced. The
+threads are never asked. Change later: edit the config, then `voicemode-switch stop &&
+voicemode-switch start`.
+
+What has been run:
+
+| Path | Run? |
+|---|---|
+| CUDA on Linux/WSL (RTX 4080 Laptop, onnxruntime-gpu 1.23.2), `--provider auto --threads 4` through the GPU wrapper | yes, 2026-11-17, n=1: `/health` CUDAExecutionProvider, a sentence spoken |
+| CPU, `--provider cpu --threads N`, repo `.venv` (onnxruntime 1.29.0) | yes, 2026-11-17 (timings below) |
+| CUDA on Windows | not run |
+| DirectML (Windows) | not run |
+| CoreML (macOS) | not run |
+| kokoro-onnx 0.4.9 (FELIX) with `from_session` | read in the source only, not run |
+
+**CPU threads, measured 2026-11-17/18 (n=3 each, warm, one English sentence of 7.06 s audio,
+voice af_sky, repo `.venv`: kokoro-onnx 0.6.1, onnxruntime 1.29.0, 14 cores, spare port).**
+There was no quiet window: the 1-minute load was 22-55 throughout (other sessions). Seconds per
+request, median (range), load during the three requests:
+
+| Setting | Run 1 (order default to 8) | Run 2 (reverse order) |
+|---|---|---|
+| unset (constructor, as before) | 46.4 (40.2-51.4), load 36-43 | 61.9 (61.4-73.8), load 49-55 |
+| `--provider cpu`, threads default | 16.0 (12.5-21.1), load 34-37 | 51.7 (42.1-68.8), load 49-55 |
+| `--threads 2` | 13.7 (13.0-14.0), load 23-31 | 48.8 (26.3-54.5), load 45-50 |
+| `--threads 4` | 13.9 (13.7-23.5), load 22-24 | 46.2 (39.9-55.3), load 40-47 |
+| `--threads 8` | 28.8 (19.1-29.3), load 30-44 | 30.8 (27.7-33.0), load 42-45 |
+
+Read with care. The first two rows run the same session settings (CPU, onnxruntime's default
+threads) and still differ 3x in run 1, which shows how large the load noise is. Under this load no
+thread count was faster in both runs. Defaults were not changed. The question (FELIX's 47 threads
+on a P/E-core CPU) needs a quiet machine and the Windows laptop.
+
+## Piper on the GPU (measured, not built)
+
+2026-11-18, n=3 each, warm model, in-process `PiperVoice.synthesize_wav` (the call
+`piper-proxy.py` makes), `de_DE-thorsten-high` (p_de_thorsten), the 7.5 s German sentence
+from the brief, piper-tts 1.8.0, throwaway venv with onnxruntime-gpu 1.23.2 and the nvidia pip
+libraries on LD_LIBRARY_PATH (the `scripts/kokoro-gpu-start.sh` recipe), order CPU, CUDA, CPU:
+
+| Run | Session providers (read from the session) | Seconds, median (range) | Audio | Load |
+|---|---|---|---|---|
+| CPU 1 | CPUExecutionProvider | 62.4 (61.4-74.0) | 7.33-7.64 s | 62-79 |
+| CUDA (`PiperVoice.load(..., use_cuda=True)`) | CUDAExecutionProvider, CPUExecutionProvider | 2.60 (2.36-3.50) | 7.23-7.64 s | 67 |
+| CPU 2 | CPUExecutionProvider | 46.8 (37.9-50.1) | 7.52-7.69 s | 55-60 |
+
+Model load: CPU 13.9 s and 16.2 s, CUDA 43.9 s (n=1 each, same load). Under this load CUDA is
+about 18-24x faster than the CPU and faster than real time. The CPU numbers are far above the
+quiet-machine baseline the measuring session was given (9.5 s and 12.7 s at load 16), so the CPU
+side is load-bound; no quiet-machine CPU run was possible here.
+
+What a piper-proxy GPU option would take (not built):
+- `load_piper_voice` passes `use_cuda=True` behind a setting (`PIPER_CUDA` / a `--cuda` flag),
+  and the proxy preloads the model at start (44 s on CUDA here, before the first reply).
+- Its own venv: piper-tts depends on the CPU `onnxruntime`, the same trap as kokoro-onnx, so
+  `onnxruntime` is removed and `onnxruntime-gpu==1.23.2` reinstalled, then CUDA checked (3.3 GB
+  measured for this venv).
+- A start wrapper that puts the nvidia lib dirs on LD_LIBRARY_PATH (the Kokoro recipe).
+- Fail loud or fall back visibly: read `voice.session.get_providers()` after loading; `/health`
+  names the provider; the same auto / cuda / cpu choice as Kokoro.
+- Installer and `voicemode-switch ensure/status` wiring, tests with a fake piper. GPU memory
+  next to Kokoro and whisper was not measured.
+
 ## `start` and a holder of 8880 (CPU Kokoro ONNX)
 
 `voicemode-switch start` with the CPU Kokoro ONNX on 8880 (`KOKORO_ONNX=true`, no GPU) used to
@@ -236,7 +335,9 @@ in one line and the install stops (exit 1) with nothing killed. Tests:
 - Tests: `tests/test_kokoro_onnx_require_gpu.py` (fake kokoro_onnx), `tests/test_kokoro_gpu_start.py`,
   `tests/test_switch_kokoro_gpu.py`, `tests/test_install_tts.py`; the CPU fallback:
   `tests/test_kokoro_cpu_start.py`, `tests/test_switch_cpu_fallback.py`,
-  `tests/test_switch_fallback_routing.py`. The real GPU path:
+  `tests/test_switch_fallback_routing.py`; provider and threads:
+  `tests/test_kokoro_onnx_provider.py` (fake onnxruntime), `tests/test_switch_kokoro_provider.py`.
+  The real GPU path:
   `VML_GPU_TESTS=1 VML_KOKORO_GPU_VENV=<venv> pytest tests/test_kokoro_onnx_require_gpu.py -k real -s`
   (model dir from `VML_KOKORO_MODEL_DIR`, default `models/kokoro` in the checkout).
 
