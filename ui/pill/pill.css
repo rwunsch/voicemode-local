@@ -66,5 +66,8 @@ html,body{height:100%}
 .btn.ctl .ic{font-size:13px;line-height:1}
 .btn.ctl[aria-pressed=true]{border-color:var(--m);background:var(--hover)}
 
+.btn.preview{flex:none;white-space:nowrap}
+#previewStatus:empty{display:none}
+
 /* A barge click is shown at once, dimmed, until the backend agrees (model.js bargeShown). */
 #barge.pending { opacity: 0.6; }

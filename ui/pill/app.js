@@ -5,7 +5,8 @@
 (function () {
   var M = window.PillModel, $ = function (id) { return document.getElementById(id); };
   var bargePending = null, bargeLastShown = null;
-  var lastBargeCount = null, interruptedUntil = null;   // the Interrupted flash (model.js interruptFlash)
+  var lastBargeCount = null, interruptedUntil = null;
+  var previewAnswer = null;   // the backend's last preview answer, stamped with when it came   // the Interrupted flash (model.js interruptFlash)
   var hidden = false, snapshot = null, lastSeen = null, ui = null, lastMode = null, lastPhase = null, floorPid = null, filled = false;
 
   function send(obj) {
@@ -90,6 +91,11 @@
     $("drag").title = [vm.session, vm.stateText, vm.waitingText].filter(Boolean).join(" \u00b7 ");
     $("tab").textContent = vm.side === "left" ? "\u203A" : "\u2039";
     fill($("voice"), vm.voices, vm.voice); fill($("language"), vm.languages, vm.language); filled = true;
+    var pv = M.previewView(previewAnswer, Date.now(), vm.connected, vm.inTurn);
+    $("preview").disabled = !pv.enabled || !$("voice").value;
+    $("preview").title = pv.title;
+    $("preview").setAttribute("aria-busy", String(pv.pending));
+    $("previewStatus").textContent = pv.text;
     $("bargeRow").style.display = vm.barge.visible ? "" : "none";
     var bs = M.bargeShown(vm.barge.on, bargePending, Date.now());
     bargePending = bs.keep;
@@ -124,6 +130,7 @@
     if (kind === "ignore") return;
     if (kind === "restore") { saveUi({ minimized: false }); return; } // the tray icon was clicked
     if (kind === "dropped") { lastSeen = null; render(); return; }    // backend restarting: say so now
+    if (kind === "preview") { previewAnswer = Object.assign({ at: Date.now() }, s.window); render(); return; }
     if (kind === "window") return;
     var wasStale = lastSeen === null || Date.now() - lastSeen > M.STALE_MS;
     var prevVisible = snapshot ? snapshot.visible : null;
@@ -144,6 +151,13 @@
   $("ctlPause").onclick = function () { send({ cmd: M.viewModel(snapshot, lastSeen, Date.now()).controls.pause.cmd }); };
   $("ctlMain").onclick = function () { send({ cmd: M.viewModel(snapshot, lastSeen, Date.now()).controls.main.cmd }); };
   $("dismiss").onclick = function () { send({ cmd: "dismiss" }); hidden = true; send({ window: { mode: "hidden" } }); render(); };
+  // Hear the voice shown in the list; one at a time (the button waits for the answer).
+  $("preview").onclick = function () {
+    if (!$("voice").value) return;
+    previewAnswer = { preview: "loading", voice: $("voice").value, at: Date.now() };
+    send({ cmd: "preview_voice", voice: $("voice").value });
+    render();
+  };
   $("voice").onchange = function () { send({ cmd: "set_voice", voice: this.value }); this.blur(); };
   $("language").onchange = function () {
     // A voice speaks its own language: switch to that language's voice first (the current one if

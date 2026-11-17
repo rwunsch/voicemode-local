@@ -93,7 +93,7 @@
       return { connected: false, phase: "disconnected", label: LABELS.disconnected, mode: "pill", side: null,
         main: offMain, pause: offPause, stop: off,
         controls: controlsFor(offMain, offPause, false, false), indicator: indicatorFor("disconnected", "", false),
-        pickersEnabled: false, minimizeEnabled: true, dismissEnabled: true, queue: [], queueMore: "", voice: null, language: null, keys: [], session: "", stateText: LABELS.disconnected, waitingText: "",
+        inTurn: false, pickersEnabled: false, minimizeEnabled: true, dismissEnabled: true, queue: [], queueMore: "", voice: null, language: null, keys: [], session: "", stateText: LABELS.disconnected, waitingText: "",
         barge: { visible: false, on: false, enabled: false, countText: "" }, beeps: { on: false }, voices: VOICES, languages: LANGUAGES,
         wakeText: "" };
     }
@@ -139,7 +139,7 @@
       cmd: phase === "paused" ? "resume" : "pause", icon: phase === "paused" ? RESUME : PAUSE };
     var mode = ui.minimized ? "dot" : ui.docked ? (ui.tucked ? "tab" : ui.dockOpen ? "docked" : "rail") : ui.expanded ? "expanded" : "pill";
     return {
-      connected: true, phase: phase, label: LABELS[phase] || LABELS.idle, mode: mode,
+      connected: true, phase: phase, inTurn: inTurn, label: LABELS[phase] || LABELS.idle, mode: mode,
       side: mode === "docked" || mode === "rail" || mode === "tab" ? (ui.side === "left" ? "left" : "right") : null,
       main: main,
       pause: pause,
@@ -202,16 +202,43 @@
     return { on: !shown.on, at: now, from: from, moved: false };
   }
 
+  // The voice preview's line and button from the backend's last answer (voice_pill.py _preview).
+  // answer: {preview, reason, detail, voice, at} or null. A result stays PREVIEW_SHOW_MS; a
+  // request with no answer frees the button after PREVIEW_PENDING_MS.
+  var PREVIEW_SHOW_MS = 6000, PREVIEW_PENDING_MS = 45000;
+  function previewView(answer, now, connected, inTurn) {
+    var a = answer || {}, age = now - (a.at || 0), state = a.preview;
+    var pending = state === "loading" || state === "playing";
+    var text = "";
+    if (pending && age >= PREVIEW_PENDING_MS) {
+      pending = false;
+      if (age < PREVIEW_PENDING_MS + PREVIEW_SHOW_MS) text = "No answer from the preview";
+    } else if (state === "loading") text = "Preparing a sample\u2026";
+    else if (state === "playing") text = "Playing " + (a.voice || "the sample") + "\u2026";
+    else if (age < PREVIEW_SHOW_MS) {
+      if (state === "busy") text = a.reason === "preview" ? "A sample is already playing" : "Preview works between voice turns";
+      else if (state === "stopped") text = "Sample stopped: a voice turn started";
+      else if (state === "unavailable") text = "Preview unavailable: " + (a.detail || "no audio output here");
+      else if (state === "error") text = "Preview failed: " + (a.detail || "unknown error");
+    }
+    return { text: text, pending: pending, enabled: !!connected && !pending && !inTurn,
+      title: inTurn ? "Preview works between voice turns" : "Hear a short sample of this voice" };
+  }
+
   // What an incoming message is: the tray's "restore", a command the window could not
   // deliver ("dropped": the backend is restarting), another window message, or a snapshot.
   function incomingKind(s) {
     if (!s || typeof s !== "object") return "ignore";
     if (s.cmd === "restore") return "restore";
-    if (s.window && typeof s.window === "object") return "dropped" in s.window ? "dropped" : "window";
+    if (s.window && typeof s.window === "object") {
+      if ("dropped" in s.window) return "dropped";
+      return "preview" in s.window ? "preview" : "window";
+    }
     return "snapshot";
   }
 
-  var api = { interruptFlash: interruptFlash, FLASH_MS: FLASH_MS, clickBarge: clickBarge, bargeShown: bargeShown, PENDING_MS: PENDING_MS, incomingKind: incomingKind, nextHidden: nextHidden, viewModel: viewModel, languageOf: languageOf, voiceForLanguage: voiceForLanguage, VOICES: VOICES, GERMAN_VOICES: GERMAN_VOICES, LANGUAGES: LANGUAGES, STALE_MS: STALE_MS };
+  var api = { previewView: previewView, PREVIEW_SHOW_MS: PREVIEW_SHOW_MS, PREVIEW_PENDING_MS: PREVIEW_PENDING_MS,
+    interruptFlash: interruptFlash, FLASH_MS: FLASH_MS, clickBarge: clickBarge, bargeShown: bargeShown, PENDING_MS: PENDING_MS, incomingKind: incomingKind, nextHidden: nextHidden, viewModel: viewModel, languageOf: languageOf, voiceForLanguage: voiceForLanguage, VOICES: VOICES, GERMAN_VOICES: GERMAN_VOICES, LANGUAGES: LANGUAGES, STALE_MS: STALE_MS };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   if (typeof window !== "undefined") window.PillModel = api;
 })();

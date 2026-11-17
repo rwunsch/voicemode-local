@@ -30,8 +30,10 @@
     </div>
     <div class="row">
       <select id="voice" aria-label="Voice"></select>
+      <button id="preview" class="btn preview" title="Hear a short sample of this voice" aria-label="Preview this voice">&#x25B6;&#xFE0E; Preview</button>
       <select id="language" aria-label="Language"></select>
     </div>
+    <div id="previewStatus" class="m" role="status" aria-live="polite"></div>
     <div id="bargeRow" class="row between"><label for="barge">Interrupt by voice</label>
       <button id="barge" class="btn" role="switch" aria-checked="false">Off</button></div>
     <div class="row between"><label for="beeps">Beeps</label>

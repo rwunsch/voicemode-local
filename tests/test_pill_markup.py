@@ -108,6 +108,18 @@ def test_indicator_colours_are_tokens_with_contrast_in_light_and_dark():
         assert re.search(r"\[data-tone=%s\] \.orb\{[^}]*var\(%s\)" % (tone, token), css), tone
 
 
+def test_a_labelled_preview_button_sits_beside_the_voice_list():
+    html = (UI / "index.html").read_text(encoding="utf-8")
+    tag, attrs, inner = _tag(html, "preview")
+    assert tag == "button"
+    assert 'aria-label="Preview this voice"' in attrs and "title=" in attrs
+    assert "Preview" in inner
+    row = re.search(r'<div class="row">\s*<select id="voice".*?</div>', html, re.S).group(0)
+    assert 'id="preview"' in row, "Preview must be in the voice row"
+    tag, attrs, _ = _tag(html, "previewStatus")
+    assert 'role="status"' in attrs and 'aria-live="polite"' in attrs
+
+
 def test_the_indicator_dot_is_labelled_and_driven_by_the_model():
     html = (UI / "index.html").read_text(encoding="utf-8")
     m = re.search(r'<div id="orb" class="orb"([^>]*)>', html)
