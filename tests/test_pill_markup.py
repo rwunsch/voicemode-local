@@ -37,3 +37,36 @@ def test_both_windows_log_each_hop_of_a_click():
     assert 'w.TryGetValue("log", out v)' in ps1 and '"cmd -> backend: "' in ps1
     mac = (root / "patches" / "voice_pill_mac.py").read_text(encoding="utf-8")
     assert '"page: "' in mac and "cmd -> backend:" in mac
+
+
+# -- 2026-11-17, a tester's feedback (n=1): controls easy to find, a coloured indicator ------
+
+def _tag(html, el_id):
+    m = re.search(r'<(\w+)([^>]*)\bid="%s"([^>]*)>(.*?)</\1>' % re.escape(el_id), html, re.S)
+    assert m, f"#{el_id} not in index.html"
+    return m.group(1).lower(), m.group(2) + m.group(3), m.group(4)
+
+
+def test_the_panel_has_labelled_pause_and_stop_buttons():
+    html = (UI / "index.html").read_text(encoding="utf-8")
+    tag, attrs, _ = _tag(html, "controls")
+    assert 'role="group"' in attrs and 'aria-label="Voice controls"' in attrs
+    # first thing in the expanded panel, so it is found before the settings
+    assert html.index('id="more"') < html.index('id="controls"') < html.index('id="voice"')
+    for el_id, text, aria in (("ctlPause", "Pause", "Pause the voice turn"),
+                              ("ctlMain", "Stop", "Stop the voice turn")):
+        tag, attrs, inner = _tag(html, el_id)
+        assert tag == "button", el_id
+        assert f'aria-label="{aria}"' in attrs, el_id
+        assert re.search(r'<span id="%sText">%s</span>' % (el_id, text), inner), \
+            f"#{el_id} must carry a text label, not an icon alone"
+
+
+def test_app_drives_the_labelled_controls_from_the_model():
+    js = (UI / "app.js").read_text(encoding="utf-8")
+    for needle in ('$("ctlPauseText").textContent = vm.controls.pause.text',
+                   '$("ctlMainText").textContent = vm.controls.main.text',
+                   '"aria-label", vm.controls.pause.aria', '"aria-label", vm.controls.main.aria',
+                   '"aria-pressed", String(vm.controls.pause.pressed)',
+                   '$("ctlPause").onclick', '$("ctlMain").onclick'):
+        assert needle in js, needle

@@ -63,6 +63,17 @@
     $("main").classList.toggle("stop", vm.main.kind === "stop");
     $("mainWake").hidden = vm.main.kind !== "wake"; $("mainStop").hidden = vm.main.kind !== "stop";
     $("main").title = vm.main.title; $("main").setAttribute("aria-label", vm.main.title);
+    // The panel's labelled controls: always in place, words not icons alone (2026-11-17).
+    var cp = vm.controls.pause, cm = vm.controls.main;
+    $("ctlPause").disabled = !cp.enabled; $("ctlMain").disabled = !cm.enabled;
+    $("ctlPauseIcon").textContent = cp.icon; $("ctlPauseText").textContent = vm.controls.pause.text;
+    $("ctlPause").setAttribute("aria-label", vm.controls.pause.aria);
+    $("ctlPause").setAttribute("aria-pressed", String(vm.controls.pause.pressed));
+    $("ctlMainIcon").textContent = cm.kind === "stop" ? "\u25A0\uFE0E" : "";
+    $("ctlMainText").textContent = vm.controls.main.text;
+    $("ctlMain").setAttribute("aria-label", vm.controls.main.aria); $("ctlMain").title = cm.aria;
+    $("ctlMain").classList.toggle("wake", cm.kind === "wake"); $("ctlMain").classList.toggle("stop", cm.kind === "stop");
+    $("pause").setAttribute("aria-pressed", String(cp.pressed));
     $("pause").hidden = !vm.pause.visible;
     $("pause").textContent = vm.pause.icon;
     $("pause").title = vm.pause.label; $("pause").setAttribute("aria-label", vm.pause.label);
@@ -124,6 +135,8 @@
   function cmd(c, extra) { return function () { send(Object.assign({ cmd: c }, extra)); }; }
   $("main").onclick = function () { send({ cmd: M.viewModel(snapshot, lastSeen, Date.now()).main.cmd }); };
   $("pause").onclick = function () { send({ cmd: M.viewModel(snapshot, lastSeen, Date.now()).pause.cmd }); };
+  $("ctlPause").onclick = function () { send({ cmd: M.viewModel(snapshot, lastSeen, Date.now()).controls.pause.cmd }); };
+  $("ctlMain").onclick = function () { send({ cmd: M.viewModel(snapshot, lastSeen, Date.now()).controls.main.cmd }); };
   $("dismiss").onclick = function () { send({ cmd: "dismiss" }); hidden = true; send({ window: { mode: "hidden" } }); render(); };
   $("voice").onchange = function () { send({ cmd: "set_voice", voice: this.value }); this.blur(); };
   $("language").onchange = function () {
