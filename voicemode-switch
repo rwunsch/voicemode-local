@@ -146,11 +146,14 @@ update_env() {
     # no .claude.json env / WSLENV plumbing is needed. NOTE: real environment
     # variables override this file, so the routing vars must NOT also be set in
     # ~/.claude.json's env block (we keep only secrets like OPENAI_API_KEY there).
-    local stt_urls="$1" tts_urls="$2" voices="$3" mode="${4:-custom}"
-    with_env_lock python3 - "$stt_urls" "$tts_urls" "$voices" "$mode" << 'PYEOF'
+    # $5 (optional): a VOICEMODE_TTS_TIMEOUT_LOCAL to write into the block, unless the file
+    # already sets it outside the block (a value the user set is never overwritten).
+    local stt_urls="$1" tts_urls="$2" voices="$3" mode="${4:-custom}" tts_timeout_local="${5:-}"
+    with_env_lock python3 - "$stt_urls" "$tts_urls" "$voices" "$mode" "$tts_timeout_local" << 'PYEOF'
 import os, re, sys
 
 stt, tts, voices, mode = sys.argv[1:5]
+tts_timeout_local = sys.argv[5] if len(sys.argv) > 5 else ""
 envfile = os.path.expanduser("~/.voicemode/voicemode.env")
 os.makedirs(os.path.dirname(envfile), exist_ok=True)
 
@@ -188,6 +191,8 @@ if tts:
     block.append(f"VOICEMODE_TTS_BASE_URLS={tts}")
 if voices:
     block.append(f"VOICEMODE_VOICES={voices}")
+if tts_timeout_local and not re.search(r"^\s*(export\s+)?VOICEMODE_TTS_TIMEOUT_LOCAL=", outside, re.M):
+    block.append(f"VOICEMODE_TTS_TIMEOUT_LOCAL={tts_timeout_local}")
 block.append(END)
 block_text = "\n".join(block) + "\n"
 
@@ -300,6 +305,7 @@ cmd_status() {
         check_proxy || true
         check_service "Whisper Proxy (OpenAI-compat)" "http://127.0.0.1:2022/health" || true
     fi
+    status_cpu_fallbacks
 
     echo ""
     echo "Piper:"
@@ -329,6 +335,45 @@ import json
 ce = json.load(open(os.path.expanduser('~/.claude.json'))).get('mcpServers', {}).get('voicemode', {}).get('env', {}) if os.path.exists(os.path.expanduser('~/.claude.json')) else {}
 print(f'  OpenAI key (in .claude.json): {\"set\" if ce.get(\"OPENAI_API_KEY\") else \"NOT SET\"}')
 "
+}
+
+# The CPU fallbacks in `status`: process (pid file), and what /health says it runs on.
+status_cpu_fallbacks() {
+    local port body value
+    if is_kokoro_cpu_fallback; then
+        port="$(kokoro_cpu_fallback_port)"
+        echo ""
+        echo "Kokoro CPU fallback (port $port):"
+        if [ -f "$KOKORO_CPU_PID_FILE" ] && kill -0 "$(cat "$KOKORO_CPU_PID_FILE")" 2>/dev/null; then
+            ok "Kokoro CPU fallback running (PID $(cat "$KOKORO_CPU_PID_FILE"))"
+        else
+            fail "Kokoro CPU fallback not running (log: /tmp/kokoro-cpu-fallback.log)"
+        fi
+        body="$(port_health_body "$port")" || true
+        value="$(json_field "$body" provider)"
+        if [ "$value" = "CPUExecutionProvider" ]; then
+            ok "Provider: $value"
+        elif [ -n "$value" ]; then
+            fail "Provider: $value (not the CPU fallback this port is configured for)"
+        fi
+    fi
+    if is_stt_cpu_fallback; then
+        port="$(stt_cpu_fallback_port)"
+        echo ""
+        echo "Speech recognition CPU fallback (faster-whisper, port $port):"
+        if [ -f "$STT_CPU_PID_FILE" ] && kill -0 "$(cat "$STT_CPU_PID_FILE")" 2>/dev/null; then
+            ok "faster-whisper CPU fallback running (PID $(cat "$STT_CPU_PID_FILE"))"
+        else
+            fail "faster-whisper CPU fallback not running (log: /tmp/faster-whisper-cpu.log)"
+        fi
+        body="$(port_health_body "$port")" || true
+        value="$(json_field "$body" device)"
+        if [ "$value" = "cpu" ]; then
+            ok "Device: cpu, model $(json_field "$body" model) ($(json_field "$body" status))"
+        elif [ -n "$value" ]; then
+            fail "Device: $value (not the CPU fallback this port is configured for)"
+        fi
+    fi
 }
 
 is_kokoro_onnx() {
@@ -381,7 +426,13 @@ start_kokoro_onnx() {
 
 # Which local proxy ports the *current* config (voicemode.env) actually uses.
 configured_local_ports() {
-    KOKORO_ONNX_PORT="$(kokoro_onnx_port)" python3 - << 'PYEOF'
+    # A CPU fallback is needed whenever the engine it stands in for is (its own URL may not
+    # be routed yet: the routing is written by the next mode switch).
+    local kfb="" sfb=""
+    is_kokoro_cpu_fallback && kfb="$(kokoro_cpu_fallback_port)"
+    is_stt_cpu_fallback && sfb="$(stt_cpu_fallback_port)"
+    KOKORO_ONNX_PORT="$(kokoro_onnx_port)" KOKORO_FALLBACK_PORT="$kfb" STT_FALLBACK_PORT="$sfb" \
+        python3 - << 'PYEOF'
 import os, re
 envfile = os.path.expanduser("~/.voicemode/voicemode.env")
 text = open(envfile).read() if os.path.exists(envfile) else ""
@@ -397,7 +448,12 @@ if onnx not in known:
 # Fall back to the local default if nothing is configured yet.
 if not urls.strip(","):
     urls = ",".join(known)
-print(" ".join(p for p in known if p in urls))
+ports = [p for p in known if p in urls]
+for fallback, primary in ((os.environ.get("STT_FALLBACK_PORT", ""), "2022"),
+                          (os.environ.get("KOKORO_FALLBACK_PORT", ""), onnx)):
+    if fallback and primary in ports and fallback not in ports:
+        ports.append(fallback)
+print(" ".join(ports))
 PYEOF
 }
 
@@ -411,6 +467,65 @@ faster_whisper_venv() { vm_read_config FASTER_WHISPER_VENV "$HOME/.voicemode-loc
 # Default = what whisper-proxy.py binds (it is started without --host): 0.0.0.0, so
 # Windows reaches WSL's 2022 through localhost forwarding just as before.
 faster_whisper_host() { vm_read_config FASTER_WHISPER_HOST 0.0.0.0; }
+
+# --- Managed CPU fallbacks for the native GPU engines ---------------------------------
+# 2026-11-17: a WSL restart killed the GPU speech recognition (silent for hours) and the GPU
+# Kokoro was killed by a test, leaving no local Kokoro. A CPU engine fails independently of
+# CUDA, so each GPU engine can have a CPU twin on its own port, after it in the routing:
+#   KOKORO_CPU_FALLBACK=true  (needs KOKORO_ONNX_GPU)       kokoro-onnx on the CPU, port
+#                             KOKORO_CPU_FALLBACK_PORT (8882), from the GPU venv
+#   STT_CPU_FALLBACK=true     (needs STT_ENGINE=faster-whisper) faster-whisper on the CPU,
+#                             port STT_CPU_FALLBACK_PORT (2023), model STT_CPU_FALLBACK_MODEL
+# Both default off. See docs/native-gpu-tts and docs/native-gpu-stt, "CPU fallback".
+KOKORO_CPU_PID_FILE="/tmp/kokoro-cpu-fallback.pid"
+STT_CPU_PID_FILE="/tmp/faster-whisper-cpu.pid"
+kokoro_cpu_fallback_port() { vm_read_config KOKORO_CPU_FALLBACK_PORT 8882; }
+kokoro_cpu_fallback_wanted() { is_kokoro_onnx_gpu && [ "$(vm_read_config KOKORO_CPU_FALLBACK false)" = "true" ]; }
+# On the GPU Kokoro's own port it would only collide with it: then it is not run.
+is_kokoro_cpu_fallback() { kokoro_cpu_fallback_wanted && [ "$(kokoro_cpu_fallback_port)" != "$(kokoro_onnx_port)" ]; }
+stt_cpu_fallback_port() { vm_read_config STT_CPU_FALLBACK_PORT 2023; }
+# base: measured 2026-11-17 on the 7.6 s clip, CPU int8, load ~25 on 14 cores (n=3):
+# base 23.3-29.8 s, small 28.0-47.2 s. Neither is within 1.5x the clip on a loaded machine.
+stt_cpu_fallback_model() { vm_read_config STT_CPU_FALLBACK_MODEL base; }
+is_stt_cpu_fallback() { is_faster_whisper && [ "$(vm_read_config STT_CPU_FALLBACK false)" = "true" ]; }
+
+# The command-line patterns that prove a fallback is this install's own (see own_pids).
+kokoro_cpu_own_re() {
+    local d; d="$(script_dir_regex)"
+    printf '%s' "([^ ]*python[0-9.]* $d/kokoro-onnx-server\\.py|$d/scripts/kokoro-(cpu|gpu)-start\\.sh) .*--port $1( |\$)"
+}
+stt_cpu_own_re() {
+    local d; d="$(script_dir_regex)"
+    printf '%s' "([^ ]*python[0-9.]* $d/faster-whisper-server\\.py|$d/scripts/faster-whisper-start\\.sh) .*--port $1( |\$)"
+}
+
+start_kokoro_cpu_fallback() {
+    start_detached kokoro-cpu-fallback "$KOKORO_CPU_PID_FILE" \
+        "$SCRIPT_DIR/scripts/kokoro-cpu-start.sh" "$(kokoro_onnx_venv)" \
+        --port "$(kokoro_cpu_fallback_port)" --model-dir "$SCRIPT_DIR/models/kokoro" --no-download
+}
+
+start_stt_cpu_fallback() {
+    start_detached faster-whisper-cpu "$STT_CPU_PID_FILE" \
+        "$SCRIPT_DIR/scripts/faster-whisper-start.sh" "$(faster_whisper_venv)" \
+        --host "$(faster_whisper_host)" --port "$(stt_cpu_fallback_port)" \
+        --model "$(stt_cpu_fallback_model)" --device cpu --compute-type int8
+}
+
+# Stop a fallback only if its pid is provably this install's own; a stale pid file whose pid
+# now belongs to something else is removed, not acted on.
+stop_cpu_fallback() {   # $1 = label, $2 = pid file, $3 = own-process regex
+    local pids
+    pids="$(own_pids "$2" "$3")" || true
+    if [ -n "$pids" ] && stop_port_holders "$pids"; then
+        ok "$1 stopped"
+    elif [ -n "$pids" ]; then
+        warn "$1 (PID $pids) did not stop"
+    else
+        warn "$1 was not running"
+    fi
+    rm -f "$2"
+}
 
 healthy() {
     # $1 = port. True if the local service answers /health or /v1/models.
@@ -496,6 +611,27 @@ port_identity_mismatch() {
         # No provider reported by our own server = its model is still loading: leave it be.
         if [ -z "$field" ] && [ -n "$PORT_PIDS" ]; then return 1; fi
         PORT_HOLDER="kokoro-onnx-server${field:+ on $field}"
+    elif is_kokoro_cpu_fallback && [ "$port" = "$(kokoro_cpu_fallback_port)" ]; then
+        PORT_EXPECT="the configured Kokoro CPU fallback (CPUExecutionProvider)"
+        body="$(port_health_body "$port")" || true
+        if [ -z "$body" ] && ! healthy "$port"; then return 1; fi
+        field="$(json_field "$body" provider)"
+        [ "$field" = "CPUExecutionProvider" ] && return 1
+        PORT_PIDS="$(own_pids "$KOKORO_CPU_PID_FILE" "$(kokoro_cpu_own_re "$port")")"
+        if [ -z "$field" ] && [ -n "$PORT_PIDS" ]; then return 1; fi   # ours, still loading
+        PORT_HOLDER="kokoro-onnx-server${field:+ on $field}"
+    elif is_stt_cpu_fallback && [ "$port" = "$(stt_cpu_fallback_port)" ]; then
+        PORT_EXPECT="the configured faster-whisper CPU fallback"
+        body="$(port_health_body "$port")" || true
+        if [ -z "$body" ] && ! healthy "$port"; then return 1; fi
+        field="$(json_field "$body" device)"
+        [ "$(json_field "$body" engine)" = "faster-whisper" ] && [ "$field" = "cpu" ] && return 1
+        PORT_PIDS="$(own_pids "$STT_CPU_PID_FILE" "$(stt_cpu_own_re "$port")")"
+        # Ours on the CPU with its model still loading: /health is 503 {"status": "loading"}.
+        if [ "$(json_field "$body" status)" = "loading" ] && [ "$field" = "cpu" ] && [ -n "$PORT_PIDS" ]; then
+            return 1
+        fi
+        PORT_HOLDER="faster-whisper${field:+ on $field}"
     else
         return 1
     fi
@@ -523,8 +659,14 @@ stop_port_holders() {
 cmd_ensure() {
     local quiet="${1:-}" rc=0
     local onnx_port; onnx_port="$(kokoro_onnx_port)"
+    local kfb_port="-" sfb_port="-"   # "-" never equals a port: no fallback configured
+    is_kokoro_cpu_fallback && kfb_port="$(kokoro_cpu_fallback_port)"
+    is_stt_cpu_fallback && sfb_port="$(stt_cpu_fallback_port)"
     exec 9>"/tmp/voicemode-ensure.lock"
     flock 9 2>/dev/null || true
+    if kokoro_cpu_fallback_wanted && ! is_kokoro_cpu_fallback; then
+        echo "Kokoro CPU fallback not started: KOKORO_CPU_FALLBACK_PORT ($(kokoro_cpu_fallback_port)) is the GPU Kokoro's own port (KOKORO_ONNX_PORT); set another" >&2
+    fi
     for port in $(configured_local_ports); do
         if port_identity_mismatch "$port"; then
             if [ -z "$PORT_PIDS" ]; then
@@ -583,6 +725,12 @@ cmd_ensure() {
                         --whisper-url http://127.0.0.1:9000
                     [ -n "$quiet" ] || echo "  ensured Whisper proxy (2022)"
                 fi ;;
+            "$kfb_port")
+                start_kokoro_cpu_fallback
+                [ -n "$quiet" ] || echo "  ensured Kokoro CPU fallback ($port)" ;;
+            "$sfb_port")
+                start_stt_cpu_fallback
+                [ -n "$quiet" ] || echo "  ensured faster-whisper CPU fallback ($port)" ;;
             "$onnx_port")
                 # Only reached when KOKORO_ONNX_PORT is NOT 8880 — i.e. ONNX is
                 # running alongside the Docker Kokoro rather than instead of it.
@@ -820,11 +968,16 @@ cmd_health() {
     echo "=== VoiceMode health (configured local proxies) ==="
     local ports; ports="$(configured_local_ports)"
     [ -n "$ports" ] || { echo "  (no local proxies configured)"; return 0; }
+    local kfb_port="-" sfb_port="-"
+    is_kokoro_cpu_fallback && kfb_port="$(kokoro_cpu_fallback_port)"
+    is_stt_cpu_fallback && sfb_port="$(stt_cpu_fallback_port)"
     for port in $ports; do
         case "$port" in
             8880) n="Kokoro TTS";;
             8881) n="Piper TTS";;
             2022) n="Whisper STT";;
+            "$kfb_port") n="Kokoro CPU fallback";;
+            "$sfb_port") n="faster-whisper CPU fallback";;
             "$(kokoro_onnx_port)") n="Kokoro ONNX TTS";;
             *) n="port $port";;
         esac
@@ -871,6 +1024,47 @@ start_kokoro_gpu_and_containers() {
     else
         echo "Starting Docker containers (${services[*]})..."
         docker_compose_cmd up -d "${services[@]}" 2>&1 | sed 's/^/  /'
+    fi
+}
+
+# `start`: the configured CPU fallbacks, each after the GPU engine it stands in for.
+start_cpu_fallbacks_verbose() {
+    local port
+    if kokoro_cpu_fallback_wanted && ! is_kokoro_cpu_fallback; then
+        echo ""
+        fail "Kokoro CPU fallback not started: KOKORO_CPU_FALLBACK_PORT ($(kokoro_cpu_fallback_port)) is the GPU Kokoro's own port (KOKORO_ONNX_PORT)"
+    fi
+    if is_kokoro_cpu_fallback; then
+        port="$(kokoro_cpu_fallback_port)"
+        echo ""
+        echo "Starting Kokoro CPU fallback (port $port)..."
+        if [ -f "$KOKORO_CPU_PID_FILE" ] && kill -0 "$(cat "$KOKORO_CPU_PID_FILE")" 2>/dev/null; then
+            warn "Kokoro CPU fallback already running (PID $(cat "$KOKORO_CPU_PID_FILE"))"
+        else
+            start_kokoro_cpu_fallback
+            sleep 1
+            if kill -0 "$(cat "$KOKORO_CPU_PID_FILE")" 2>/dev/null; then
+                ok "Kokoro CPU fallback started (PID $(cat "$KOKORO_CPU_PID_FILE")); it answers once its model is loaded"
+            else
+                fail "Kokoro CPU fallback failed to start - check /tmp/kokoro-cpu-fallback.log"
+            fi
+        fi
+    fi
+    if is_stt_cpu_fallback; then
+        port="$(stt_cpu_fallback_port)"
+        echo ""
+        echo "Starting faster-whisper CPU fallback (port $port, model $(stt_cpu_fallback_model))..."
+        if [ -f "$STT_CPU_PID_FILE" ] && kill -0 "$(cat "$STT_CPU_PID_FILE")" 2>/dev/null; then
+            warn "faster-whisper CPU fallback already running (PID $(cat "$STT_CPU_PID_FILE"))"
+        else
+            start_stt_cpu_fallback
+            sleep 1
+            if kill -0 "$(cat "$STT_CPU_PID_FILE")" 2>/dev/null; then
+                ok "faster-whisper CPU fallback started (PID $(cat "$STT_CPU_PID_FILE")); /health turns 200 once the model is loaded"
+            else
+                fail "faster-whisper CPU fallback failed to start - check /tmp/faster-whisper-cpu.log"
+            fi
+        fi
     fi
 }
 
@@ -972,6 +1166,8 @@ cmd_start() {
         fi
     fi
 
+    start_cpu_fallbacks_verbose
+
     echo ""
     echo "Starting Piper proxy..."
     PIPER_PID_FILE="/tmp/piper-proxy.pid"
@@ -1039,6 +1235,19 @@ cmd_stop() {
         rm -f "$KOKORO_ONNX_PID_FILE"
     fi
 
+    if [ -f "$KOKORO_CPU_PID_FILE" ] || is_kokoro_cpu_fallback; then
+        echo ""
+        echo "Stopping Kokoro CPU fallback..."
+        stop_cpu_fallback "Kokoro CPU fallback" "$KOKORO_CPU_PID_FILE" \
+            "$(kokoro_cpu_own_re "$(kokoro_cpu_fallback_port)")"
+    fi
+    if [ -f "$STT_CPU_PID_FILE" ] || is_stt_cpu_fallback; then
+        echo ""
+        echo "Stopping faster-whisper CPU fallback..."
+        stop_cpu_fallback "faster-whisper CPU fallback" "$STT_CPU_PID_FILE" \
+            "$(stt_cpu_own_re "$(stt_cpu_fallback_port)")"
+    fi
+
     echo ""
     echo "Stopping Docker containers..."
     docker_compose_cmd down 2>&1 | sed 's/^/  /'
@@ -1052,13 +1261,59 @@ PIPER_URL="http://127.0.0.1:8881/v1"
 WHISPER_URL="http://127.0.0.1:2022/v1"
 OPENAI_URL="https://api.openai.com/v1"
 
+# The CPU fallbacks in the routing (only when configured; otherwise the lists pass unchanged):
+#   STT  the fallback URL right after the GPU engine's (2022)
+#   TTS  the Kokoro CPU URL after the last Kokoro/Piper URL, i.e. before OpenAI
+#        (local: 8880, 8881, 8882), plus VOICEMODE_TTS_TIMEOUT_LOCAL=90 unless already set:
+#        CPU Kokoro is 3-4.5x slower than real time, and the default 30 s cuts longer parts.
+KOKORO_CPU_FALLBACK_TTS_TIMEOUT=90
+stt_urls_with_fallback() {   # $1 = comma list
+    local fb="" out="" u
+    is_stt_cpu_fallback && fb="http://127.0.0.1:$(stt_cpu_fallback_port)/v1"
+    [ -n "$fb" ] || { printf '%s' "$1"; return 0; }
+    for u in ${1//,/ }; do
+        [ "$u" = "$fb" ] && continue
+        out="${out:+$out,}$u"
+        [ "$u" = "$WHISPER_URL" ] && out="$out,$fb"
+    done
+    printf '%s' "$out"
+}
+tts_urls_with_fallback() {   # $1 = comma list
+    local fb="" items=() u i last=-1 out=""
+    is_kokoro_cpu_fallback && fb="http://127.0.0.1:$(kokoro_cpu_fallback_port)/v1"
+    [ -n "$fb" ] || { printf '%s' "$1"; return 0; }
+    for u in ${1//,/ }; do [ "$u" = "$fb" ] || items+=("$u"); done
+    for i in "${!items[@]}"; do
+        case "${items[$i]}" in "$KOKORO_URL"|"$PIPER_URL") last=$i ;; esac
+    done
+    [ "$last" -ge 0 ] || { printf '%s' "$1"; return 0; }   # no local Kokoro routed
+    for i in "${!items[@]}"; do
+        out="${out:+$out,}${items[$i]}"
+        [ "$i" -eq "$last" ] && out="$out,$fb"
+    done
+    printf '%s' "$out"
+}
+update_env_routed() {   # update_env with the configured CPU fallbacks folded in
+    local stt tts timeout=""
+    stt="$(stt_urls_with_fallback "$1")"
+    tts="$(tts_urls_with_fallback "$2")"
+    [ "$tts" != "$2" ] && timeout="$KOKORO_CPU_FALLBACK_TTS_TIMEOUT"
+    if [ "$stt" != "$1" ]; then
+        echo "  STT CPU fallback: faster-whisper $(stt_cpu_fallback_model) on port $(stt_cpu_fallback_port), after 2022"
+    fi
+    if [ -n "$timeout" ]; then
+        echo "  TTS CPU fallback: Kokoro on port $(kokoro_cpu_fallback_port), after Kokoro and Piper"
+    fi
+    update_env "$stt" "$tts" "$3" "$4" "$timeout"
+}
+
 cmd_local() {
     echo "=== Switching to LOCAL mode (Kokoro + Piper, OpenAI last resort) ==="
     echo "  STT: Local Whisper (2022) -> OpenAI fallback"
     echo "  TTS: Local Kokoro (8880) + Piper (8881), equal -> OpenAI last resort"
     echo ""
 
-    update_env "$WHISPER_URL,$OPENAI_URL" "$KOKORO_URL,$PIPER_URL,$OPENAI_URL" "af_sky" "local"
+    update_env_routed "$WHISPER_URL,$OPENAI_URL" "$KOKORO_URL,$PIPER_URL,$OPENAI_URL" "af_sky" "local"
 
     echo ""
     warn "Restart Claude Code for changes to take effect"
@@ -1071,7 +1326,7 @@ cmd_localonly() {
     echo "  TTS: Local Kokoro (8880) + Piper (8881) only"
     echo ""
 
-    update_env "$WHISPER_URL" "$KOKORO_URL,$PIPER_URL" "af_sky" "localonly"
+    update_env_routed "$WHISPER_URL" "$KOKORO_URL,$PIPER_URL" "af_sky" "localonly"
 
     echo ""
     warn "Restart Claude Code for changes to take effect"
@@ -1096,7 +1351,7 @@ cmd_hybrid() {
     echo "  TTS: Local Kokoro (8880) + Piper (8881) -> OpenAI last resort"
     echo ""
 
-    update_env "$OPENAI_URL,$WHISPER_URL" "$KOKORO_URL,$PIPER_URL,$OPENAI_URL" "af_sky" "hybrid"
+    update_env_routed "$OPENAI_URL,$WHISPER_URL" "$KOKORO_URL,$PIPER_URL,$OPENAI_URL" "af_sky" "hybrid"
 
     echo ""
     warn "Restart Claude Code for changes to take effect"
@@ -1109,7 +1364,7 @@ cmd_piper() {
     echo "  TTS: Local Piper (8881) primary + Kokoro (8880) -> OpenAI last resort"
     echo ""
 
-    update_env "$WHISPER_URL,$OPENAI_URL" "$PIPER_URL,$KOKORO_URL,$OPENAI_URL" "p_de_thorsten" "piper"
+    update_env_routed "$WHISPER_URL,$OPENAI_URL" "$PIPER_URL,$KOKORO_URL,$OPENAI_URL" "p_de_thorsten" "piper"
 
     echo ""
     warn "Restart Claude Code for changes to take effect"
