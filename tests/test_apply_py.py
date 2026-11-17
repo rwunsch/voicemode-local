@@ -111,6 +111,7 @@ INTENDED_SINCE_BASELINE = [
     ("patch_voice_fallback.py", ["simple_failover.py", "tools/converse.py"]),   # 2026-11-17: uninstalled voice
     ("patch_echo_labels.py", ["tools/converse.py"]),   # 2026-11-17: echo labels from settings
     ("patch_stt_language.py", ["simple_failover.py"]),   # 2026-11-17: STT language follows the pill
+    ("patch_load_scipy_early.py", ["tools/converse.py"]),   # 2026-11-17: scipy.signal loaded before the stall backstop starts
 ]
 # Modules added as "copy" steps since the baseline (2026-11-07: session_wake.py).
 INTENDED_COPIES_SINCE_BASELINE = ["session_wake.py"]

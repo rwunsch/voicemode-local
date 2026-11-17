@@ -96,6 +96,14 @@ def vad_env(monkeypatch):
     """
     cfg = {"speech_until_s": 0.0}
 
+    # Pay the scipy.signal import NOW. The loop under test does
+    # `from scipy import signal` on its first chunk, after last_audio_time was
+    # stamped, so a slow cold import (6.5 s measured; > AUDIO_STALL_TIMEOUT of
+    # 5 s) trips upstream's stall backstop and the loop exits after one chunk,
+    # silently. That is a property of the machine's import speed, not of the
+    # overrun behaviour these tests check.
+    from scipy import signal  # noqa: F401
+
     def vad_factory(aggressiveness):
         v = FakeVad(aggressiveness)
         v.speech_until_s = cfg["speech_until_s"]
@@ -125,6 +133,18 @@ def _record(max_duration):
         vad_aggressiveness=3,
     )
     return len(audio) / converse.SAMPLE_RATE, speech_detected
+
+
+def test_scipy_signal_is_loaded_before_recording(vad_env):
+    """Isolation guard for the flake described at vad_env's scipy preload.
+
+    The recording loop imports scipy.signal lazily, on the first chunk, and its
+    5 s AUDIO_STALL_TIMEOUT is already running. A cold import took 6.5 s here
+    (2026-11-17), so about 1 run in 6 ended after one chunk with no log line.
+    The fixture must have paid that import before the loop starts.
+    """
+    import scipy
+    assert "signal" in vars(scipy), "scipy.signal not preloaded: the stall timer will race its import"
 
 
 def test_active_speech_extends_past_max_duration(vad_env):

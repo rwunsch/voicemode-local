@@ -152,6 +152,10 @@ INTENDED_STEP_LINES.append(b'    {"patch": "patch_echo_labels.py", "targets": ["
 INTENDED_STEP_LINES.append(b'    {"patch": "patch_stt_language.py", "targets": ["simple_failover.py"], "why": "the STT request passes the pill\'s language for the session; needs voice_pill_state.py and voice_languages.py"},\n')
 INTENDED_PATCHES.append(("patch_echo_labels.py", ["tools/converse.py"]))
 INTENDED_PATCHES.append(("patch_stt_language.py", ["simple_failover.py"]))
+# 2026-11-17: scipy.signal is imported at start on WSL/Mac too (a cold import outlasts the stall backstop).
+INTENDED_STEP_LINES.append(b'    {"patch": "patch_load_scipy_early.py", "targets": ["tools/converse.py"],\n'
+                           b'     "why": "import scipy.signal at start, not mid-recording: a cold import outlasts the 5 s stall backstop (voicemode#545)"},\n')
+INTENDED_PATCHES.append(("patch_load_scipy_early.py", ["tools/converse.py"]))
 # Text edits those additions force on lines that were already there: (now, before).
 INTENDED_EDITS = [
     (b'    "streaming.py",\n    "conch_notify.py",\n    "conch_queue.py",\n    "conch.py",\n    "config.py",\n    "tools/configuration_management.py"\n', b'    "streaming.py"\n'),
@@ -190,6 +194,23 @@ def test_default_output_is_byte_identical_to_before(tmp_path):
     assert "FELIX: NO FFMPEG" not in (now / "tools/converse.py").read_text(encoding="utf-8")
 
 
+def test_default_manifest_loads_scipy_before_recording(tmp_path):
+    """2026-11-17: the recording loop imports scipy.signal on its first chunk, with the 5 s
+    stall backstop already running; a cold import took 6.5 s and ended the turn after one
+    chunk. WSL/Linux/Mac need the same early import native Windows already had."""
+    names = [s.get("patch") or s.get("copy") for s in _steps("manifest.json")]
+    assert names.count("patch_load_scipy_early.py") == 1
+    assert names.index("patch_simple_failover.py") < names.index("patch_load_scipy_early.py") \
+        < names.index("patch_session_name.py")
+    pkg = _tree(tmp_path)
+    _apply(PATCHES / "apply.py", pkg)
+    once = _files(pkg)
+    assert b"FELIX: LOAD SCIPY EARLY" in once["tools/converse.py"]
+    assert b"FELIX: NO FFMPEG" not in once["tools/converse.py"]   # ffmpeg stays on WSL/Mac
+    _apply(PATCHES / "apply.py", pkg)
+    assert _files(pkg) == once   # idempotent
+
+
 # -- native Windows ---------------------------------------------------------
 
 def test_native_list_is_the_default_plus_felix_three_in_felixs_place():
@@ -201,8 +222,11 @@ def test_native_list_is_the_default_plus_felix_three_in_felixs_place():
     assert ours[0]["targets"] == ["core.py", "streaming.py"]
     assert ours[1]["targets"] == ["tools/converse.py"]
     # The provider-keys step is deliberately default-only (FELIX never sets a provider key).
+    # Likewise load_scipy_early: the default list now has it too (2026-11-17), right after
+    # simple_failover; native keeps FELIX's own position for it (third of its three), and the
+    # patch is idempotent, so the two lists agree on the result.
     assert [s for s in native if s not in added and s not in ours] == \
-        [s for s in default if s.get("patch") != "patch_env_provider_keys.py"]
+        [s for s in default if s.get("patch") not in ("patch_env_provider_keys.py", "patch_load_scipy_early.py")]
     # FELIX's order: listen_overrun, turns_playback_stop, simple_failover, then its three.
     names = [s.get("patch") or s.get("copy") for s in native]
     at = names.index("patch_simple_failover.py")

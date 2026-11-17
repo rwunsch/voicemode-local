@@ -20,6 +20,8 @@
      "why": "stop the turns[] playback thread on cancel (upstream PR #555)"},
     {"patch": "patch_simple_failover.py", "targets": ["simple_failover.py"],
      "why": "no silent OpenAI voice swap; configurable STT timeout"},
+    {"patch": "patch_load_scipy_early.py", "targets": ["tools/converse.py"],
+     "why": "import scipy.signal at start, not mid-recording: a cold import outlasts the 5 s stall backstop (voicemode#545)"},
     {"patch": "patch_session_name.py", "targets": ["tools/converse.py"],
      "why": "a distinguishable session name in the conch"},
     {"patch": "patch_control_hold.py", "targets": ["control_channel.py"],
