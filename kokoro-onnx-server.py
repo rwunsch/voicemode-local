@@ -16,6 +16,19 @@ Usage:
 unless its onnxruntime session runs on CUDAExecutionProvider first. Without it a GPU
 venv whose CUDA provider failed to load silently runs on the CPU. Run the GPU venv
 through scripts/kokoro-gpu-start.sh. See docs/native-gpu-tts/README.md.
+
+--provider auto|cuda|cpu|directml|coreml (or env VOICEMODE_KOKORO_PROVIDER; the flag wins):
+  auto      CUDA when onnxruntime offers it and the session really runs on it, else the CPU
+            with one log line saying why (/health: provider_requested, fallback_reason).
+            auto never picks DirectML or CoreML.
+  cuda, directml, coreml   exit 1, naming the cause, when not offered or not what the
+            session runs on.
+  cpu       the CPU only.
+--threads N (or env VOICEMODE_KOKORO_THREADS): onnxruntime intra-op threads; 0 = its default.
+With neither set the model loads exactly as before (kokoro_onnx.Kokoro(model, voices), the
+provider from kokoro-onnx's ONNX_PROVIDER). With either, the server builds the onnxruntime
+session itself and passes it to kokoro_onnx.Kokoro.from_session. See
+docs/native-gpu-tts/README.md, "Provider and threads".
 """
 
 import argparse
@@ -46,6 +59,22 @@ _require_gpu = False
 GPU_PROVIDER = "CUDAExecutionProvider"
 NO_CUDA_CAUSE = ("onnxruntime-gpu loaded no CUDA provider; the default pip build needs CUDA 13: "
                  "install onnxruntime-gpu==1.23.2")
+
+# --provider: the onnxruntime execution provider each name stands for.
+PROVIDERS = {"cuda": GPU_PROVIDER, "cpu": "CPUExecutionProvider",
+             "directml": "DmlExecutionProvider", "coreml": "CoreMLExecutionProvider"}
+PROVIDER_CHOICES = ("auto",) + tuple(PROVIDERS)
+# What to install when an explicit provider is not offered.
+PROVIDER_HINTS = {
+    "cuda": "install onnxruntime-gpu==1.23.2 and start through scripts/kokoro-gpu-start.sh",
+    "directml": "DirectML needs the onnxruntime-directml package (Windows)",
+    "coreml": "CoreML needs onnxruntime on macOS",
+}
+# None = not set: load the model exactly as before this option existed.
+_provider_requested = None
+_threads = 0
+# --provider auto on the CPU: why (None while it runs on CUDA).
+_fallback_reason = None
 
 # Requests are served on their own threads, so /health answers while a long synthesis
 # runs (2026-11-14: a 54 s reply took 134.7 s and the health checks timed out). One
@@ -133,9 +162,81 @@ def _load_kokoro():
 
         model_path, voices_path = ensure_models()
         print(f"Loading Kokoro ONNX model from {model_path}...")
-        _kokoro = kokoro_onnx.Kokoro(str(model_path), str(voices_path))
+        _kokoro = build_kokoro(kokoro_onnx, model_path, voices_path)
         print("Model loaded.")
     return _kokoro
+
+
+def provider_error(message):
+    """An explicit --provider that cannot be had: exit 1, naming the cause."""
+    print(f"Error: {message}", file=sys.stderr, flush=True)
+    sys.exit(1)
+
+
+def default_providers():
+    """The providers kokoro-onnx would choose itself (used when only --threads is set):
+    ONNX_PROVIDER, else kokoro_onnx.session.resolve_providers (0.6.x), else the CPU."""
+    env_provider = os.environ.get("ONNX_PROVIDER")
+    if env_provider:
+        return [env_provider]
+    try:
+        from kokoro_onnx.session import resolve_providers
+        return list(resolve_providers())
+    except Exception:  # noqa: BLE001 - 0.4.x has no such module
+        return [PROVIDERS["cpu"]]
+
+
+def plan_providers(requested, available, version):
+    """(providers for the session, fallback reason or None) for a --provider value."""
+    cpu = PROVIDERS["cpu"]
+    if requested is None:
+        return default_providers(), None
+    if requested == "cpu":
+        return [cpu], None
+    if requested == "auto":
+        if GPU_PROVIDER in available:
+            return [GPU_PROVIDER, cpu], None
+        return [cpu], f"onnxruntime {version} offers no {GPU_PROVIDER} (available: {available})"
+    wanted = PROVIDERS[requested]
+    if wanted not in available:
+        provider_error(f"--provider {requested}: {wanted} is not offered by onnxruntime {version} "
+                       f"(available: {available}). {PROVIDER_HINTS[requested]}.")
+    return [wanted, cpu], None
+
+
+def build_kokoro(kokoro_onnx, model_path, voices_path, label="Kokoro"):
+    """The Kokoro object for one model. Without --provider and --threads exactly as before;
+    with them, from an onnxruntime session built here (provider list, intra-op threads)."""
+    global _fallback_reason
+    if _provider_requested is None and not _threads:
+        return kokoro_onnx.Kokoro(str(model_path), str(voices_path))
+    if not hasattr(kokoro_onnx.Kokoro, "from_session"):
+        provider_error(f"this kokoro-onnx has no Kokoro.from_session, so --provider/--threads "
+                       f"cannot be applied; upgrade kokoro-onnx or run without them")
+    import onnxruntime as rt
+    available = list(rt.get_available_providers())
+    version = getattr(rt, "__version__", "?")
+    providers, reason = plan_providers(_provider_requested, available, version)
+    options = rt.SessionOptions()
+    if _threads:
+        options.intra_op_num_threads = _threads
+    session = rt.InferenceSession(str(model_path), sess_options=options, providers=providers)
+    got = list(session.get_providers())
+    first = got[0] if got else "no provider"
+    if _provider_requested == "auto":
+        if reason is None and first != GPU_PROVIDER:
+            reason = (f"{GPU_PROVIDER} is offered but the {label} session runs on {first} "
+                      f"(the CUDA libraries did not load; start through scripts/kokoro-gpu-start.sh)")
+        if reason:
+            if label == "Kokoro":
+                _fallback_reason = reason
+            print(f"Kokoro ONNX --provider auto: running on the CPU ({label}), because {reason}",
+                  file=sys.stderr, flush=True)
+    elif _provider_requested in ("cuda", "directml", "coreml") and first != PROVIDERS[_provider_requested]:
+        provider_error(f"--provider {_provider_requested}: {PROVIDERS[_provider_requested]} is offered "
+                       f"by onnxruntime {version}, but the {label} session runs on {first} "
+                       f"(providers: {got}). {PROVIDER_HINTS[_provider_requested]}.")
+    return kokoro_onnx.Kokoro.from_session(session, str(voices_path))
 
 
 def get_kokoro_de():
@@ -157,7 +258,7 @@ def _load_kokoro_de():
             return None
         import kokoro_onnx
         print(f"Loading German Kokoro ONNX model from {model_path}...")
-        _kokoro_de = kokoro_onnx.Kokoro(str(model_path), str(voices_path))
+        _kokoro_de = build_kokoro(kokoro_onnx, model_path, voices_path, "German Kokoro")
         print(f"German model loaded (voices: {_kokoro_de.get_voices()}).")
     return _kokoro_de
 
@@ -344,6 +445,19 @@ def list_voices():
     return {"object": "list", "data": data}
 
 
+def health_body():
+    """/health: as before, plus provider_requested (and with auto fallback_reason) when
+    --provider is set and threads when --threads is."""
+    body = {"status": "ok", "engine": "kokoro-onnx", "provider": active_provider(_kokoro)}
+    if _provider_requested is not None:
+        body["provider_requested"] = _provider_requested
+        if _provider_requested == "auto":
+            body["fallback_reason"] = _fallback_reason
+    if _threads:
+        body["threads"] = _threads
+    return body
+
+
 class TTSHandler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         # Suppress default request logging for cleaner output
@@ -361,8 +475,7 @@ class TTSHandler(BaseHTTPRequestHandler):
         if self.path == "/health":
             # The provider of the model already loaded (never loads it): CUDAExecutionProvider
             # on the GPU, CPUExecutionProvider when it runs on the CPU, null before loading.
-            self._send_json(200, {"status": "ok", "engine": "kokoro-onnx",
-                                  "provider": active_provider(_kokoro)})
+            self._send_json(200, health_body())
         elif self.path == "/v1/audio/voices":
             try:
                 self._send_json(200, list_voices())
@@ -468,11 +581,40 @@ def main():
     parser.add_argument("--require-gpu", action="store_true",
                         help="Exit 1 unless the model runs on CUDAExecutionProvider "
                              "(also: env VOICEMODE_KOKORO_REQUIRE_GPU=1)")
+    parser.add_argument("--provider", choices=PROVIDER_CHOICES, default=None,
+                        help="onnxruntime provider: auto (CUDA if it really runs, else CPU), "
+                             "cuda, cpu, directml, coreml (also: env VOICEMODE_KOKORO_PROVIDER). "
+                             "Unset: kokoro-onnx's own choice, as before")
+    parser.add_argument("--threads", type=int, default=None,
+                        help="onnxruntime intra-op threads; 0 = its default "
+                             "(also: env VOICEMODE_KOKORO_THREADS)")
     args = parser.parse_args()
 
-    global _model_dir, _de_model_dir, _no_download, _require_gpu
+    global _model_dir, _de_model_dir, _no_download, _require_gpu, _provider_requested, _threads
     _no_download = args.no_download
     _require_gpu = args.require_gpu or os.environ.get("VOICEMODE_KOKORO_REQUIRE_GPU") == "1"
+    provider = args.provider
+    if provider is None:
+        env_provider = os.environ.get("VOICEMODE_KOKORO_PROVIDER", "").strip().lower()
+        if env_provider and env_provider not in PROVIDER_CHOICES:
+            parser.error(f"VOICEMODE_KOKORO_PROVIDER={env_provider}: use one of "
+                         f"{', '.join(PROVIDER_CHOICES)}")
+        provider = env_provider or None
+    threads = args.threads
+    if threads is None:
+        env_threads = os.environ.get("VOICEMODE_KOKORO_THREADS", "").strip()
+        try:
+            threads = int(env_threads) if env_threads else 0
+        except ValueError:
+            parser.error(f"VOICEMODE_KOKORO_THREADS={env_threads}: not a whole number")
+        if threads < 0:
+            parser.error(f"VOICEMODE_KOKORO_THREADS={env_threads}: must be 0 or more")
+    elif threads < 0:
+        parser.error(f"--threads {threads}: must be 0 or more")
+    if _require_gpu and provider not in (None, "cuda"):
+        parser.error(f"--require-gpu means CUDA; it cannot be combined with --provider {provider} "
+                     f"(drop one; --provider cuda is the same rule)")
+    _provider_requested, _threads = provider, threads
     _model_dir = Path(args.model_dir)
     _de_model_dir = Path(args.de_model_dir or f"{args.model_dir.rstrip('/')}-de-martin")
 
@@ -492,6 +634,9 @@ def main():
         if kokoro_de is not None:
             exit_unless_on_gpu(kokoro_de, "German Kokoro")
     print(f"Kokoro ONNX provider: {active_provider(kokoro) or 'unknown'}", flush=True)
+    if _provider_requested is not None or _threads:
+        print(f"  requested provider: {_provider_requested or '(kokoro-onnx default)'}, "
+              f"threads: {_threads or 'onnxruntime default'}", flush=True)
 
     server = make_server(args.host, args.port)
     print(f"Kokoro ONNX TTS server listening on {args.host}:{args.port}", flush=True)
