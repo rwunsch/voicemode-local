@@ -5,8 +5,8 @@
 (function () {
   var M = window.PillModel, $ = function (id) { return document.getElementById(id); };
   var bargePending = null, bargeLastShown = null;
-  var lastBargeCount = null, interruptedUntil = null;
-  var previewAnswer = null;   // the backend's last preview answer, stamped with when it came   // the Interrupted flash (model.js interruptFlash)
+  var lastBargeCount = null, interruptedUntil = null;   // the Interrupted flash (model.js interruptFlash)
+  var previewAnswer = null;   // the backend's last preview answer, stamped with when it came
   var hidden = false, snapshot = null, lastSeen = null, ui = null, lastMode = null, lastPhase = null, floorPid = null, filled = false;
 
   function send(obj) {
