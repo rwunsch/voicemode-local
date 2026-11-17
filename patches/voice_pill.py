@@ -289,6 +289,10 @@ VOICES_TIMEOUT_S = 1.0
 VOICES_CACHE_S = 60.0          # the snapshot loop runs every 0.25-1 s: do not ask every tick
 _VOICES_CACHE = {}             # URL setting -> (time, ({language: [voice ids]}, {experimental ids}))
 _clock = time.monotonic
+BACKGROUND_REFRESH = True      # the snapshot path refreshes the list in a thread; tests turn it off
+_REFRESH_LOCK = threading.Lock()
+_REFRESH_THREAD = None         # the one refresh thread, while it runs
+_REFRESH_WARNED = False
 
 
 def _fetch_voices(url):
@@ -365,10 +369,42 @@ def _ask_servers(raw):
     return merged, experimental
 
 
-def voices_by_language(home=None) -> dict:
+def _refresh_voices(raw):
+    """Ask the servers and store the answer under raw (runs in the refresh thread). A refresh
+    that raises, or that finds no voice at all while some were known, keeps the old list; the
+    stamp is renewed either way so a dead endpoint is asked once per VOICES_CACHE_S, not per tick."""
+    global _REFRESH_WARNED
+    old = _VOICES_CACHE.get(raw)
+    try:
+        fresh = _ask_servers(raw)
+        if old is not None and not fresh[0] and old[1][0]:
+            fresh = old[1]
+    except Exception as e:  # noqa: BLE001 - never kills the thread, says so once
+        if not _REFRESH_WARNED:
+            _REFRESH_WARNED = True
+            print(f"voice_pill: voice list refresh failed: {e}", file=sys.stderr, flush=True)
+        fresh = old[1] if old is not None else ({}, set())
+    _VOICES_CACHE[raw] = (_clock(), fresh)
+
+
+def _start_refresh(raw):
+    """Start the refresh thread unless one is running. Never two at once."""
+    global _REFRESH_THREAD
+    with _REFRESH_LOCK:
+        if _REFRESH_THREAD is not None and _REFRESH_THREAD.is_alive():
+            return
+        _REFRESH_THREAD = threading.Thread(target=_refresh_voices, args=(raw,), daemon=True,
+                                           name="voice-pill-voices")
+        _REFRESH_THREAD.start()
+
+
+def voices_by_language(home=None, wait=True) -> dict:
     """{language: [voice ids]} from the local TTS servers in VOICEMODE_TTS_BASE_URLS, in
     server order (first server first). Cached for VOICES_CACHE_S per URL setting. Never
-    raises; {} when nothing answered. VOICEMODE_PILL_LANGUAGES, when set, keeps only the
+    raises; {} when nothing answered. wait=False (the snapshot path, which runs in the command
+    loop: Stop and Pause queue behind it) never asks a server itself: it answers from the cache,
+    stale or not, ({} before the first refresh) and has a single background thread refresh an
+    expired entry. VOICEMODE_PILL_LANGUAGES, when set, keeps only the
     languages it lists. Voices a server marks "experimental" (Japanese, Chinese: round trips came
     back as nonsense, 2026-11-17) are hidden unless their language is named in that setting;
     a server that gives no quality is classed by the voice id (j, z). A German voice german_voices() knows but does not
@@ -379,8 +415,13 @@ def voices_by_language(home=None) -> dict:
         now = _clock()
         hit = _VOICES_CACHE.get(raw)
         if hit is None or now - hit[0] >= VOICES_CACHE_S:
-            hit = (now, _ask_servers(raw))
-            _VOICES_CACHE[raw] = hit
+            if wait:
+                hit = (now, _ask_servers(raw))
+                _VOICES_CACHE[raw] = hit
+            elif BACKGROUND_REFRESH:
+                _start_refresh(raw)
+        if hit is None:
+            return {}
         allowed = set(german_voices(home))
         listed = listed_languages(home)   # VOICEMODE_PILL_LANGUAGES: only these, when set
         out = {}
@@ -586,7 +627,7 @@ def gather(ctx) -> dict:
         default_voice=st.default_voice(ctx.home),
         play={"label": play.label} if play else None, wake=wake_view(ctx), platform=platform,
         german=german_available(ctx.home), ptt_listener=ptt_listening(platform, ctx.home),
-        german_list=german_voices(ctx.home), voices=voices_by_language(ctx.home))
+        german_list=german_voices(ctx.home), voices=voices_by_language(ctx.home, wait=False))
 
 
 # -- voice preview (2026-11-17) ----------------------------------------------------------------
