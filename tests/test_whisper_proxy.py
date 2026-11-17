@@ -7,6 +7,7 @@ requires the Whisper backend, so only side-effect-free endpoints are tested.
 
 import http.server
 import json
+import os
 import subprocess
 import threading
 import sys
@@ -45,14 +46,25 @@ class FakeBackend:
         self.server.server_close()
 
 
-def _start_proxy(whisper_url=DEAD_BACKEND):
+NO_CONFIG = "/nonexistent/voicemode-local-config"
+
+
+def _env(config_path=NO_CONFIG):
+    """Never read the real ~/.voicemode-local/config: on a faster-whisper machine the
+    startup guard would make every test's proxy exit."""
+    return {**os.environ, "VOICEMODE_LOCAL_CONFIG": str(config_path)}
+
+
+def _start_proxy(whisper_url=DEAD_BACKEND, config_path=NO_CONFIG, extra=()):
     proc = subprocess.Popen(
         [
             sys.executable,
             PROXY_SCRIPT,
             "--port", str(TEST_PORT),
             "--whisper-url", whisper_url,
+            *extra,
         ],
+        env=_env(config_path),
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
@@ -208,5 +220,73 @@ def test_transcription_rejects_non_multipart():
     try:
         status, _ = _post("/v1/audio/transcriptions", body={"file": "test"})
         assert status == 400
+    finally:
+        _stop_proxy(proc)
+
+
+# ── startup guard: STT_ENGINE=faster-whisper must not let this proxy take 2022 ──
+
+GUARD_LINE = "STT_ENGINE=faster-whisper: not starting the Docker proxy; run voicemode-switch ensure"
+
+
+def _run_guarded(tmp_path, config_text, *extra):
+    cfg = tmp_path / "config"
+    if config_text is not None:
+        cfg.write_text(config_text)
+    return subprocess.run(
+        [sys.executable, PROXY_SCRIPT, "--port", str(TEST_PORT), "--whisper-url", DEAD_BACKEND, *extra],
+        env=_env(cfg), capture_output=True, text=True, timeout=5,
+    )
+
+
+def test_guard_exits_0_without_binding_when_the_engine_is_faster_whisper(tmp_path):
+    done = _run_guarded(tmp_path, "KOKORO_ONNX=false\nSTT_ENGINE=faster-whisper\n")
+    assert done.returncode == 0
+    assert done.stderr.strip() == GUARD_LINE
+    assert done.stdout == ""
+    # it never bound the port
+    try:
+        urllib.request.urlopen(f"{BASE_URL}/health", timeout=1)
+        raise AssertionError("something listens on the test port")
+    except urllib.error.URLError:
+        pass
+
+
+def test_guard_last_config_line_wins_like_vm_read_config(tmp_path):
+    done = _run_guarded(tmp_path, "STT_ENGINE=faster-whisper\nSTT_ENGINE=docker\n", "--help")
+    assert GUARD_LINE not in done.stderr   # docker wins: normal startup path (--help exits)
+
+
+def test_guard_serves_when_the_engine_is_docker(tmp_path):
+    cfg = tmp_path / "config"
+    cfg.write_text("STT_ENGINE=docker\n")
+    proc = _start_proxy(config_path=cfg)
+    try:
+        assert _get("/health")[0] == 503   # listening (backend is the dead one)
+    finally:
+        _stop_proxy(proc)
+
+
+def test_guard_serves_when_the_config_is_missing_or_the_engine_unset(tmp_path):
+    proc = _start_proxy()   # config path does not exist
+    try:
+        assert _get("/health")[0] == 503
+    finally:
+        _stop_proxy(proc)
+    cfg = tmp_path / "config"
+    cfg.write_text("KOKORO_ONNX=false\n")
+    proc = _start_proxy(config_path=cfg)
+    try:
+        assert _get("/health")[0] == 503
+    finally:
+        _stop_proxy(proc)
+
+
+def test_force_serves_even_when_the_engine_is_faster_whisper(tmp_path):
+    cfg = tmp_path / "config"
+    cfg.write_text("STT_ENGINE=faster-whisper\n")
+    proc = _start_proxy(config_path=cfg, extra=("--force",))
+    try:
+        assert _get("/health")[0] == 503
     finally:
         _stop_proxy(proc)

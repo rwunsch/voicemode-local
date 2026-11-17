@@ -16,6 +16,7 @@ import argparse
 import io
 import itertools
 import json
+import os
 import sys
 import threading
 import time
@@ -241,6 +242,23 @@ class WhisperProxyHandler(BaseHTTPRequestHandler):
         print(f"[whisper-proxy] {args[0]}", flush=True)
 
 
+def read_config_value(key, default=""):
+    """KEY=value from the voicemode-local config, read as voicemode-switch's
+    vm_read_config does: the last non-empty KEY= line wins. The path comes from
+    VOICEMODE_LOCAL_CONFIG (tests), default ~/.voicemode-local/config."""
+    path = os.environ.get("VOICEMODE_LOCAL_CONFIG") or os.path.expanduser("~/.voicemode-local/config")
+    value = ""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                line = line.rstrip("\r\n")
+                if line.startswith(key + "="):
+                    value = line[len(key) + 1:] or value
+    except OSError:
+        pass
+    return value or default
+
+
 def main():
     parser = argparse.ArgumentParser(description="Whisper OpenAI-compatible proxy")
     parser.add_argument("--port", type=int, default=2022, help="Port to listen on (default: 2022)")
@@ -252,7 +270,20 @@ def main():
         default="http://127.0.0.1:9000",
         help="Upstream whisper service URL (default: http://127.0.0.1:9000)",
     )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Serve even when STT_ENGINE=faster-whisper (default: exit 0 and leave port 2022 to the native engine)",
+    )
     args = parser.parse_args()
+
+    # The ~/.bashrc autostart starts this proxy whenever nothing listens on 2022.
+    # With the native engine configured that took the port from it (2026-11-17),
+    # so stand down and let `voicemode-switch ensure` start the engine.
+    if not args.force and read_config_value("STT_ENGINE", "docker") == "faster-whisper":
+        print("STT_ENGINE=faster-whisper: not starting the Docker proxy; run voicemode-switch ensure",
+              file=sys.stderr)
+        return 0
 
     WhisperProxyHandler.whisper_url = args.whisper_url
     # ThreadingHTTPServer, not HTTPServer: the proxies are shared by every
