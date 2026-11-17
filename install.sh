@@ -79,6 +79,9 @@ mkdir -p "$CONFIG_DIR"
 VM_CONFIG_FILE="$CONFIG_FILE"
 # shellcheck source=lib/compute.sh
 [ -f "$SCRIPT_DIR/lib/compute.sh" ] && . "$SCRIPT_DIR/lib/compute.sh"
+# Freeing 8880 / 2022 without killing what is not ours (vm_free_port).
+# shellcheck source=lib/ports.sh
+. "$SCRIPT_DIR/lib/ports.sh"
 
 INSTALL_MODE=""
 if command -v docker >/dev/null 2>&1; then
@@ -463,10 +466,8 @@ if [ "$KOKORO_ONNX" = "true" ]; then
     if [ -f "$KOKORO_ONNX_PID_FILE" ] && kill -0 "$(cat "$KOKORO_ONNX_PID_FILE")" 2>/dev/null; then
         warn "Kokoro ONNX server already running"
     else
-        if lsof -ti:8880 > /dev/null 2>&1; then
-            kill "$(lsof -ti:8880)" 2>/dev/null
-            sleep 1
-        fi
+        # Our own earlier server by exact pid, a Docker kokoro by name; anything else stops here.
+        vm_free_port 8880 "$(vm_kokoro_own_re 8880)" kokoro || exit 1
         if [ "$TTS_ENGINE" = "native-gpu" ]; then
             # The wrapper puts the venv's CUDA libraries on LD_LIBRARY_PATH; --require-gpu
             # exits rather than run on the CPU (check the log if it is gone).
@@ -509,10 +510,8 @@ fi
 
 if [ "$STT_ENGINE" = "faster-whisper" ]; then
     echo "  Starting faster-whisper server..."
-    if lsof -ti:2022 > /dev/null 2>&1; then
-        kill "$(lsof -ti:2022)" 2>/dev/null
-        sleep 1
-    fi
+    # Our own earlier server or proxy by exact pid, a Docker whisper by name; anything else stops here.
+    vm_free_port 2022 "$(vm_stt_own_re 2022)" whisper || exit 1
     nohup "$SCRIPT_DIR/scripts/faster-whisper-start.sh" "$FW_VENV" --host "$FW_HOST" --port 2022 --model "$FW_MODEL" \
         > /tmp/faster-whisper-server.log 2>&1 &
     echo $! > /tmp/faster-whisper-server.pid
@@ -525,10 +524,8 @@ if [ "$STT_ENGINE" = "faster-whisper" ]; then
     fi
 else
     echo "  Starting Whisper proxy..."
-    if lsof -ti:2022 > /dev/null 2>&1; then
-        kill "$(lsof -ti:2022)" 2>/dev/null
-        sleep 1
-    fi
+    # Our own earlier server or proxy by exact pid, a Docker whisper by name; anything else stops here.
+    vm_free_port 2022 "$(vm_stt_own_re 2022)" whisper || exit 1
     nohup python3 "$SCRIPT_DIR/whisper-proxy.py" --port 2022 --whisper-url http://127.0.0.1:9000 \
         > /tmp/whisper-proxy.log 2>&1 &
     echo $! > /tmp/whisper-proxy.pid

@@ -219,6 +219,14 @@ killing nothing. Behaviour change: a foreign holder of 8880 now stops `start` in
 killed; free the port yourself or set `KOKORO_ONNX_PORT`. Tests:
 `tests/test_switch_start_8880.py`.
 
+`install.sh` follows the same rules (`lib/ports.sh`, `vm_free_port`) where it used to run
+`kill "$(lsof -ti:8880)"` (Step 7a) and `kill "$(lsof -ti:2022)"` (Step 7c, both STT
+branches): its own earlier server or whisper-proxy (command line naming the install
+directory and `--port`, current user) by exact pid, a Docker container publishing the port
+whose name or image contains `kokoro` / `whisper` by `docker stop <name>`, anything else named
+in one line and the install stops (exit 1) with nothing killed. Tests:
+`tests/test_install_ports.py`.
+
 ## Verification
 
 - `voicemode-switch status`: "Kokoro ONNX (native GPU, port 8880)", the PID, and
