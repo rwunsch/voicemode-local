@@ -360,6 +360,58 @@ def test_threads_without_a_provider_keep_the_onnx_provider_choice(box):
                                "providers": [CUDA], "threads": 3}
 
 
+def test_env_only_provider_and_threads(box):
+    """FELIX-voice: both from the environment alone, no flags."""
+    b = box(available=f"{CUDA},{CPU}", extra={"VOICEMODE_KOKORO_PROVIDER": "auto",
+                                              "VOICEMODE_KOKORO_THREADS": "6"}).start()
+    health = b.health()
+    assert health["provider"] == CUDA and health["provider_requested"] == "auto"
+    assert health["threads"] == 6
+    assert b.sessions()[0]["providers"] == [CUDA, CPU] and b.sessions()[0]["threads"] == 6
+
+
+def test_the_flag_wins_over_the_env_for_threads(box):
+    b = box(extra={"VOICEMODE_KOKORO_THREADS": "6"}).start("--provider", "cpu", "--threads", "2")
+    assert b.health()["threads"] == 2
+
+
+# --- the start log (FELIX reads it for its start notes) -----------------------------------
+
+def _lines(text):
+    return [line for line in text.splitlines() if line.strip()]
+
+
+def test_the_first_log_line_names_the_requested_provider_and_threads(box):
+    b = box(available=f"{CUDA},{CPU}").start("--provider", "auto", "--threads", "4")
+    b.health()
+    first = _lines(b.output())[0]
+    assert first == "Kokoro ONNX options: provider requested auto, threads 4"
+
+
+def test_the_provider_line_names_requested_and_threads(box):
+    b = box(available=f"{CUDA},{CPU}").start("--provider", "auto", "--threads", "4")
+    b.health()
+    assert ("Kokoro ONNX provider: CUDAExecutionProvider (requested: auto), threads: 4"
+            in _lines(b.output()))
+
+
+def test_the_provider_line_names_the_fallback_reason_and_default_threads(box):
+    b = box(available=CPU).start("--provider", "auto")
+    b.health()
+    line = next(l for l in _lines(b.output()) if l.startswith("Kokoro ONNX provider:"))
+    assert line.startswith("Kokoro ONNX provider: CPUExecutionProvider (requested: auto, reason: "
+                           "onnxruntime 9.9.9 offers no CUDAExecutionProvider")
+    assert line.endswith("), threads: default")
+
+
+def test_the_default_log_is_unchanged(box):
+    b = box().start()
+    b.health()
+    lines = _lines(b.output())
+    assert not any(l.startswith("Kokoro ONNX options:") for l in lines)
+    assert "Kokoro ONNX provider: CPUExecutionProvider" in lines
+
+
 @pytest.mark.parametrize("value", ["-1", "many"])
 def test_bad_threads_exit_2(box, value):
     code, _, err = box(extra={"VOICEMODE_KOKORO_THREADS": value}).exits()

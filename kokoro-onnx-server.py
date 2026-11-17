@@ -445,6 +445,18 @@ def list_voices():
     return {"object": "list", "data": data}
 
 
+def provider_log_line(provider):
+    """The start log's provider line. Unset options: exactly the line from before them;
+    else with the requested provider, the auto fallback reason and the thread count."""
+    line = f"Kokoro ONNX provider: {provider or 'unknown'}"
+    if _provider_requested is None and not _threads:
+        return line
+    detail = f"requested: {_provider_requested or 'default'}"
+    if _fallback_reason:
+        detail += f", reason: {_fallback_reason}"
+    return f"{line} ({detail}), threads: {_threads or 'default'}"
+
+
 def health_body():
     """/health: as before, plus provider_requested (and with auto fallback_reason) when
     --provider is set and threads when --threads is."""
@@ -615,6 +627,10 @@ def main():
         parser.error(f"--require-gpu means CUDA; it cannot be combined with --provider {provider} "
                      f"(drop one; --provider cuda is the same rule)")
     _provider_requested, _threads = provider, threads
+    if _provider_requested is not None or _threads:
+        # The first log line (FELIX reads it for its start notes); none when unset, as before.
+        print(f"Kokoro ONNX options: provider requested {_provider_requested or 'default'}, "
+              f"threads {_threads or 'default'}", flush=True)
     _model_dir = Path(args.model_dir)
     _de_model_dir = Path(args.de_model_dir or f"{args.model_dir.rstrip('/')}-de-martin")
 
@@ -633,10 +649,7 @@ def main():
         exit_unless_on_gpu(kokoro)
         if kokoro_de is not None:
             exit_unless_on_gpu(kokoro_de, "German Kokoro")
-    print(f"Kokoro ONNX provider: {active_provider(kokoro) or 'unknown'}", flush=True)
-    if _provider_requested is not None or _threads:
-        print(f"  requested provider: {_provider_requested or '(kokoro-onnx default)'}, "
-              f"threads: {_threads or 'onnxruntime default'}", flush=True)
+    print(provider_log_line(active_provider(kokoro)), flush=True)
 
     server = make_server(args.host, args.port)
     print(f"Kokoro ONNX TTS server listening on {args.host}:{args.port}", flush=True)
