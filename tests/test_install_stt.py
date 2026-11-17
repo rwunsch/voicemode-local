@@ -165,7 +165,7 @@ def test_write_stt_config_for_docker_writes_only_the_engine(tmp_path):
 
 # --- install.sh wiring -------------------------------------------------------------
 
-def _install_setup(tmp_path: Path, gpu=True, args=(), stdin="1\nn\n\n"):
+def _install_setup(tmp_path: Path, gpu=True, args=(), stdin="1\nn\n\n", env=None):
     """install.sh up to 'Step 1: System packages', in a fake HOME. docker is a stub
     with no nvidia runtime, so the Docker compute mode is CPU and asks nothing."""
     b = Box(tmp_path, gpu=gpu)
@@ -175,11 +175,11 @@ def _install_setup(tmp_path: Path, gpu=True, args=(), stdin="1\nn\n\n"):
     (repo / "lib").mkdir(parents=True)
     (repo / "install.sh").write_text(text[:cut] + "exit 0\n")
     (repo / "install.sh").chmod(0o755)
-    for name in ("compute.sh", "stt.sh", "tts.sh"):
-        (repo / "lib" / name).write_text((REPO / "lib" / name).read_text())
+    for lib in (REPO / "lib").glob("*.sh"):
+        (repo / "lib" / lib.name).write_text(lib.read_text())
     _stub(b.bin / "docker", 'exit 0')
     done = subprocess.run([str(repo / "install.sh"), *args], input=stdin, capture_output=True, text=True,
-                          env=b.env(), timeout=30)
+                          env=b.env(**(env or {})), timeout=30)
     cfg = b.home / ".voicemode-local/config"
     return done, cfg.read_text() if cfg.exists() else "", b
 
@@ -216,40 +216,79 @@ def test_install_sets_up_the_venv_and_starts_through_the_wrapper():
     assert '--host "$FW_HOST"' in tail and "vm_read_config FASTER_WHISPER_HOST 0.0.0.0" in tail
 
 
-# --- the CPU fallback (STT_CPU_FALLBACK) ---------------------------------------------
+# --- the CPU fallback (STT_CPU_FALLBACK): opt-in ---------------------------------------
+# Robert, 2026-11-17: off unless asked for. The question names the measured costs
+# (2026-11-17, n=3, docs/native-gpu-stt/README.md "CPU fallback").
 
-def test_write_stt_config_turns_the_cpu_fallback_on_and_says_what_it_costs(tmp_path):
+STT_COST_LINES = ("about 142 MB extra disk", "about 260 MiB RAM idle",
+                  "2.5-5 s for a 7.6 s clip on a quiet machine", "23-30 s under heavy load")
+
+
+def test_write_stt_config_leaves_the_cpu_fallback_off_by_default(tmp_path):
     b = Box(tmp_path)
     done = b.bash('vm_write_stt_config faster-whisper "$HOME/fw-venv" small')
-    assert done.returncode == 0, done.stderr
-    assert "STT_CPU_FALLBACK=true\n" in (b.home / ".voicemode-local/config").read_text()
-    out = done.stdout
-    assert "CPU fallback" in out and "2023" in out and "MB" in out
-    assert "--no-cpu-fallback" in out                       # and how to opt out
-
-
-@pytest.mark.parametrize("how", ["flag", "env"])
-def test_the_stt_cpu_fallback_can_be_opted_out(tmp_path, how):
-    b = Box(tmp_path)
-    if how == "flag":
-        done = b.bash('CPU_FALLBACK=false; vm_write_stt_config faster-whisper')
-    else:
-        done = b.bash('vm_write_stt_config faster-whisper', VOICEMODE_CPU_FALLBACK="false")
     assert done.returncode == 0, done.stderr
     assert "STT_CPU_FALLBACK=false\n" in (b.home / ".voicemode-local/config").read_text()
 
 
-def test_install_with_a_gpu_turns_the_stt_cpu_fallback_on(tmp_path):
+def test_the_question_names_the_costs_and_defaults_to_no(tmp_path):
+    b = Box(tmp_path)
+    done = b.bash('vm_choose_stt_cpu_fallback; echo "CHOICE=$STT_CPU_FALLBACK_CHOICE"', stdin="\n")
+    assert done.returncode == 0, done.stderr
+    for line in STT_COST_LINES:
+        assert line in done.stdout, line
+    assert "speech input" in done.stdout and "[y/N]" in done.stdout
+    assert "CHOICE=false" in done.stdout
+
+
+def test_answering_yes_turns_it_on(tmp_path):
+    b = Box(tmp_path)
+    done = b.bash('vm_choose_stt_cpu_fallback; vm_write_stt_config faster-whisper', stdin="y\n")
+    assert done.returncode == 0, done.stderr
+    assert "STT_CPU_FALLBACK=true\n" in (b.home / ".voicemode-local/config").read_text()
+
+
+def test_no_input_at_all_means_off(tmp_path):
+    b = Box(tmp_path)
+    done = b.bash('vm_choose_stt_cpu_fallback < /dev/null; vm_write_stt_config faster-whisper')
+    assert done.returncode == 0, done.stderr
+    assert "STT_CPU_FALLBACK=false\n" in (b.home / ".voicemode-local/config").read_text()
+
+
+@pytest.mark.parametrize("how,value", [("flag", "true"), ("env", "true"), ("flag", "false"), ("env", "false")])
+def test_a_forced_choice_is_not_asked(tmp_path, how, value):
+    b = Box(tmp_path)
+    code = 'vm_choose_stt_cpu_fallback < /dev/null; vm_write_stt_config faster-whisper'
+    done = b.bash(f'CPU_FALLBACK={value}; {code}') if how == "flag" else b.bash(code, VOICEMODE_CPU_FALLBACK=value)
+    assert done.returncode == 0, done.stderr
+    assert "[y/N]" not in done.stdout
+    assert f"STT_CPU_FALLBACK={value}\n" in (b.home / ".voicemode-local/config").read_text()
+
+
+def test_install_with_a_gpu_leaves_the_stt_fallback_off(tmp_path):
     done, cfg, _ = _install_setup(tmp_path)
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert "STT_ENGINE=faster-whisper\n" in cfg and "STT_CPU_FALLBACK=false\n" in cfg
+
+
+@pytest.mark.parametrize("args,env", [(("--cpu-fallback",), {}), ((), {"VOICEMODE_CPU_FALLBACK": "true"})])
+def test_install_turns_the_stt_fallback_on_only_when_asked(tmp_path, args, env):
+    done, cfg, _ = _install_setup(tmp_path, args=args, env=env)
     assert done.returncode == 0, done.stdout + done.stderr
     assert "STT_CPU_FALLBACK=true\n" in cfg
 
 
-def test_install_no_cpu_fallback_flag_turns_it_off(tmp_path):
+def test_install_no_cpu_fallback_is_kept_and_means_off(tmp_path):
     done, cfg, _ = _install_setup(tmp_path, args=("--no-cpu-fallback",))
     assert done.returncode == 0, done.stdout + done.stderr
-    assert "STT_ENGINE=faster-whisper\n" in cfg
     assert "STT_CPU_FALLBACK=false\n" in cfg
+
+
+def test_install_interactive_yes_turns_the_stt_fallback_on(tmp_path):
+    # install mode 1, piper n, STT choice (native), STT fallback y, TTS choice (native), TTS fallback (no)
+    done, cfg, _ = _install_setup(tmp_path, stdin="1\nn\n\ny\n\n\n")
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert "STT_CPU_FALLBACK=true\n" in cfg and "KOKORO_CPU_FALLBACK=false\n" in cfg
 
 
 def test_install_without_a_gpu_writes_no_stt_fallback(tmp_path):

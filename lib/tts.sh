@@ -7,6 +7,7 @@
 #   - vm_setup_kokoro_gpu V       : create venv V with uv and install kokoro-onnx on onnxruntime-gpu
 #   - vm_write_tts_config E [V]   : write KOKORO_ONNX / KOKORO_ONNX_GPU / _VENV / _PORT /
 #                                  KOKORO_CPU_FALLBACK to the config
+#   - vm_choose_tts_cpu_fallback  : sets KOKORO_CPU_FALLBACK_CHOICE (asks, default No)
 #
 # Native GPU Kokoro is kokoro-onnx-server.py from its own venv on CUDA, started through
 # scripts/kokoro-gpu-start.sh with --require-gpu. Like the native STT it needs no Docker
@@ -75,6 +76,20 @@ vm_setup_kokoro_gpu() {
     fi
 }
 
+# Sets KOKORO_CPU_FALLBACK_CHOICE. The figures are measured (2026-11-17, n=3, this machine;
+# docs/native-gpu-tts/README.md "CPU fallback").
+vm_choose_tts_cpu_fallback() {
+    KOKORO_CPU_FALLBACK_CHOICE="$(vm_cpu_fallback_forced)"
+    [ -z "$KOKORO_CPU_FALLBACK_CHOICE" ] || return 0
+    echo ""
+    echo "  Optional: a CPU fallback for speech output (Kokoro on the CPU, port 8882)."
+    echo "    It keeps English speech output working if the GPU server dies or CUDA fails."
+    echo "    Cost: no extra disk (same models and GPU venv), about 450 MiB RAM idle and"
+    echo "    up to about 750 MiB in use. It is slower than real time under load."
+    vm_ask_yes_no "  Turn on the speech output CPU fallback? [y/N]: "
+    KOKORO_CPU_FALLBACK_CHOICE="$VM_ANSWER"
+}
+
 vm_write_tts_config() {
     local engine="$1" venv="${2:-$KOKORO_GPU_DEFAULT_VENV}"
     if [ "$engine" = "native-gpu" ]; then
@@ -82,17 +97,10 @@ vm_write_tts_config() {
         vm_write_config KOKORO_ONNX_GPU true
         vm_write_config KOKORO_ONNX_VENV "$venv"
         vm_write_config KOKORO_ONNX_PORT 8880
-        # vm_cpu_fallback_choice is in lib/stt.sh (sourced first): on unless --no-cpu-fallback.
-        local fallback; fallback="$(vm_cpu_fallback_choice)"
-        vm_write_config KOKORO_CPU_FALLBACK "$fallback"
-        if [ "$fallback" = "true" ]; then
-            # Measured 2026-11-17 (docs/native-gpu-tts/README.md, "CPU fallback").
-            echo "  Speech output CPU fallback: on (Kokoro on the CPU, port 8882, from the same venv)."
-            echo "    Takes over when the GPU Kokoro on 8880 is down. Costs about 450 MB RAM while idle"
-            echo "    (about 750 MB once it has spoken); no extra disk. Off: --no-cpu-fallback"
-        else
-            echo "  Speech output CPU fallback: off (--no-cpu-fallback)"
-        fi
+        # Opt-in: the answer to vm_choose_tts_cpu_fallback, else --cpu-fallback /
+        # VOICEMODE_CPU_FALLBACK (vm_cpu_fallback_forced, lib/stt.sh), else off.
+        local fallback="${KOKORO_CPU_FALLBACK_CHOICE:-$(vm_cpu_fallback_forced)}"
+        vm_write_config KOKORO_CPU_FALLBACK "${fallback:-false}"
     else
         vm_write_config KOKORO_ONNX_GPU false
     fi

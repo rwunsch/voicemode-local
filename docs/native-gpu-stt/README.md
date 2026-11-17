@@ -169,8 +169,16 @@ CUDA, so with it routed after 2022, voice-mode moves on to it when 2022 refuses 
 | `STT_CPU_FALLBACK_PORT` | 2023 | its port |
 | `STT_CPU_FALLBACK_MODEL` | base | its model |
 
-`install.sh` writes `STT_CPU_FALLBACK=true` when it sets up the native GPU engine; opt out with
-`--no-cpu-fallback` or `VOICEMODE_CPU_FALLBACK=false` (then it writes `false`).
+**Opt-in** (Robert, 2026-11-17). When `install.sh` sets up the native GPU engine it asks, default
+No, with the measured costs (2026-11-17, n=3, this machine, see "Cost and model choice" below):
+
+> It keeps speech input working if the GPU engine dies. Cost: about 142 MB extra disk (model
+> cached once), about 260 MiB RAM idle. Speed: 2.5-5 s for a 7.6 s clip on a quiet machine, but
+> 23-30 s under heavy load.
+
+It writes `STT_CPU_FALLBACK=true` only on a yes, `--cpu-fallback`, or
+`VOICEMODE_CPU_FALLBACK=true`; otherwise `false`. A run without input (piped, non-interactive)
+answers No. `--no-cpu-fallback` / `VOICEMODE_CPU_FALLBACK=false` keep it off without asking.
 
 **What runs.** `ensure` and `start` run `scripts/faster-whisper-start.sh <FASTER_WHISPER_VENV>
 --host <FASTER_WHISPER_HOST> --port 2023 --model base --device cpu --compute-type int8`, detached

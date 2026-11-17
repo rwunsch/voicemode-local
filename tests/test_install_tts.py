@@ -195,40 +195,63 @@ def test_install_sets_up_the_venv_starts_through_the_wrapper_and_can_fall_back()
     assert '--download-german' in tail
 
 
-# --- the CPU fallback (KOKORO_CPU_FALLBACK) ------------------------------------------
+# --- the CPU fallback (KOKORO_CPU_FALLBACK): opt-in ------------------------------------
+# Robert, 2026-11-17: off unless asked for. The question names the measured costs
+# (2026-11-17, n=3, docs/native-gpu-tts/README.md "CPU fallback").
 
-def test_write_tts_config_turns_the_cpu_fallback_on_and_says_what_it_costs(tmp_path):
+TTS_COST_LINES = ("no extra disk (same models and GPU venv)", "about 450 MiB RAM idle",
+                  "up to about 750 MiB in use", "slower than real time under load")
+
+
+def test_write_tts_config_leaves_the_cpu_fallback_off_by_default(tmp_path):
     b = Box(tmp_path)
     done = b.bash('vm_write_tts_config native-gpu "$HOME/kg-venv"')
-    assert done.returncode == 0, done.stderr
-    assert "KOKORO_CPU_FALLBACK=true\n" in (b.home / ".voicemode-local/config").read_text()
-    out = done.stdout
-    assert "CPU fallback" in out and "8882" in out and "MB" in out
-    assert "--no-cpu-fallback" in out
-
-
-@pytest.mark.parametrize("how", ["flag", "env"])
-def test_the_kokoro_cpu_fallback_can_be_opted_out(tmp_path, how):
-    b = Box(tmp_path)
-    if how == "flag":
-        done = b.bash('CPU_FALLBACK=false; vm_write_tts_config native-gpu')
-    else:
-        done = b.bash('vm_write_tts_config native-gpu', VOICEMODE_CPU_FALLBACK="false")
     assert done.returncode == 0, done.stderr
     assert "KOKORO_CPU_FALLBACK=false\n" in (b.home / ".voicemode-local/config").read_text()
 
 
-def test_install_with_a_gpu_turns_the_kokoro_cpu_fallback_on(tmp_path):
+def test_the_question_names_the_costs_and_defaults_to_no(tmp_path):
+    done = Box(tmp_path).bash('vm_choose_tts_cpu_fallback; echo "CHOICE=$KOKORO_CPU_FALLBACK_CHOICE"', stdin="\n")
+    assert done.returncode == 0, done.stderr
+    for line in TTS_COST_LINES:
+        assert line in done.stdout, line
+    assert "English speech output" in done.stdout and "[y/N]" in done.stdout
+    assert "CHOICE=false" in done.stdout
+
+
+def test_answering_yes_turns_it_on(tmp_path):
+    b = Box(tmp_path)
+    done = b.bash('vm_choose_tts_cpu_fallback; vm_write_tts_config native-gpu', stdin="yes\n")
+    assert done.returncode == 0, done.stderr
+    assert "KOKORO_CPU_FALLBACK=true\n" in (b.home / ".voicemode-local/config").read_text()
+
+
+@pytest.mark.parametrize("how", ["flag", "env"])
+def test_a_forced_on_is_not_asked(tmp_path, how):
+    b = Box(tmp_path)
+    code = 'vm_choose_tts_cpu_fallback < /dev/null; vm_write_tts_config native-gpu'
+    done = b.bash(f'CPU_FALLBACK=true; {code}') if how == "flag" else b.bash(code, VOICEMODE_CPU_FALLBACK="true")
+    assert "[y/N]" not in done.stdout
+    assert "KOKORO_CPU_FALLBACK=true\n" in (b.home / ".voicemode-local/config").read_text()
+
+
+def test_install_with_a_gpu_leaves_the_kokoro_fallback_off(tmp_path):
     done, cfg, _ = _install_setup(tmp_path, stdin="1\nn\n\n\n")
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert "KOKORO_ONNX_GPU=true\n" in cfg and "KOKORO_CPU_FALLBACK=false\n" in cfg
+
+
+def test_install_cpu_fallback_flag_turns_the_kokoro_fallback_on(tmp_path):
+    done, cfg, _ = _install_setup(tmp_path, args=("--cpu-fallback",), stdin="1\nn\n\n\n")
     assert done.returncode == 0, done.stdout + done.stderr
     assert "KOKORO_CPU_FALLBACK=true\n" in cfg
 
 
-def test_install_no_cpu_fallback_flag_turns_the_kokoro_fallback_off(tmp_path):
-    done, cfg, _ = _install_setup(tmp_path, args=("--no-cpu-fallback",), stdin="1\nn\n\n\n")
+def test_install_interactive_yes_turns_the_kokoro_fallback_on(tmp_path):
+    # install mode 1, piper n, STT choice, STT fallback (no), TTS choice, TTS fallback y
+    done, cfg, _ = _install_setup(tmp_path, stdin="1\nn\n\n\n\ny\n")
     assert done.returncode == 0, done.stdout + done.stderr
-    assert "KOKORO_ONNX_GPU=true\n" in cfg
-    assert "KOKORO_CPU_FALLBACK=false\n" in cfg
+    assert "KOKORO_CPU_FALLBACK=true\n" in cfg and "STT_CPU_FALLBACK=false\n" in cfg
 
 
 def test_install_tts_docker_writes_no_kokoro_fallback(tmp_path):

@@ -157,8 +157,16 @@ fails independently of CUDA, so routed after 8880 it keeps speech output local.
 | `KOKORO_CPU_FALLBACK` | false | `true` runs the CPU twin (only with `KOKORO_ONNX=true` + `KOKORO_ONNX_GPU=true`) |
 | `KOKORO_CPU_FALLBACK_PORT` | 8882 | its port; must differ from `KOKORO_ONNX_PORT` (if equal it is not started, and `ensure`/`start` say so) |
 
-`install.sh` writes `KOKORO_CPU_FALLBACK=true` when it sets up the native GPU Kokoro; opt out
-with `--no-cpu-fallback` or `VOICEMODE_CPU_FALLBACK=false`.
+**Opt-in** (Robert, 2026-11-17). When `install.sh` sets up the native GPU Kokoro it asks, default
+No, with the measured costs (2026-11-17, n=3, this machine, see "Cost" below):
+
+> It keeps English speech output working if the GPU server dies or CUDA fails. Cost: no extra
+> disk (same models and GPU venv), about 450 MiB RAM idle and up to about 750 MiB in use. It is
+> slower than real time under load.
+
+It writes `KOKORO_CPU_FALLBACK=true` only on a yes, `--cpu-fallback`, or
+`VOICEMODE_CPU_FALLBACK=true`; otherwise `false`. A run without input answers No.
+`--no-cpu-fallback` / `VOICEMODE_CPU_FALLBACK=false` keep it off without asking.
 
 **What runs.** `ensure` and `start` run `scripts/kokoro-cpu-start.sh <KOKORO_ONNX_VENV> --port
 8882 --model-dir <install>/models/kokoro --no-download`, detached (`setsid`), pid file

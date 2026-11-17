@@ -7,7 +7,8 @@
 #   - vm_setup_faster_whisper V  : create venv V with uv and install faster-whisper + CUDA libraries
 #   - vm_write_stt_config E [V M] : write STT_ENGINE (and FASTER_WHISPER_VENV / _MODEL /
 #                                  STT_CPU_FALLBACK) to the config
-#   - vm_cpu_fallback_choice      : true | false, the CPU fallbacks (--no-cpu-fallback)
+#   - vm_cpu_fallback_forced      : true | false | "" from --cpu-fallback / VOICEMODE_CPU_FALLBACK
+#   - vm_choose_stt_cpu_fallback  : sets STT_CPU_FALLBACK_CHOICE (asks, default No)
 #
 # The native engine needs no Docker and no sudo: the CUDA libraries come from pip
 # (nvidia-cublas-cu12, nvidia-cudnn-cu12), not from a system CUDA install. Unlike
@@ -69,13 +70,40 @@ vm_setup_faster_whisper() {
     uv pip install --python "$venv/bin/python" "${FASTER_WHISPER_PACKAGES[@]}" || return 1
 }
 
-# The CPU fallbacks (STT_CPU_FALLBACK, KOKORO_CPU_FALLBACK) are on with a native GPU engine
-# unless CPU_FALLBACK (install.sh --no-cpu-fallback) or VOICEMODE_CPU_FALLBACK is false.
-vm_cpu_fallback_choice() {
-    case "${CPU_FALLBACK:-${VOICEMODE_CPU_FALLBACK:-true}}" in
-        false|no|off|0) echo false ;;
-        *) echo true ;;
+# The CPU fallbacks (STT_CPU_FALLBACK, KOKORO_CPU_FALLBACK) are opt-in (Robert, 2026-11-17).
+# vm_cpu_fallback_forced prints true / false when CPU_FALLBACK (install.sh --cpu-fallback,
+# or --no-cpu-fallback, which keeps the default) or VOICEMODE_CPU_FALLBACK decides, else
+# nothing; then the installer asks, default No. No input (a non-interactive run) is No.
+vm_cpu_fallback_forced() {
+    case "${CPU_FALLBACK:-${VOICEMODE_CPU_FALLBACK:-}}" in
+        true|yes|on|1)   echo true ;;
+        false|no|off|0)  echo false ;;
+        *) ;;
     esac
+}
+
+# Ask one y/N question; sets VM_ANSWER to true or false. $1 = the prompt, printed to stdout
+# (read -p prints only on a terminal, so a piped run would not show the question).
+vm_ask_yes_no() {
+    local answer=""
+    printf '%s' "$1"
+    read -r answer || true
+    echo ""
+    case "$answer" in [Yy]|[Yy][Ee][Ss]) VM_ANSWER=true ;; *) VM_ANSWER=false ;; esac
+}
+
+# Sets STT_CPU_FALLBACK_CHOICE. The figures are measured (2026-11-17, n=3, this machine;
+# docs/native-gpu-stt/README.md "CPU fallback").
+vm_choose_stt_cpu_fallback() {
+    STT_CPU_FALLBACK_CHOICE="$(vm_cpu_fallback_forced)"
+    [ -z "$STT_CPU_FALLBACK_CHOICE" ] || return 0
+    echo ""
+    echo "  Optional: a CPU fallback for speech recognition (faster-whisper, base model, port 2023)."
+    echo "    It keeps speech input working if the GPU engine dies."
+    echo "    Cost: about 142 MB extra disk (model cached once), about 260 MiB RAM idle."
+    echo "    Speed: 2.5-5 s for a 7.6 s clip on a quiet machine, but 23-30 s under heavy load."
+    vm_ask_yes_no "  Turn on the speech recognition CPU fallback? [y/N]: "
+    STT_CPU_FALLBACK_CHOICE="$VM_ANSWER"
 }
 
 vm_write_stt_config() {
@@ -84,15 +112,7 @@ vm_write_stt_config() {
     if [ "$engine" = "faster-whisper" ]; then
         vm_write_config FASTER_WHISPER_VENV "$venv"
         vm_write_config FASTER_WHISPER_MODEL "$model"
-        local fallback; fallback="$(vm_cpu_fallback_choice)"
-        vm_write_config STT_CPU_FALLBACK "$fallback"
-        if [ "$fallback" = "true" ]; then
-            # Measured 2026-11-17 (docs/native-gpu-stt/README.md, "CPU fallback").
-            echo "  Speech recognition CPU fallback: on (faster-whisper base on the CPU, port 2023)."
-            echo "    Takes over when the GPU engine on 2022 is down. Costs about 260 MB RAM while idle"
-            echo "    and 142 MB disk for the base model; no extra venv. Off: --no-cpu-fallback"
-        else
-            echo "  Speech recognition CPU fallback: off (--no-cpu-fallback)"
-        fi
+        local fallback="${STT_CPU_FALLBACK_CHOICE:-$(vm_cpu_fallback_forced)}"
+        vm_write_config STT_CPU_FALLBACK "${fallback:-false}"
     fi
 }

@@ -19,7 +19,7 @@
 # Usage:
 #   cd ~/git/voicemode-local
 #   ./install.sh [--openai-key sk-proj-...] [--stt=docker|native-gpu] [--tts=docker|native-gpu]
-#                [--no-cpu-fallback]
+#                [--cpu-fallback]
 #
 #   --stt=docker      keep speech recognition on the Docker whisper even with a GPU
 #                     (same as VOICEMODE_STT=docker)
@@ -27,9 +27,11 @@
 #   --tts=docker      keep speech output on the Docker Kokoro even with a GPU
 #                     (same as VOICEMODE_TTS=docker)
 #   --tts=native-gpu  kokoro-onnx on CUDA in its own venv, on 8880 (recommended with an NVIDIA GPU)
-#   --no-cpu-fallback no CPU fallbacks for the native GPU engines (same as
-#                     VOICEMODE_CPU_FALLBACK=false); by default a CPU Kokoro on 8882 and a
-#                     CPU faster-whisper on 2023 take over when a GPU engine is down
+#   --cpu-fallback    with a native GPU engine, also run its CPU fallback (a CPU Kokoro on
+#                     8882, a CPU faster-whisper on 2023) without asking (same as
+#                     VOICEMODE_CPU_FALLBACK=true). Off by default; asked interactively,
+#                     default No. --no-cpu-fallback (or VOICEMODE_CPU_FALLBACK=false) keeps
+#                     them off without asking.
 
 set -euo pipefail
 
@@ -59,6 +61,7 @@ for arg in "$@"; do
     case $arg in
         --stt=*)        STT_CHOICE="${arg#*=}" ;;
         --tts=*)        TTS_CHOICE="${arg#*=}" ;;
+        --cpu-fallback)    CPU_FALLBACK="true" ;;
         --no-cpu-fallback) CPU_FALLBACK="false" ;;
         --openai-key=*) OPENAI_KEY="${arg#*=}" ;;
         --openai-key)   shift; OPENAI_KEY="${2:-}" ;;
@@ -174,6 +177,10 @@ header "Speech recognition (STT)"
 STT_ENGINE="docker"
 vm_choose_stt_engine || exit 1
 ok "Speech recognition: $STT_ENGINE"
+if [ "$STT_ENGINE" = "faster-whisper" ]; then
+    vm_choose_stt_cpu_fallback
+    ok "Speech recognition CPU fallback: $([ "$STT_CPU_FALLBACK_CHOICE" = true ] && echo on || echo off)"
+fi
 
 # ─── Speech output: native GPU Kokoro (kokoro-onnx on CUDA) or Docker Kokoro ─
 # With an NVIDIA GPU, kokoro-onnx in its own venv on CUDA replaces the Docker Kokoro
@@ -187,6 +194,10 @@ if [ "$TTS_ENGINE" = "native-gpu" ]; then
     KOKORO_ONNX="true"
 fi
 ok "Speech output: $TTS_ENGINE"
+if [ "$TTS_ENGINE" = "native-gpu" ]; then
+    vm_choose_tts_cpu_fallback
+    ok "Speech output CPU fallback: $([ "$KOKORO_CPU_FALLBACK_CHOICE" = true ] && echo on || echo off)"
+fi
 
 # Save config
 cat > "$CONFIG_FILE" << EOF
