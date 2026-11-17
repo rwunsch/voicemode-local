@@ -268,8 +268,16 @@ def exit_unless_on_gpu(kokoro, label="Kokoro"):
     else:
         first = providers[0] if providers else "no provider"
         got = f"the {label} session runs on {first} (providers: {providers})"
+    try:
+        import onnxruntime
+        runtime = (f"onnxruntime {getattr(onnxruntime, '__version__', '?')}; available providers: "
+                   f"{list(onnxruntime.get_available_providers())}")
+    except Exception as error:  # noqa: BLE001 - only a diagnostic line
+        runtime = f"onnxruntime not readable ({error})"
     print(f"Error: --require-gpu: {NO_CUDA_CAUSE}.\n"
           f"  {got}.\n"
+          f"  {runtime}. (1.23.2 failing as well usually means the CUDA libraries were not on\n"
+          f"  LD_LIBRARY_PATH when the server started.)\n"
           f"  Start the server through scripts/kokoro-gpu-start.sh (it puts the venv's nvidia\n"
           f"  libraries on LD_LIBRARY_PATH and sets ONNX_PROVIDER={GPU_PROVIDER}),\n"
           f"  or run without --require-gpu to accept the CPU.",

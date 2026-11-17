@@ -126,6 +126,22 @@ def test_require_gpu_with_a_cpu_session_exits_1_naming_the_cause(tmp_path):
     assert "CPUExecutionProvider" in err          # what it got instead
 
 
+def test_the_message_names_the_onnxruntime_version_and_what_it_offers(tmp_path):
+    """Seen for real 2026-11-17: onnxruntime-gpu 1.23.2 started without the wrapper (no
+    CUDA libraries on the path) also falls back to the CPU. The version line tells that
+    case apart from the 1.32 one, where installing 1.23.2 is the fix."""
+    fake_ort = tmp_path / "fake" / "onnxruntime"
+    fake_ort.mkdir(parents=True)
+    (fake_ort / "__init__.py").write_text(
+        '__version__ = "1.23.2"\n'
+        'def get_available_providers():\n'
+        '    return ["CUDAExecutionProvider", "CPUExecutionProvider"]\n')
+    code, _, err = _exits(tmp_path, "CPUExecutionProvider")
+    assert code == 1
+    assert "onnxruntime 1.23.2" in err
+    assert "['CUDAExecutionProvider', 'CPUExecutionProvider']" in err
+
+
 def test_require_gpu_with_cuda_listed_second_still_exits(tmp_path):
     code, _, err = _exits(tmp_path, "CPUExecutionProvider,CUDAExecutionProvider")
     assert code == 1 and CAUSE in err
