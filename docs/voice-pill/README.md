@@ -495,3 +495,39 @@ Needs Robert (voice, ears, permissions):
   reuses an old pid does not inherit them. A choice saved before v1.1.3 has no start time and
   is dropped once.
 - `VOICEMODE_PILL` is read case-insensitively everywhere (`true`, `True`, `TRUE`).
+
+## Controls, speaker colour and voice preview (2026-11-17)
+
+From one tester's feedback (FE, 2026-11-16, n=1), approved by Robert. Kept close to the
+existing look; no redesign.
+
+- **Labelled controls.** The expanded panel opens with a *Voice controls* group: **Pause /
+  Resume** and **Stop** (or **Wake** between turns), words beside the icons, aria labels, and
+  `aria-pressed` on Pause while paused. Pause stays in place, disabled, between turns, so it is
+  always where it was. Same commands as the top-row buttons (`pause`, `resume`, `stop`, `wake`).
+- **Who is speaking.** The dot's colour comes from `model.js` `indicatorFor`: violet while the
+  assistant speaks, teal while it listens to you, grey for holding and between turns, a hollow
+  ring when paused. The state text beside it always says the same in words, and the dot has an
+  aria label naming the floor session. Colours are CSS tokens (`--speak`, `--listen`,
+  `--neutral`, `--muted`, `--interrupt`); `tests/test_pill_markup.py` holds each to 3:1
+  against the background in light and dark.
+- **Interrupted.** When `barge.count` rises between two snapshots, the dot turns amber and the
+  state reads *Interrupted* for 1.5 s (`interruptFlash`). The first snapshot after a reconnect
+  never flashes; a count that drops (a new day) does not either.
+- **Voice preview.** *▶ Preview* beside the voice list sends `{"cmd":"preview_voice","voice":id}`.
+  The backend asks the first local server in `VOICEMODE_TTS_BASE_URLS` that lists the voice
+  for one fixed sentence in its language (English when there is none for it) as WAV, and plays
+  it in a child process (`voice_pill.py --play-wav`: numpy + sounddevice, as voice-mode
+  plays), so the backend itself stays stdlib only. Answers come back as window lines
+  `{"window":{"preview": state}}`: `loading`, `playing`, `done`, `stopped`, `busy`
+  (`reason`: `turn` or `preview`), `error`, `unavailable` (with `detail`).
+  - Never during a voice turn: refused while the server reports speaking, listening or holding,
+    while paused, or while a session holds the floor; checked again once the sample is made;
+    and cut as soon as a snapshot shows a turn starting. The button rests during a turn.
+  - One at a time. Without numpy or sounddevice beside the backend (or a frozen backend), the
+    answer is `unavailable` with what is missing.
+  - The voice list still applies a voice when you pick it; Preview plays the voice shown. To try
+    voices, pick one and press Preview; the choice takes effect only at the session's next turn.
+
+Not checked yet: the look on a real Windows or Mac window, and sound from the child on a real
+machine (the tests use a fake player and fake TTS servers).
