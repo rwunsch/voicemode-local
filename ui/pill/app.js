@@ -5,6 +5,8 @@
 (function () {
   var M = window.PillModel, $ = function (id) { return document.getElementById(id); };
   var bargePending = null, bargeLastShown = null;
+  var lastBargeCount = null, interruptedUntil = null;   // the Interrupted flash (model.js interruptFlash)
+  var previewAnswer = null;   // the backend's last preview answer, stamped with when it came
   var hidden = false, snapshot = null, lastSeen = null, ui = null, lastMode = null, lastPhase = null, floorPid = null, filled = false;
 
   function send(obj) {
@@ -37,13 +39,15 @@
   }
 
   function render() {
-    var vm = M.viewModel(snapshot, lastSeen, Date.now());
+    var vm = M.viewModel(snapshot, lastSeen, Date.now(), { interruptedUntil: interruptedUntil });
     if (ui) { // local ui wins: it is what the user just chose, and the backend echoes it back
       var mode = ui.minimized ? "dot" : ui.docked ? (ui.tucked ? "tab" : ui.dockOpen ? "docked" : "rail") : ui.expanded ? "expanded" : "pill";
       vm.mode = mode; vm.side = mode === "docked" || mode === "rail" || mode === "tab" ? (ui.side || "right") : null;
     }
     document.body.dataset.mode = vm.mode;
     document.body.dataset.phase = vm.phase;
+    document.body.dataset.tone = vm.indicator.tone;
+    $("orb").setAttribute("aria-label", [vm.indicator.who, vm.indicator.text].filter(Boolean).join(": "));
     $("label").textContent = vm.stateText;
     $("waiting").textContent = vm.waitingText;
     $("sub").textContent = vm.session || "Voice pill";
@@ -63,6 +67,17 @@
     $("main").classList.toggle("stop", vm.main.kind === "stop");
     $("mainWake").hidden = vm.main.kind !== "wake"; $("mainStop").hidden = vm.main.kind !== "stop";
     $("main").title = vm.main.title; $("main").setAttribute("aria-label", vm.main.title);
+    // The panel's labelled controls: always in place, words not icons alone (2026-11-17).
+    var cp = vm.controls.pause, cm = vm.controls.main;
+    $("ctlPause").disabled = !cp.enabled; $("ctlMain").disabled = !cm.enabled;
+    $("ctlPauseIcon").textContent = cp.icon; $("ctlPauseText").textContent = vm.controls.pause.text;
+    $("ctlPause").setAttribute("aria-label", vm.controls.pause.aria);
+    $("ctlPause").setAttribute("aria-pressed", String(vm.controls.pause.pressed));
+    $("ctlMainIcon").textContent = cm.kind === "stop" ? "\u25A0\uFE0E" : "";
+    $("ctlMainText").textContent = vm.controls.main.text;
+    $("ctlMain").setAttribute("aria-label", vm.controls.main.aria); $("ctlMain").title = cm.aria;
+    $("ctlMain").classList.toggle("wake", cm.kind === "wake"); $("ctlMain").classList.toggle("stop", cm.kind === "stop");
+    $("pause").setAttribute("aria-pressed", String(cp.pressed));
     $("pause").hidden = !vm.pause.visible;
     $("pause").textContent = vm.pause.icon;
     $("pause").title = vm.pause.label; $("pause").setAttribute("aria-label", vm.pause.label);
@@ -76,6 +91,11 @@
     $("drag").title = [vm.session, vm.stateText, vm.waitingText].filter(Boolean).join(" \u00b7 ");
     $("tab").textContent = vm.side === "left" ? "\u203A" : "\u2039";
     fill($("voice"), vm.voices, vm.voice); fill($("language"), vm.languages, vm.language); filled = true;
+    var pv = M.previewView(previewAnswer, Date.now(), vm.connected, vm.inTurn);
+    $("preview").disabled = !pv.enabled || !$("voice").value;
+    $("preview").title = pv.title;
+    $("preview").setAttribute("aria-busy", String(pv.pending));
+    $("previewStatus").textContent = pv.text;
     $("bargeRow").style.display = vm.barge.visible ? "" : "none";
     var bs = M.bargeShown(vm.barge.on, bargePending, Date.now());
     bargePending = bs.keep;
@@ -110,10 +130,14 @@
     if (kind === "ignore") return;
     if (kind === "restore") { saveUi({ minimized: false }); return; } // the tray icon was clicked
     if (kind === "dropped") { lastSeen = null; render(); return; }    // backend restarting: say so now
+    if (kind === "preview") { previewAnswer = Object.assign({ at: Date.now() }, s.window); render(); return; }
     if (kind === "window") return;
     var wasStale = lastSeen === null || Date.now() - lastSeen > M.STALE_MS;
     var prevVisible = snapshot ? snapshot.visible : null;
     snapshot = s; lastSeen = Date.now();
+    var count = s.barge && typeof s.barge.count === "number" ? s.barge.count : null;
+    interruptedUntil = M.interruptFlash(wasStale ? null : lastBargeCount, count, lastSeen, interruptedUntil);
+    lastBargeCount = count;
     var h = M.nextHidden(hidden, prevVisible, s.visible, wasStale);
     if (hidden && !h) lastMode = null; // resend the mode so the wrapper shows the window again
     hidden = h;
@@ -124,7 +148,16 @@
   function cmd(c, extra) { return function () { send(Object.assign({ cmd: c }, extra)); }; }
   $("main").onclick = function () { send({ cmd: M.viewModel(snapshot, lastSeen, Date.now()).main.cmd }); };
   $("pause").onclick = function () { send({ cmd: M.viewModel(snapshot, lastSeen, Date.now()).pause.cmd }); };
+  $("ctlPause").onclick = function () { send({ cmd: M.viewModel(snapshot, lastSeen, Date.now()).controls.pause.cmd }); };
+  $("ctlMain").onclick = function () { send({ cmd: M.viewModel(snapshot, lastSeen, Date.now()).controls.main.cmd }); };
   $("dismiss").onclick = function () { send({ cmd: "dismiss" }); hidden = true; send({ window: { mode: "hidden" } }); render(); };
+  // Hear the voice shown in the list; one at a time (the button waits for the answer).
+  $("preview").onclick = function () {
+    if (!$("voice").value) return;
+    previewAnswer = { preview: "loading", voice: $("voice").value, at: Date.now() };
+    send({ cmd: "preview_voice", voice: $("voice").value });
+    render();
+  };
   $("voice").onchange = function () { send({ cmd: "set_voice", voice: this.value }); this.blur(); };
   $("language").onchange = function () {
     // A voice speaks its own language: switch to that language's voice first (the current one if

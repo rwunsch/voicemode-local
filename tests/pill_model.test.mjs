@@ -438,3 +438,140 @@ test("app.js sends the language's voice before the language", async () => {
   const voiceAt = body.indexOf('cmd: "set_voice"'), langAt = body.indexOf('cmd: "set_language"');
   assert.ok(voiceAt >= 0 && langAt > voiceAt, body);
 });
+
+// -- 2026-11-17, a tester's feedback (n=1): controls easy to find, a coloured indicator of who
+// is speaking and when an interruption took effect, a voice preview.
+
+test("labelled controls: Pause and Stop in a turn, text not icon-only, with aria labels", () => {
+  const c = viewModel(snap({ phase: "speaking" }), 0, 0).controls;
+  assert.equal(c.pause.text, "Pause");
+  assert.equal(c.pause.aria, "Pause the voice turn");
+  assert.equal(c.pause.cmd, "pause");
+  assert.equal(c.pause.enabled, true);
+  assert.equal(c.pause.pressed, false);
+  assert.equal(c.main.text, "Stop");
+  assert.equal(c.main.aria, "Stop the voice turn");
+  assert.equal(c.main.cmd, "stop");
+  assert.equal(c.main.enabled, true);
+});
+
+test("labelled controls: paused reads Resume and is shown pressed", () => {
+  const c = viewModel(snap({ phase: "paused" }), 0, 0).controls;
+  assert.deepEqual([c.pause.text, c.pause.aria, c.pause.cmd, c.pause.pressed],
+    ["Resume", "Resume the voice turn", "resume", true]);
+  assert.equal(c.main.text, "Stop");
+});
+
+test("labelled controls: between turns Pause stays in place but disabled; the main one wakes", () => {
+  const c = viewModel(snap({ phase: "working", play: { label: "felix" } }), 0, 0).controls;
+  assert.equal(c.pause.text, "Pause");
+  assert.equal(c.pause.enabled, false);
+  assert.equal(c.main.text, "Wake");
+  assert.equal(c.main.aria, "Wake felix");
+  assert.equal(c.main.cmd, "wake");
+  assert.equal(c.main.enabled, true);
+});
+
+test("labelled controls: disconnected disables both", () => {
+  const c = viewModel(null, null, 5).controls;
+  assert.equal(c.pause.enabled, false);
+  assert.equal(c.main.enabled, false);
+  assert.equal(c.main.text, "Stop");
+});
+
+test("indicator tone per phase, with a text label for every tone", () => {
+  const t = (phase) => viewModel(snap({ phase }), 0, 0).indicator;
+  assert.deepEqual(["speaking", "listening", "holding", "working", "idle", "stopped", "paused"].map((p) => t(p).tone),
+    ["speaking", "listening", "neutral", "neutral", "neutral", "neutral", "muted"]);
+  assert.equal(t("speaking").text, "Assistant speaking");
+  assert.equal(t("listening").text, "Listening to you");
+  assert.equal(t("paused").text, "Paused");
+  for (const p of ["speaking", "listening", "holding", "working", "idle", "stopped", "paused"]) {
+    assert.ok(t(p).text, p);
+  }
+  const off = viewModel(null, null, 5).indicator;
+  assert.deepEqual([off.tone, off.text], ["off", "Disconnected"]);
+});
+
+test("indicator names the floor session", () => {
+  assert.equal(viewModel(snap({ floor: { pid: 1, label: "felix" } }), 0, 0).indicator.who, "felix");
+  assert.equal(viewModel(snap({ floor: null }), 0, 0).indicator.who, "");
+});
+
+test("interruptFlash: a rising count flashes for 1.5 s; first sight, same or lower count does not", () => {
+  const { interruptFlash, FLASH_MS } = model;
+  assert.equal(FLASH_MS, 1500);
+  assert.equal(interruptFlash(3, 4, 10000, null), 11500);
+  assert.equal(interruptFlash(3, 5, 10000, null), 11500);
+  assert.equal(interruptFlash(null, 4, 10000, null), null);   // the first snapshot: nothing new
+  assert.equal(interruptFlash(4, 4, 10000, 9000), 9000);       // unchanged: keep what was set
+  assert.equal(interruptFlash(4, 0, 10000, null), null);       // the day rolled over
+  assert.equal(interruptFlash(4, undefined, 10000, null), null);
+  assert.equal(interruptFlash(4, 5, 10000, 10500), 11500);     // a second one restarts it
+});
+
+test("an interruption shows Interrupted while the flash lasts, then the phase again", () => {
+  const s = snap({ phase: "listening" });
+  const vm = viewModel(s, 0, 1000, { interruptedUntil: 2500 });
+  assert.deepEqual([vm.indicator.tone, vm.indicator.text, vm.stateText], ["interrupted", "Interrupted", "Interrupted"]);
+  const after = viewModel(s, 0, 2500, { interruptedUntil: 2500 });
+  assert.deepEqual([after.indicator.tone, after.stateText], ["listening", "Listening"]);
+  assert.equal(viewModel(null, null, 1000, { interruptedUntil: 2500 }).indicator.tone, "off");
+});
+
+test("a preview answer is its own kind of incoming message", () => {
+  const { incomingKind } = model;
+  assert.equal(incomingKind({ window: { preview: "busy", reason: "turn" } }), "preview");
+  assert.equal(incomingKind({ window: { dropped: "preview_voice" } }), "dropped");
+  assert.equal(incomingKind({ window: { other: 1 } }), "window");
+});
+
+test("previewView: what the preview button and its line say for each answer", () => {
+  const { previewView, PREVIEW_SHOW_MS, PREVIEW_PENDING_MS } = model;
+  const at = 1000;
+  const v = (a, now = at, connected = true) => {
+    const r = previewView(a && Object.assign({ at }, a), now, connected, false);
+    return { text: r.text, pending: r.pending, enabled: r.enabled };
+  };
+  assert.deepEqual(v(null), { text: "", pending: false, enabled: true });
+  assert.deepEqual(v({ preview: "loading", voice: "am_adam" }), { text: "Preparing a sample…", pending: true, enabled: false });
+  assert.deepEqual(v({ preview: "playing", voice: "am_adam" }), { text: "Playing am_adam…", pending: true, enabled: false });
+  assert.deepEqual(v({ preview: "done", voice: "am_adam" }), { text: "", pending: false, enabled: true });
+  assert.equal(v({ preview: "busy", reason: "turn" }).text, "Preview works between voice turns");
+  assert.equal(v({ preview: "busy", reason: "preview" }).text, "A sample is already playing");
+  assert.equal(v({ preview: "stopped" }).text, "Sample stopped: a voice turn started");
+  assert.equal(v({ preview: "unavailable", detail: "no audio output module (sounddevice)" }).text,
+    "Preview unavailable: no audio output module (sounddevice)");
+  assert.equal(v({ preview: "error", detail: "unknown voice: x" }).text, "Preview failed: unknown voice: x");
+  assert.equal(v({ preview: "busy", reason: "turn" }).enabled, true);
+  // a result stays readable for a while, then the line clears
+  assert.equal(v({ preview: "error", detail: "x" }, at + PREVIEW_SHOW_MS - 1).text, "Preview failed: x");
+  assert.equal(v({ preview: "error", detail: "x" }, at + PREVIEW_SHOW_MS).text, "");
+  // a request with no answer frees the button again
+  const lost = v({ preview: "loading" }, at + PREVIEW_PENDING_MS);
+  assert.deepEqual([lost.pending, lost.enabled, lost.text], [false, true, "No answer from the preview"]);
+  // disconnected: no preview
+  assert.equal(v(null, at, false).enabled, false);
+});
+
+test("previewView: the button rests during a voice turn, and says why", () => {
+  const { previewView } = model;
+  const inTurn = previewView(null, 0, true, true);
+  assert.deepEqual([inTurn.enabled, inTurn.title], [false, "Preview works between voice turns"]);
+  const between = previewView(null, 0, true, false);
+  assert.deepEqual([between.enabled, between.title], [true, "Hear a short sample of this voice"]);
+});
+
+test("viewModel says when a voice turn is on, for the preview button", () => {
+  const t = (phase) => viewModel(snap({ phase }), 0, 0).inTurn;
+  assert.deepEqual(["speaking", "listening", "holding", "paused", "working", "idle", "stopped"].map(t),
+    [true, true, true, true, false, false, false]);
+  assert.equal(viewModel(null, null, 5).inTurn, false);
+});
+
+test("app.js sends preview_voice with the voice shown in the list", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const app = await readFile(new URL("../ui/pill/app.js", import.meta.url), "utf8");
+  const body = app.split('$("preview").onclick = function', 2)[1].split("\n  };", 1)[0];
+  assert.ok(body.includes('cmd: "preview_voice", voice: $("voice").value'), body);
+});
