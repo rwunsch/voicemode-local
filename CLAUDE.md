@@ -171,6 +171,7 @@ No need to switch to Piper for German.
 | voicemode-whisper | 9000 | Whisper ASR (Docker) |
 | voicemode-kokoro | 8880 | Kokoro TTS (Docker mode, Kokoro-FastAPI) |
 | kokoro-onnx-server | 8882 | Kokoro TTS (native ONNX). **482 MB measured** — 144 MB venv + 338 MB models. The old "~92MB" here was never measured and was wrong. Set `KOKORO_ONNX=true` + `KOKORO_ONNX_PORT=8882` in `~/.voicemode-local/config`; `ensure` starts it. `--no-download`: a missing model file exits 1 naming it and its URL (FELIX); an unknown voice is a 404 "Voice 'x' not found", no longer a bare 500. Runs ALONGSIDE the Docker Kokoro as the local last resort in the TTS chain — on 8880 it would replace it instead. |
+| kokoro-onnx-server (GPU) | 8880 | Native GPU TTS, **instead of** the Docker Kokoro when `KOKORO_ONNX=true` + `KOKORO_ONNX_GPU=true` (+ `KOKORO_ONNX_PORT=8880`, the installer's choice with an NVIDIA GPU). Same server from its own venv (`KOKORO_ONNX_VENV`, default `~/.voicemode-local/kokoro-gpu-venv`, 3.3 GB measured) via `scripts/kokoro-gpu-start.sh` (CUDA library path + `ONNX_PROVIDER`) with `--require-gpu`: exits 1 unless the session is on CUDAExecutionProvider. Needs `onnxruntime-gpu==1.23.2` and the CPU `onnxruntime` removed (both silently run on the CPU otherwise). `/health` names the provider. Back to Docker: `KOKORO_ONNX_GPU=false`, `KOKORO_ONNX=false`. See `docs/native-gpu-tts/README.md`. |
 | piper-proxy | 8881 | OpenAI-compatible TTS via Piper |
 | voicemode-piper | 10200 | Piper TTS (Docker, optional profile) |
 
