@@ -2061,6 +2061,105 @@ def test_an_unknown_setting_is_an_error_not_a_guess(vn_gpu, monkeypatch):
     assert "auto, on or off" in raised.value.next_step
 
 
+# -- setup asks about the GPU (Robert 2026-11-17: "offer GPU if NVIDIA is available - the user
+# can decide"): interactive, a usable GPU, VOICEMODE_WHISPER_GPU unset or auto. The answer is
+# written to voicemode.env, so the launch computes the same runtime as setup did.
+
+GPU_QUESTION = "Use the NVIDIA GPU for speech recognition? (about 2 GB more) [Y/n] "
+
+
+def _offer(vn, monkeypatch, answers, *, status=None, interactive=True):
+    """offer_gpu with answers typed in turn (EOFError when they run out). Returns the prompts."""
+    _fake_gpu(vn, monkeypatch, status or _status("ok", f"{_GPU}, driver 566.14", _GPU, "566.14"))
+    prompts, queue = [], list(answers)
+
+    def ask(prompt):
+        prompts.append(prompt)
+        if not queue:
+            raise EOFError
+        return queue.pop(0)
+
+    vn.offer_gpu(ask=ask, interactive=interactive)
+    return prompts
+
+
+def _env_text(home):
+    path = home / ".voicemode" / "voicemode.env"
+    return path.read_text(encoding="utf-8") if path.exists() else ""
+
+
+@pytest.mark.parametrize("answer,value", [("", "on"), ("y", "on"), (" Yes ", "on"), ("n", "off"), ("NO", "off")])
+def test_setup_asks_about_the_gpu_and_records_the_answer(vn_gpu, home, monkeypatch, capsys, answer, value):
+    prompts = _offer(vn_gpu, monkeypatch, [answer])
+    assert prompts == [GPU_QUESTION]
+    assert f"VOICEMODE_WHISPER_GPU={value}" in _env_text(home)
+    assert vn_gpu.whisper_choice()["build"] == ("cuda" if value == "on" else "cpu")
+    assert _GPU in capsys.readouterr().err
+
+
+def test_an_unclear_answer_asks_again(vn_gpu, home, monkeypatch):
+    prompts = _offer(vn_gpu, monkeypatch, ["maybe", "n"])
+    assert prompts == [GPU_QUESTION, GPU_QUESTION]
+    assert "VOICEMODE_WHISPER_GPU=off" in _env_text(home)
+
+
+def test_no_answer_at_all_keeps_auto(vn_gpu, home, monkeypatch):
+    _offer(vn_gpu, monkeypatch, [])
+    assert "VOICEMODE_WHISPER_GPU" not in _env_text(home)
+
+
+def test_an_auto_in_voicemode_env_is_asked_and_replaced(vn_gpu, home, monkeypatch):
+    _env_file(home, "VOICEMODE_WHISPER_GPU=auto\n")
+    assert _offer(vn_gpu, monkeypatch, ["n"]) == [GPU_QUESTION]
+    assert _env_text(home) == "VOICEMODE_WHISPER_GPU=off\n"
+
+
+def test_not_interactive_asks_nothing_and_keeps_auto(vn_gpu, home, monkeypatch):
+    assert _offer(vn_gpu, monkeypatch, ["n"], interactive=False) == []
+    assert _env_text(home) == ""
+
+
+def test_interactive_by_default_means_a_console_on_stdin(vn_gpu, home, monkeypatch):
+    monkeypatch.setattr(vn_gpu.sys.stdin, "isatty", lambda: False, raising=False)
+    assert _offer(vn_gpu, monkeypatch, ["n"], interactive=None) == []
+
+
+def test_no_usable_gpu_asks_nothing(vn_gpu, home, monkeypatch):
+    assert _offer(vn_gpu, monkeypatch, ["y"], status=_status("driver_too_old", "driver 470 is older")) == []
+    assert _env_text(home) == ""
+
+
+@pytest.mark.parametrize("where,value", [("file", "on"), ("file", "off"), ("env", "off"), ("env", "auto")])
+def test_a_decided_setting_is_never_asked(vn_gpu, home, monkeypatch, where, value):
+    """on/off anywhere, and auto in the environment (which voicemode.env cannot override)."""
+    if where == "env":
+        monkeypatch.setenv("VOICEMODE_WHISPER_GPU", value)
+    else:
+        _env_file(home, f"VOICEMODE_WHISPER_GPU={value}\n")
+    before = _env_text(home)
+    assert _offer(vn_gpu, monkeypatch, ["n"]) == []
+    assert _env_text(home) == before
+
+
+def test_main_setup_offers_the_gpu_first(vn, home, monkeypatch):
+    order = []
+    monkeypatch.setattr(vn, "offer_gpu", lambda **kwargs: order.append("offer"))
+    monkeypatch.setattr(vn, "setup", lambda root: order.append("setup"))
+    monkeypatch.setattr(vn, "WINDOWS", False)
+    assert vn.main(["setup"]) == 0
+    assert order == ["offer", "setup"]
+
+
+def test_setup_no_questions_asks_nothing(vn, home, monkeypatch):
+    """install.ps1 run non-interactively passes --no-questions: auto stays, nothing waits."""
+    seen = []
+    monkeypatch.setattr(vn, "offer_gpu", lambda **kwargs: seen.append(kwargs))
+    monkeypatch.setattr(vn, "setup", lambda root: None)
+    monkeypatch.setattr(vn, "WINDOWS", False)
+    assert vn.main(["setup", "--no-questions"]) == 0
+    assert seen == [{"interactive": False}]
+
+
 def test_the_runtime_digest_covers_the_whisper_build(vn, monkeypatch):
     cpu = {"build": "cpu", "setting": "auto", "reason": "r"}
     cuda = {"build": "cuda", "setting": "auto", "reason": "r"}
