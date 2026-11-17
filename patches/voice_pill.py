@@ -19,10 +19,16 @@ files are read where upstream keeps them; the pill's own follow the base dir
   ~/.claude/sessions/<pid>.json                    Wake: is the woken session busy yet
                                                    (session_wake, read only)
 
+Voice preview (2026-11-17): {"cmd": "preview_voice", "voice": id} asks the first local TTS
+server that lists the voice for one short sentence and plays it in a child process
+(``voice_pill.py --play-wav``, numpy + sounddevice like voice-mode's own player), so this
+process stays stdlib only. Never while a voice turn is on; answers are window lines.
+
 The conch file formats are those of voice-mode 8.12.0 (conch.py, conch_queue.py).
 Installed as voice_mode/voice_pill.py by patches/apply.sh.
 """
 import errno
+import importlib.util
 import json
 import os
 import platform as _platform
@@ -30,6 +36,7 @@ import queue
 import select
 import signal
 import shutil
+import subprocess
 import sys
 import threading
 import time
@@ -84,6 +91,12 @@ class Context:
         self.barge_running = False        # a worker is applying it (set and cleared under the lock)
         self.barge_lock = threading.Lock()
         self.wake = None                  # the last Wake: label, ok, detail, at, claude_pid
+        self.replies = queue.Queue()      # window lines for the page from worker threads
+        self.preview_lock = threading.Lock()
+        self.preview_running = False      # one preview at a time (set and cleared under the lock)
+        self.preview_thread = None
+        self.preview_proc = None          # the child playing the sample, while it plays
+        self.preview_cut = False          # the guard stopped it: a turn began
 
     base = property(lambda self: Path(self._base) if self._base else st.default_base(),
                     lambda self, v: setattr(self, "_base", v), doc="pill state dir")
@@ -282,7 +295,8 @@ def _fetch_voices(url):
         return json.loads(resp.read().decode("utf-8"))
 
 
-def _local_voice_urls(raw):
+def _local_base_urls(raw):
+    """The local entries of a VOICEMODE_TTS_BASE_URLS value, in order, without a trailing /."""
     urls = []
     for item in (raw or "").split(","):
         item = item.strip()
@@ -291,8 +305,12 @@ def _local_voice_urls(raw):
         except ValueError:
             continue
         if host in LOCAL_HOSTS:
-            urls.append(item.rstrip("/") + "/audio/voices")
+            urls.append(item.rstrip("/"))
     return urls
+
+
+def _local_voice_urls(raw):
+    return [u + "/audio/voices" for u in _local_base_urls(raw)]
 
 
 def _voice_pairs(body):
@@ -538,6 +556,196 @@ def gather(ctx) -> dict:
         german_list=german_voices(ctx.home), voices=voices_by_language(ctx.home))
 
 
+# -- voice preview (2026-11-17) ----------------------------------------------------------------
+# A tester asked to hear a voice before choosing it. One fixed sentence per language, made by
+# the first local TTS server that lists the voice (same discovery as voices_by_language), played
+# by a child process. Never while a turn is on, never over a session's audio: refused before,
+# checked again once the sample is made, and cut by guard_preview when a turn starts.
+
+PREVIEW_SAMPLES = {
+    "English": "Hello, this is how I sound.",
+    "German": "Hallo, so klingt meine Stimme.",
+    "Spanish": "Hola, así suena mi voz.",
+    "French": "Bonjour, voici ma voix.",
+    "Italian": "Ciao, questa è la mia voce.",
+    "Portuguese": "Olá, esta é a minha voz.",
+    "Dutch": "Hallo, zo klinkt mijn stem.",
+    "Polish": "Cześć, tak brzmi mój głos.",
+    "Russian": "Привет, так звучит мой голос.",
+    "Japanese": "こんにちは、これが私の声です。",
+    "Chinese": "你好，这是我的声音。",
+    "Hindi": "नमस्ते, यह मेरी आवाज़ है।",
+    "Korean": "안녕하세요, 이것이 제 목소리입니다.",
+}
+PREVIEW_TTS_TIMEOUT_S = 30.0     # a loaded local Kokoro can be slower than real time
+PREVIEW_PLAY_TIMEOUT_S = 30.0    # one sentence: a player still running by then is stuck
+PREVIEW_MAX_BYTES = 8 << 20
+TURN_PHASES = ("speaking", "listening", "holding", "paused")
+
+
+def preview_text(language) -> str:
+    """The sample sentence for a language; English when there is none for it."""
+    return PREVIEW_SAMPLES.get(language) or PREVIEW_SAMPLES["English"]
+
+
+def preview_owner(voice, home=None):
+    """(base URL, language) of the first local TTS server that lists the voice, else (None, None)."""
+    for base in _local_base_urls(st.setting("VOICEMODE_TTS_BASE_URLS", "", home) or ""):
+        try:
+            pairs = _voice_pairs(_fetch_voices(base + "/audio/voices"))
+        except Exception:  # noqa: BLE001 - a server that is down or odd is skipped
+            continue
+        for v, lang in pairs:
+            if v == voice:
+                return base, lang
+    return None, None
+
+
+def build_tts_request(base, voice, text):
+    body = json.dumps({"model": "tts-1", "input": text, "voice": voice,
+                       "response_format": "wav"}).encode("utf-8")
+    return urllib.request.Request(base.rstrip("/") + "/audio/speech", data=body, method="POST",
+                                  headers={"Content-Type": "application/json"})
+
+
+def _synthesize(req) -> bytes:
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))   # local: no proxy
+    with opener.open(req, timeout=PREVIEW_TTS_TIMEOUT_S) as resp:
+        return resp.read(PREVIEW_MAX_BYTES)
+
+
+def _player_unavailable():
+    """Why no sample can be played from here, or None. Looked up, never imported."""
+    if getattr(sys, "frozen", False):
+        return "this backend has no Python to play audio with"
+    for mod in ("numpy", "sounddevice"):
+        if importlib.util.find_spec(mod) is None:
+            return f"no audio output module ({mod})"
+    return None
+
+
+def _start_player():
+    """A child that plays the WAV it reads on stdin (main --play-wav)."""
+    return subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "--play-wav"],
+                            stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+                            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+
+
+def play_wav_bytes(data) -> int:
+    """Play a 16-bit WAV with sounddevice (voice-mode's own output path). Runs in the child."""
+    import io
+    import wave
+    try:  # parse first: bad input never reaches the audio stack
+        with wave.open(io.BytesIO(data), "rb") as w:
+            if w.getsampwidth() != 2:
+                print("voice_pill: preview is not 16-bit audio", file=sys.stderr)
+                return 2
+            rate, channels = w.getframerate(), w.getnchannels()
+            frames = w.readframes(w.getnframes())
+    except (wave.Error, EOFError) as e:
+        print(f"voice_pill: preview is not a WAV: {e}", file=sys.stderr)
+        return 2
+    import numpy as np
+    import sounddevice as sd
+    sd.play(np.frombuffer(frames, dtype="<i2").reshape(-1, channels), rate)
+    sd.wait()
+    return 0
+
+
+def _turn_active(ctx) -> bool:
+    """A voice turn is on: the server says so, the pill is paused, or a session holds the floor."""
+    status = st._status(ctx.sock)
+    if any(status.get(k) for k in ("speaking", "listening", "holding")):
+        return True
+    if st.is_paused(ctx.base):
+        return True
+    return read_conch(ctx.home).get("holder") is not None
+
+
+def _preview_reply(state, **kw):
+    return {"window": {"preview": state, **kw}}
+
+
+BUSY_TURN = {"preview": "busy", "reason": "turn"}
+
+
+def _preview_worker(ctx, voice):
+    try:
+        base, lang = preview_owner(voice, ctx.home)
+        if base is None:
+            ctx.replies.put(_preview_reply("error", voice=voice,
+                                           detail=f"unknown voice: no local TTS server lists {voice}"))
+            return
+        wav = _synthesize(build_tts_request(base, voice, preview_text(lang or language_from_id(voice))))
+        with ctx.preview_lock:
+            if _turn_active(ctx):   # a turn began while the sample was made
+                ctx.replies.put({"window": dict(BUSY_TURN)})
+                return
+            proc = ctx.preview_proc = _start_player()
+            ctx.preview_cut = False
+        ctx.replies.put(_preview_reply("playing", voice=voice))
+        try:
+            proc.communicate(wav, timeout=PREVIEW_PLAY_TIMEOUT_S)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+            ctx.replies.put(_preview_reply("error", voice=voice, detail="the player did not finish"))
+            return
+        if ctx.preview_cut:
+            ctx.replies.put(_preview_reply("stopped", voice=voice, detail="a voice turn started"))
+        elif proc.returncode == 0:
+            ctx.replies.put(_preview_reply("done", voice=voice))
+        else:
+            ctx.replies.put(_preview_reply("error", voice=voice,
+                                           detail=f"the player exited with {proc.returncode}"))
+    except Exception as e:  # noqa: BLE001 - every preview ends with an answer
+        print(f"voice_pill: preview {voice} failed: {e}", file=sys.stderr, flush=True)
+        ctx.replies.put(_preview_reply("error", voice=voice, detail=str(e)[:200]))
+    finally:
+        with ctx.preview_lock:
+            ctx.preview_proc = None
+            ctx.preview_running = False
+
+
+def _preview(ctx, voice):
+    if not isinstance(voice, str) or not voice.strip():
+        return _preview_reply("error", detail="no voice given")
+    voice = voice.strip()
+    why = _player_unavailable()
+    if why:
+        return _preview_reply("unavailable", detail=why)
+    if _turn_active(ctx):
+        return {"window": dict(BUSY_TURN)}
+    with ctx.preview_lock:
+        if ctx.preview_running:
+            return _preview_reply("busy", reason="preview")
+        ctx.preview_running = True
+        ctx.preview_thread = threading.Thread(target=_preview_worker, args=(ctx, voice), daemon=True,
+                                              name="voice-pill-preview")
+        ctx.preview_thread.start()
+    return _preview_reply("loading", voice=voice)
+
+
+def stop_preview(ctx) -> None:
+    """Stop a playing sample now (a turn began, or the backend is exiting)."""
+    with ctx.preview_lock:
+        proc = ctx.preview_proc
+        if proc is not None and proc.poll() is None:
+            ctx.preview_cut = True
+            try:
+                proc.kill()
+            except OSError:
+                pass
+
+
+def guard_preview(ctx, snap) -> None:
+    """Never over a session's audio: a snapshot showing a turn, or a session talking, cuts it."""
+    if ctx.preview_proc is None:
+        return
+    if snap.get("phase") in TURN_PHASES or any(r.get("state") == "talking" for r in snap.get("sessions") or []):
+        stop_preview(ctx)
+
+
 # -- commands ----------------------------------------------------------------
 
 def _set_override(ctx, floor, **change):
@@ -576,8 +784,9 @@ def _set_barge(ctx, on: bool) -> None:
             ctx.barge_thread.start()
 
 
-def handle_command(msg, ctx=None) -> None:
-    """Apply one command. Anything malformed or unknown is ignored."""
+def handle_command(msg, ctx=None):
+    """Apply one command. Anything malformed or unknown is ignored. Returns a line for the
+    page ({"window": ...}) when the command has an answer, else None."""
     ctx = ctx or Context()
     if not isinstance(msg, dict):
         return
@@ -629,6 +838,9 @@ def handle_command(msg, ctx=None) -> None:
             _play(ctx)
     elif cmd == "save_ui" and isinstance(msg.get("ui"), dict):
         st.save_ui(msg["ui"], ctx.base)
+    elif cmd == "preview_voice":
+        return _preview(ctx, msg.get("voice"))
+    return None
 
 
 # -- process -----------------------------------------------------------------
@@ -666,8 +878,21 @@ def _release_pause(ctx):
         st.send_control(ctx.sock, "resume")
 
 
+def _write_replies(ctx, out) -> None:
+    while True:
+        try:
+            line = ctx.replies.get_nowait()
+        except queue.Empty:
+            return
+        out.write(json.dumps(line) + "\n")
+        out.flush()
+
+
 def _emit(ctx, out) -> float:
     snap = gather(ctx)
+    if ctx is not None:
+        guard_preview(ctx, snap)
+        _write_replies(ctx, out)
     out.write(json.dumps(snap) + "\n")
     out.flush()
     return TURN_INTERVAL_S if snap["phase"] in ("speaking", "listening", "holding") else IDLE_INTERVAL_S
@@ -747,7 +972,9 @@ def run_stdio(ctx, stdin_fd=0, out=None):
             while b"\n" in buf:
                 line, buf = buf.split(b"\n", 1)
                 try:
-                    handle_command(json.loads(line), ctx)
+                    reply = handle_command(json.loads(line), ctx)
+                    if reply:
+                        ctx.replies.put(reply)
                 except Exception as e:  # one bad command must not end the pill
                     print(f"voice_pill: command failed: {e}", file=sys.stderr)
                 sent = True
@@ -775,6 +1002,8 @@ def _log_prune(msg: str) -> None:
 
 
 def main(argv=None) -> int:
+    if argv and argv[0] == "--play-wav":   # the preview's child: play stdin, then exit
+        return play_wav_bytes(sys.stdin.buffer.read())
     ctx = Context()
     print(f"voice_pill: started pid={os.getpid()} base={ctx.base} home={ctx.home} sock={ctx.sock} "
           f"TZ={os.environ.get('TZ', '')}", file=sys.stderr, flush=True)
@@ -797,6 +1026,7 @@ def main(argv=None) -> int:
         if not (st._on_windows() and e.errno == errno.EINVAL):
             raise
     finally:
+        stop_preview(ctx)
         _release_pause(ctx)
         st._unlink(alive_file)
         release_lock(lock)

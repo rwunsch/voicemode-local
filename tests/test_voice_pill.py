@@ -1122,3 +1122,365 @@ def test_a_voice_is_given_its_own_language_not_just_english_or_german():
     assert vp.voice_language("dm_martin") == "German" and vp.voice_language("p_de_eva") == "German"
     assert vp.voice_language("af_sky") == "English" and vp.voice_language("bm_george") == "English"
     assert vp.voice_language("xx_unknown") == "English" and vp.voice_language(None) == "English"
+
+
+# -- voice preview (2026-11-17, a tester's feedback, n=1) -------------------------------------
+# The page sends {"cmd": "preview_voice", "voice": id}. The backend synthesizes one short
+# sentence in the voice's language through the first local TTS server that lists the voice and
+# plays it in a child process, never while a voice turn is active. Answers are window messages:
+# {"window": {"preview": "loading"|"playing"|"done"|"stopped"|"busy"|"error"|"unavailable"}}.
+
+import io
+import wave
+
+
+def _wav(frames=240, rate=24000):
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(rate)
+        w.writeframes(b"\x01\x00" * frames)
+    return buf.getvalue()
+
+
+class FakePlayer:
+    """Stands in for the child process that plays the WAV."""
+
+    def __init__(self, rc=0, hold=None):
+        self.rc, self.hold, self.got, self.killed, self.returncode = rc, hold, None, False, None
+
+    def communicate(self, data=None, timeout=None):
+        self.got = data
+        if self.hold is not None:
+            self.hold.wait(5)
+        self.returncode = -9 if self.killed else self.rc
+        return None, None
+
+    def poll(self):
+        return self.returncode
+
+    def kill(self):
+        self.killed = True
+        if self.hold is not None:
+            self.hold.set()
+
+    def wait(self, timeout=None):
+        return self.returncode
+
+
+@pytest.fixture
+def players(monkeypatch):
+    made = []
+
+    def start():
+        p = FakePlayer()
+        made.append(p)
+        return p
+    monkeypatch.setattr(vp, "_start_player", start)
+    monkeypatch.setattr(vp, "_player_unavailable", lambda: None)
+    return made
+
+
+@pytest.fixture
+def tts_servers():
+    """Fake local TTS servers: GET /v1/audio/voices answers the given body, POST
+    /v1/audio/speech records the JSON body and answers a short WAV."""
+    started = []
+
+    def start(voices_body, on_speech=None):
+        posts = []
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def _send(self, code, data, ctype):
+                self.send_response(code)
+                self.send_header("Content-Type", ctype)
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+            def do_GET(self):
+                if self.path == "/v1/audio/voices":
+                    self._send(200, json.dumps(voices_body).encode(), "application/json")
+                else:
+                    self._send(404, b"", "text/plain")
+
+            def do_POST(self):
+                body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+                posts.append({"path": self.path, "ctype": self.headers.get("Content-Type"),
+                              "json": json.loads(body)})
+                if on_speech:
+                    on_speech()
+                self._send(200, _wav(), "audio/wav")
+        httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        httpd.daemon_threads = True
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        started.append(httpd)
+        return httpd.server_address[1], posts
+
+    yield start
+    for httpd in started:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+PREVIEW_REAL_FETCH = vp._fetch_voices
+
+
+@pytest.fixture
+def preview_ctx(ctx, monkeypatch):
+    """ctx, with the real voice fetch (fake servers only) and no proxy in the way."""
+    monkeypatch.setattr(vp, "_fetch_voices", PREVIEW_REAL_FETCH)
+    for key in ("VOICEMODE_TTS_BASE_URLS", "http_proxy", "HTTP_PROXY"):
+        monkeypatch.delenv(key, raising=False)
+    return ctx
+
+
+def _finish(ctx):
+    t = getattr(ctx, "preview_thread", None)
+    if t is not None:
+        t.join(10)
+        assert not t.is_alive()
+    out = []
+    while not ctx.replies.empty():
+        out.append(ctx.replies.get_nowait())
+    return out
+
+
+def _states(replies):
+    return [r["window"]["preview"] for r in replies]
+
+
+def _wait_for(made):
+    deadline = time.time() + 5
+    while not made and time.time() < deadline:
+        time.sleep(0.02)
+    assert made
+
+
+def test_preview_sample_is_one_short_sentence_per_language_with_english_fallback():
+    en = vp.preview_text("English")
+    assert en and en.endswith(".") and len(en) < 80
+    assert vp.preview_text("German") != en and "Stimme" in vp.preview_text("German")
+    assert vp.preview_text("Spanish") != en and "voz" in vp.preview_text("Spanish")
+    for lang in ("French", "Italian", "Portuguese", "Dutch", "Polish", "Russian", "Japanese",
+                 "Chinese", "Hindi", "Korean"):
+        assert vp.preview_text(lang) not in ("", en), lang
+    assert vp.preview_text("Klingon") == en
+    assert vp.preview_text(None) == en
+
+
+@pytest.mark.parametrize("msg", [{"cmd": "preview_voice"}, {"cmd": "preview_voice", "voice": ""},
+                                 {"cmd": "preview_voice", "voice": 7}])
+def test_preview_without_a_voice_is_an_error(preview_ctx, players, msg):
+    reply = vp.handle_command(msg, preview_ctx)
+    assert reply["window"]["preview"] == "error"
+    assert players == [] and getattr(preview_ctx, "preview_thread", None) is None
+
+
+def test_preview_of_a_voice_no_local_server_lists_is_an_error(preview_ctx, players, tts_servers, monkeypatch):
+    port, posts = tts_servers({"voices": ["af_sky"]})
+    monkeypatch.setenv("VOICEMODE_TTS_BASE_URLS", f"http://127.0.0.1:{port}/v1")
+    reply = vp.handle_command({"cmd": "preview_voice", "voice": "zz_nobody"}, preview_ctx)
+    assert reply == {"window": {"preview": "loading", "voice": "zz_nobody"}}
+    replies = _finish(preview_ctx)
+    assert _states(replies) == ["error"]
+    assert "unknown voice" in replies[0]["window"]["detail"]
+    assert posts == [] and players == []
+
+
+def test_preview_builds_the_tts_request_on_the_first_server_that_lists_the_voice(
+        preview_ctx, players, tts_servers, monkeypatch):
+    kokoro, kposts = tts_servers({"voices": ["af_sky"]})
+    piper, pposts = tts_servers({"data": [{"id": "p_de_thorsten", "language_name": "German"}]})
+    piper2, p2posts = tts_servers({"data": [{"id": "p_de_thorsten", "language_name": "German"}]})
+    monkeypatch.setenv("VOICEMODE_TTS_BASE_URLS", f"https://api.openai.com/v1,http://127.0.0.1:{kokoro}/v1,"
+                       f"http://localhost:{piper}/v1/,http://127.0.0.1:{piper2}/v1")
+    reply = vp.handle_command({"cmd": "preview_voice", "voice": "p_de_thorsten"}, preview_ctx)
+    assert reply["window"]["preview"] == "loading"
+    replies = _finish(preview_ctx)
+    assert _states(replies) == ["playing", "done"]
+    assert kposts == [] and p2posts == []
+    assert pposts == [{"path": "/v1/audio/speech", "ctype": "application/json",
+                       "json": {"model": "tts-1", "input": vp.preview_text("German"),
+                                "voice": "p_de_thorsten", "response_format": "wav"}}]
+    assert len(players) == 1 and players[0].got == _wav()
+
+
+def test_preview_language_falls_back_to_the_voice_id(preview_ctx, players, tts_servers, monkeypatch):
+    port, posts = tts_servers({"voices": ["ef_dora"]})
+    monkeypatch.setenv("VOICEMODE_TTS_BASE_URLS", f"http://127.0.0.1:{port}/v1")
+    vp.handle_command({"cmd": "preview_voice", "voice": "ef_dora"}, preview_ctx)
+    _finish(preview_ctx)
+    assert posts[0]["json"]["input"] == vp.preview_text("Spanish")
+
+
+def test_preview_is_busy_while_a_session_holds_the_floor(preview_ctx, players, child):
+    write_conch(preview_ctx, child.pid)
+    reply = vp.handle_command({"cmd": "preview_voice", "voice": "af_sky"}, preview_ctx)
+    assert reply == {"window": {"preview": "busy", "reason": "turn"}}
+    assert players == [] and getattr(preview_ctx, "preview_thread", None) is None
+
+
+@pytest.mark.parametrize("status", [{"speaking": True}, {"listening": True}, {"holding": True}])
+def test_preview_is_busy_while_the_server_says_a_turn_is_on(preview_ctx, players, status):
+    c = FakeControl(preview_ctx.sock, status=status)
+    try:
+        reply = vp.handle_command({"cmd": "preview_voice", "voice": "af_sky"}, preview_ctx)
+    finally:
+        c.close()
+    assert reply["window"] == {"preview": "busy", "reason": "turn"}
+    assert players == []
+
+
+def test_preview_is_busy_while_paused(preview_ctx, players):
+    st.set_paused(True, os.getpid(), preview_ctx.base)
+    reply = vp.handle_command({"cmd": "preview_voice", "voice": "af_sky"}, preview_ctx)
+    assert reply["window"] == {"preview": "busy", "reason": "turn"}
+
+
+def test_one_preview_at_a_time(preview_ctx, tts_servers, monkeypatch):
+    hold = threading.Event()
+    made = []
+    monkeypatch.setattr(vp, "_player_unavailable", lambda: None)
+    monkeypatch.setattr(vp, "_start_player", lambda: made.append(FakePlayer(hold=hold)) or made[-1])
+    port, posts = tts_servers({"voices": ["af_sky"]})
+    monkeypatch.setenv("VOICEMODE_TTS_BASE_URLS", f"http://127.0.0.1:{port}/v1")
+    assert vp.handle_command({"cmd": "preview_voice", "voice": "af_sky"}, preview_ctx)["window"]["preview"] == "loading"
+    _wait_for(made)
+    second = vp.handle_command({"cmd": "preview_voice", "voice": "af_sky"}, preview_ctx)
+    assert second["window"] == {"preview": "busy", "reason": "preview"}
+    hold.set()
+    _finish(preview_ctx)
+    assert len(posts) == 1 and len(made) == 1
+    # done: the next one may start
+    assert vp.handle_command({"cmd": "preview_voice", "voice": "af_sky"}, preview_ctx)["window"]["preview"] == "loading"
+    _finish(preview_ctx)
+
+
+def test_nothing_plays_when_a_turn_starts_while_the_sample_is_made(preview_ctx, players, tts_servers, child, monkeypatch):
+    port, posts = tts_servers({"voices": ["af_sky"]}, on_speech=lambda: write_conch(preview_ctx, child.pid))
+    monkeypatch.setenv("VOICEMODE_TTS_BASE_URLS", f"http://127.0.0.1:{port}/v1")
+    vp.handle_command({"cmd": "preview_voice", "voice": "af_sky"}, preview_ctx)
+    replies = _finish(preview_ctx)
+    assert len(posts) == 1
+    assert _states(replies) == ["busy"] and replies[0]["window"]["reason"] == "turn"
+    assert players == []
+
+
+def test_a_turn_starting_during_playback_cuts_the_preview(preview_ctx, tts_servers, monkeypatch):
+    hold = threading.Event()
+    made = []
+    monkeypatch.setattr(vp, "_player_unavailable", lambda: None)
+    monkeypatch.setattr(vp, "_start_player", lambda: made.append(FakePlayer(hold=hold)) or made[-1])
+    port, _ = tts_servers({"voices": ["af_sky"]})
+    monkeypatch.setenv("VOICEMODE_TTS_BASE_URLS", f"http://127.0.0.1:{port}/v1")
+    vp.handle_command({"cmd": "preview_voice", "voice": "af_sky"}, preview_ctx)
+    _wait_for(made)
+    deadline = time.time() + 5
+    while preview_ctx.preview_proc is None and time.time() < deadline:
+        time.sleep(0.02)
+    vp.guard_preview(preview_ctx, {"phase": "working", "sessions": [{"state": "working"}]})
+    assert not made[0].killed                       # between turns: it plays on
+    vp.guard_preview(preview_ctx, {"phase": "speaking", "sessions": []})
+    assert made[0].killed
+    replies = _finish(preview_ctx)
+    assert _states(replies) == ["playing", "stopped"]
+
+
+def test_a_session_taking_the_floor_cuts_the_preview_too(preview_ctx):
+    p = FakePlayer()
+    preview_ctx.preview_proc = p
+    vp.guard_preview(preview_ctx, {"phase": "working", "sessions": [{"state": "talking"}]})
+    assert p.killed
+
+
+def test_stop_preview_on_exit_kills_a_running_player(preview_ctx):
+    p = FakePlayer()
+    preview_ctx.preview_proc = p
+    vp.stop_preview(preview_ctx)
+    assert p.killed
+
+
+def test_preview_says_unavailable_when_nothing_can_play(preview_ctx, monkeypatch):
+    monkeypatch.setattr(vp, "_player_unavailable", lambda: "no audio output module (sounddevice)")
+    reply = vp.handle_command({"cmd": "preview_voice", "voice": "af_sky"}, preview_ctx)
+    assert reply == {"window": {"preview": "unavailable", "detail": "no audio output module (sounddevice)"}}
+    assert getattr(preview_ctx, "preview_thread", None) is None
+
+
+def test_a_failed_synthesis_is_an_error_not_a_hang(preview_ctx, players, monkeypatch):
+    monkeypatch.setattr(vp, "preview_owner", lambda voice, home=None: ("http://127.0.0.1:9/v1", "English"))
+
+    def refuse(req):
+        raise OSError("connection refused")
+    monkeypatch.setattr(vp, "_synthesize", refuse)
+    vp.handle_command({"cmd": "preview_voice", "voice": "af_sky"}, preview_ctx)
+    replies = _finish(preview_ctx)
+    assert _states(replies) == ["error"] and "connection refused" in replies[0]["window"]["detail"]
+    assert players == []
+
+
+def test_a_player_that_fails_is_reported(preview_ctx, tts_servers, monkeypatch):
+    monkeypatch.setattr(vp, "_player_unavailable", lambda: None)
+    monkeypatch.setattr(vp, "_start_player", lambda: FakePlayer(rc=1))
+    port, _ = tts_servers({"voices": ["af_sky"]})
+    monkeypatch.setenv("VOICEMODE_TTS_BASE_URLS", f"http://127.0.0.1:{port}/v1")
+    vp.handle_command({"cmd": "preview_voice", "voice": "af_sky"}, preview_ctx)
+    assert _states(_finish(preview_ctx)) == ["playing", "error"]
+
+
+def test_play_wav_hands_the_samples_to_sounddevice(monkeypatch):
+    calls = []
+    fake_sd = types.SimpleNamespace(play=lambda data, rate: calls.append(("play", data.shape, rate)),
+                                    wait=lambda: calls.append(("wait",)))
+    monkeypatch.setitem(sys.modules, "sounddevice", fake_sd)
+    assert vp.play_wav_bytes(_wav(frames=240, rate=22050)) == 0
+    assert calls == [("play", (240, 1), 22050), ("wait",)]
+
+
+def test_player_unavailable_names_what_is_missing(monkeypatch):
+    import importlib.util as iu
+    real = iu.find_spec
+    monkeypatch.setattr(iu, "find_spec", lambda name, *a: None if name == "sounddevice" else real(name, *a))
+    assert "sounddevice" in vp._player_unavailable()
+
+
+def test_the_stdio_loop_writes_the_preview_answer(tmp_path):
+    env = {**os.environ, "HOME": str(tmp_path), "VOICEMODE_BASE_DIR": str(tmp_path / "pill")}
+    env.pop("VOICEMODE_CONTROL_SOCKET", None)
+    p = subprocess.Popen([sys.executable, str(PATCHES / "voice_pill.py"), "--stdio"],
+                         stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                         stderr=subprocess.PIPE, env=env, text=True)
+    try:
+        json.loads(p.stdout.readline())
+        p.stdin.write(json.dumps({"cmd": "preview_voice", "voice": 5}) + "\n")
+        p.stdin.flush()
+        got = None
+        for _ in range(4):
+            line = json.loads(p.stdout.readline())
+            if "window" in line:
+                got = line
+                break
+        assert got and got["window"]["preview"] == "error"
+        p.stdin.close()
+        assert p.wait(timeout=5) == 0
+    finally:
+        if p.poll() is None:
+            p.kill()
+            p.wait()
+
+
+def test_the_play_wav_child_rejects_bad_input_before_touching_audio(tmp_path):
+    """The real child entry point: no WAV on stdin gives a non-zero exit, and sounddevice is
+    never imported (a shim that would exit 99 stands first on the path)."""
+    shim = tmp_path / "shim"
+    shim.mkdir()
+    (shim / "sounddevice.py").write_text("raise SystemExit(99)\n")
+    env = {**os.environ, "PYTHONPATH": str(shim)}
+    out = subprocess.run([sys.executable, str(PATCHES / "voice_pill.py"), "--play-wav"],
+                         input=b"not a wav", capture_output=True, env=env, timeout=30)
+    assert out.returncode not in (0, 99), out
