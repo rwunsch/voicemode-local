@@ -501,6 +501,8 @@ Needs Robert (voice, ears, permissions):
   A name the pill does not know is ignored. Unset or blank: every language the local TTS
   servers offer. A session already speaking an unlisted language keeps that one entry, so the
   menu shows its real value. (Tested: English, case, spaces, an unknown name; 2026-11-17.)
+- **Experimental voices are hidden** (see "Languages and quality" below): a language whose voices
+  the server marks experimental is offered only when `VOICEMODE_PILL_LANGUAGES` names it.
 - **Push-to-talk keys** are shown only where a listener runs. `VOICEMODE_PTT_ENABLED` decides
   when it says yes or no. Unset: on a Mac, while `voicemode-mcp`'s listener lives
   (`~/.voicemode/run/ptt-listener.pid`); on Windows and Linux, shown.
@@ -508,6 +510,27 @@ Needs Robert (voice, ears, permissions):
   reuses an old pid does not inherit them. A choice saved before v1.1.3 has no start time and
   is dropped once.
 - `VOICEMODE_PILL` is read case-insensitively everywhere (`true`, `True`, `TRUE`).
+
+## Languages and quality (2026-11-17)
+
+`kokoro-onnx-server.py` answers `GET /v1/audio/voices` with `"quality": "good"` or
+`"experimental"` per voice (plus a short dated `quality_note` for experimental ones). The
+server phonemises every language with espeak-ng only (kokoro-onnx 0.6.1 has no misaki), which
+cannot do Japanese or Chinese well. The pill hides experimental voices by default.
+
+| Language | Status | Evidence (round trip: speak a sentence, transcribe it back with the language set) | Source |
+|---|---|---|---|
+| English, Spanish, French, Italian, Portuguese, German | good | 98-100 % of characters matched (n=1 each; Spanish and French also on our server, n=1) | FELIX-voice (kokoro-onnx 0.4.9, whisper.cpp base), 2026-11-17; ours |
+| Hindi | good, weakly judged | Every word matched what the recogniser wrote; it wrote Urdu script (its choice). Judged only by whether the recogniser's words matched; no native speaker listened. n=1 | FELIX-voice; ours, 2026-11-17 |
+| Japanese | experimental | 15.5 s of audio for a 5 s sentence, nonsense transcript (n=1); ours: 10.3 s for about 3 s of speech, gibberish (n=1). Docker Kokoro-FastAPI v0.2.0 also broken, 17.4 s (n=1, default request; its lang_code option not tried) | FELIX-voice; ours, 2026-11-17 |
+| Chinese | experimental | Fragments with wrong words (n=1 on each machine). Docker Kokoro-FastAPI v0.2.0: 15.1 s of nonsense (n=1) | FELIX-voice; ours, 2026-11-17 |
+
+The marks come from n=1 round trips, not a larger sample. Piper voices are good by default.
+
+**Opt-in rule.** A language named in `VOICEMODE_PILL_LANGUAGES` (for example `English,Japanese`)
+is shown with its experimental voices. Unset or blank: experimental voices are hidden. A server
+that gives no quality (Kokoro-FastAPI answers `{"voices": [ids]}`) is classed by the voice id's
+first letter: `j` and `z` are experimental. An unknown quality value counts as good.
 
 ## Controls, speaker colour and voice preview (2026-11-17)
 
