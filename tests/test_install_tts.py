@@ -257,3 +257,109 @@ def test_install_interactive_yes_turns_the_kokoro_fallback_on(tmp_path):
 def test_install_tts_docker_writes_no_kokoro_fallback(tmp_path):
     _, cfg, _ = _install_setup(tmp_path, args=("--tts=docker",), stdin="1\nn\n\n")
     assert "KOKORO_CPU_FALLBACK" not in cfg
+
+
+# --- the provider (KOKORO_PROVIDER): Robert, 2026-11-17 ------------------------------------
+# "users should be able to decide by install and configuration". With the GPU engine the
+# installer asks auto / cpu / cuda (default auto, also with no input); directml and coreml
+# are never offered (never run by us) but are accepted when forced. Forced by
+# --kokoro-provider <name> / --kokoro-provider=<name> or VOICEMODE_KOKORO_PROVIDER. Without
+# the GPU engine nothing is asked and nothing written unless forced. KOKORO_THREADS is never
+# asked; with the GPU engine it is written as 0 (= onnxruntime's default) so the key is in
+# the file to edit later.
+
+PROVIDER_COST_LINES = ("about 3.3 GB", "144 MB", "4.6 s", "63.7 s")
+
+
+def test_the_provider_question_defaults_to_auto_and_names_costs(tmp_path):
+    done = Box(tmp_path).bash('TTS_ENGINE=native-gpu; vm_choose_kokoro_provider; '
+                              'echo "CHOICE=$KOKORO_PROVIDER_CHOICE"', stdin="\n")
+    assert done.returncode == 0, done.stderr
+    assert "CHOICE=auto" in done.stdout
+    for line in PROVIDER_COST_LINES:
+        assert line in done.stdout, line
+    out = done.stdout.lower()
+    assert "auto" in out and "cpu" in out and "cuda" in out
+    assert "directml" not in out and "coreml" not in out
+    assert "~/.voicemode-local/config" in done.stdout
+
+
+def test_no_input_is_auto(tmp_path):
+    done = Box(tmp_path).bash('TTS_ENGINE=native-gpu; vm_choose_kokoro_provider < /dev/null; '
+                              'echo "CHOICE=$KOKORO_PROVIDER_CHOICE"')
+    assert "CHOICE=auto" in done.stdout
+
+
+@pytest.mark.parametrize("answer,choice", [("2", "cpu"), ("3", "cuda"), ("1", "auto")])
+def test_the_provider_answers(tmp_path, answer, choice):
+    done = Box(tmp_path).bash('TTS_ENGINE=native-gpu; vm_choose_kokoro_provider; '
+                              'echo "CHOICE=$KOKORO_PROVIDER_CHOICE"', stdin=f"{answer}\n")
+    assert f"CHOICE={choice}" in done.stdout
+
+
+def test_without_the_gpu_engine_nothing_is_asked(tmp_path):
+    done = Box(tmp_path).bash('TTS_ENGINE=docker; vm_choose_kokoro_provider < /dev/null; '
+                              'echo "CHOICE=[$KOKORO_PROVIDER_CHOICE]"')
+    assert "CHOICE=[]" in done.stdout and "Choice" not in done.stdout
+
+
+@pytest.mark.parametrize("value", ["cuda", "cpu", "directml", "coreml", "auto"])
+def test_a_forced_provider_is_not_asked(tmp_path, value):
+    done = Box(tmp_path).bash('TTS_ENGINE=native-gpu; vm_choose_kokoro_provider < /dev/null; '
+                              'echo "CHOICE=$KOKORO_PROVIDER_CHOICE"', VOICEMODE_KOKORO_PROVIDER=value)
+    assert f"CHOICE={value}" in done.stdout and "Choice [1]" not in done.stdout
+
+
+def test_an_unknown_forced_provider_fails(tmp_path):
+    done = Box(tmp_path).bash('KOKORO_PROVIDER_FORCED=tpu; vm_choose_kokoro_provider < /dev/null')
+    assert done.returncode != 0
+    assert "tpu" in done.stdout + done.stderr
+
+
+def test_write_tts_config_writes_the_provider_and_threads_key(tmp_path):
+    b = Box(tmp_path)
+    b.bash('KOKORO_PROVIDER_CHOICE=auto; vm_write_tts_config native-gpu')
+    text = (b.home / ".voicemode-local/config").read_text()
+    assert "KOKORO_PROVIDER=auto\n" in text and "KOKORO_THREADS=0\n" in text
+
+
+def test_write_tts_config_keeps_an_edited_threads_value(tmp_path):
+    b = Box(tmp_path)
+    cfg = b.home / ".voicemode-local/config"
+    cfg.parent.mkdir(parents=True)
+    cfg.write_text("KOKORO_THREADS=4\n")
+    b.bash('KOKORO_PROVIDER_CHOICE=cpu; vm_write_tts_config native-gpu')
+    text = cfg.read_text()
+    assert "KOKORO_THREADS=4\n" in text and text.count("KOKORO_THREADS=") == 1
+
+
+def test_install_with_a_gpu_writes_provider_auto(tmp_path):
+    done, cfg, _ = _install_setup(tmp_path, stdin="1\nn\n\n\n")
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert "KOKORO_PROVIDER=auto\n" in cfg and "KOKORO_THREADS=0\n" in cfg
+
+
+def test_install_interactive_cpu_answer(tmp_path):
+    # install mode 1, piper n, STT choice, STT fallback, TTS choice, TTS fallback, provider 2
+    done, cfg, _ = _install_setup(tmp_path, stdin="1\nn\n\n\n\n\n2\n")
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert "KOKORO_PROVIDER=cpu\n" in cfg
+
+
+@pytest.mark.parametrize("args", [("--kokoro-provider", "cuda"), ("--kokoro-provider=cuda",)])
+def test_install_kokoro_provider_flag(tmp_path, args):
+    done, cfg, _ = _install_setup(tmp_path, args=args, stdin="1\nn\n\n\n\n\n")
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert "KOKORO_PROVIDER=cuda\n" in cfg
+
+
+def test_install_without_a_gpu_writes_no_provider(tmp_path):
+    done, cfg, _ = _install_setup(tmp_path, gpu="none-listed", stdin="1\nn\n")
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert "KOKORO_PROVIDER" not in cfg
+
+
+def test_install_starts_the_server_with_the_chosen_provider():
+    text = INSTALL_SH.read_text()
+    tail = text[text.index("# ─── Step 1: System packages"):]
+    assert '--provider "$KOKORO_PROVIDER_CHOICE"' in tail

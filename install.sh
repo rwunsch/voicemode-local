@@ -32,6 +32,10 @@
 #                     VOICEMODE_CPU_FALLBACK=true). Off by default; asked interactively,
 #                     default No. --no-cpu-fallback (or VOICEMODE_CPU_FALLBACK=false) keeps
 #                     them off without asking.
+#   --kokoro-provider <auto|cpu|cuda|directml|coreml>  (or --kokoro-provider=<name>, or
+#                     VOICEMODE_KOKORO_PROVIDER): where Kokoro runs, without asking. With
+#                     the GPU engine it is asked otherwise (auto, cpu, cuda; default auto).
+#                     Written as KOKORO_PROVIDER to ~/.voicemode-local/config.
 
 set -euo pipefail
 
@@ -57,8 +61,13 @@ OPENAI_KEY=""
 STT_CHOICE=""
 TTS_CHOICE=""
 CPU_FALLBACK=""
+KOKORO_PROVIDER_FORCED=""
+expect_provider=false
 for arg in "$@"; do
+    if $expect_provider; then KOKORO_PROVIDER_FORCED="$arg"; expect_provider=false; continue; fi
     case $arg in
+        --kokoro-provider=*) KOKORO_PROVIDER_FORCED="${arg#*=}" ;;
+        --kokoro-provider)   expect_provider=true ;;
         --stt=*)        STT_CHOICE="${arg#*=}" ;;
         --tts=*)        TTS_CHOICE="${arg#*=}" ;;
         --cpu-fallback)    CPU_FALLBACK="true" ;;
@@ -201,6 +210,8 @@ if [ "$TTS_ENGINE" = "native-gpu" ]; then
     vm_choose_tts_cpu_fallback
     ok "Speech output CPU fallback: $([ "$KOKORO_CPU_FALLBACK_CHOICE" = true ] && echo on || echo off)"
 fi
+vm_choose_kokoro_provider || exit 1
+[ -z "$KOKORO_PROVIDER_CHOICE" ] || ok "Speech output provider: $KOKORO_PROVIDER_CHOICE (KOKORO_PROVIDER)"
 
 # Save config
 cat > "$CONFIG_FILE" << EOF
@@ -468,15 +479,20 @@ if [ "$KOKORO_ONNX" = "true" ]; then
     else
         # Our own earlier server by exact pid, a Docker kokoro by name; anything else stops here.
         vm_free_port 8880 "$(vm_kokoro_own_re 8880)" kokoro || exit 1
+        # KOKORO_PROVIDER as chosen above (voicemode-switch passes the same from the config).
+        kokoro_args=()
+        [ -z "$KOKORO_PROVIDER_CHOICE" ] || kokoro_args=(--provider "$KOKORO_PROVIDER_CHOICE")
         if [ "$TTS_ENGINE" = "native-gpu" ]; then
-            # The wrapper puts the venv's CUDA libraries on LD_LIBRARY_PATH; --require-gpu
-            # exits rather than run on the CPU (check the log if it is gone).
+            # The wrapper puts the venv's CUDA libraries on LD_LIBRARY_PATH. Without a
+            # provider, --require-gpu exits rather than run on the CPU (check the log if it
+            # is gone); with auto it falls back to the CPU and says why.
+            [ ${#kokoro_args[@]} -gt 0 ] || kokoro_args=(--require-gpu)
             nohup "$SCRIPT_DIR/scripts/kokoro-gpu-start.sh" "$KG_VENV" --port 8880 \
-                --model-dir "$SCRIPT_DIR/models/kokoro" --require-gpu \
+                --model-dir "$SCRIPT_DIR/models/kokoro" "${kokoro_args[@]}" \
                 > /tmp/kokoro-onnx-server.log 2>&1 &
         else
             nohup python3 "$SCRIPT_DIR/kokoro-onnx-server.py" --port 8880 \
-                --model-dir "$SCRIPT_DIR/models/kokoro" \
+                --model-dir "$SCRIPT_DIR/models/kokoro" ${kokoro_args[@]+"${kokoro_args[@]}"} \
                 > /tmp/kokoro-onnx-server.log 2>&1 &
         fi
         echo $! > "$KOKORO_ONNX_PID_FILE"
