@@ -236,6 +236,17 @@ def german_files_exist():
     return all((model_dir / name).exists() for name in ("kokoro-martin.onnx", "voices-martin.npz"))
 
 
+def known_voices(kokoro):
+    """The voice ids the loaded model has; everything (no check) if it cannot say."""
+    try:
+        return set(kokoro.get_voices())
+    except Exception:  # noqa: BLE001 - an odd model: let kokoro_onnx decide, as before
+        class _Everything:
+            def __contains__(self, item):
+                return True
+        return _Everything()
+
+
 def list_voices():
     """The voices this server speaks, in the Piper proxy's shape, so the voice pill can
     list them by language: every voice of the English model, plus dm_martin when the
@@ -318,6 +329,11 @@ class TTSHandler(BaseHTTPRequestHandler):
                 lang = "de"
             else:
                 kokoro = get_kokoro()
+                if voice_id not in known_voices(kokoro):
+                    # kokoro_onnx would raise KeyError, answered as a bare 500; voice-mode's
+                    # fallback to an installed voice needs to see that the voice is unknown.
+                    self._send_json(404, {"error": f"Voice '{voice}' not found"})
+                    return
                 lang = "en-us"
             start = time.time()
             with _INFERENCE_LOCK:
