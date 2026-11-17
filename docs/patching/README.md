@@ -52,11 +52,23 @@ on every run, taking the old `patches/` from git.
 | 14 | copy voice_barge_tool | tools/ | none |
 | 15 | copy tts_chunks; patch_tts_chunks | simple_failover | 3 (patched file); tts_chunks first |
 | 16 | patch_tts_no_double_synthesis | core, streaming | none |
+| 17 | copy voice_languages, voice_fallback; patch_voice_fallback | simple_failover, converse | 15 if present; the copies first |
+| 18 | patch_echo_labels | converse | none |
+| 19 | patch_stt_language | simple_failover | 10 (voice_pill_state), 17 (voice_languages) |
 
 Steps 15 and 16 (2026-11-14) run after the conch, allowlist and git-timeout steps, in both lists; on
 Windows before the two Windows-only steps, which stay last. Step 15 speaks a long reply in parts when
 `VOICEMODE_TTS_CHUNK_CHARS` is set (off by default). Step 16 stops a timed-out streaming request to a
 local server from being sent again buffered.
+
+Steps 17-19 (2026-11-17) follow 16 in both lists, Windows-only steps still last. Step 17 wraps
+`simple_tts_failover` / `simple_tts_synthesize` (whatever they are by then, tts_chunks' wrapper
+included) and `_converse_core` at the end of their files: when every local TTS server rejected the
+voice as unknown, the turn is spoken once more with an installed local voice of the same language,
+and converse's result says "Voice X is not installed here; spoke with Y." Step 18 relabels the echo
+lines of both converse docstrings from `VOICEMODE_ECHO_ASSISTANT_LABEL` / `VOICEMODE_ECHO_USER_LABEL`
+(a decorator applied before `@mcp.tool()`). Step 19 passes the pill's language for the session as
+the STT request's `language`.
 
 Optional dependencies, so FELIX's tree (no hold or session-name patches) works:
 

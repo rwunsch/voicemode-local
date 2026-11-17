@@ -298,9 +298,17 @@ then `voicemode.env`):
 
 | Value | Build installed |
 |---|---|
-| `auto` (default) | CUDA when `nvidia-smi.exe` is on PATH and `nvidia-smi -L` lists a GPU (5 s timeout, no window); otherwise CPU, with the reason |
+| `auto` (default) | CUDA when `vml_supervisor.gpu` says available: `nvidia-smi.exe` on PATH, `nvidia-smi --query-gpu=name,driver_version --format=csv,noheader` lists a GPU, driver >= 525 (5 s timeout, no window); otherwise CPU, with the reason code (`no_nvidia_smi`, `no_gpu_listed`, `driver_too_old`, `nvidia_smi_failed`, `nvidia_smi_timeout`) |
 | `on` | CUDA, without asking nvidia-smi |
 | `off` | CPU, today's zip, unchanged |
+
+**Setup asks.** Run interactively (a console on stdin) with the setting unset or `auto` in
+`voicemode.env` and a usable GPU, setup asks `Use the NVIDIA GPU for speech recognition? (about
+2 GB more) [Y/n]` (on stderr, default yes) and writes `VOICEMODE_WHISPER_GPU=on` or `off` to
+`voicemode.env`, so the launch computes the same runtime. `install.ps1` passes `--no-questions`
+when its PowerShell is not interactive (`-NonInteractive`, or no user session), and then nothing
+is asked and `auto` stays. A value in the environment is a decision and is never asked about.
+`python -m vml_supervisor.gpu` prints the check as one JSON line (read-only; FELIX vendors it).
 
 Any other value is an error that names the setting. Setup installs **one** build. The CUDA build
 is `whisper_cuda` in `scripts/windows/dependencies.json`: `whisper-bin-win-cuda-12.4.0-x64.zip`

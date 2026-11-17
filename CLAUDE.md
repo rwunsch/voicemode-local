@@ -7,7 +7,7 @@ Local voice services for Claude Code, with Whisper STT, Kokoro TTS, and Piper TT
 - **WSL2 on Windows 11** (primary, tested on Ubuntu 22.04 LTS)
 - **Ubuntu 22.04+** (native Linux, should work with PulseAudio/PipeWire)
 - **macOS** (partially tested — native mode: whisper.cpp via `WHISPER_CPP_MODEL`, Kokoro ONNX, Piper; see README "macOS (native, no Docker)")
-- **Windows (native)** — work in progress, see below. Native STT is whisper.cpp from a pinned zip: the CUDA build when `nvidia-smi -L` lists a GPU (`VOICEMODE_WHISPER_GPU=auto|on|off`), checked on the GPU by setup, which fails with `whisper_gpu_failed` rather than falling back to the CPU without saying so. Median 0.21 s vs 6.94 s on the CPU for a 7.6 s clip (n=5 each, 2026-11-17); see docs/windows-native/README.md
+- **Windows (native)** — work in progress, see below. Native STT is whisper.cpp from a pinned zip: the CUDA build when `python -m vml_supervisor.gpu` (the one shared GPU check: nvidia-smi, a GPU, driver >= 525) says available (`VOICEMODE_WHISPER_GPU=auto|on|off`; interactive setup asks "Use the NVIDIA GPU for speech recognition? (about 2 GB more) [Y/n]" and writes on/off to voicemode.env, `setup --no-questions` / a non-interactive install.ps1 keeps auto), checked on the GPU by setup, which fails with `whisper_gpu_failed` rather than falling back to the CPU without saying so. Median 0.21 s vs 6.94 s on the CPU for a 7.6 s clip (n=5 each, 2026-11-17); see docs/windows-native/README.md
 
 ## Windows Working Copy
 
@@ -25,6 +25,9 @@ When starting a voice conversation via `/voicemode:converse`, offer voice select
 - **German**: Piper's `p_de_thorsten`, or `dm_martin` only where the German Kokoro model is installed (`kokoro-onnx-server.py --download-german`, a third-party Hugging Face model; not installed by default, and then dm_martin fails on every server). Stock English Kokoro voices mispronounce German
 - **German voices speak German only.** With `dm_martin` (or any `p_de_*` voice) write every `message` in German, even if the user speaks English. The model phonemizes everything as German, so English text comes out garbled. If the user wants English, switch to an English voice instead
 - **Default / "just start"**: Proceed without specifying a voice
+- **A voice that is not installed** is spoken with an installed local voice of the same language (else the first installed `VOICEMODE_VOICES` entry), never OpenAI; the converse result then says "Voice X is not installed here; spoke with Y." (`patches/voice_fallback.py`)
+- **Echo labels**: `VOICEMODE_ECHO_ASSISTANT_LABEL` / `VOICEMODE_ECHO_USER_LABEL` (default ASSISTANT / USER) set the names in converse's `> **X (voicemode):**` echo lines; read at voice-mode start
+- **Speech recognition follows the pill's language**: with a language chosen in the pill, the session's STT request passes its ISO code (de, en, ...) so Whisper does not guess; unset, auto-detect / `VOICEMODE_WHISPER_LANGUAGE` as before
 
 Pass the selected voice as the `voice` parameter on every `mcp__voicemode__converse` call for that session.
 
@@ -167,7 +170,7 @@ No need to switch to Piper for German.
 | faster-whisper-server | 2022 | Native GPU STT, **instead of** whisper-proxy + Docker whisper when `STT_ENGINE=faster-whisper` in `~/.voicemode-local/config` (venv `FASTER_WHISPER_VENV`, model `FASTER_WHISPER_MODEL`, default small). Started via `scripts/faster-whisper-start.sh` (sets the CUDA library path first); `/health` is 503 until the model is loaded and warmed up. Binds `FASTER_WHISPER_HOST` (default 0.0.0.0, as whisper-proxy). WAV in-process, other formats via `ffmpeg` on PATH. Back to Docker: `STT_ENGINE=docker`. See `docs/native-gpu-stt/README.md`. |
 | voicemode-whisper | 9000 | Whisper ASR (Docker) |
 | voicemode-kokoro | 8880 | Kokoro TTS (Docker mode, Kokoro-FastAPI) |
-| kokoro-onnx-server | 8882 | Kokoro TTS (native ONNX). **482 MB measured** — 144 MB venv + 338 MB models. The old "~92MB" here was never measured and was wrong. Set `KOKORO_ONNX=true` + `KOKORO_ONNX_PORT=8882` in `~/.voicemode-local/config`; `ensure` starts it. Runs ALONGSIDE the Docker Kokoro as the local last resort in the TTS chain — on 8880 it would replace it instead. |
+| kokoro-onnx-server | 8882 | Kokoro TTS (native ONNX). **482 MB measured** — 144 MB venv + 338 MB models. The old "~92MB" here was never measured and was wrong. Set `KOKORO_ONNX=true` + `KOKORO_ONNX_PORT=8882` in `~/.voicemode-local/config`; `ensure` starts it. `--no-download`: a missing model file exits 1 naming it and its URL (FELIX); an unknown voice is a 404 "Voice 'x' not found", no longer a bare 500. Runs ALONGSIDE the Docker Kokoro as the local last resort in the TTS chain — on 8880 it would replace it instead. |
 | piper-proxy | 8881 | OpenAI-compatible TTS via Piper |
 | voicemode-piper | 10200 | Piper TTS (Docker, optional profile) |
 
