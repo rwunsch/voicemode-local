@@ -484,8 +484,9 @@ kokoro_cpu_fallback_wanted() { is_kokoro_onnx_gpu && [ "$(vm_read_config KOKORO_
 # On the GPU Kokoro's own port it would only collide with it: then it is not run.
 is_kokoro_cpu_fallback() { kokoro_cpu_fallback_wanted && [ "$(kokoro_cpu_fallback_port)" != "$(kokoro_onnx_port)" ]; }
 stt_cpu_fallback_port() { vm_read_config STT_CPU_FALLBACK_PORT 2023; }
-# base: measured 2026-11-17 on the 7.6 s clip, CPU int8, load ~25 on 14 cores (n=3):
-# base 23.3-29.8 s, small 28.0-47.2 s. Neither is within 1.5x the clip on a loaded machine.
+# base, measured 2026-11-17 on a 7.6 s clip, CPU int8, 14 cores, n=3 each: at load ~5 base
+# 2.5-5.4 s, small 14.3-16.9 s (only base within 1.5x the clip); at load ~25 base 23.3-29.8 s,
+# small 28.0-47.2 s. Idle RSS: base 256 MiB, small 716 MiB. See docs/native-gpu-stt.
 stt_cpu_fallback_model() { vm_read_config STT_CPU_FALLBACK_MODEL base; }
 is_stt_cpu_fallback() { is_faster_whisper && [ "$(vm_read_config STT_CPU_FALLBACK false)" = "true" ]; }
 
