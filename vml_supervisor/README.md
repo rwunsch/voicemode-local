@@ -86,6 +86,7 @@ start (`profile.BLOCKING`); an unknown hook name is reported and ignored.
 | `watch_main(profile)` | `host` | The POSIX watchdog's loop (`watch <profile file>`). |
 | `load_profile(path)` | `profile` | Read a profile file without raising: `(profile, results)`. |
 | `load_hooks(profile)` | `hooks` | Resolve the profile's hooks: `(Hooks, results)`. |
+| `probe()`, `summary(result)` | `gpu` | Read-only NVIDIA GPU check for the CUDA speech-recognition build; `python -m vml_supervisor.gpu` prints `summary()` as one JSON line. |
 
 ## Result codes
 
@@ -99,6 +100,7 @@ Every operation returns `Result(code, detail, data)` objects instead of raising.
 | `detach_failed` | POSIX: the middle process that starts a process outside this one's ancestry failed (detail: its exit code and stderr tail, its unexpected output, a timeout, or the OSError). |
 | `detach_unsupported` | `procs.detach` was called on Windows, which starts outside a chat through the host instead. |
 | `detached` | POSIX: a process was started through a middle process, so it is no descendant of the caller (data: `pid`). |
+| `driver_too_old` | GPU check: the NVIDIA driver is older than 525, which the CUDA 12.4 build needs (data: `gpu`, `driver`). |
 | `helper_command_bad` | A helper's command could not be built or started. |
 | `helper_not_running` | A helper was asked to stop and was not running. |
 | `helper_not_started` | The host did not start a helper: no connector lease was live under the lock. |
@@ -130,7 +132,13 @@ Every operation returns `Result(code, detail, data)` objects instead of raising.
 | `lease_remove_failed` | A connector's lease file could not be removed. |
 | `lease_write_failed` | A connector's lease file could not be written. |
 | `no_free_port` | No port in the service's candidates is free. |
+| `no_gpu_listed` | GPU check: `nvidia-smi` ran and listed no GPU. |
 | `no_job` | No Job Object was used (not Windows, or none given), or the parent is in no job so there was nothing to break away from. |
+| `no_nvidia_smi` | GPU check: `nvidia-smi` is not on PATH. |
+| `not_applicable` | GPU check: macOS, which has no NVIDIA CUDA; nothing was run. |
+| `nvidia_smi_failed` | GPU check: `nvidia-smi` could not run, exited non-zero or answered an unreadable line. |
+| `nvidia_smi_timeout` | GPU check: `nvidia-smi` did not answer in 5 s. |
+| `ok` | GPU check: an NVIDIA GPU with a new enough driver is usable (data: `gpu`, `driver`); `gpu.summary()` says `available`. |
 | `override_port_taken` | The port override asked for a port that is taken; another port was used (data: `port`, `chosen`). |
 | `owner_other` | Another process answers on the service's port. |
 | `owner_unknown` | The port answered but no listener could be found to prove it is ours. |

@@ -141,6 +141,17 @@ INTENDED_STEP_LINES.append(b'    {"patch": "patch_tts_no_double_synthesis.py", "
 INTENDED_PATCHES.append(("patch_tts_chunks.py", ["simple_failover.py"]))
 INTENDED_PATCHES.append(("patch_tts_no_double_synthesis.py", ["core.py", "streaming.py"]))
 INTENDED_COPIES += ["tts_chunks.py"]
+# 2026-11-17: an uninstalled voice is spoken with an installed one of its language, never a 500.
+INTENDED_STEP_LINES.append(b'    {"copy": "voice_languages.py", "to": "voice_languages.py", "why": "which language a local voice speaks, and ISO codes of language names"},\n')
+INTENDED_STEP_LINES.append(b'    {"copy": "voice_fallback.py", "to": "voice_fallback.py", "why": "an uninstalled voice is spoken with an installed voice of its language"},\n')
+INTENDED_STEP_LINES.append(b'    {"patch": "patch_voice_fallback.py", "targets": ["simple_failover.py", "tools/converse.py"], "why": "an uninstalled voice is spoken with an installed one of its language, never a 500, and converse says so; needs voice_fallback.py"},\n')
+INTENDED_PATCHES.append(("patch_voice_fallback.py", ["simple_failover.py", "tools/converse.py"]))
+INTENDED_COPIES += ["voice_languages.py", "voice_fallback.py"]
+# 2026-11-17: echo labels from settings; STT language follows the pill.
+INTENDED_STEP_LINES.append(b'    {"patch": "patch_echo_labels.py", "targets": ["tools/converse.py"], "why": "the transcript echo lines\' labels come from VOICEMODE_ECHO_ASSISTANT_LABEL and VOICEMODE_ECHO_USER_LABEL"},\n')
+INTENDED_STEP_LINES.append(b'    {"patch": "patch_stt_language.py", "targets": ["simple_failover.py"], "why": "the STT request passes the pill\'s language for the session; needs voice_pill_state.py and voice_languages.py"},\n')
+INTENDED_PATCHES.append(("patch_echo_labels.py", ["tools/converse.py"]))
+INTENDED_PATCHES.append(("patch_stt_language.py", ["simple_failover.py"]))
 # Text edits those additions force on lines that were already there: (now, before).
 INTENDED_EDITS = [
     (b'    "streaming.py",\n    "conch_notify.py",\n    "conch_queue.py",\n    "conch.py",\n    "config.py",\n    "tools/configuration_management.py"\n', b'    "streaming.py"\n'),

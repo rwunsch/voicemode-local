@@ -10,6 +10,7 @@ Requirements:
 
 Usage:
     python3 kokoro-onnx-server.py [--host 0.0.0.0] [--port 8880] [--model-dir ./models/kokoro]
+                                  [--no-download]
 """
 
 import argparse
@@ -31,6 +32,9 @@ VOICES_URL = "https://github.com/thewh1teagle/kokoro-onnx/releases/download/mode
 # Lazy-loaded globals
 _kokoro = None
 _model_dir = None
+# --no-download: a missing model file is an error, never a download (FELIX installs the
+# files itself and runs the server offline).
+_no_download = False
 
 # Requests are served on their own threads, so /health answers while a long synthesis
 # runs (2026-11-14: a 54 s reply took 134.7 s and the health checks timed out). One
@@ -55,8 +59,33 @@ def get_model_dir():
     return _model_dir or Path("./models/kokoro")
 
 
+def missing_model_files():
+    """(path, url) of every English model file not present in the model directory."""
+    model_dir = get_model_dir()
+    return [(model_dir / name, url)
+            for name, url in (("kokoro-v1.0.onnx", MODEL_URL), ("voices-v1.0.bin", VOICES_URL))
+            if not (model_dir / name).exists()]
+
+
+def exit_if_missing_without_download():
+    """With --no-download, a missing model file ends the server: exit 1, naming the file
+    and where to get it, so the caller can fetch it rather than have us download it."""
+    missing = missing_model_files()
+    if not missing:
+        return
+    for path, url in missing:
+        print(f"Error: Kokoro model file missing: {path}\n"
+              f"  --no-download is set, so it is not downloaded. Get it from:\n"
+              f"  {url}\n"
+              f"  and save it as {path} (or run without --no-download).",
+              file=sys.stderr, flush=True)
+    sys.exit(1)
+
+
 def ensure_models():
-    """Download model files if not present."""
+    """Download model files if not present (with --no-download: exit 1 instead)."""
+    if _no_download:
+        exit_if_missing_without_download()
     model_dir = get_model_dir()
     model_dir.mkdir(parents=True, exist_ok=True)
 
@@ -207,6 +236,17 @@ def german_files_exist():
     return all((model_dir / name).exists() for name in ("kokoro-martin.onnx", "voices-martin.npz"))
 
 
+def known_voices(kokoro):
+    """The voice ids the loaded model has; everything (no check) if it cannot say."""
+    try:
+        return set(kokoro.get_voices())
+    except Exception:  # noqa: BLE001 - an odd model: let kokoro_onnx decide, as before
+        class _Everything:
+            def __contains__(self, item):
+                return True
+        return _Everything()
+
+
 def list_voices():
     """The voices this server speaks, in the Piper proxy's shape, so the voice pill can
     list them by language: every voice of the English model, plus dm_martin when the
@@ -289,6 +329,11 @@ class TTSHandler(BaseHTTPRequestHandler):
                 lang = "de"
             else:
                 kokoro = get_kokoro()
+                if voice_id not in known_voices(kokoro):
+                    # kokoro_onnx would raise KeyError, answered as a bare 500; voice-mode's
+                    # fallback to an installed voice needs to see that the voice is unknown.
+                    self._send_json(404, {"error": f"Voice '{voice}' not found"})
+                    return
                 lang = "en-us"
             start = time.time()
             with _INFERENCE_LOCK:
@@ -332,15 +377,22 @@ def main():
                         help="Directory for the German model (default: <model-dir>-de-martin)")
     parser.add_argument("--download-german", action="store_true",
                         help="Download the German model (voice dm_martin) and exit")
+    parser.add_argument("--no-download", action="store_true",
+                        help="Never download: a missing English model file exits 1, naming it")
     args = parser.parse_args()
 
-    global _model_dir, _de_model_dir
+    global _model_dir, _de_model_dir, _no_download
+    _no_download = args.no_download
     _model_dir = Path(args.model_dir)
     _de_model_dir = Path(args.de_model_dir or f"{args.model_dir.rstrip('/')}-de-martin")
 
     if args.download_german:
         download_german()
         return
+
+    if _no_download:
+        # Before the kokoro_onnx import: the missing file is the error worth naming.
+        exit_if_missing_without_download()
 
     # Pre-load models
     get_kokoro()

@@ -250,3 +250,118 @@ def test_voices_lists_dm_martin_only_when_the_german_files_exist(listing_server)
     (de / "voices-martin.npz").write_text("")
     data = _voices(base)["data"]
     assert data[-1] == {"id": "dm_martin", "language": "de", "language_name": "German"}
+
+
+# --- An unknown voice is a 404 that names it (2026-11-17) --------------------------------
+# kokoro_onnx looks a voice up with voices[name], so an id this model lacks raised KeyError
+# and the server answered 500 {"error": "'xx'"}: FELIX's first reply failed with HTTP 500
+# (Stephan, 2026-11-16). voice-mode's fallback recognises "Voice 'x' not found".
+
+class _VoicedKokoro(_ListingKokoro):
+    def __init__(self):
+        self.created = []
+
+    def create(self, text, voice, speed, lang):
+        self.created.append(voice)
+        return np.zeros(240, dtype=np.float32), 24000
+
+
+@pytest.fixture
+def voiced_server(monkeypatch):
+    server = _server()
+    fake = _VoicedKokoro()
+    monkeypatch.setattr(server, "get_kokoro", lambda: fake)
+    httpd = server.make_server("127.0.0.1", 0)
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{httpd.server_address[1]}", fake
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def _post_speech(base, voice):
+    body = json.dumps({"input": "hello", "voice": voice, "response_format": "pcm"}).encode()
+    req = urllib.request.Request(f"{base}/v1/audio/speech", data=body,
+                                 headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return resp.status, resp.read()
+    except urllib.error.HTTPError as error:
+        return error.code, error.read()
+
+
+def test_an_unknown_voice_is_a_404_naming_it(voiced_server):
+    import urllib.error  # noqa: F401
+    base, fake = voiced_server
+    code, body = _post_speech(base, "xf_nobody")
+    assert code == 404
+    assert json.loads(body) == {"error": "Voice 'xf_nobody' not found"}
+    assert fake.created == []
+
+
+def test_a_known_voice_still_speaks(voiced_server):
+    base, fake = voiced_server
+    code, _ = _post_speech(base, "bm_george")
+    assert code == 200 and fake.created == ["bm_george"]
+
+
+# --- --no-download (FELIX runs the server against files it installed itself) ---------
+
+def _run_no_download(tmp_path, *present):
+    import subprocess
+    import sys
+    from pathlib import Path
+    for name in present:
+        (tmp_path / name).write_bytes(b"x")
+    script = Path(__file__).resolve().parent.parent / "kokoro-onnx-server.py"
+    return subprocess.run(
+        [sys.executable, str(script), "--host", "127.0.0.1", "--port", "0",
+         "--model-dir", str(tmp_path), "--no-download"],
+        capture_output=True, text=True, timeout=30)
+
+
+@pytest.mark.parametrize("present,missing", [
+    ((), "kokoro-v1.0.onnx"),
+    (("voices-v1.0.bin",), "kokoro-v1.0.onnx"),
+    (("kokoro-v1.0.onnx",), "voices-v1.0.bin"),
+])
+def test_no_download_exits_1_naming_the_missing_file(tmp_path, present, missing):
+    result = _run_no_download(tmp_path, *present)
+    assert result.returncode == 1, result.stderr
+    err = result.stderr
+    assert str(tmp_path / missing) in err
+    assert "--no-download" in err
+    # How to get it: the release URL of that file.
+    server = _server()
+    url = server.MODEL_URL if missing == "kokoro-v1.0.onnx" else server.VOICES_URL
+    assert url in err
+    # Nothing was fetched or created.
+    assert not (tmp_path / missing).exists()
+
+
+def test_no_download_never_calls_urlretrieve(tmp_path, monkeypatch):
+    server = _server()
+    calls = []
+    monkeypatch.setattr(server, "urlretrieve", lambda *a, **k: calls.append(a))
+    monkeypatch.setattr(server, "_model_dir", tmp_path)
+    monkeypatch.setattr(server, "_no_download", True)
+    with pytest.raises(SystemExit) as exc:
+        server.ensure_models()
+    assert exc.value.code == 1
+    assert calls == []
+
+
+def test_without_no_download_missing_files_are_still_downloaded(tmp_path, monkeypatch):
+    server = _server()
+    calls = []
+
+    def fake(url, path):
+        calls.append(url)
+        with open(path, "wb") as fh:
+            fh.write(b"x")
+    monkeypatch.setattr(server, "urlretrieve", fake)
+    monkeypatch.setattr(server, "_model_dir", tmp_path)
+    server.ensure_models()
+    assert calls == [server.MODEL_URL, server.VOICES_URL]

@@ -235,6 +235,15 @@ function Get-ClaudeCli {
     return $null
 }
 
+function Test-Interactive {
+    # A user at the console: not a service or scheduled task, not started with -NonInteractive.
+    if (-not [Environment]::UserInteractive) { return $false }
+    foreach ($arg in [Environment]::GetCommandLineArgs()) {
+        if ($arg -like '-NonI*') { return $false }
+    }
+    return $true
+}
+
 function Get-NativeInfo {
     param([string]$Python, [string]$Script)
     $out = & $Python $Script info
@@ -279,7 +288,11 @@ function Invoke-NativeInstall {
     if ($Root) { $env:VOICEMODE_NATIVE_ROOT = $Root }
 
     header "windows-native: setup"
-    & $python $script setup | Out-Host
+    # Interactive, setup asks whether to use an NVIDIA GPU for speech recognition (on stderr,
+    # answered on the console); otherwise it asks nothing and VOICEMODE_WHISPER_GPU stays auto.
+    $setupArgs = @("setup")
+    if (-not (Test-Interactive)) { $setupArgs += "--no-questions" }
+    & $python $script @setupArgs | Out-Host
     if ($LASTEXITCODE -ne 0) { fail "setup failed (exit $LASTEXITCODE); see the lines above."; return 1 }
     $info = Get-NativeInfo $python $script
     if (-not $info) { fail "Could not read the install's details (voicemode_native.py info)."; return 1 }

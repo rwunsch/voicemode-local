@@ -39,7 +39,7 @@ uv's Python and cache live under it too. Settings come from the process environm
 through patches/voice_pill_state.setting (the shared resolver).
 
 Speech recognition is whisper.cpp from a pinned zip: the CUDA build when VOICEMODE_WHISPER_GPU
-is on, or auto (the default) and `nvidia-smi -L` lists a GPU; else the CPU build. Setup checks
+is on, or auto (the default) and vml_supervisor.gpu finds a usable GPU; else the CPU build. Setup checks
 that the CUDA build really runs on the GPU and fails with whisper_gpu_failed otherwise: nothing
 falls back to the CPU without saying so (docs/windows-native/README.md).
 
@@ -100,6 +100,7 @@ if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
 from vml_profiles import claude as profile_values  # noqa: E402
+from vml_supervisor import gpu as sv_gpu  # noqa: E402
 from vml_supervisor import helpers as sv_helpers  # noqa: E402
 from vml_supervisor import host as sv_host  # noqa: E402
 from vml_supervisor import procs, winjob  # noqa: E402
@@ -291,42 +292,71 @@ def url(port):
 
 
 # -- speech recognition on an NVIDIA GPU (the pinned whisper.cpp CUDA build) -----------------
-# VOICEMODE_WHISPER_GPU = auto (the default: CUDA when `nvidia-smi -L` lists a GPU) | on | off.
+# VOICEMODE_WHISPER_GPU = auto (the default: CUDA when vml_supervisor.gpu says a GPU is usable) | on | off.
 # Setup installs one build, the CUDA zip or the CPU zip, never both, and records which and why.
 # The build is part of the runtime digest, so changing the choice makes setup build a new runtime.
 
 WHISPER_GPU_SETTING = "VOICEMODE_WHISPER_GPU"
 WHISPER_SPECS = {"cpu": "whisper", "cuda": "whisper_cuda"}   # the build's entry in dependencies.json
 WHISPER_BUILD_NAMES = {"cpu": "CPU", "cuda": "CUDA"}
-GPU_CHECK_TIMEOUT = 5          # nvidia-smi -L answered in about 0.2 s here (2026-11-17, n=2)
 WHISPER_CHECK_TIMEOUT = 60     # the CUDA server answered /health 1.6 s after its start (n=1)
 WHISPER_ON_GPU = "whisper_backend_init_gpu: using CUDA"   # whisper.cpp b5454's line once on the GPU
 WHISPER_GPU_OFF_STEP = ("Set VOICEMODE_WHISPER_GPU=off (in the environment or ~/.voicemode/voicemode.env) "
                         "and run setup again, then restart the voice connector.")
 
 
-def nvidia_gpus():
-    """(names, reason): the GPUs `nvidia-smi -L` lists, and how that was found out. No nvidia-smi
-    on PATH, a timeout, a failure or an empty list is no GPU, with the reason said."""
-    smi = on_path("nvidia-smi")
-    if not smi:
-        return [], "nvidia-smi was not found on PATH"
-    options = {"creationflags": subprocess.CREATE_NO_WINDOW} if WINDOWS else {}
-    try:
-        done = subprocess.run([smi, "-L"], capture_output=True, text=True, errors="replace",
-                              timeout=GPU_CHECK_TIMEOUT, stdin=subprocess.DEVNULL, **options)
-    except subprocess.TimeoutExpired:
-        return [], f"nvidia-smi -L did not answer in {GPU_CHECK_TIMEOUT} s"
-    except OSError as error:
-        return [], f"nvidia-smi -L could not run: {error}"
-    output = (done.stdout or "").strip()
-    first = (output or (done.stderr or "").strip()).splitlines()[:1]
-    if done.returncode != 0:
-        return [], f"nvidia-smi -L exited {done.returncode}" + (f": {first[0]}" if first else "")
-    gpus = [m.group(1).strip() for m in re.finditer(r"^GPU \d+: (.+?)(?: \(UUID: [^)]*\))?\s*$", output, re.M)]
-    if not gpus:
-        return [], "nvidia-smi -L lists no GPU" + (f" ({first[0]})" if first else "")
-    return gpus, f"nvidia-smi -L lists {len(gpus)} GPU{'s' if len(gpus) > 1 else ''}"
+def gpu_status():
+    """vml_supervisor.gpu's one JSON shape: {available, reason (its code), detail, gpu, driver}.
+    The one GPU check, shared with FELIX: nvidia-smi on PATH, a GPU listed, driver >= 525 for
+    the CUDA 12.4 build; read-only, 5 s at most, no window."""
+    return sv_gpu.summary(sv_gpu.probe())
+
+
+GPU_QUESTION = "Use the NVIDIA GPU for speech recognition? (about 2 GB more) [Y/n] "
+
+
+def _ask_on_console(prompt):
+    """The question on stderr and the answer from stdin: install.ps1 pipes setup's stdout
+    through Out-Host, where a prompt without a line end would not show."""
+    sys.stderr.write(prompt)
+    sys.stderr.flush()
+    line = sys.stdin.readline()
+    if not line:
+        raise EOFError
+    return line
+
+
+def offer_gpu(ask=None, interactive=None):
+    """Setup asks whether to use a usable NVIDIA GPU (Robert 2026-11-17: "offer GPU if NVIDIA
+    is available - the user can decide"), default yes, and writes the answer as
+    VOICEMODE_WHISPER_GPU=on|off to voicemode.env, where the launch reads it too. Asked only
+    when interactive (default: a console on stdin), the GPU check says available, and the
+    setting is unset or auto in voicemode.env. A value in the environment is a decision (it
+    wins over the file); no answer keeps auto."""
+    if interactive is None:
+        interactive = bool(getattr(sys.stdin, "isatty", lambda: False)())
+    if not interactive or os.environ.get(WHISPER_GPU_SETTING) not in (None, ""):
+        return
+    current = str(setting(WHISPER_GPU_SETTING, "auto")).strip().strip("\"'").strip().lower()
+    if current != "auto":
+        return
+    found = gpu_status()
+    if not found["available"]:
+        return
+    ask = ask or _ask_on_console
+    print(f"NVIDIA GPU found: {found['gpu']} (driver {found['driver']}).", file=sys.stderr, flush=True)
+    while True:
+        try:
+            answer = ask(GPU_QUESTION).strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print("", file=sys.stderr)
+            return
+        if answer in ("", "y", "yes", "n", "no"):
+            break
+    value = "off" if answer.startswith("n") else "on"
+    path = resolver().env_file()
+    write_setting(path, WHISPER_GPU_SETTING, value)
+    print(f"{WHISPER_GPU_SETTING}={value} in {path}.", file=sys.stderr, flush=True)
 
 
 def whisper_choice():
@@ -341,11 +371,12 @@ def whisper_choice():
     if value in ("on", "off"):
         return {"build": "cuda" if value == "on" else "cpu", "setting": value,
                 "reason": f"{WHISPER_GPU_SETTING}={value}"}
-    gpus, why = nvidia_gpus()
-    if gpus:
+    found = gpu_status()
+    if found["available"]:
         return {"build": "cuda", "setting": value,
-                "reason": f"NVIDIA GPU found: {gpus[0]}; {why}; {WHISPER_GPU_SETTING}=auto"}
-    return {"build": "cpu", "setting": value, "reason": f"no NVIDIA GPU: {why}; {WHISPER_GPU_SETTING}=auto"}
+                "reason": f"NVIDIA GPU found: {found['gpu']}, driver {found['driver']}; {WHISPER_GPU_SETTING}=auto"}
+    return {"build": "cpu", "setting": value,
+            "reason": f"no usable NVIDIA GPU ({found['reason']}: {found['detail']}); {WHISPER_GPU_SETTING}=auto"}
 
 
 def whisper_record(runtime):
@@ -1636,6 +1667,8 @@ def main(argv=None):
                         help="for barge, pill and ptt: on, off or status; barge also auto")
     parser.add_argument("--allow-root-outside-profile", action="store_true",
                         help="accept a VOICEMODE_NATIVE_ROOT outside the profile and LOCALAPPDATA")
+    parser.add_argument("--no-questions", action="store_true",
+                        help="setup: ask nothing (VOICEMODE_WHISPER_GPU stays as it is, auto if unset)")
     args = parser.parse_args(argv)
     if (args.command in SWITCHES) != (args.action is not None):
         parser.error("on, off or status goes with barge, pill and ptt only, and they need one")
@@ -1654,6 +1687,10 @@ def main(argv=None):
             if restarted is not None:
                 return restarted
         if args.command == "setup":
+            if args.no_questions:
+                offer_gpu(interactive=False)
+            else:
+                offer_gpu()
             setup(root)
             return 0
         if args.command == "stop":

@@ -159,6 +159,17 @@ def test_helper_creates_the_file_when_missing(helper, tmp_path):
     assert json.loads(claude.read_text())["mcpServers"]["voicemode"]["env"] == {"VOICEMODE_NATIVE_ROOT": r"C:\root"}
 
 
+def test_setup_asks_only_from_an_interactive_install():
+    """setup asks about the GPU itself (a console on stdin); a non-interactive install.ps1 run
+    (-NonInteractive, or no user session) passes --no-questions so nothing waits on an answer."""
+    native = _native()
+    body = native[native.index("function Invoke-NativeInstall"):native.index("function Invoke-NativeUninstall")]
+    assert "function Test-Interactive" in native
+    assert "[Environment]::UserInteractive" in native and "-NonI" in native
+    assert '$setupArgs += "--no-questions"' in body
+    assert "& $python $script @setupArgs | Out-Host" in body
+
+
 def test_uninstall_matches_the_entry_by_root_and_checks_claude_exit_codes():
     native = _native()
     body = native[native.index("function Invoke-NativeUninstall"):]
