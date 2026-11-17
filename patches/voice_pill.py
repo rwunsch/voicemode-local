@@ -733,10 +733,14 @@ def _preview(ctx, voice):
         if ctx.preview_running:
             return _preview_reply("busy", reason="preview")
         ctx.preview_running = True
+        # "loading" goes into the queue BEFORE the worker starts, so the worker's answers (an
+        # instant error included) always come after it; returning it instead let the caller
+        # queue it after a terminal answer, and the page waited 45 s on a stale "loading".
+        ctx.replies.put(_preview_reply("loading", voice=voice))
         ctx.preview_thread = threading.Thread(target=_preview_worker, args=(ctx, voice), daemon=True,
                                               name="voice-pill-preview")
         ctx.preview_thread.start()
-    return _preview_reply("loading", voice=voice)
+    return None
 
 
 def stop_preview(ctx) -> None:
