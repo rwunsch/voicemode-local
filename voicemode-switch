@@ -434,16 +434,109 @@ start_detached() {
     echo $! > "$pidfile"
 }
 
+# --- Who holds a port: "it answers" is not "it is the configured engine" ----------
+# 2026-11-17: STT_ENGINE=faster-whisper was configured, but the old whisper-proxy had taken
+# port 2022 (the ~/.bashrc autostart) and its /health answered 200 over a dead backend, so
+# `ensure` saw a healthy port and never started the engine. For a NATIVE engine the port is
+# healthy only if /health names that engine: faster-whisper on 2022 ("engine"), and with
+# KOKORO_ONNX_GPU=true the Kokoro on 8880 ("provider" CUDAExecutionProvider). A holder is
+# stopped only when its pid file or command line proves it is voicemode's own, by exact pid.
+port_health_body() { curl -s --max-time 2 "http://127.0.0.1:$1/health" 2>/dev/null; }
+
+json_field() {   # $1 = JSON text, $2 = key; prints the value, empty if absent/null/not JSON
+    printf '%s' "$1" | python3 -c 'import json, sys
+try:
+    v = json.load(sys.stdin).get(sys.argv[1])
+except Exception:
+    v = None
+print("" if v is None else v)' "$2" 2>/dev/null
+}
+
+# Live pids that are voicemode's own, by exact pid. The pid file's pid wins when its command
+# line matches the extended regex $2 (then it is the only pid returned). Otherwise the
+# fallback is every process OF THE CURRENT USER whose command line matches $2; callers build
+# $2 around this install's own "$SCRIPT_DIR", so a lookalike running another path (another
+# checkout, a test's fake) never matches. One `ps`, no per-pid loop.
+own_pids() {   # $1 = pid file, $2 = regex over the command line
+    local pid line
+    pid="$(cat "$1" 2>/dev/null)"
+    case "$pid" in ''|*[!0-9]*) pid="" ;; esac
+    if [ -n "$pid" ]; then
+        line="$(ps -u "$(id -u)" -ww -p "$pid" -o pid=,args= 2>/dev/null)"
+        if printf '%s\n' "$line" | grep -Eq "^ *[0-9]+ $2"; then echo "$pid"; return 0; fi
+    fi
+    ps -u "$(id -u)" -ww -o pid=,args= 2>/dev/null | grep -E "^ *[0-9]+ $2" | awk '{print $1}' | sort -un | tr '\n' ' ' | sed 's/ $//'
+}
+
+# $SCRIPT_DIR with every regex metacharacter escaped, for the anchored patterns below.
+script_dir_regex() { printf '%s' "$SCRIPT_DIR" | sed 's/[][\.*^$(){}?+|/]/\\&/g'; }
+
+# Sets PORT_HOLDER (what holds the port), PORT_PIDS (its provable own pids) and PORT_EXPECT,
+# and returns 0 when $1 is held by something other than the configured native engine;
+# returns 1 when the port is fine (free, the right engine, or no native engine configured).
+PORT_HOLDER=""; PORT_PIDS=""; PORT_EXPECT=""
+port_identity_mismatch() {
+    local port="$1" body field d
+    PORT_HOLDER=""; PORT_PIDS=""; PORT_EXPECT=""
+    if [ "$port" = "2022" ] && is_faster_whisper; then
+        PORT_EXPECT="the configured faster-whisper engine"
+        body="$(port_health_body 2022)"
+        if [ -z "$body" ] && ! healthy 2022; then return 1; fi   # nothing answers
+        [ "$(json_field "$body" engine)" = "faster-whisper" ] && return 1
+        PORT_PIDS="$(own_pids "$PROXY_PID_FILE" "[^ ]*python[0-9.]* $(script_dir_regex)/whisper-proxy\\.py --port 2022( |\$)")"
+        PORT_HOLDER="whisper-proxy"
+    elif [ "$port" = "8880" ] && is_kokoro_onnx_gpu && [ "$(kokoro_onnx_port)" = "8880" ]; then
+        PORT_EXPECT="the configured GPU Kokoro (CUDAExecutionProvider)"
+        body="$(port_health_body 8880)"
+        if [ -z "$body" ] && ! healthy 8880; then return 1; fi
+        field="$(json_field "$body" provider)"
+        [ "$field" = "CUDAExecutionProvider" ] && return 1
+        d="$(script_dir_regex)"
+        PORT_PIDS="$(own_pids "$KOKORO_ONNX_PID_FILE" "([^ ]*python[0-9.]* $d/kokoro-onnx-server\\.py|$d/scripts/kokoro-gpu-start\\.sh) .*--port 8880( |\$)")"
+        # No provider reported by our own server = its model is still loading: leave it be.
+        if [ -z "$field" ] && [ -n "$PORT_PIDS" ]; then return 1; fi
+        PORT_HOLDER="kokoro-onnx-server${field:+ on $field}"
+    else
+        return 1
+    fi
+    [ -n "$PORT_PIDS" ] || PORT_HOLDER="an unidentified service"
+    return 0
+}
+
+# Stop the provable own holders by exact pid and wait for them to go. Fails if one stays.
+stop_port_holders() {
+    local pid n
+    for pid in $1; do kill "$pid" 2>/dev/null || true; done
+    for pid in $1; do
+        n=0
+        while kill -0 "$pid" 2>/dev/null; do
+            n=$((n + 1)); [ "$n" -gt 50 ] && return 1
+            sleep 0.1
+        done
+    done
+    return 0
+}
+
 # Ensure exactly the proxies the current config needs are up. Started detached,
 # so they survive the launching session and stay up for the others. Idempotent
 # and serialized across concurrent session starts via a lock.
 cmd_ensure() {
-    local quiet="${1:-}"
+    local quiet="${1:-}" rc=0
     local onnx_port; onnx_port="$(kokoro_onnx_port)"
     exec 9>"/tmp/voicemode-ensure.lock"
     flock 9 2>/dev/null || true
     for port in $(configured_local_ports); do
-        if healthy "$port"; then continue; fi
+        if port_identity_mismatch "$port"; then
+            if [ -z "$PORT_PIDS" ]; then
+                echo "$port is held by $PORT_HOLDER, not $PORT_EXPECT; not stopping it (cannot prove it is voicemode's own)" >&2
+                rc=1; continue
+            fi
+            echo "$port is held by $PORT_HOLDER (PID $PORT_PIDS), not $PORT_EXPECT; stopping it" >&2
+            if ! stop_port_holders "$PORT_PIDS"; then
+                echo "$port: PID $PORT_PIDS did not stop; not starting $PORT_EXPECT" >&2
+                rc=1; continue
+            fi
+        elif healthy "$port"; then continue; fi
         case "$port" in
             8880)
                 # ONNX takes 8880 only when configured to replace Docker Kokoro.
@@ -509,6 +602,7 @@ cmd_ensure() {
         [ -n "$quiet" ] || echo "  ensured voice barge-in trigger"
     fi
     flock -u 9 2>/dev/null || true
+    return $rc
 }
 
 # --- Voice barge-in: stop TTS when the user talks over it --------------------

@@ -16,6 +16,7 @@ import argparse
 import io
 import itertools
 import json
+import os
 import sys
 import threading
 import time
@@ -45,6 +46,30 @@ class WhisperProxyHandler(BaseHTTPRequestHandler):
             flush=True,
         )
 
+    # Backend probe for /health: short timeout, result cached so a burst of
+    # health checks costs one backend request.
+    PROBE_TIMEOUT = 1.5
+    PROBE_TTL = 2.0
+    _probe_lock = threading.Lock()
+    _probe_at = 0.0
+    _probe_ok = False
+
+    @classmethod
+    def _backend_up(cls):
+        with cls._probe_lock:
+            now = time.monotonic()
+            if cls._probe_at and now - cls._probe_at < cls.PROBE_TTL:
+                return cls._probe_ok
+            try:
+                urllib.request.urlopen(cls.whisper_url, timeout=cls.PROBE_TIMEOUT).close()
+                ok = True
+            except urllib.error.HTTPError:
+                ok = True   # an HTTP error status still means something answered
+            except Exception:
+                ok = False
+            cls._probe_ok, cls._probe_at = ok, time.monotonic()
+            return ok
+
     def do_POST(self):
         if self.path == "/v1/audio/transcriptions":
             self._proxy_transcription()
@@ -53,10 +78,22 @@ class WhisperProxyHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path == "/health":
-            self.send_response(200)
+            # Report the BACKEND, not just this process: a proxy whose backend is
+            # dead answers every transcription with 502, so "200" must mean the
+            # whole path works (2026-11-17: this answered 200 over a dead backend
+            # and hid the configured engine for hours).
+            if self._backend_up():
+                status = 200
+                payload = {"status": "ok", "engine": "whisper-proxy", "backend": "ok"}
+            else:
+                status = 503
+                payload = {"status": "backend_unreachable", "backend": self.whisper_url}
+            body = json.dumps(payload).encode()
+            self.send_response(status)
             self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
             self.end_headers()
-            self.wfile.write(json.dumps({"status": "ok"}).encode())
+            self.wfile.write(body)
         elif self.path == "/v1/models":
             response = json.dumps({
                 "object": "list",
@@ -205,6 +242,23 @@ class WhisperProxyHandler(BaseHTTPRequestHandler):
         print(f"[whisper-proxy] {args[0]}", flush=True)
 
 
+def read_config_value(key, default=""):
+    """KEY=value from the voicemode-local config, read as voicemode-switch's
+    vm_read_config does: the last non-empty KEY= line wins. The path comes from
+    VOICEMODE_LOCAL_CONFIG (tests), default ~/.voicemode-local/config."""
+    path = os.environ.get("VOICEMODE_LOCAL_CONFIG") or os.path.expanduser("~/.voicemode-local/config")
+    value = ""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                line = line.rstrip("\r\n")
+                if line.startswith(key + "="):
+                    value = line[len(key) + 1:] or value
+    except OSError:
+        pass
+    return value or default
+
+
 def main():
     parser = argparse.ArgumentParser(description="Whisper OpenAI-compatible proxy")
     parser.add_argument("--port", type=int, default=2022, help="Port to listen on (default: 2022)")
@@ -216,7 +270,20 @@ def main():
         default="http://127.0.0.1:9000",
         help="Upstream whisper service URL (default: http://127.0.0.1:9000)",
     )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Serve even when STT_ENGINE=faster-whisper (default: exit 0 and leave port 2022 to the native engine)",
+    )
     args = parser.parse_args()
+
+    # The ~/.bashrc autostart starts this proxy whenever nothing listens on 2022.
+    # With the native engine configured that took the port from it (2026-11-17),
+    # so stand down and let `voicemode-switch ensure` start the engine.
+    if not args.force and read_config_value("STT_ENGINE", "docker") == "faster-whisper":
+        print("STT_ENGINE=faster-whisper: not starting the Docker proxy; run voicemode-switch ensure",
+              file=sys.stderr)
+        return 0
 
     WhisperProxyHandler.whisper_url = args.whisper_url
     # ThreadingHTTPServer, not HTTPServer: the proxies are shared by every
