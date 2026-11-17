@@ -71,6 +71,9 @@
     {"copy": "tts_chunks.py", "to": "tts_chunks.py", "why": "a long reply is spoken in parts, one TTS request each (VOICEMODE_TTS_CHUNK_CHARS, off by default)"},
     {"patch": "patch_tts_chunks.py", "targets": ["simple_failover.py"], "why": "simple_tts_failover speaks a long reply in parts; needs tts_chunks.py"},
     {"patch": "patch_tts_no_double_synthesis.py", "targets": ["core.py", "streaming.py"], "why": "a timed-out local TTS request is not sent again buffered, so the server never generates the same speech twice"},
+    {"copy": "voice_languages.py", "to": "voice_languages.py", "why": "which language a local voice speaks, and ISO codes of language names"},
+    {"copy": "voice_fallback.py", "to": "voice_fallback.py", "why": "an uninstalled voice is spoken with an installed voice of its language"},
+    {"patch": "patch_voice_fallback.py", "targets": ["simple_failover.py", "tools/converse.py"], "why": "an uninstalled voice is spoken with an installed one of its language, never a 500, and converse says so; needs voice_fallback.py"},
     {"patch": "patch_env_provider_keys.py", "targets": ["config.py", "tools/configuration_management.py"], "why": "optional: the two provider keys upstream reads may also come from voicemode.env; not in the Windows manifest or FELIX"}
   ]
 }
