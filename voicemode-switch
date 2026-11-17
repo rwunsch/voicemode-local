@@ -421,8 +421,13 @@ kokoro_onnx_venv() { vm_read_config KOKORO_ONNX_VENV "$HOME/.voicemode-local/kok
 # nothing is passed, as before. With the GPU engine a KOKORO_PROVIDER replaces
 # --require-gpu (cuda is the same rule; auto falls back to the CPU and says why).
 # See docs/native-gpu-tts/README.md, "Provider and threads".
-kokoro_provider() { vm_read_config KOKORO_PROVIDER ""; }
-kokoro_threads() { vm_read_config KOKORO_THREADS ""; }
+# Read directly (as kokoro_onnx_port does): lib/compute.sh is optional for this script.
+kokoro_config_value() {
+    [ -f "$CONFIG_FILE" ] || return 0
+    sed -n "s/^$1=//p" "$CONFIG_FILE" 2>/dev/null | tail -1
+}
+kokoro_provider() { kokoro_config_value KOKORO_PROVIDER; }
+kokoro_threads() { kokoro_config_value KOKORO_THREADS; }
 # Sets KOKORO_OPTION_ARGS: the args for the main ONNX Kokoro ($1 = gpu | cpu).
 kokoro_option_args() {
     local provider threads
