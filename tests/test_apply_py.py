@@ -109,6 +109,8 @@ INTENDED_SINCE_BASELINE = [
     ("patch_tts_chunks.py", ["simple_failover.py"]),   # 2026-11-14: long replies in parts
     ("patch_tts_no_double_synthesis.py", ["core.py", "streaming.py"]),   # 2026-11-14: no second request after a timeout
     ("patch_voice_fallback.py", ["simple_failover.py", "tools/converse.py"]),   # 2026-11-17: uninstalled voice
+    ("patch_echo_labels.py", ["tools/converse.py"]),   # 2026-11-17: echo labels from settings
+    ("patch_stt_language.py", ["simple_failover.py"]),   # 2026-11-17: STT language follows the pill
 ]
 # Modules added as "copy" steps since the baseline (2026-11-07: session_wake.py).
 INTENDED_COPIES_SINCE_BASELINE = ["session_wake.py"]
@@ -140,7 +142,7 @@ def without_intended_log(out: str) -> str:
     return "".join(line for line in out.splitlines(keepends=True)
                    if "(ptt instant)" not in line and "(tts timeout knob)" not in line
                    and "(tts chunks)" not in line and "(tts no double synthesis)" not in line
-                   and "(voice fallback)" not in line and not line.strip().startswith(copied))
+                   and "(voice fallback)" not in line and "(echo labels)" not in line and "(stt language)" not in line and not line.strip().startswith(copied))
 
 
 def hardlink_core(venv: Path, outside: Path) -> None:
