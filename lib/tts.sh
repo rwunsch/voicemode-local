@@ -5,7 +5,8 @@
 # Provides:
 #   - vm_choose_tts_engine        : sets TTS_ENGINE to docker | native-gpu (asks when there is a GPU)
 #   - vm_setup_kokoro_gpu V       : create venv V with uv and install kokoro-onnx on onnxruntime-gpu
-#   - vm_write_tts_config E [V]   : write KOKORO_ONNX / KOKORO_ONNX_GPU / _VENV / _PORT to the config
+#   - vm_write_tts_config E [V]   : write KOKORO_ONNX / KOKORO_ONNX_GPU / _VENV / _PORT /
+#                                  KOKORO_CPU_FALLBACK to the config
 #
 # Native GPU Kokoro is kokoro-onnx-server.py from its own venv on CUDA, started through
 # scripts/kokoro-gpu-start.sh with --require-gpu. Like the native STT it needs no Docker
@@ -81,6 +82,17 @@ vm_write_tts_config() {
         vm_write_config KOKORO_ONNX_GPU true
         vm_write_config KOKORO_ONNX_VENV "$venv"
         vm_write_config KOKORO_ONNX_PORT 8880
+        # vm_cpu_fallback_choice is in lib/stt.sh (sourced first): on unless --no-cpu-fallback.
+        local fallback; fallback="$(vm_cpu_fallback_choice)"
+        vm_write_config KOKORO_CPU_FALLBACK "$fallback"
+        if [ "$fallback" = "true" ]; then
+            # Measured 2026-11-17 (docs/native-gpu-tts/README.md, "CPU fallback").
+            echo "  Speech output CPU fallback: on (Kokoro on the CPU, port 8882, from the same venv)."
+            echo "    Takes over when the GPU Kokoro on 8880 is down. Costs about 450 MB RAM while idle"
+            echo "    (about 750 MB once it has spoken); no extra disk. Off: --no-cpu-fallback"
+        else
+            echo "  Speech output CPU fallback: off (--no-cpu-fallback)"
+        fi
     else
         vm_write_config KOKORO_ONNX_GPU false
     fi

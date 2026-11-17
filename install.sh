@@ -19,6 +19,7 @@
 # Usage:
 #   cd ~/git/voicemode-local
 #   ./install.sh [--openai-key sk-proj-...] [--stt=docker|native-gpu] [--tts=docker|native-gpu]
+#                [--no-cpu-fallback]
 #
 #   --stt=docker      keep speech recognition on the Docker whisper even with a GPU
 #                     (same as VOICEMODE_STT=docker)
@@ -26,6 +27,9 @@
 #   --tts=docker      keep speech output on the Docker Kokoro even with a GPU
 #                     (same as VOICEMODE_TTS=docker)
 #   --tts=native-gpu  kokoro-onnx on CUDA in its own venv, on 8880 (recommended with an NVIDIA GPU)
+#   --no-cpu-fallback no CPU fallbacks for the native GPU engines (same as
+#                     VOICEMODE_CPU_FALLBACK=false); by default a CPU Kokoro on 8882 and a
+#                     CPU faster-whisper on 2023 take over when a GPU engine is down
 
 set -euo pipefail
 
@@ -50,10 +54,12 @@ header() { echo -e "\n${BOLD}=== $1 ===${NC}"; }
 OPENAI_KEY=""
 STT_CHOICE=""
 TTS_CHOICE=""
+CPU_FALLBACK=""
 for arg in "$@"; do
     case $arg in
         --stt=*)        STT_CHOICE="${arg#*=}" ;;
         --tts=*)        TTS_CHOICE="${arg#*=}" ;;
+        --no-cpu-fallback) CPU_FALLBACK="false" ;;
         --openai-key=*) OPENAI_KEY="${arg#*=}" ;;
         --openai-key)   shift; OPENAI_KEY="${2:-}" ;;
     esac

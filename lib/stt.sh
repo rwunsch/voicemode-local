@@ -5,7 +5,9 @@
 #   - vm_has_nvidia_gpu          : 0 if Linux/WSL and nvidia-smi lists a GPU (sets VM_STT_GPU_NAME)
 #   - vm_choose_stt_engine       : sets STT_ENGINE to docker | faster-whisper (asks when there is a GPU)
 #   - vm_setup_faster_whisper V  : create venv V with uv and install faster-whisper + CUDA libraries
-#   - vm_write_stt_config E [V M] : write STT_ENGINE (and FASTER_WHISPER_VENV / _MODEL) to the config
+#   - vm_write_stt_config E [V M] : write STT_ENGINE (and FASTER_WHISPER_VENV / _MODEL /
+#                                  STT_CPU_FALLBACK) to the config
+#   - vm_cpu_fallback_choice      : true | false, the CPU fallbacks (--no-cpu-fallback)
 #
 # The native engine needs no Docker and no sudo: the CUDA libraries come from pip
 # (nvidia-cublas-cu12, nvidia-cudnn-cu12), not from a system CUDA install. Unlike
@@ -67,11 +69,30 @@ vm_setup_faster_whisper() {
     uv pip install --python "$venv/bin/python" "${FASTER_WHISPER_PACKAGES[@]}" || return 1
 }
 
+# The CPU fallbacks (STT_CPU_FALLBACK, KOKORO_CPU_FALLBACK) are on with a native GPU engine
+# unless CPU_FALLBACK (install.sh --no-cpu-fallback) or VOICEMODE_CPU_FALLBACK is false.
+vm_cpu_fallback_choice() {
+    case "${CPU_FALLBACK:-${VOICEMODE_CPU_FALLBACK:-true}}" in
+        false|no|off|0) echo false ;;
+        *) echo true ;;
+    esac
+}
+
 vm_write_stt_config() {
     local engine="$1" venv="${2:-$FASTER_WHISPER_DEFAULT_VENV}" model="${3:-$FASTER_WHISPER_DEFAULT_MODEL}"
     vm_write_config STT_ENGINE "$engine"
     if [ "$engine" = "faster-whisper" ]; then
         vm_write_config FASTER_WHISPER_VENV "$venv"
         vm_write_config FASTER_WHISPER_MODEL "$model"
+        local fallback; fallback="$(vm_cpu_fallback_choice)"
+        vm_write_config STT_CPU_FALLBACK "$fallback"
+        if [ "$fallback" = "true" ]; then
+            # Measured 2026-11-17 (docs/native-gpu-stt/README.md, "CPU fallback").
+            echo "  Speech recognition CPU fallback: on (faster-whisper base on the CPU, port 2023)."
+            echo "    Takes over when the GPU engine on 2022 is down. Costs about 260 MB RAM while idle"
+            echo "    and 142 MB disk for the base model; no extra venv. Off: --no-cpu-fallback"
+        else
+            echo "  Speech recognition CPU fallback: off (--no-cpu-fallback)"
+        fi
     fi
 }

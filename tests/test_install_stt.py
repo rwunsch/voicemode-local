@@ -214,3 +214,44 @@ def test_install_sets_up_the_venv_and_starts_through_the_wrapper():
     assert "scripts/faster-whisper-start.sh" in tail
     assert "/tmp/faster-whisper-server.pid" in tail
     assert '--host "$FW_HOST"' in tail and "vm_read_config FASTER_WHISPER_HOST 0.0.0.0" in tail
+
+
+# --- the CPU fallback (STT_CPU_FALLBACK) ---------------------------------------------
+
+def test_write_stt_config_turns_the_cpu_fallback_on_and_says_what_it_costs(tmp_path):
+    b = Box(tmp_path)
+    done = b.bash('vm_write_stt_config faster-whisper "$HOME/fw-venv" small')
+    assert done.returncode == 0, done.stderr
+    assert "STT_CPU_FALLBACK=true\n" in (b.home / ".voicemode-local/config").read_text()
+    out = done.stdout
+    assert "CPU fallback" in out and "2023" in out and "MB" in out
+    assert "--no-cpu-fallback" in out                       # and how to opt out
+
+
+@pytest.mark.parametrize("how", ["flag", "env"])
+def test_the_stt_cpu_fallback_can_be_opted_out(tmp_path, how):
+    b = Box(tmp_path)
+    if how == "flag":
+        done = b.bash('CPU_FALLBACK=false; vm_write_stt_config faster-whisper')
+    else:
+        done = b.bash('vm_write_stt_config faster-whisper', VOICEMODE_CPU_FALLBACK="false")
+    assert done.returncode == 0, done.stderr
+    assert "STT_CPU_FALLBACK=false\n" in (b.home / ".voicemode-local/config").read_text()
+
+
+def test_install_with_a_gpu_turns_the_stt_cpu_fallback_on(tmp_path):
+    done, cfg, _ = _install_setup(tmp_path)
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert "STT_CPU_FALLBACK=true\n" in cfg
+
+
+def test_install_no_cpu_fallback_flag_turns_it_off(tmp_path):
+    done, cfg, _ = _install_setup(tmp_path, args=("--no-cpu-fallback",))
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert "STT_ENGINE=faster-whisper\n" in cfg
+    assert "STT_CPU_FALLBACK=false\n" in cfg
+
+
+def test_install_without_a_gpu_writes_no_stt_fallback(tmp_path):
+    _, cfg, _ = _install_setup(tmp_path, gpu="none-listed", stdin="1\nn\n")
+    assert "STT_CPU_FALLBACK" not in cfg
