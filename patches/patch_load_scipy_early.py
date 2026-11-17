@@ -16,8 +16,10 @@ Usage: patch_load_scipy_early.py <path-to-voice_mode/tools/converse.py>
 Provenance: copied from felix-framework plugins/voicemode/patches/patch_load_scipy_early.py at commit
 aea841ffd (branch feat/voice-opt-in). Changed here only to keep the file's own line
 endings (CRLF stays CRLF); FELIX's writes LF whatever it reads. Same marker as FELIX's,
-so either copy sees the other's work as done. voicemode-local applies it on native
-Windows only (patches/manifest.windows.json).
+so either copy sees the other's work as done. voicemode-local applies it everywhere
+(patches/manifest.json since 2026-11-17, and manifest.windows.json): the same cold import
+(6.5 s measured on WSL) outlasts the recording loop's 5 s AUDIO_STALL_TIMEOUT, which is
+already running when the loop reaches it, and ends the turn after one chunk.
 """
 import sys
 from pathlib import Path

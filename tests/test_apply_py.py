@@ -108,6 +108,7 @@ INTENDED_SINCE_BASELINE = [
     ("patch_git_timeout.py", ["config.py"]),   # 2026-11-13: transcript-saving git call bounded (5 s, stdin closed)
     ("patch_tts_chunks.py", ["simple_failover.py"]),   # 2026-11-14: long replies in parts
     ("patch_tts_no_double_synthesis.py", ["core.py", "streaming.py"]),   # 2026-11-14: no second request after a timeout
+    ("patch_load_scipy_early.py", ["tools/converse.py"]),   # 2026-11-17: scipy.signal loaded before the stall backstop starts
 ]
 # Modules added as "copy" steps since the baseline (2026-11-07: session_wake.py).
 INTENDED_COPIES_SINCE_BASELINE = ["session_wake.py"]
