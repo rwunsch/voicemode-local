@@ -45,6 +45,30 @@ class WhisperProxyHandler(BaseHTTPRequestHandler):
             flush=True,
         )
 
+    # Backend probe for /health: short timeout, result cached so a burst of
+    # health checks costs one backend request.
+    PROBE_TIMEOUT = 1.5
+    PROBE_TTL = 2.0
+    _probe_lock = threading.Lock()
+    _probe_at = 0.0
+    _probe_ok = False
+
+    @classmethod
+    def _backend_up(cls):
+        with cls._probe_lock:
+            now = time.monotonic()
+            if cls._probe_at and now - cls._probe_at < cls.PROBE_TTL:
+                return cls._probe_ok
+            try:
+                urllib.request.urlopen(cls.whisper_url, timeout=cls.PROBE_TIMEOUT).close()
+                ok = True
+            except urllib.error.HTTPError:
+                ok = True   # an HTTP error status still means something answered
+            except Exception:
+                ok = False
+            cls._probe_ok, cls._probe_at = ok, time.monotonic()
+            return ok
+
     def do_POST(self):
         if self.path == "/v1/audio/transcriptions":
             self._proxy_transcription()
@@ -53,10 +77,22 @@ class WhisperProxyHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path == "/health":
-            self.send_response(200)
+            # Report the BACKEND, not just this process: a proxy whose backend is
+            # dead answers every transcription with 502, so "200" must mean the
+            # whole path works (2026-11-17: this answered 200 over a dead backend
+            # and hid the configured engine for hours).
+            if self._backend_up():
+                status = 200
+                payload = {"status": "ok", "engine": "whisper-proxy", "backend": "ok"}
+            else:
+                status = 503
+                payload = {"status": "backend_unreachable", "backend": self.whisper_url}
+            body = json.dumps(payload).encode()
+            self.send_response(status)
             self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
             self.end_headers()
-            self.wfile.write(json.dumps({"status": "ok"}).encode())
+            self.wfile.write(body)
         elif self.path == "/v1/models":
             response = json.dumps({
                 "object": "list",
