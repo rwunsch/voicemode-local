@@ -285,6 +285,73 @@ folder (`VML_MODEL_SOURCE`) instead of being downloaded, and setup verified ever
 Setup took 111 s, 92 s, 99 s and 105 s with the models seeded. voice-mode answered `initialize`
 in 10.7-13.0 s (n=4), and 14.0-15.0 s with ffmpeg off PATH (n=2).
 
+## Speech recognition on an NVIDIA GPU (added 2026-11-17)
+
+**Why.** On this laptop (RTX 4080 Laptop GPU, driver 596.58), measured on 2026-11-17 with the
+pinned `ggml-base.bin`, a 7.58 s spoken English clip (resampled to 16 kHz mono) and 5 POSTs to
+`/inference` per build (n=5 each, one machine, other sessions running): the CPU zip took a median of
+**6.94 s** (4.02-10.01 s), and the CUDA zip took **0.21 s** (0.13-0.42 s). Both returned the same text.
+The CUDA server answered `/health` 1.6 s after it started (n=1).
+
+**What setup does.** `VOICEMODE_WHISPER_GPU` is read like the other settings (the environment,
+then `voicemode.env`):
+
+| Value | Build installed |
+|---|---|
+| `auto` (default) | CUDA when `nvidia-smi.exe` is on PATH and `nvidia-smi -L` lists a GPU (5 s timeout, no window); otherwise CPU, with the reason |
+| `on` | CUDA, without asking nvidia-smi |
+| `off` | CPU, today's zip, unchanged |
+
+Any other value is an error that names the setting. Setup installs **one** build. The CUDA build
+is `whisper_cuda` in `scripts/windows/dependencies.json`: `whisper-bin-win-cuda-12.4.0-x64.zip`
+from the same release b5454 as the CPU zip, 684,913,404 bytes, SHA-256
+`afef0b88...a957a`. The pin is GitHub's asset digest, and on 2026-11-17 the file was downloaded
+and hashed to the same value. The chosen build is part of the runtime digest, so changing the
+setting makes the next setup build a new runtime, and the old one is pruned. `auto` with a GPU and
+`on` give the same runtime. `.complete.json` records `{"build", "setting", "reason"}`. Setup,
+`setup` run again, and `status` print it as one line: `Speech recognition: whisper.cpp CUDA build
+(...)`.
+
+**Checked on the GPU, never a silent CPU fallback.** The zip loads its backends as DLLs
+(`ggml-cuda.dll`, `ggml-cpu-*.dll`). When the CUDA one cannot load, whisper.cpp runs on the
+CPU and says only `whisper_backend_init_gpu: no GPU found`. So before selecting a CUDA runtime,
+setup starts its whisper-server once on a free loopback port. When `/health` answers (the model is
+loaded by then), setup stops the server and requires the line `whisper_backend_init_gpu: using CUDA0 backend`. That line is
+recorded as `gpu_check`. Without it, or if the server exits or does not answer within 60 s, setup fails with
+`whisper_gpu_failed: <reason>`, the new runtime is removed, and the previous one stays selected.
+The next step it prints is: set `VOICEMODE_WHISPER_GPU=off` and run setup again. At start, an STT
+service on a CUDA runtime that exits or never answers is reported the same way. GPU use is on by
+default in whisper.cpp (only `-ng/--no-gpu` turns it off), so the service command is the same
+for both builds.
+
+**Why not a CPU fallback at start.** That would need both zips in every runtime, plus a second
+start path in `vml_supervisor`, which is shared with FELIX. A fallback inside it would also be a
+quiet one, the thing this change is meant to avoid. A GPU that fails is a fault the user should
+see, and it has a one-line fix. Measured on the real binaries (Windows, n=1 each): the CUDA build
+passes the check; the CPU build, and the CUDA build run with `--no-gpu`, fail it with
+`whisper_gpu_failed: whisper-server loaded the model on the CPU, not the GPU (... no GPU found)`.
+
+**Size.** The zip is 684,913,404 bytes (685 MB), kept in `downloads\`. Unpacked into each
+runtime's `services\whisper` are 23 files, 1,212,038,656 bytes (the CPU build: 16 files,
+17,687,552). The largest are `ggml-cuda.dll` (570 MB) and `cublasLt64_12.dll` (474 MB). The DLLs
+are copies, as the CPU build's are, so while a rebuild runs two runtimes hold them. A whole
+CUDA install measured 2,946,118,594 bytes in 23,940 files after one setup (hard links counted
+once; `tests/test_voicemode_native_windows.py`, 2026-11-17, n=1), against 1,064,229,839 for the CPU
+install above. That setup took 282 s with the downloads seeded, while other sessions' test suites
+were loading the machine.
+
+**Driver.** NVIDIA's documented requirement, not measured here: the CUDA compatibility table in the
+CUDA Toolkit release notes (read 2026-11-17) lists driver **>= 525** for CUDA 12.x minor-version
+compatibility, and >= 551.61 on Windows as the driver shipped with the 12.4 GA toolkit. The same
+table gives `< 580` as the top of the 12.x minor-version range. The CUDA 12.4 build nevertheless ran on
+this laptop's 596.58 (n=1 machine). An older driver should fail the setup check, not run on the CPU
+without saying so; that path was not tested on a real old driver.
+
+**Not covered.** Only setup checks the GPU. A driver that changes after setup is caught only
+when the service then fails to start; if it starts and runs on the CPU instead, nothing reports it
+until setup runs again. FELIX copies this design (`dependencies.windows.json`), so the setting has
+a general name.
+
 ## How to recreate
 
 ```powershell

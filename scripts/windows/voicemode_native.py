@@ -38,6 +38,11 @@ runtime runs code from it, and a folder elsewhere may be writable by other accou
 uv's Python and cache live under it too. Settings come from the process environment first, then voicemode.env,
 through patches/voice_pill_state.setting (the shared resolver).
 
+Speech recognition is whisper.cpp from a pinned zip: the CUDA build when VOICEMODE_WHISPER_GPU
+is on, or auto (the default) and `nvidia-smi -L` lists a GPU; else the CPU build. Setup checks
+that the CUDA build really runs on the GPU and fails with whisper_gpu_failed otherwise: nothing
+falls back to the CPU without saying so (docs/windows-native/README.md).
+
 Speech services listen on 127.0.0.1 only, on the first free port of 28880-28899 (TTS)
 and 22022-22041 (STT), or a port set in VOICEMODE_NATIVE_TTS_PORT / _STT_PORT. Never
 8880, 8881, 8882, 2022 or 9000 (the WSL and Docker setup), nor FELIX's 18880-18899
@@ -285,6 +290,143 @@ def url(port):
     return f"http://{LOOPBACK}:{port}/v1"
 
 
+# -- speech recognition on an NVIDIA GPU (the pinned whisper.cpp CUDA build) -----------------
+# VOICEMODE_WHISPER_GPU = auto (the default: CUDA when `nvidia-smi -L` lists a GPU) | on | off.
+# Setup installs one build, the CUDA zip or the CPU zip, never both, and records which and why.
+# The build is part of the runtime digest, so changing the choice makes setup build a new runtime.
+
+WHISPER_GPU_SETTING = "VOICEMODE_WHISPER_GPU"
+WHISPER_SPECS = {"cpu": "whisper", "cuda": "whisper_cuda"}   # the build's entry in dependencies.json
+WHISPER_BUILD_NAMES = {"cpu": "CPU", "cuda": "CUDA"}
+GPU_CHECK_TIMEOUT = 5          # nvidia-smi -L answered in about 0.2 s here (2026-11-17, n=2)
+WHISPER_CHECK_TIMEOUT = 60     # the CUDA server answered /health 1.6 s after its start (n=1)
+WHISPER_ON_GPU = "whisper_backend_init_gpu: using CUDA"   # whisper.cpp b5454's line once on the GPU
+WHISPER_GPU_OFF_STEP = ("Set VOICEMODE_WHISPER_GPU=off (in the environment or ~/.voicemode/voicemode.env) "
+                        "and run setup again, then restart the voice connector.")
+
+
+def nvidia_gpus():
+    """(names, reason): the GPUs `nvidia-smi -L` lists, and how that was found out. No nvidia-smi
+    on PATH, a timeout, a failure or an empty list is no GPU, with the reason said."""
+    smi = on_path("nvidia-smi")
+    if not smi:
+        return [], "nvidia-smi was not found on PATH"
+    options = {"creationflags": subprocess.CREATE_NO_WINDOW} if WINDOWS else {}
+    try:
+        done = subprocess.run([smi, "-L"], capture_output=True, text=True, errors="replace",
+                              timeout=GPU_CHECK_TIMEOUT, stdin=subprocess.DEVNULL, **options)
+    except subprocess.TimeoutExpired:
+        return [], f"nvidia-smi -L did not answer in {GPU_CHECK_TIMEOUT} s"
+    except OSError as error:
+        return [], f"nvidia-smi -L could not run: {error}"
+    output = (done.stdout or "").strip()
+    first = (output or (done.stderr or "").strip()).splitlines()[:1]
+    if done.returncode != 0:
+        return [], f"nvidia-smi -L exited {done.returncode}" + (f": {first[0]}" if first else "")
+    gpus = [m.group(1).strip() for m in re.finditer(r"^GPU \d+: (.+?)(?: \(UUID: [^)]*\))?\s*$", output, re.M)]
+    if not gpus:
+        return [], "nvidia-smi -L lists no GPU" + (f" ({first[0]})" if first else "")
+    return gpus, f"nvidia-smi -L lists {len(gpus)} GPU{'s' if len(gpus) > 1 else ''}"
+
+
+def whisper_choice():
+    """{"build": "cuda" | "cpu", "setting": auto | on | off, "reason": why}: which whisper.cpp
+    build setup installs. on and off decide without asking nvidia-smi; any other value is an
+    error, never a guess."""
+    raw = setting(WHISPER_GPU_SETTING, "auto")
+    value = str(raw).strip().strip("\"'").strip().lower()
+    if value not in ("auto", "on", "off"):
+        raise VoiceError(f"{WHISPER_GPU_SETTING}={raw!r} is not a choice.",
+                         f"Set {WHISPER_GPU_SETTING} to auto, on or off, then run setup again.")
+    if value in ("on", "off"):
+        return {"build": "cuda" if value == "on" else "cpu", "setting": value,
+                "reason": f"{WHISPER_GPU_SETTING}={value}"}
+    gpus, why = nvidia_gpus()
+    if gpus:
+        return {"build": "cuda", "setting": value,
+                "reason": f"NVIDIA GPU found: {gpus[0]}; {why}; {WHISPER_GPU_SETTING}=auto"}
+    return {"build": "cpu", "setting": value, "reason": f"no NVIDIA GPU: {why}; {WHISPER_GPU_SETTING}=auto"}
+
+
+def whisper_record(runtime):
+    """The build a runtime was set up with (.complete.json), or None for one set up before it was recorded."""
+    complete = read_json(Path(runtime) / ".complete.json")
+    record = complete.get("whisper") if isinstance(complete, dict) else None
+    return record if isinstance(record, dict) and record.get("build") in WHISPER_SPECS else None
+
+
+def whisper_summary(record):
+    """One line for people: which build, and why."""
+    if record is None:
+        return "Speech recognition: whisper.cpp CPU build (set up before the GPU choice was recorded)."
+    line = f"Speech recognition: whisper.cpp {WHISPER_BUILD_NAMES[record['build']]} build ({record.get('reason')})."
+    if record.get("gpu_check"):
+        line += f" Setup checked it on the GPU: {record['gpu_check']}"
+    return line
+
+
+def whisper_check_command(runtime, port):
+    """The installed whisper-server with the runtime's model on loopback, as the service runs it,
+    GPU on (whisper.cpp's default; only -ng/--no-gpu turns it off)."""
+    return [str(whisper_program(runtime)), "--host", LOOPBACK, "--port", str(port),
+            "-m", str(Path(runtime) / "models/whisper/ggml-base.bin"), "-l", "auto"]
+
+
+def _free_loopback_port():
+    import socket
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.bind((LOOPBACK, 0))
+        return probe.getsockname()[1]
+
+
+def _tail(text, lines=3):
+    found = [line.strip() for line in text.splitlines() if line.strip()]
+    return "; ".join(found[-lines:]) or "it wrote nothing"
+
+
+def check_whisper_gpu(runtime):
+    """Setup's check of the CUDA build: start whisper-server once on a free loopback port until
+    /health answers (it loads the model first), then stop it. whisper.cpp loads its CUDA backend
+    from a DLL and quietly runs on the CPU when that fails, so the check reads the server's own
+    line. Returns that line; anything else raises whisper_gpu_failed with the next step. Nothing is
+    transcribed, played or recorded."""
+    fd, name = tempfile.mkstemp(prefix="vml-whisper-gpu-check-", suffix=".log")
+    log = Path(name)
+    options = {"creationflags": subprocess.CREATE_NO_WINDOW} if WINDOWS else {}
+    try:
+        port = _free_loopback_port()
+        with os.fdopen(fd, "wb") as output:
+            process = subprocess.Popen(whisper_check_command(runtime, port), stdin=subprocess.DEVNULL,
+                                       stdout=output, stderr=subprocess.STDOUT, cwd=str(runtime), **options)
+        try:
+            deadline = time.monotonic() + WHISPER_CHECK_TIMEOUT
+            while not sv_services.check_service("whisper", port, "/health"):
+                if process.poll() is not None:
+                    raise VoiceError(f"whisper_gpu_failed: whisper-server exited with {process.returncode} "
+                                     f"while loading its model ({_tail(log.read_text(errors='replace'))})",
+                                     WHISPER_GPU_OFF_STEP)
+                if time.monotonic() >= deadline:
+                    raise VoiceError(f"whisper_gpu_failed: whisper-server did not answer /health in "
+                                     f"{WHISPER_CHECK_TIMEOUT} s ({_tail(log.read_text(errors='replace'))})",
+                                     WHISPER_GPU_OFF_STEP)
+                time.sleep(0.1)
+        finally:
+            if process.poll() is None:
+                process.kill()
+            process.wait()
+        text = log.read_text(errors="replace")
+    finally:
+        log.unlink(missing_ok=True)
+    line = next((line.strip() for line in text.splitlines() if WHISPER_ON_GPU in line), None)
+    if line is None:
+        said = [line.strip() for line in text.splitlines()
+                if "whisper_backend_init_gpu" in line or "ggml_cuda_init" in line]
+        raise VoiceError("whisper_gpu_failed: whisper-server loaded the model on the CPU, not the GPU ("
+                         + ("; ".join(said[-2:]) or _tail(text)) + ")", WHISPER_GPU_OFF_STEP)
+    return line
+
+
 def runtime_inputs():
     """Every file whose bytes go into a runtime; a change to any of them means a new runtime."""
     patches = json.loads((PATCHES / "manifest.windows.json").read_text(encoding="utf-8"))
@@ -293,12 +435,15 @@ def runtime_inputs():
             PATCHES / "apply.py", PATCHES / "manifest.windows.json", *steps]
 
 
-def manifest():
-    """The dependencies and a digest of every runtime input."""
+def manifest(choice=None):
+    """The dependencies and a digest of every runtime input and of the whisper build (the
+    choice, else whisper_choice()): a runtime with the other build is not current."""
     data = json.loads(DEPENDENCIES.read_text(encoding="utf-8"))
+    choice = whisper_choice() if choice is None else choice
     value = hashlib.sha256()
     for path in runtime_inputs():
         value.update(path.relative_to(REPO).as_posix().encode() + b"\0" + path.read_bytes() + b"\0")
+    value.update(b"whisper-build\0" + choice["build"].encode() + b"\0")
     return data, value.hexdigest()
 
 
@@ -490,9 +635,10 @@ def check_machine():
         raise VoiceError("Native setup needs 64-bit Windows on an Intel or AMD processor.")
 
 
-def install_whisper(data, root, runtime):
-    """whisper-server and the DLLs beside it, from the pinned, hash-checked zip."""
-    spec = data["whisper"]
+def install_whisper(data, root, runtime, build="cpu"):
+    """whisper-server and the DLLs beside it, from the pinned, hash-checked zip of the build
+    (cpu: whisper, cuda: whisper_cuda in dependencies.json)."""
+    spec = data[WHISPER_SPECS[build]]
     archive = root / "downloads" / spec["sha256"] / spec["path"]
     download(spec, archive)
     target = whisper_program(runtime).parent
@@ -530,7 +676,8 @@ def relink_models(runtime, data, root):
 
 def setup(root):
     check_machine()
-    data, expected = manifest()
+    choice = whisper_choice()
+    data, expected = manifest(choice)
     probe = root / RUNTIMES / (expected[:12] + "-xxxxxxxx")
     phonemes = site_packages(probe / ".venv", data) / "espeakng_loader/espeak-ng-data"
     if len(os.fsencode(phonemes)) >= MAX_ESPEAK_PATH:
@@ -547,12 +694,12 @@ def setup(root):
     # uv's Python lives under the root too, so the runtime depends on nothing outside it.
     uv_env = {**os.environ, "UV_CACHE_DIR": str(uv_cache), "UV_PYTHON_INSTALL_DIR": str(root / "python")}
     try:
-        return _setup_locked(root, data, expected, uv, uv_env)
+        return _setup_locked(root, data, expected, uv, uv_env, choice)
     finally:
         shutil.rmtree(uv_cache, ignore_errors=True)
 
 
-def _setup_locked(root, data, expected, uv, uv_env):
+def _setup_locked(root, data, expected, uv, uv_env, choice):
     with exclusive(root / ".setup.lock"):
         for item in data["models"]:
             download(item, model_source(root, item))
@@ -566,6 +713,7 @@ def _setup_locked(root, data, expected, uv, uv_env):
                     relink_models(runtime, data, root)
                     prune_runtimes(root, runtime.name)
                     print(f"Already installed at {runtime}. Nothing was started.")
+                    print(whisper_summary(whisper_record(runtime)))
                     return runtime
         holders = root / RUNTIMES
         holders.mkdir(exist_ok=True)
@@ -589,7 +737,7 @@ def _setup_locked(root, data, expected, uv, uv_env):
             run([venv_program(runtime, "python"), PATCHES / "apply.py", "--native-windows",
                  "--package-dir", site_packages(venv, data) / "voice_mode"],
                 env={**os.environ, "PYTHONUTF8": "1"})
-            install_whisper(data, root, runtime)
+            install_whisper(data, root, runtime, choice["build"])
             (runtime / "services").mkdir(exist_ok=True)
             shutil.copy2(TTS_SERVER, runtime / "services/kokoro-onnx-server.py")
             shutil.copy2(DEPENDENCIES, runtime / "dependencies.json")
@@ -604,7 +752,12 @@ def _setup_locked(root, data, expected, uv, uv_env):
                 env=runtime_environment(runtime))
             run([venv_program(runtime, "python"), "-c", SYNTH_CHECK, runtime / "models/kokoro/kokoro-v1.0.onnx",
                  runtime / "models/kokoro/voices-v1.0.bin", DEFAULT_VOICE], env=runtime_environment(runtime))
-            atomic_json(runtime / ".complete.json", {"manifest": expected, "layout": LAYOUT})
+            # The CUDA build must really load on the GPU: a failure fails setup with the next step
+            # (VOICEMODE_WHISPER_GPU=off), and the previous runtime stays selected.
+            whisper = dict(choice)
+            if choice["build"] == "cuda":
+                whisper["gpu_check"] = check_whisper_gpu(runtime)
+            atomic_json(runtime / ".complete.json", {"manifest": expected, "layout": LAYOUT, "whisper": whisper})
             atomic_json(root / "active.json", {"manifest": expected, "runtime": runtime.name})
         except BaseException:
             shutil.rmtree(runtime, ignore_errors=True)
@@ -613,6 +766,7 @@ def _setup_locked(root, data, expected, uv, uv_env):
     if removed:
         print(f"Removed runtimes no longer in use: {', '.join(removed)}.")
     print(f"Installed at {runtime}. Nothing was started and no audio was played or recorded.")
+    print(whisper_summary(whisper_record(runtime)))
     return runtime
 
 
@@ -829,12 +983,18 @@ def launch_modes():
 
 
 def failure(results, runtime):
-    """The VoiceError for speech services that did not start, from the first Result that says why."""
+    """The VoiceError for speech services that did not start, from the first Result that says why.
+    STT that exited or never answered on a runtime with the CUDA build is whisper_gpu_failed, with
+    the step back to the CPU build: nothing falls back to the CPU on its own."""
     windows_step = "Start Claude Code from a normal desktop session, then restart the voice connector."
     for result in results:
         data = result.data if isinstance(result.data, dict) else {}
         kind = str(data.get("service", "")).lower()
         noun = kind.upper()
+        if (kind == "stt" and result.code in ("service_exited", "service_not_ready")
+                and (whisper_record(runtime) or {}).get("build") == "cuda"):
+            return VoiceError(f"whisper_gpu_failed: the CUDA speech recognition service did not start "
+                              f"({result.detail}). See {data.get('log')}.", WHISPER_GPU_OFF_STEP)
         if result.code == "runtime_incomplete":
             return VoiceError(f"The runtime {Path(runtime).name} was replaced while starting.",
                               "Restart the voice connector.")
@@ -1326,6 +1486,7 @@ def status(root):
     else:
         print("Not running; the services start with the voice connector.")
     print(f"Installed at {runtime}.")
+    print(whisper_summary(whisper_record(runtime)))
     use = disk_use(root)
     print(f"Disk: {use['root']:,} bytes in {root} (runtime {use['runtime']:,}, downloads "
           f"{use['downloads']:,}, Python {use['python']:,}; a hard-linked file counted once).")
