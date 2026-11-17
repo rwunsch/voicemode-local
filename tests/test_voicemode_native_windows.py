@@ -805,18 +805,19 @@ WSL_PILL_EXISTED = sys.platform == "win32" and (Path(os.environ.get("LOCALAPPDAT
 # -- speech recognition on an NVIDIA GPU, on this machine (no install, no service) -------------
 
 def test_gpu_detection_on_this_machine(monkeypatch):
-    """The real `nvidia-smi -L`: with it on PATH and a GPU listed, auto chooses the CUDA build."""
+    """The real nvidia-smi through vml_supervisor.gpu: with it on PATH and a usable GPU, auto
+    chooses the CUDA build."""
     monkeypatch.delenv("VOICEMODE_WHISPER_GPU", raising=False)
     vn = _launcher()
     if vn.on_path("nvidia-smi") is None:
         pytest.skip("no nvidia-smi on this machine's PATH")
     started = time.monotonic()
-    gpus, reason = vn.nvidia_gpus()
-    print(f"\n[gpu] {gpus} ({reason}) in {time.monotonic() - started:.2f} s")
-    assert gpus, reason
+    found = vn.gpu_status()
+    print(f"\n[gpu] {found} in {time.monotonic() - started:.2f} s")
+    assert found["available"], found
     monkeypatch.setenv("VOICEMODE_WHISPER_GPU", "auto")
     choice = vn.whisper_choice()
-    assert choice["build"] == "cuda" and gpus[0] in choice["reason"]
+    assert choice["build"] == "cuda" and found["gpu"] in choice["reason"]
 
 
 def _seeded(item):
@@ -835,7 +836,7 @@ def builds(tmp_path):
     needed = [data["whisper"], data["whisper_cuda"], model]
     if not all(_seeded(item) for item in needed):
         pytest.skip("VML_MODEL_SOURCE lacks a whisper zip or ggml-base.bin")
-    if vn.on_path("nvidia-smi") is None or not vn.nvidia_gpus()[0]:
+    if vn.on_path("nvidia-smi") is None or not vn.gpu_status()["available"]:
         pytest.skip("no NVIDIA GPU here")
     root = tmp_path / "r"
     for item in needed:

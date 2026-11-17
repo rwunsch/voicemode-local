@@ -58,8 +58,13 @@ def vn(home, monkeypatch):
     module = _load(SCRIPT, "voicemode_native_under_test")
     # No test runs this machine's nvidia-smi: the answer would depend on the machine. The GPU
     # detection tests load the module without this (vn_gpu).
-    monkeypatch.setattr(module, "nvidia_gpus", lambda: ([], "nvidia-smi was not looked for (test)"))
+    monkeypatch.setattr(module, "gpu_status", lambda: _status("no_nvidia_smi", "not looked for (test)"))
     return module
+
+
+def _status(reason, detail="", gpu=None, driver=None):
+    """vml_supervisor.gpu.summary()'s shape."""
+    return {"available": reason == "ok", "reason": reason, "detail": detail, "gpu": gpu, "driver": driver}
 
 
 @pytest.fixture
@@ -1958,28 +1963,23 @@ def test_a_stop_keeps_the_host_from_starting_again(vn, home, tmp_path, monkeypat
 
 
 # -- speech recognition on an NVIDIA GPU: the pinned whisper.cpp CUDA build ----------------
-# VOICEMODE_WHISPER_GPU = auto (default) | on | off. auto asks `nvidia-smi -L`; the choice goes
+# VOICEMODE_WHISPER_GPU = auto (default) | on | off. auto asks vml_supervisor.gpu; the choice goes
 # into the runtime digest, so changing it makes setup build a new runtime; setup checks that the
 # CUDA server really loads its model on the GPU; a failure says so, with the next step.
 
-_SMI_LINE = "GPU 0: NVIDIA GeForce RTX 4080 Laptop GPU (UUID: GPU-f69cada7-1dff-3a59-3f18-746738f9253b)\n"
+_GPU = "NVIDIA GeForce RTX 4080 Laptop GPU"
 
 
-def _fake_smi(vn, monkeypatch, *, found=True, stdout=_SMI_LINE, code=0, error=None):
-    """nvidia-smi on PATH (found) answering `-L` with stdout and code, or raising error. Returns
-    the calls made."""
+def _fake_gpu(vn, monkeypatch, status):
+    """vml_supervisor.gpu.probe answering status (a summary dict). Returns the calls made."""
     calls = []
-    real_on_path = vn.on_path
-    monkeypatch.setattr(vn, "on_path", lambda name: ("/fake/bin/nvidia-smi" if found else None)
-                        if name == "nvidia-smi" else real_on_path(name))
 
-    def run(args, **kwargs):
-        calls.append((list(args), kwargs))
-        if error is not None:
-            raise error
-        return vn.subprocess.CompletedProcess(args, code, stdout, "")
+    def probe():
+        calls.append(1)
+        return vn.sv_gpu.Result(status["reason"], status["detail"],
+                                {"gpu": status["gpu"], "driver": status["driver"]})
 
-    monkeypatch.setattr(vn.subprocess, "run", run)
+    monkeypatch.setattr(vn.sv_gpu, "probe", probe)
     return calls
 
 
@@ -1997,44 +1997,52 @@ def test_whisper_cuda_is_pinned_like_the_cpu_zip(vn):
     assert "whisper_cuda" in data["_provenance"]
 
 
+def test_detection_is_the_shared_module():
+    """One detection: setup asks vml_supervisor.gpu, the module FELIX vendors, and has none of its own."""
+    vn = _load(SCRIPT, "voicemode_native_shared_gpu")
+    from vml_supervisor import gpu
+    assert vn.sv_gpu.probe is gpu.probe
+    assert not hasattr(vn, "nvidia_gpus")
+    assert "nvidia-smi -L" not in SCRIPT.read_text(encoding="utf-8")
+
+
+def test_gpu_status_is_the_modules_summary(vn_gpu, monkeypatch):
+    _fake_gpu(vn_gpu, monkeypatch, _status("ok", f"{_GPU}, driver 566.14", _GPU, "566.14"))
+    assert vn_gpu.gpu_status() == _status("ok", f"{_GPU}, driver 566.14", _GPU, "566.14")
+
+
 def test_no_nvidia_smi_means_the_cpu_build(vn_gpu, monkeypatch):
-    calls = _fake_smi(vn_gpu, monkeypatch, found=False)
+    _fake_gpu(vn_gpu, monkeypatch, _status("no_nvidia_smi", "nvidia-smi is not on PATH"))
     choice = vn_gpu.whisper_choice()
     assert choice["build"] == "cpu" and choice["setting"] == "auto"
-    assert "nvidia-smi" in choice["reason"] and not calls
+    assert "no_nvidia_smi" in choice["reason"] and "nvidia-smi is not on PATH" in choice["reason"]
 
 
-def test_a_gpu_listed_by_nvidia_smi_means_the_cuda_build(vn_gpu, monkeypatch):
-    monkeypatch.setattr(vn_gpu, "WINDOWS", True)
-    no_window = getattr(vn_gpu.subprocess, "CREATE_NO_WINDOW", 0x08000000)
-    monkeypatch.setattr(vn_gpu.subprocess, "CREATE_NO_WINDOW", no_window, raising=False)
-    calls = _fake_smi(vn_gpu, monkeypatch)
+def test_a_usable_gpu_means_the_cuda_build(vn_gpu, monkeypatch):
+    _fake_gpu(vn_gpu, monkeypatch, _status("ok", f"{_GPU}, driver 566.14", _GPU, "566.14"))
     choice = vn_gpu.whisper_choice()
     assert choice["build"] == "cuda" and choice["setting"] == "auto"
-    assert "NVIDIA GeForce RTX 4080 Laptop GPU" in choice["reason"]
-    (args, kwargs), = calls
-    assert args == ["/fake/bin/nvidia-smi", "-L"]
-    assert 0 < kwargs["timeout"] <= 10
-    assert kwargs["creationflags"] == no_window
+    assert _GPU in choice["reason"]
 
 
-@pytest.mark.parametrize("kwargs,why", [
-    ({"stdout": "No devices were found\n"}, "lists no GPU"),
-    ({"stdout": "", "code": 9}, "exited 9"),
-    ({"error": subprocess.TimeoutExpired(["nvidia-smi", "-L"], 5)}, "did not answer"),
-    ({"error": OSError("access denied")}, "access denied"),
+@pytest.mark.parametrize("reason,detail", [
+    ("no_gpu_listed", "nvidia-smi lists no GPU"),
+    ("nvidia_smi_failed", "nvidia-smi exited 9"),
+    ("nvidia_smi_timeout", "nvidia-smi did not answer in 5 s"),
+    ("driver_too_old", "driver 470.82 is older than 525, which the CUDA 12.4 build needs"),
 ])
-def test_nvidia_smi_without_a_gpu_means_the_cpu_build_and_says_why(vn_gpu, monkeypatch, kwargs, why):
-    _fake_smi(vn_gpu, monkeypatch, **kwargs)
+def test_no_usable_gpu_means_the_cpu_build_and_says_why(vn_gpu, monkeypatch, reason, detail):
+    _fake_gpu(vn_gpu, monkeypatch, _status(reason, detail))
     choice = vn_gpu.whisper_choice()
     assert choice["build"] == "cpu"
-    assert why in choice["reason"]
+    assert reason in choice["reason"] and detail in choice["reason"]
 
 
 @pytest.mark.parametrize("where", ["env", "file"])
 @pytest.mark.parametrize("value,build", [("on", "cuda"), ("off", "cpu"), (" OFF ", "cpu"), ('"on"', "cuda")])
 def test_the_setting_overrides_detection(vn_gpu, home, monkeypatch, where, value, build):
-    calls = _fake_smi(vn_gpu, monkeypatch, found=build == "cpu")  # detection would say the opposite
+    calls = _fake_gpu(vn_gpu, monkeypatch,  # detection would say the opposite
+                      _status("no_nvidia_smi") if build == "cuda" else _status("ok", "", _GPU, "566.14"))
     if where == "env":
         monkeypatch.setenv("VOICEMODE_WHISPER_GPU", value)
     else:
@@ -2154,7 +2162,8 @@ def test_changing_the_setting_makes_setup_build_a_new_runtime(vn, home, tmp_path
     assert json.loads((root / "active.json").read_text())["runtime"] == second.name
     assert not first.exists()  # the CPU runtime was pruned
     monkeypatch.setenv("VOICEMODE_WHISPER_GPU", "auto")
-    monkeypatch.setattr(vn, "nvidia_gpus", lambda: (["NVIDIA GeForce RTX 4080 Laptop GPU"], "listed"))
+    monkeypatch.setattr(vn, "gpu_status", lambda: _status("ok", "listed", "NVIDIA GeForce RTX 4080 Laptop GPU",
+                                                          "566.14"))
     assert vn.setup(root) == second  # auto with a GPU is the same CUDA runtime: nothing rebuilt
     assert seen["installed"] == ["cpu", "cuda"]
     assert "Already installed" in capsys.readouterr().out
