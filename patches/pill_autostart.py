@@ -25,8 +25,14 @@ Settings (environment first, as voice_pill_state.setting reads them):
   VOICEMODE_PILL_DATA_DIR  the window's folder on Windows (log, position, WebView2, and the
                            mutex and stop-event names). Default <VOICEMODE_NATIVE_ROOT>\\pill,
                            else <base>/pill/window.
-  VOICEMODE_PILL_PYTHON    the backend's interpreter natively (default: this one); on macOS
-                           the pill venv's python (default ~/.voicemode/pill-venv/bin/python).
+  VOICEMODE_PILL_PYTHON    the backend's interpreter on Windows and WSL (default: this one); on
+                           macOS the WINDOW's interpreter, the pill venv's python (default
+                           ~/.voicemode/pill-venv/bin/python).
+  VOICEMODE_PILL_BACKEND_PYTHON
+                           the backend's interpreter on every platform, when set. On macOS
+                           without it the backend runs in this server's own interpreter, never
+                           in the pill venv (it has no numpy or sounddevice for the previews).
+                           Both Python settings are read from the environment only.
 
 Stdlib only, like voice_pill_state. A patch copied into voice_mode: it must not import
 vml_supervisor, so _detach below is that package's procs.detach sequence, kept small here.
@@ -48,6 +54,7 @@ HERE = Path(__file__).resolve().parent
 AUTOSTART_SETTING = "VOICEMODE_PILL_AUTOSTART"
 DATA_DIR_SETTING = "VOICEMODE_PILL_DATA_DIR"
 PYTHON_SETTING = "VOICEMODE_PILL_PYTHON"
+BACKEND_PYTHON_SETTING = "VOICEMODE_PILL_BACKEND_PYTHON"
 LAUNCH_SPACING_S = 20.0   # the WSL window takes up to ~15 s to start its backend
 CREATE_NO_WINDOW = 0x08000000
 CREATE_NEW_PROCESS_GROUP = 0x00000200
@@ -107,8 +114,16 @@ def data_dir(base=None) -> Path:
 
 
 def backend_python() -> str:
-    """VOICEMODE_PILL_PYTHON from the environment only (a voicemode.env value is refused:
-    a model can write that file), else the server's own interpreter."""
+    """The interpreter the backend (voice_pill.py --stdio) runs in, which also plays the voice
+    previews, so it needs numpy and sounddevice. Environment only (a voicemode.env value is
+    refused: a model can write that file). VOICEMODE_PILL_BACKEND_PYTHON wins everywhere. On
+    macOS otherwise the server's own interpreter, because VOICEMODE_PILL_PYTHON there is the
+    window's pill venv (no numpy). Elsewhere VOICEMODE_PILL_PYTHON, else the server's own."""
+    explicit = st.trusted_env(BACKEND_PYTHON_SETTING)
+    if explicit:
+        return explicit
+    if platform_kind() == "macos":
+        return sys.executable
     return st.trusted_env(PYTHON_SETTING) or sys.executable
 
 

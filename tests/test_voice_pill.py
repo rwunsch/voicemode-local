@@ -1114,6 +1114,31 @@ def test_snapshot_carries_voices_by_language(ctx, monkeypatch):
     assert vp.gather(ctx)["voices_by_language"] == {"English": ["af_sky"], "French": ["ff_siwis"]}
 
 
+@pytest.mark.parametrize("setting,kept", [
+    ("English", ["English"]),
+    ("english", ["English"]),
+    (" English , french ", ["English", "French"]),
+    ("Spanish", ["Spanish"]),
+    ("English,Klingon", ["English"]),
+])
+def test_voices_by_language_follows_voicemode_pill_languages(voices_env, monkeypatch, setting, kept):
+    """Talos #1840: FELIX sets VOICEMODE_PILL_LANGUAGES=English, yet every local language
+    was offered. When the setting is set only the listed languages remain."""
+    monkeypatch.setattr(vp, "_fetch_voices", lambda url: {"voices": ["af_sky", "ef_dora", "ff_siwis"]})
+    monkeypatch.setenv("VOICEMODE_TTS_BASE_URLS", "http://127.0.0.1:8880/v1")
+    monkeypatch.setenv("VOICEMODE_PILL_LANGUAGES", setting)
+    assert list(vp.voices_by_language(voices_env)) == [
+        l for l in ("English", "Spanish", "French") if l in kept]
+
+
+def test_voices_by_language_unset_offers_every_language(voices_env, monkeypatch):
+    monkeypatch.setattr(vp, "_fetch_voices", lambda url: {"voices": ["af_sky", "ef_dora", "ff_siwis"]})
+    monkeypatch.setenv("VOICEMODE_TTS_BASE_URLS", "http://127.0.0.1:8880/v1")
+    assert list(vp.voices_by_language(voices_env)) == ["English", "Spanish", "French"]
+    monkeypatch.setenv("VOICEMODE_PILL_LANGUAGES", "  ")   # blank counts as unset, as for German
+    assert list(vp.voices_by_language(voices_env)) == ["English", "Spanish", "French"]
+
+
 def test_a_voice_is_given_its_own_language_not_just_english_or_german():
     """2026-11-16: with every local language in the pill, a default voice such as ef_dora showed
     as English, because voice_language knew only English and German."""
@@ -1247,6 +1272,17 @@ def _finish(ctx):
     out = []
     while not ctx.replies.empty():
         out.append(ctx.replies.get_nowait())
+    # "loading" is published first, by _preview itself; the callers look at what came after
+    if out and out[0]["window"].get("preview") == "loading":
+        out = out[1:]
+    return out
+
+
+def _published(ctx):
+    """Everything queued for the page, in order, without waiting for a worker."""
+    out = []
+    while not ctx.replies.empty():
+        out.append(ctx.replies.get_nowait())
     return out
 
 
@@ -1284,12 +1320,37 @@ def test_preview_without_a_voice_is_an_error(preview_ctx, players, msg):
 def test_preview_of_a_voice_no_local_server_lists_is_an_error(preview_ctx, players, tts_servers, monkeypatch):
     port, posts = tts_servers({"voices": ["af_sky"]})
     monkeypatch.setenv("VOICEMODE_TTS_BASE_URLS", f"http://127.0.0.1:{port}/v1")
-    reply = vp.handle_command({"cmd": "preview_voice", "voice": "zz_nobody"}, preview_ctx)
-    assert reply == {"window": {"preview": "loading", "voice": "zz_nobody"}}
+    assert vp.handle_command({"cmd": "preview_voice", "voice": "zz_nobody"}, preview_ctx) is None
+    assert preview_ctx.replies.get(timeout=5) == {"window": {"preview": "loading", "voice": "zz_nobody"}}
     replies = _finish(preview_ctx)
     assert _states(replies) == ["error"]
     assert "unknown voice" in replies[0]["window"]["detail"]
     assert posts == [] and players == []
+
+
+def test_loading_is_published_before_the_worker_can_answer(preview_ctx, monkeypatch):
+    """Talos #1840: the worker started before the "loading" answer was published, so an
+    instant failure was queued first and the later "loading" overwrote it (the page then
+    waited 45 s). The worker below fails at once; the order must still be loading, error."""
+    monkeypatch.setattr(vp, "_player_unavailable", lambda: None)
+    started = threading.Event()
+
+    def fails_instantly(ctx, voice):
+        ctx.replies.put(vp._preview_reply("error", voice=voice, detail="boom"))
+        with ctx.preview_lock:
+            ctx.preview_running = False
+        started.set()
+
+    monkeypatch.setattr(vp, "_preview_worker", fails_instantly)
+    handled = vp.handle_command({"cmd": "preview_voice", "voice": "af_sky"}, preview_ctx)
+    # what run_stdio queues for the command's own return value, after handle_command returns
+    queued = [handled] if handled else []
+    assert started.wait(5)
+    preview_ctx.preview_thread.join(5)
+    got = _published(preview_ctx)
+    # the page keeps the last state it was sent: it must be the terminal one
+    order = _states(got + queued)
+    assert order[-1] == "error" and order.index("loading") < order.index("error")
 
 
 def test_preview_builds_the_tts_request_on_the_first_server_that_lists_the_voice(
@@ -1299,8 +1360,7 @@ def test_preview_builds_the_tts_request_on_the_first_server_that_lists_the_voice
     piper2, p2posts = tts_servers({"data": [{"id": "p_de_thorsten", "language_name": "German"}]})
     monkeypatch.setenv("VOICEMODE_TTS_BASE_URLS", f"https://api.openai.com/v1,http://127.0.0.1:{kokoro}/v1,"
                        f"http://localhost:{piper}/v1/,http://127.0.0.1:{piper2}/v1")
-    reply = vp.handle_command({"cmd": "preview_voice", "voice": "p_de_thorsten"}, preview_ctx)
-    assert reply["window"]["preview"] == "loading"
+    assert vp.handle_command({"cmd": "preview_voice", "voice": "p_de_thorsten"}, preview_ctx) is None
     replies = _finish(preview_ctx)
     assert _states(replies) == ["playing", "done"]
     assert kposts == [] and p2posts == []
@@ -1349,7 +1409,7 @@ def test_one_preview_at_a_time(preview_ctx, tts_servers, monkeypatch):
     monkeypatch.setattr(vp, "_start_player", lambda: made.append(FakePlayer(hold=hold)) or made[-1])
     port, posts = tts_servers({"voices": ["af_sky"]})
     monkeypatch.setenv("VOICEMODE_TTS_BASE_URLS", f"http://127.0.0.1:{port}/v1")
-    assert vp.handle_command({"cmd": "preview_voice", "voice": "af_sky"}, preview_ctx)["window"]["preview"] == "loading"
+    assert vp.handle_command({"cmd": "preview_voice", "voice": "af_sky"}, preview_ctx) is None
     _wait_for(made)
     second = vp.handle_command({"cmd": "preview_voice", "voice": "af_sky"}, preview_ctx)
     assert second["window"] == {"preview": "busy", "reason": "preview"}
@@ -1357,7 +1417,7 @@ def test_one_preview_at_a_time(preview_ctx, tts_servers, monkeypatch):
     _finish(preview_ctx)
     assert len(posts) == 1 and len(made) == 1
     # done: the next one may start
-    assert vp.handle_command({"cmd": "preview_voice", "voice": "af_sky"}, preview_ctx)["window"]["preview"] == "loading"
+    assert vp.handle_command({"cmd": "preview_voice", "voice": "af_sky"}, preview_ctx) is None
     _finish(preview_ctx)
 
 

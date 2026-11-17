@@ -365,3 +365,38 @@ def test_without_no_download_missing_files_are_still_downloaded(tmp_path, monkey
     monkeypatch.setattr(server, "_model_dir", tmp_path)
     server.ensure_models()
     assert calls == [server.MODEL_URL, server.VOICES_URL]
+
+
+# --- The espeak language follows the voice's prefix (Talos #1840, 2026-11-17) -------------
+# Every non-German voice used to be phonemised as lang="en-us", so ff_siwis read French
+# text with English rules.
+
+class _LangKokoro(_VoicedKokoro):
+    def __init__(self):
+        super().__init__()
+        self.langs = []
+
+    def create(self, text, voice, speed, lang):
+        self.langs.append(lang)
+        return np.zeros(240, dtype=np.float32), 24000
+
+
+@pytest.mark.parametrize("voice,lang", [
+    ("af_sky", "en-us"), ("am_adam", "en-us"), ("bf_emma", "en-gb"), ("bm_george", "en-gb"),
+    ("ef_dora", "es"), ("ff_siwis", "fr-fr"), ("hf_alpha", "hi"), ("if_sara", "it"),
+    ("jf_alpha", "ja"), ("pf_dora", "pt-br"), ("zf_xiaobei", "cmn"),
+    ("xf_nobody", "en-us"),
+])
+def test_the_espeak_language_follows_the_voice_prefix(monkeypatch, voice, lang):
+    server = _server()
+    fake = _LangKokoro()
+    monkeypatch.setattr(server, "get_kokoro", lambda: fake)
+    monkeypatch.setattr(server, "known_voices", lambda k: {voice})
+    httpd = server.make_server("127.0.0.1", 0)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        code, _ = _post_speech(f"http://127.0.0.1:{httpd.server_address[1]}", voice)
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+    assert code == 200 and fake.langs == [lang]

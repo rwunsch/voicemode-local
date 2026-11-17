@@ -76,14 +76,60 @@ def test_an_empty_list_is_no_gpu():
     assert result.code == "no_gpu_listed"
 
 
-@pytest.mark.parametrize("driver,code", [("524.99", "driver_too_old"), ("470.82.01", "driver_too_old"),
-                                         ("525.60.13", "ok"), ("525", "ok")])
-def test_the_cuda_12_4_build_needs_driver_525(driver, code):
-    result, _ = _probe(stdout=f"NVIDIA T4, {driver}\n")
+# NVIDIA's CUDA 12.x minimum drivers: Windows >= 527.41, Linux >= 525.60.13. WSL runs on the
+# WINDOWS driver, so the Windows minimum applies there (Talos #1840: only the major number,
+# 525, was compared, so 526.x and 527.00 counted as suitable).
+def _probe_on(platform, wsl, driver):
+    calls, run, which = _world(stdout=f"NVIDIA T4, {driver}\n")
+    return gpu.probe(run=run, which=which, platform=platform, wsl=wsl)
+
+
+@pytest.mark.parametrize("platform,wsl", [("win32", False), ("linux", True)])
+@pytest.mark.parametrize("driver,code", [
+    ("524.99", "driver_too_old"), ("526.98", "driver_too_old"), ("527.00", "driver_too_old"),
+    ("527.40", "driver_too_old"), ("525.60.13", "driver_too_old"), ("470.82.01", "driver_too_old"),
+    ("527.41", "ok"), ("527.99", "ok"), ("528.02", "ok"), ("596.58", "ok")])
+def test_windows_and_wsl_need_527_41(platform, wsl, driver, code):
+    result = _probe_on(platform, wsl, driver)
     assert result.code == code
     assert result.data == {"gpu": "NVIDIA T4", "driver": driver}
     if code == "driver_too_old":
-        assert driver in result.detail and "525" in result.detail
+        assert driver in result.detail and "527.41" in result.detail
+
+
+@pytest.mark.parametrize("driver,code", [
+    ("525.59", "driver_too_old"), ("525.59.99", "driver_too_old"), ("525", "driver_too_old"),
+    ("524.99", "driver_too_old"), ("470.82.01", "driver_too_old"),
+    ("525.60.13", "ok"), ("525.60.14", "ok"), ("525.85", "ok"), ("526.00", "ok"),
+    ("535.10", "ok"), ("566.14", "ok")])
+def test_plain_linux_needs_525_60_13(driver, code):
+    result = _probe_on("linux", False, driver)
+    assert result.code == code
+    if code == "driver_too_old":
+        assert driver in result.detail and "525.60.13" in result.detail
+
+
+def test_wsl_is_detected_from_the_environment_and_the_kernel_name(monkeypatch):
+    monkeypatch.delenv("WSL_DISTRO_NAME", raising=False)
+    monkeypatch.delenv("WSL_INTEROP", raising=False)
+    assert gpu.is_wsl("linux", read=lambda path: "6.6.87.2-microsoft-standard-WSL2") is True
+    assert gpu.is_wsl("linux", read=lambda path: "6.8.0-generic") is False
+    assert gpu.is_wsl("win32", read=lambda path: "microsoft") is False   # native Windows is not WSL
+    monkeypatch.setenv("WSL_DISTRO_NAME", "Ubuntu")
+    assert gpu.is_wsl("linux", read=lambda path: "6.8.0-generic") is True
+
+
+def test_probe_detects_wsl_itself_when_not_told(monkeypatch):
+    monkeypatch.setattr(gpu, "is_wsl", lambda platform, read=None: True)
+    calls, run, which = _world(stdout="NVIDIA T4, 526.98\n")
+    assert gpu.probe(run=run, which=which, platform="linux").code == "driver_too_old"
+
+
+@pytest.mark.parametrize("driver", ["abc", "527.x", "527.41-beta"])
+def test_an_unreadable_driver_version_is_never_available(driver):
+    result = _probe_on("win32", False, driver)
+    assert result.code == "nvidia_smi_failed"
+    assert "unreadable" in result.detail
 
 
 def test_a_failing_nvidia_smi_says_its_exit_code_and_first_line():

@@ -24,7 +24,7 @@ st = _load("voice_pill_state")
 pa = _load("pill_autostart")
 
 SETTINGS = ("VOICEMODE_PILL", "VOICEMODE_PILL_AUTOSTART", "VOICEMODE_PILL_DATA_DIR",
-            "VOICEMODE_PILL_PYTHON", "VOICEMODE_NATIVE_ROOT", "VOICEMODE_BASE_DIR")
+            "VOICEMODE_PILL_PYTHON", "VOICEMODE_PILL_BACKEND_PYTHON", "VOICEMODE_NATIVE_ROOT", "VOICEMODE_BASE_DIR")
 
 
 @pytest.fixture
@@ -105,6 +105,7 @@ def test_no_platform_no_start(env, monkeypatch):
 
 def test_windows_command(env, monkeypatch):
     base, _ = env
+    monkeypatch.setattr(pa, "platform_kind", lambda: "windows")   # the fixture says macos
     monkeypatch.setenv("VOICEMODE_PILL_DATA_DIR", r"C:\FELIX\voice\pill-window")
     monkeypatch.setenv("VOICEMODE_PILL_PYTHON", r"C:\FELIX\runtime\Scripts\python.exe")
     cmd = pa.start_command("windows", base)
@@ -134,6 +135,51 @@ def test_macos_command(env, monkeypatch):
     assert cmd[0] == "/felix/pill-venv/bin/python"
     assert cmd[1] == str(pa.HERE / "voice_pill_mac.py")
     assert cmd[2] == "--backend" and str(pa.HERE / "voice_pill.py") in cmd[3]
+
+
+def _backend_of(cmd):
+    return cmd[cmd.index("--backend") + 1]
+
+
+def test_macos_backend_does_not_run_in_the_pill_venv(env, monkeypatch):
+    """Talos #1840: VOICEMODE_PILL_PYTHON is the WINDOW's python on a Mac (the pill venv has
+    no numpy or sounddevice), so the backend, which plays the previews, must not use it."""
+    base, _ = env
+    monkeypatch.setenv("VOICEMODE_PILL_PYTHON", "/felix/pill-venv/bin/python")
+    assert pa.backend_python() == sys.executable
+    cmd = pa.start_command("macos", base)
+    assert cmd[0] == "/felix/pill-venv/bin/python"                       # the window
+    assert _backend_of(cmd).startswith(f'"{sys.executable}" ')           # the backend
+
+
+def test_backend_python_setting_wins_on_every_platform(env, monkeypatch):
+    base, _ = env
+    monkeypatch.setenv("VOICEMODE_PILL_PYTHON", "/felix/pill-venv/bin/python")
+    monkeypatch.setenv("VOICEMODE_PILL_BACKEND_PYTHON", "/felix/runtime/bin/python")
+    for kind in ("macos", "windows", "wsl"):
+        monkeypatch.setattr(pa, "platform_kind", lambda kind=kind: kind)
+        assert pa.backend_python() == "/felix/runtime/bin/python", kind
+    assert pa.mac_python() == "/felix/pill-venv/bin/python"
+    assert _backend_of(pa.start_command("macos", base)).startswith('"/felix/runtime/bin/python" ')
+    win = pa.start_command("windows", base)
+    assert win[win.index("-BackendExe") + 1] == "/felix/runtime/bin/python"
+
+
+@pytest.mark.parametrize("kind", ["windows", "wsl"])
+def test_windows_and_wsl_backend_still_follow_pill_python(env, monkeypatch, kind):
+    monkeypatch.setattr(pa, "platform_kind", lambda: kind)
+    monkeypatch.setenv("VOICEMODE_PILL_PYTHON", "/felix/runtime/bin/python")
+    assert pa.backend_python() == "/felix/runtime/bin/python"
+    monkeypatch.delenv("VOICEMODE_PILL_PYTHON")
+    assert pa.backend_python() == sys.executable
+
+
+def test_backend_python_from_a_voicemode_env_is_refused(env, monkeypatch):
+    monkeypatch.setenv(pa.BACKEND_PYTHON_SETTING, "/tmp/evil")
+    monkeypatch.setattr(st, "setting_came_from_a_file", lambda name: name == pa.BACKEND_PYTHON_SETTING)
+    assert pa.backend_python() == sys.executable
+    monkeypatch.setattr(st, "setting_came_from_a_file", lambda name: False)
+    assert pa.backend_python() == "/tmp/evil"
 
 
 def test_macos_without_a_pill_venv_does_not_start(env, monkeypatch, tmp_path):

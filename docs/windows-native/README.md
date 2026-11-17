@@ -298,7 +298,7 @@ then `voicemode.env`):
 
 | Value | Build installed |
 |---|---|
-| `auto` (default) | CUDA when `vml_supervisor.gpu` says available: `nvidia-smi.exe` on PATH, `nvidia-smi --query-gpu=name,driver_version --format=csv,noheader` lists a GPU, driver >= 525 (5 s timeout, no window); otherwise CPU, with the reason code (`no_nvidia_smi`, `no_gpu_listed`, `driver_too_old`, `nvidia_smi_failed`, `nvidia_smi_timeout`) |
+| `auto` (default) | CUDA when `vml_supervisor.gpu` says available: `nvidia-smi.exe` on PATH, `nvidia-smi --query-gpu=name,driver_version --format=csv,noheader` lists a GPU, driver >= 527.41 on Windows and WSL, >= 525.60.13 on Linux (5 s timeout, no window); otherwise CPU, with the reason code (`no_nvidia_smi`, `no_gpu_listed`, `driver_too_old`, `nvidia_smi_failed`, `nvidia_smi_timeout`) |
 | `on` | CUDA, without asking nvidia-smi |
 | `off` | CPU, today's zip, unchanged |
 
@@ -349,8 +349,9 @@ install above. That setup took 282 s with the downloads seeded, while other sess
 were loading the machine.
 
 **Driver.** NVIDIA's documented requirement, not measured here: the CUDA compatibility table in the
-CUDA Toolkit release notes (read 2026-11-17) lists driver **>= 525** for CUDA 12.x minor-version
-compatibility, and >= 551.61 on Windows as the driver shipped with the 12.4 GA toolkit. The same
+CUDA Toolkit release notes (read 2026-11-17) lists driver **>= 527.41 on Windows and >= 525.60.13 on Linux** for CUDA 12.x minor-version
+compatibility (WSL uses the Windows driver, so the Windows minimum; the check compares the whole
+version, not the major number, since 2026-11-17), and >= 551.61 on Windows as the driver shipped with the 12.4 GA toolkit. The same
 table gives `< 580` as the top of the 12.x minor-version range. The CUDA 12.4 build nevertheless ran on
 this laptop's 596.58 (n=1 machine). An older driver should fail the setup check, not run on the CPU
 without saying so; that path was not tested on a real old driver.

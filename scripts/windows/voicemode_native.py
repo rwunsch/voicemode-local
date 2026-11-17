@@ -307,8 +307,8 @@ WHISPER_GPU_OFF_STEP = ("Set VOICEMODE_WHISPER_GPU=off (in the environment or ~/
 
 def gpu_status():
     """vml_supervisor.gpu's one JSON shape: {available, reason (its code), detail, gpu, driver}.
-    The one GPU check, shared with FELIX: nvidia-smi on PATH, a GPU listed, driver >= 525 for
-    the CUDA 12.4 build; read-only, 5 s at most, no window."""
+    The one GPU check, shared with FELIX: nvidia-smi on PATH, a GPU listed, driver >= 527.41 (Windows)
+    for the CUDA 12.4 build; read-only, 5 s at most, no window."""
     return sv_gpu.summary(sv_gpu.probe())
 
 

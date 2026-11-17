@@ -100,7 +100,7 @@ Every operation returns `Result(code, detail, data)` objects instead of raising.
 | `detach_failed` | POSIX: the middle process that starts a process outside this one's ancestry failed (detail: its exit code and stderr tail, its unexpected output, a timeout, or the OSError). |
 | `detach_unsupported` | `procs.detach` was called on Windows, which starts outside a chat through the host instead. |
 | `detached` | POSIX: a process was started through a middle process, so it is no descendant of the caller (data: `pid`). |
-| `driver_too_old` | GPU check: the NVIDIA driver is older than 525, which the CUDA 12.4 build needs (data: `gpu`, `driver`). |
+| `driver_too_old` | GPU check: the NVIDIA driver is older than the minimum for the CUDA 12.4 build: 527.41 on Windows and WSL (WSL uses the Windows driver), 525.60.13 on Linux; the detail names it (data: `gpu`, `driver`). The whole version is compared; an unreadable version is `nvidia_smi_failed`, never available. |
 | `helper_command_bad` | A helper's command could not be built or started. |
 | `helper_not_running` | A helper was asked to stop and was not running. |
 | `helper_not_started` | The host did not start a helper: no connector lease was live under the lock. |

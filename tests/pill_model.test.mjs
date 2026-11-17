@@ -388,6 +388,17 @@ test("without English the languages are alphabetical; German follows the list, n
   assert.deepEqual(vm.languages, ["Dutch", "Spanish"]);
 });
 
+// VOICEMODE_PILL_LANGUAGES: the backend sends only the listed languages in voices_by_language
+// (and german_available false when German is not listed); the menu shows exactly those.
+test("an English-only voices_by_language gives an English-only menu", () => {
+  const vm = viewModel(snap({ voices_by_language: { English: ["af_sky", "bm_george"] },
+    german_available: false, voice: "af_sky", language: "English" }), 0, 0);
+  assert.deepEqual(vm.languages, ["English"]);
+  assert.deepEqual(vm.voices, ["af_sky", "bm_george"]);
+  const two = viewModel(snap({ voices_by_language: { French: ["ff_siwis"], English: ["af_sky"] } }), 0, 0);
+  assert.deepEqual(two.languages, ["English", "French"]);
+});
+
 test("absent or empty voices_by_language: today's lists", () => {
   for (const vbl of [undefined, null, {}, [], "x"]) {
     const vm = viewModel(snap({ voices_by_language: vbl }), 0, 0);

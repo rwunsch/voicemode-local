@@ -8,13 +8,16 @@ most, no window on Windows) and returns a Result; `summary()` turns it into the 
 
 Codes: ok, no_nvidia_smi, no_gpu_listed, driver_too_old, nvidia_smi_failed, nvidia_smi_timeout,
 not_applicable (macOS: no NVIDIA CUDA there, nothing is run). Only "ok" is available. The CUDA
-12.4 build needs driver 525 or newer (NVIDIA's CUDA toolkit/driver table: CUDA 12.x runs on
->= 525.60.13 on Linux, >= 527.41 on Windows through minor-version compatibility; the major
-number is what is checked). Never downloads, installs or starts anything.
+12.4 build needs NVIDIA's documented minimum driver for CUDA 12.x: >= 527.41 on Windows and
+>= 525.60.13 on Linux (minor-version compatibility). WSL runs on the WINDOWS driver, so the
+Windows minimum applies there. The whole version is compared, not its major number; a version
+that cannot be read is nvidia_smi_failed and never available. Never downloads, installs or
+starts anything.
 """
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -23,7 +26,8 @@ import sys
 from .result import Result
 
 TIMEOUT = 5            # nvidia-smi -L answered in about 0.2 s on the Windows laptop (2026-11-17, n=2)
-MIN_DRIVER = 525       # the CUDA 12.4 build's minimum driver major version
+MIN_DRIVER_WINDOWS = (527, 41)      # CUDA 12.x minimum on Windows, and on WSL (the Windows driver)
+MIN_DRIVER_LINUX = (525, 60, 13)    # CUDA 12.x minimum on Linux
 QUERY = ["--query-gpu=name,driver_version", "--format=csv,noheader"]
 
 
@@ -35,9 +39,34 @@ def _first_line(*texts):
     return ""
 
 
-def probe(run=subprocess.run, which=shutil.which, platform=None) -> Result:
+def _read_text(path):
+    with open(path, encoding="utf-8", errors="replace") as handle:
+        return handle.read()
+
+
+def is_wsl(platform=None, read=_read_text) -> bool:
+    """Is this Linux running under WSL (so the Windows driver is what nvidia-smi reports)?"""
+    platform = sys.platform if platform is None else platform
+    if not platform.startswith("linux"):
+        return False
+    if os.environ.get("WSL_DISTRO_NAME") or os.environ.get("WSL_INTEROP"):
+        return True
+    try:
+        return "microsoft" in read("/proc/sys/kernel/osrelease").lower()
+    except OSError:
+        return False
+
+
+def min_driver(platform, wsl):
+    """The minimum driver version (a tuple) for this platform."""
+    return MIN_DRIVER_WINDOWS if platform == "win32" or wsl else MIN_DRIVER_LINUX
+
+
+def probe(run=subprocess.run, which=shutil.which, platform=None, wsl=None) -> Result:
     """The GPU check: Result(code, detail, {"gpu": name|None, "driver": version|None})."""
     platform = sys.platform if platform is None else platform
+    if wsl is None:
+        wsl = is_wsl(platform)
     none = {"gpu": None, "driver": None}
     if platform == "darwin":
         return Result("not_applicable", "macOS has no NVIDIA CUDA", none)
@@ -62,13 +91,16 @@ def probe(run=subprocess.run, which=shutil.which, platform=None) -> Result:
     if not rows:
         return Result("no_gpu_listed", "nvidia-smi lists no GPU", none)
     name, _, driver = (part.strip() for part in rows[0].rpartition(","))
-    major = re.match(r"(\d+)(?:\.\d+)*$", driver)
-    if not name or not major:
+    parts = re.match(r"\d+(?:\.\d+)*$", driver)
+    if not name or not parts:
         return Result("nvidia_smi_failed", f"nvidia-smi answered an unreadable line: {rows[0]}", none)
     found = {"gpu": name, "driver": driver}
-    if int(major.group(1)) < MIN_DRIVER:
-        return Result("driver_too_old", f"driver {driver} is older than {MIN_DRIVER}, "
-                      "which the CUDA 12.4 build needs", found)
+    needed = min_driver(platform, wsl)
+    if tuple(int(n) for n in driver.split(".")) < needed:
+        minimum = ".".join(str(n) for n in needed)
+        where = "Windows or WSL" if needed == MIN_DRIVER_WINDOWS else "Linux"
+        return Result("driver_too_old", f"driver {driver} is older than {minimum}, the minimum "
+                      f"for the CUDA 12.4 build on {where}", found)
     return Result("ok", f"{name}, driver {driver}", found)
 
 

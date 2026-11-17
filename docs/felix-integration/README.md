@@ -178,7 +178,8 @@ Agreed with FELIX-voice on 2026-11-10. Robert's decisions are in
   | `VOICEMODE_PILL` | `true` to have a pill |
   | `VOICEMODE_PILL_AUTOSTART` | leave unset (`off` = the server never starts a window) |
   | `VOICEMODE_PILL_DATA_DIR` | FELIX's pill window folder, e.g. `<voice root>\pill-window`, with WebView2 pre-installed |
-  | `VOICEMODE_PILL_PYTHON` | macOS: the pill venv's python. Windows: optional, default is the server's own interpreter. **Environment only** since v1.1.3: a value in a voicemode.env is ignored |
+  | `VOICEMODE_PILL_PYTHON` | macOS: the pill venv's python, the WINDOW's interpreter only (not the backend's). Windows and WSL: the backend's interpreter, optional, default is the server's own. **Environment only** since v1.1.3: a value in a voicemode.env is ignored |
+  | `VOICEMODE_PILL_BACKEND_PYTHON` | The backend's interpreter on every platform, optional. On macOS without it the backend runs in the server's own interpreter (never the pill venv, which has no numpy or sounddevice for the voice previews). **Environment only**, like `VOICEMODE_PILL_PYTHON` |
   | `VOICEMODE_CONTROL_CHANNEL_ENABLED` | still `true` for live state |
 
 - **Barge `auto`.** `VOICEMODE_VOICE_BARGE=auto` listens only while output goes to headphones.

@@ -241,6 +241,14 @@ LANGUAGE_BY_PREFIX = {
 }
 
 
+# The espeak-ng language a voice is phonemised with, by the voice id's first letter. An
+# unknown prefix stays en-us. (d, the German model, passes "de" on its own path.)
+ESPEAK_LANG_BY_PREFIX = {
+    "a": "en-us", "b": "en-gb", "e": "es", "f": "fr-fr", "h": "hi", "i": "it",
+    "j": "ja", "p": "pt-br", "z": "cmn",
+}
+
+
 def session_providers(kokoro):
     """The providers of the onnxruntime session kokoro_onnx actually created
     (Kokoro.sess), in priority order; None if the object has no readable session."""
@@ -393,7 +401,7 @@ class TTSHandler(BaseHTTPRequestHandler):
                     # fallback to an installed voice needs to see that the voice is unknown.
                     self._send_json(404, {"error": f"Voice '{voice}' not found"})
                     return
-                lang = "en-us"
+                lang = ESPEAK_LANG_BY_PREFIX.get(voice_id[:1], "en-us")
             start = time.time()
             with _INFERENCE_LOCK:
                 waited = time.time() - start

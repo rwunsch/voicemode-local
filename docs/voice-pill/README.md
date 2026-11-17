@@ -65,7 +65,8 @@ window. No launcher starts it any more.
   - **WSL:** `Start-Process powershell.exe … pill-windows.ps1 -BackendCommand …`, so the window
     is not a child of the interop call.
   - **macOS:** `<VOICEMODE_PILL_PYTHON> voice_pill_mac.py --backend …`. It needs the pill venv
-    that `voicemode-switch pill on` makes.
+    that `voicemode-switch pill on` makes. The `--backend` interpreter is the server's own, not
+    the pill venv (see `VOICEMODE_PILL_BACKEND_PYTHON` below).
 
   `pill-windows.ps1`, `voice_pill_mac.py` and `ui/pill` are copied into the voice_mode
   package by `patches/apply.py`.
@@ -82,8 +83,12 @@ window. No launcher starts it any more.
 - **Settings.**
   - `VOICEMODE_PILL_DATA_DIR`: the Windows folder. Default `<VOICEMODE_NATIVE_ROOT>\pill`,
     else `<base>/pill/window`. WSL passes none and keeps `%LOCALAPPDATA%\voicemode-local`.
-  - `VOICEMODE_PILL_PYTHON`: the backend interpreter natively, or the pill venv python on
-    macOS.
+  - `VOICEMODE_PILL_PYTHON`: the backend interpreter on Windows and WSL; on macOS the pill
+    venv python, which runs the window only.
+  - `VOICEMODE_PILL_BACKEND_PYTHON`: the backend interpreter on every platform, when set. On
+    macOS without it the backend runs in the server's own interpreter, because it plays the
+    voice previews and the pill venv has no numpy or sounddevice. Environment only, like
+    `VOICEMODE_PILL_PYTHON` (a voicemode.env value is ignored).
   - `voicemode-switch pill on|off` and `voicemode_native.py pill on|off` still open or close
     the window at once.
 
@@ -488,6 +493,14 @@ Needs Robert (voice, ears, permissions):
   3. Otherwise the German Kokoro model (`models/kokoro-de-martin/`) next to the install.
   4. If only the English model is found, German is hidden. If nothing is found, it stays.
   A session that is already in German keeps German listed, so the menu shows its real value.
+- **`VOICEMODE_PILL_LANGUAGES`** also limits the language menu and its voices to the languages it
+  lists, not only German. The value is a comma-separated list of language names as the pill
+  shows them, compared case-insensitively with spaces around names ignored: `English`,
+  `German`, `Spanish`, `French`, `Italian`, `Japanese`, `Portuguese`, `Chinese`, `Hindi`,
+  `Dutch`, `Polish`, `Russian`, `Korean`. Examples: `English`; `English,German`; `english, french`.
+  A name the pill does not know is ignored. Unset or blank: every language the local TTS
+  servers offer. A session already speaking an unlisted language keeps that one entry, so the
+  menu shows its real value. (Tested: English, case, spaces, an unknown name; 2026-11-17.)
 - **Push-to-talk keys** are shown only where a listener runs. `VOICEMODE_PTT_ENABLED` decides
   when it says yes or no. Unset: on a Mac, while `voicemode-mcp`'s listener lives
   (`~/.voicemode/run/ptt-listener.pid`); on Windows and Linux, shown.
