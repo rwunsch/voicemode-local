@@ -129,6 +129,30 @@ voicemode-switch start                     # or ensure
 Routing in `~/.voicemode/voicemode.env` does not change: both engines serve
 `http://127.0.0.1:2022/v1`. No Claude Code restart is needed.
 
+## Who holds port 2022 (identity check)
+
+Why: on 2026-11-17 a WSL restart killed the native server; the next shell's `~/.bashrc`
+autostart ran `whisper-proxy.py` on the free 2022, and `ensure` then saw "2022 answers" and never
+started the configured engine. The proxy's `/health` also answered 200 while its Docker backend
+was dead (a real transcription returned 502), so speech input ran on the old path unnoticed for
+about 7 hours. Three guards, all tested:
+
+- `whisper-proxy.py` `/health` reports the backend (1.5 s probe, cached 2 s): 200
+  `{"status":"ok","engine":"whisper-proxy","backend":"ok"}`, else 503 `backend_unreachable`.
+- `whisper-proxy.py` exits 0 at startup when `STT_ENGINE=faster-whisper` (config path from
+  `VOICEMODE_LOCAL_CONFIG` for tests, else `~/.voicemode-local/config`); `--force` overrides.
+  The bashrc autostart can therefore no longer take 2022 from the engine.
+- `voicemode-switch ensure`: with `STT_ENGINE=faster-whisper`, 2022 counts as healthy only if
+  `GET /health` has `"engine": "faster-whisper"`. Another holder is named in one line
+  (`2022 is held by whisper-proxy (PID n), not the configured faster-whisper engine`). It is
+  stopped, by exact pid, only if `/tmp/whisper-proxy.pid` or the command line
+  (`python3 .../whisper-proxy.py --port 2022`) proves it is voicemode's own; the pid file wins
+  when it matches. If the holder cannot be proven ours, nothing is killed, the line says so and
+  `ensure` exits non-zero. The same rule covers native GPU Kokoro: with `KOKORO_ONNX_GPU=true`,
+  8880 is healthy only if `/health` says provider `CUDAExecutionProvider` (our own server that
+  reports no provider yet is still loading and is left alone). Tests:
+  `tests/test_switch_port_identity.py`, `tests/test_whisper_proxy.py`.
+
 ## Verification
 
 - `voicemode-switch status` shows "faster-whisper server running (PID ...)" and the 2022 health.

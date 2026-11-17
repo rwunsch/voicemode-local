@@ -264,6 +264,14 @@ already been ruled out by measurement, so it doesn't get re-proposed.
 
 The whisper proxy starts automatically on first WSL shell via `~/.bashrc`. It checks port 2022 to avoid duplicates.
 
+With `STT_ENGINE=faster-whisper` in `~/.voicemode-local/config` that autostart no longer takes
+port 2022: `whisper-proxy.py` reads the config, prints `STT_ENGINE=faster-whisper: not starting the
+Docker proxy; run voicemode-switch ensure` to stderr and exits 0 (`--force` serves anyway). Its
+`/health` reports the backend: 200 only if the Docker whisper answers, else 503
+`backend_unreachable`. `voicemode-switch ensure` treats 2022 as healthy only if `/health` says
+`"engine": "faster-whisper"` (and 8880 only with provider CUDAExecutionProvider when
+`KOKORO_ONNX_GPU=true`); see `docs/native-gpu-stt/README.md`.
+
 ## Key Dependencies
 
 - Python 3.10+, Docker + Compose, Claude Code CLI, uv/uvx
