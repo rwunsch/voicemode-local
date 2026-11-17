@@ -401,14 +401,19 @@ cmd_status() {
         fi
         check_service "Kokoro ONNX TTS" "http://127.0.0.1:$onnx_port/health" || true
         # /health names the provider the session really runs on.
-        local provider
-        provider="$(curl -sf --max-time 2 "http://127.0.0.1:$onnx_port/health" 2>/dev/null \
-            | python3 -c 'import json, sys; print(json.load(sys.stdin).get("provider") or "unknown")' 2>/dev/null || true)"
-        if [ "$provider" = "CUDAExecutionProvider" ]; then
-            ok "Provider: $provider"
-        elif [ -n "$provider" ]; then
-            fail "Provider: $provider (not on the GPU; the server should have exited with --require-gpu)"
-        fi
+        local provider body reason
+        body="$(curl -sf --max-time 2 "http://127.0.0.1:$onnx_port/health" 2>/dev/null || true)"
+        provider="$(json_field "$body" provider)"
+        [ -n "$body" ] && [ -z "$provider" ] && provider="unknown"
+        reason="$(json_field "$body" fallback_reason)"
+        case "$(kokoro_provider):$provider" in
+            *:CUDAExecutionProvider) ok "Provider: $provider" ;;
+            *:) ;;
+            auto:*) warn "Provider: $provider (KOKORO_PROVIDER=auto fell back to the CPU: ${reason:-no reason given})" ;;
+            cpu:*|directml:*|coreml:*) ok "Provider: $provider (KOKORO_PROVIDER=$(kokoro_provider))" ;;
+            *) fail "Provider: $provider (not on the GPU; the server should have exited with --require-gpu)" ;;
+        esac
+        status_kokoro_settings
     elif is_kokoro_onnx; then
         echo "Kokoro ONNX (native, port $onnx_port):"
         KOKORO_ONNX_PID_FILE="/tmp/kokoro-onnx-server.pid"
@@ -418,6 +423,7 @@ cmd_status() {
             fail "Kokoro ONNX server not running"
         fi
         check_service "Kokoro ONNX TTS" "http://127.0.0.1:$onnx_port/health" || true
+        status_kokoro_settings
     fi
     if is_faster_whisper; then
         echo ""
@@ -542,18 +548,55 @@ KOKORO_ONNX_PID_FILE="/tmp/kokoro-onnx-server.pid"
 is_kokoro_onnx_gpu() { is_kokoro_onnx && [ "$(vm_read_config KOKORO_ONNX_GPU false)" = "true" ]; }
 kokoro_onnx_venv() { vm_read_config KOKORO_ONNX_VENV "$HOME/.voicemode-local/kokoro-gpu-venv"; }
 
+# Provider and threads (2026-11-17): KOKORO_PROVIDER=auto|cuda|cpu|directml|coreml and
+# KOKORO_THREADS=N in the config become --provider / --threads. Unset (or threads 0):
+# nothing is passed, as before. With the GPU engine a KOKORO_PROVIDER replaces
+# --require-gpu (cuda is the same rule; auto falls back to the CPU and says why).
+# See docs/native-gpu-tts/README.md, "Provider and threads".
+# Read directly (as kokoro_onnx_port does): lib/compute.sh is optional for this script.
+kokoro_config_value() {
+    [ -f "$CONFIG_FILE" ] || return 0
+    sed -n "s/^$1=//p" "$CONFIG_FILE" 2>/dev/null | tail -1
+}
+kokoro_provider() { kokoro_config_value KOKORO_PROVIDER; }
+kokoro_threads() { kokoro_config_value KOKORO_THREADS; }
+# Sets KOKORO_OPTION_ARGS: the args for the main ONNX Kokoro ($1 = gpu | cpu).
+kokoro_option_args() {
+    local provider threads
+    provider="$(kokoro_provider)"; threads="$(kokoro_threads)"
+    KOKORO_OPTION_ARGS=()
+    if [ -n "$provider" ]; then
+        KOKORO_OPTION_ARGS+=(--provider "$provider")
+    elif [ "$1" = "gpu" ]; then
+        KOKORO_OPTION_ARGS+=(--require-gpu)
+    fi
+    if [ -n "$threads" ] && [ "$threads" != "0" ]; then
+        KOKORO_OPTION_ARGS+=(--threads "$threads")
+    fi
+}
+
 # Start the ONNX Kokoro server detached on port $1 (CPU or GPU, as configured).
 start_kokoro_onnx() {
     local port="$1"
     if is_kokoro_onnx_gpu; then
+        kokoro_option_args gpu
         start_detached kokoro-onnx-server "$KOKORO_ONNX_PID_FILE" \
             "$SCRIPT_DIR/scripts/kokoro-gpu-start.sh" "$(kokoro_onnx_venv)" --port "$port" \
-            --model-dir "$SCRIPT_DIR/models/kokoro" --require-gpu
+            --model-dir "$SCRIPT_DIR/models/kokoro" ${KOKORO_OPTION_ARGS[@]+"${KOKORO_OPTION_ARGS[@]}"}
     else
+        kokoro_option_args cpu
         start_detached kokoro-onnx-server "$KOKORO_ONNX_PID_FILE" \
             "$VENV_PY" "$SCRIPT_DIR/kokoro-onnx-server.py" --port "$port" \
-            --model-dir "$SCRIPT_DIR/models/kokoro"
+            --model-dir "$SCRIPT_DIR/models/kokoro" ${KOKORO_OPTION_ARGS[@]+"${KOKORO_OPTION_ARGS[@]}"}
     fi
+}
+
+# `status`: the provider/threads settings and how to change them.
+status_kokoro_settings() {
+    local provider threads
+    provider="$(kokoro_provider)"; threads="$(kokoro_threads)"
+    echo "  Settings: ${provider:+KOKORO_PROVIDER=$provider}${provider:-KOKORO_PROVIDER unset (as before: $(is_kokoro_onnx_gpu && echo 'CUDA required' || echo "kokoro-onnx's default"))}, ${threads:+KOKORO_THREADS=$threads}${threads:-KOKORO_THREADS unset (onnxruntime default)}"
+    echo "  Change: edit ~/.voicemode-local/config (KOKORO_PROVIDER=auto|cuda|cpu|directml|coreml, KOKORO_THREADS=N), then voicemode-switch stop && voicemode-switch start"
 }
 
 # Which local proxy ports the *current* config (voicemode.env) actually uses.
@@ -633,9 +676,14 @@ stt_cpu_own_re() {
 }
 
 start_kokoro_cpu_fallback() {
+    # KOKORO_THREADS applies here too; KOKORO_PROVIDER never does (always the CPU).
+    local threads; threads="$(kokoro_threads)"
+    local extra=()
+    if [ -n "$threads" ] && [ "$threads" != "0" ]; then extra=(--threads "$threads"); fi
     start_detached kokoro-cpu-fallback "$KOKORO_CPU_PID_FILE" \
         "$SCRIPT_DIR/scripts/kokoro-cpu-start.sh" "$(kokoro_onnx_venv)" \
-        --port "$(kokoro_cpu_fallback_port)" --model-dir "$SCRIPT_DIR/models/kokoro" --no-download
+        --port "$(kokoro_cpu_fallback_port)" --model-dir "$SCRIPT_DIR/models/kokoro" --no-download \
+        ${extra[@]+"${extra[@]}"}
 }
 
 start_stt_cpu_fallback() {
@@ -1259,8 +1307,9 @@ cmd_start() {
             if [ "$ONNX_PORT" = "8880" ] && ! free_8880_for_cpu_onnx; then
                 exit 1
             fi
+            kokoro_option_args cpu
             nohup "$VENV_PY" "$SCRIPT_DIR/kokoro-onnx-server.py" --port "$ONNX_PORT" \
-                --model-dir "$SCRIPT_DIR/models/kokoro" \
+                --model-dir "$SCRIPT_DIR/models/kokoro" ${KOKORO_OPTION_ARGS[@]+"${KOKORO_OPTION_ARGS[@]}"} \
                 > /tmp/kokoro-onnx-server.log 2>&1 &
             echo $! > "$KOKORO_ONNX_PID_FILE"
             sleep 2

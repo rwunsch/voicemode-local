@@ -8,6 +8,8 @@
 #   - vm_write_tts_config E [V]   : write KOKORO_ONNX / KOKORO_ONNX_GPU / _VENV / _PORT /
 #                                  KOKORO_CPU_FALLBACK to the config
 #   - vm_choose_tts_cpu_fallback  : sets KOKORO_CPU_FALLBACK_CHOICE (asks, default No)
+#   - vm_choose_kokoro_provider   : sets KOKORO_PROVIDER_CHOICE (asks with the GPU engine,
+#                                  default auto); vm_write_tts_config writes it
 #
 # Native GPU Kokoro is kokoro-onnx-server.py from its own venv on CUDA, started through
 # scripts/kokoro-gpu-start.sh with --require-gpu. Like the native STT it needs no Docker
@@ -90,8 +92,64 @@ vm_choose_tts_cpu_fallback() {
     KOKORO_CPU_FALLBACK_CHOICE="$VM_ANSWER"
 }
 
+# Sets KOKORO_PROVIDER_CHOICE (Robert, 2026-11-17: "users should be able to decide by
+# install and configuration"). Forced by KOKORO_PROVIDER_FORCED (install.sh
+# --kokoro-provider) or VOICEMODE_KOKORO_PROVIDER: any of auto cuda cpu directml coreml.
+# Otherwise asked only with the GPU engine (TTS_ENGINE=native-gpu, which needs an NVIDIA
+# GPU): auto / cpu / cuda, default auto, also with no input. directml and coreml are never
+# offered (never run by us). Without the GPU engine: empty, nothing is written.
+vm_choose_kokoro_provider() {
+    local forced="${KOKORO_PROVIDER_FORCED:-${VOICEMODE_KOKORO_PROVIDER:-}}"
+    KOKORO_PROVIDER_CHOICE=""
+    if [ -n "$forced" ]; then
+        case "$forced" in
+            auto|cuda|cpu|directml|coreml)
+                KOKORO_PROVIDER_CHOICE="$forced"
+                echo "  Speech output provider: $forced (forced)"
+                return 0 ;;
+            *)
+                echo "  Unknown --kokoro-provider value: $forced (use auto, cpu, cuda, directml or coreml)"
+                return 1 ;;
+        esac
+    fi
+    [ "${TTS_ENGINE:-}" = "native-gpu" ] || return 0
+    echo ""
+    echo "  Where should Kokoro make speech: on the GPU or on the processor (CPU)?"
+    echo "    1) auto (recommended) — the GPU when Kokoro really runs on it, otherwise the CPU,"
+    echo "         with a note saying why in the log and in voicemode-switch status."
+    echo "    2) cpu — never use the GPU. Much slower: measured on an RTX 4080 Laptop"
+    echo "         (2026-11-17, n=5, busy machine) a 270-character reply took a median 63.7 s"
+    echo "         on the CPU vs 4.6 s on the GPU."
+    echo "    3) cuda — the GPU only: if CUDA does not work, Kokoro stops with an error instead"
+    echo "         of falling back to the CPU."
+    echo "    Disk: no difference between these; all three run from the GPU venv chosen above"
+    echo "    (about 3.3 GB, CUDA libraries from pip). A CPU-only Kokoro venv is 144 MB."
+    echo "    Change it later: KOKORO_PROVIDER in ~/.voicemode-local/config (KOKORO_THREADS there"
+    echo "    sets the CPU threads; 0 = the default), then voicemode-switch stop && voicemode-switch start."
+    local answer=""
+    printf '%s' "  Choice [1]: "
+    read -r answer || true
+    echo ""
+    case "${answer:-1}" in
+        2) KOKORO_PROVIDER_CHOICE="cpu" ;;
+        3) KOKORO_PROVIDER_CHOICE="cuda" ;;
+        *) KOKORO_PROVIDER_CHOICE="auto" ;;
+    esac
+}
+
+# KOKORO_PROVIDER (when chosen or forced) and, with the GPU engine, KOKORO_THREADS=0 unless
+# the file already has a value: the key is then there to edit; 0 = onnxruntime's default.
+vm_write_kokoro_provider_config() {
+    [ -n "${KOKORO_PROVIDER_CHOICE:-}" ] || return 0
+    vm_write_config KOKORO_PROVIDER "$KOKORO_PROVIDER_CHOICE"
+    if [ -z "$(vm_read_config KOKORO_THREADS)" ]; then
+        vm_write_config KOKORO_THREADS 0
+    fi
+}
+
 vm_write_tts_config() {
     local engine="$1" venv="${2:-$KOKORO_GPU_DEFAULT_VENV}"
+    vm_write_kokoro_provider_config
     if [ "$engine" = "native-gpu" ]; then
         vm_write_config KOKORO_ONNX true
         vm_write_config KOKORO_ONNX_GPU true
