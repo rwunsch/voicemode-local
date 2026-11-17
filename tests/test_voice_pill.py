@@ -1114,6 +1114,31 @@ def test_snapshot_carries_voices_by_language(ctx, monkeypatch):
     assert vp.gather(ctx)["voices_by_language"] == {"English": ["af_sky"], "French": ["ff_siwis"]}
 
 
+@pytest.mark.parametrize("setting,kept", [
+    ("English", ["English"]),
+    ("english", ["English"]),
+    (" English , french ", ["English", "French"]),
+    ("Spanish", ["Spanish"]),
+    ("English,Klingon", ["English"]),
+])
+def test_voices_by_language_follows_voicemode_pill_languages(voices_env, monkeypatch, setting, kept):
+    """Talos #1840: FELIX sets VOICEMODE_PILL_LANGUAGES=English, yet every local language
+    was offered. When the setting is set only the listed languages remain."""
+    monkeypatch.setattr(vp, "_fetch_voices", lambda url: {"voices": ["af_sky", "ef_dora", "ff_siwis"]})
+    monkeypatch.setenv("VOICEMODE_TTS_BASE_URLS", "http://127.0.0.1:8880/v1")
+    monkeypatch.setenv("VOICEMODE_PILL_LANGUAGES", setting)
+    assert list(vp.voices_by_language(voices_env)) == [
+        l for l in ("English", "Spanish", "French") if l in kept]
+
+
+def test_voices_by_language_unset_offers_every_language(voices_env, monkeypatch):
+    monkeypatch.setattr(vp, "_fetch_voices", lambda url: {"voices": ["af_sky", "ef_dora", "ff_siwis"]})
+    monkeypatch.setenv("VOICEMODE_TTS_BASE_URLS", "http://127.0.0.1:8880/v1")
+    assert list(vp.voices_by_language(voices_env)) == ["English", "Spanish", "French"]
+    monkeypatch.setenv("VOICEMODE_PILL_LANGUAGES", "  ")   # blank counts as unset, as for German
+    assert list(vp.voices_by_language(voices_env)) == ["English", "Spanish", "French"]
+
+
 def test_a_voice_is_given_its_own_language_not_just_english_or_german():
     """2026-11-16: with every local language in the pill, a default voice such as ef_dora showed
     as English, because voice_language knew only English and German."""

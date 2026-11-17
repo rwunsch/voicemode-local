@@ -488,6 +488,14 @@ Needs Robert (voice, ears, permissions):
   3. Otherwise the German Kokoro model (`models/kokoro-de-martin/`) next to the install.
   4. If only the English model is found, German is hidden. If nothing is found, it stays.
   A session that is already in German keeps German listed, so the menu shows its real value.
+- **`VOICEMODE_PILL_LANGUAGES`** also limits the language menu and its voices to the languages it
+  lists, not only German. The value is a comma-separated list of language names as the pill
+  shows them, compared case-insensitively with spaces around names ignored: `English`,
+  `German`, `Spanish`, `French`, `Italian`, `Japanese`, `Portuguese`, `Chinese`, `Hindi`,
+  `Dutch`, `Polish`, `Russian`, `Korean`. Examples: `English`; `English,German`; `english, french`.
+  A name the pill does not know is ignored. Unset or blank: every language the local TTS
+  servers offer. A session already speaking an unlisted language keeps that one entry, so the
+  menu shows its real value. (Tested: English, case, spaces, an unknown name; 2026-11-17.)
 - **Push-to-talk keys** are shown only where a listener runs. `VOICEMODE_PTT_ENABLED` decides
   when it says yes or no. Unset: on a Mac, while `voicemode-mcp`'s listener lives
   (`~/.voicemode/run/ptt-listener.pid`); on Windows and Linux, shown.

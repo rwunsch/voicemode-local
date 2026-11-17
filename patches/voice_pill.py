@@ -203,14 +203,23 @@ def _install_dirs():
     return list(dict.fromkeys(dirs))
 
 
+def listed_languages(home=None):
+    """The languages VOICEMODE_PILL_LANGUAGES names, lower-cased (a comma list of the names
+    the pill shows: English, German, Spanish ...), or None when it is unset or blank."""
+    raw = (st.setting(LANGUAGES_SETTING, "", home) or "").strip()
+    if not raw:
+        return None
+    return [x.strip().lower() for x in raw.split(",") if x.strip()]
+
+
 def german_available(home=None) -> bool:
     """Can a German voice speak here? VOICEMODE_PILL_LANGUAGES decides when set. Otherwise yes
     if a German voice is configured, Piper is in the TTS chain, or the German Kokoro model is
     installed; no if the English Kokoro model is found without it (FELIX); and yes when
     nothing can be found, as before, because a wrong no hides a working voice."""
-    raw = (st.setting(LANGUAGES_SETTING, "", home) or "").strip()
-    if raw:
-        return "german" in [x.strip().lower() for x in raw.split(",")]
+    listed = listed_languages(home)
+    if listed is not None:
+        return "german" in listed
     for name in ("VOICEMODE_VOICES", "VOICEMODE_TTS_VOICE"):
         voices = (st.setting(name, "", home) or "").split(",")
         if any(voice_language(v.strip()) == "German" for v in voices):
@@ -344,7 +353,8 @@ def _ask_servers(raw):
 def voices_by_language(home=None) -> dict:
     """{language: [voice ids]} from the local TTS servers in VOICEMODE_TTS_BASE_URLS, in
     server order (first server first). Cached for VOICES_CACHE_S per URL setting. Never
-    raises; {} when nothing answered. A German voice german_voices() knows but does not
+    raises; {} when nothing answered. VOICEMODE_PILL_LANGUAGES, when set, keeps only the
+    languages it lists. A German voice german_voices() knows but does not
     offer here (dm_martin without its model) is dropped; one it does not know is kept,
     because its server says it speaks it (Piper's p_de_kerstin)."""
     try:
@@ -355,8 +365,11 @@ def voices_by_language(home=None) -> dict:
             hit = (now, _ask_servers(raw))
             _VOICES_CACHE[raw] = hit
         allowed = set(german_voices(home))
+        listed = listed_languages(home)   # VOICEMODE_PILL_LANGUAGES: only these, when set
         out = {}
         for lang, ids in hit[1].items():
+            if listed is not None and lang.lower() not in listed:
+                continue
             keep = [v for v in ids if v not in GERMAN_VOICES or v in allowed]
             if keep:
                 out[lang] = keep
