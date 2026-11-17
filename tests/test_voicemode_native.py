@@ -703,7 +703,10 @@ def test_kokoro_host_loopback(kokoro, monkeypatch):
     assert _serve_once(kokoro, monkeypatch, "ThreadingHTTPServer", argv) == ("127.0.0.1", 19)
 
 
-def test_whisper_proxy_host_default_and_loopback(monkeypatch):
+def test_whisper_proxy_host_default_and_loopback(monkeypatch, tmp_path):
+    # The proxy stands down when the config says STT_ENGINE=faster-whisper (this machine's real
+    # config does): point it at a config that does not exist, so the test never depends on the host.
+    monkeypatch.setenv("VOICEMODE_LOCAL_CONFIG", str(tmp_path / "no-such-config"))
     module = _load(REPO / "whisper-proxy.py", "whisper_proxy_under_test")
     assert _serve_once(module, monkeypatch, "ThreadingHTTPServer", ["w"]) == ("0.0.0.0", 2022)
     argv = ["w", "--host", "127.0.0.1", "--port", "20"]
