@@ -10,7 +10,12 @@ Requirements:
 
 Usage:
     python3 kokoro-onnx-server.py [--host 0.0.0.0] [--port 8880] [--model-dir ./models/kokoro]
-                                  [--no-download]
+                                  [--no-download] [--require-gpu]
+
+--require-gpu (or env VOICEMODE_KOKORO_REQUIRE_GPU=1): after loading the model, exit 1
+unless its onnxruntime session runs on CUDAExecutionProvider first. Without it a GPU
+venv whose CUDA provider failed to load silently runs on the CPU. Run the GPU venv
+through scripts/kokoro-gpu-start.sh. See docs/native-gpu-tts/README.md.
 """
 
 import argparse
@@ -35,6 +40,12 @@ _model_dir = None
 # --no-download: a missing model file is an error, never a download (FELIX installs the
 # files itself and runs the server offline).
 _no_download = False
+# --require-gpu: a session that is not on CUDA ends the server (exit 1), never a silent
+# CPU fallback.
+_require_gpu = False
+GPU_PROVIDER = "CUDAExecutionProvider"
+NO_CUDA_CAUSE = ("onnxruntime-gpu loaded no CUDA provider; the default pip build needs CUDA 13: "
+                 "install onnxruntime-gpu==1.23.2")
 
 # Requests are served on their own threads, so /health answers while a long synthesis
 # runs (2026-11-14: a 54 s reply took 134.7 s and the health checks timed out). One
@@ -230,6 +241,42 @@ LANGUAGE_BY_PREFIX = {
 }
 
 
+def session_providers(kokoro):
+    """The providers of the onnxruntime session kokoro_onnx actually created
+    (Kokoro.sess), in priority order; None if the object has no readable session."""
+    try:
+        return list(kokoro.sess.get_providers())
+    except Exception:  # noqa: BLE001 - a fake or an older kokoro_onnx: unknown
+        return None
+
+
+def active_provider(kokoro):
+    """The provider the session runs on (the first one), or None if not known."""
+    providers = session_providers(kokoro) if kokoro is not None else None
+    return providers[0] if providers else None
+
+
+def exit_unless_on_gpu(kokoro, label="Kokoro"):
+    """--require-gpu: exit 1 unless the session's first provider is CUDA. onnxruntime-gpu
+    can list CUDAExecutionProvider as available and still fail to load it (1.32 with the
+    CUDA 12 pip libraries), and then quietly runs on the CPU."""
+    providers = session_providers(kokoro)
+    if providers and providers[0] == GPU_PROVIDER:
+        return
+    if providers is None:
+        got = "could not read the session's provider list (kokoro_onnx.Kokoro.sess)"
+    else:
+        first = providers[0] if providers else "no provider"
+        got = f"the {label} session runs on {first} (providers: {providers})"
+    print(f"Error: --require-gpu: {NO_CUDA_CAUSE}.\n"
+          f"  {got}.\n"
+          f"  Start the server through scripts/kokoro-gpu-start.sh (it puts the venv's nvidia\n"
+          f"  libraries on LD_LIBRARY_PATH and sets ONNX_PROVIDER={GPU_PROVIDER}),\n"
+          f"  or run without --require-gpu to accept the CPU.",
+          file=sys.stderr, flush=True)
+    sys.exit(1)
+
+
 def german_files_exist():
     """The German model's files are downloaded (checked without loading the model)."""
     model_dir = _de_model_dir or Path("./models/kokoro-de-martin")
@@ -277,7 +324,10 @@ class TTSHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path == "/health":
-            self._send_json(200, {"status": "ok", "engine": "kokoro-onnx"})
+            # The provider of the model already loaded (never loads it): CUDAExecutionProvider
+            # on the GPU, CPUExecutionProvider when it runs on the CPU, null before loading.
+            self._send_json(200, {"status": "ok", "engine": "kokoro-onnx",
+                                  "provider": active_provider(_kokoro)})
         elif self.path == "/v1/audio/voices":
             try:
                 self._send_json(200, list_voices())
@@ -287,7 +337,8 @@ class TTSHandler(BaseHTTPRequestHandler):
         elif self.path == "/v1/models":
             self._send_json(200, {
                 "object": "list",
-                "data": [{"id": "kokoro-onnx", "object": "model", "owned_by": "local"}]
+                "data": [{"id": "kokoro-onnx", "object": "model", "owned_by": "local",
+                          "provider": active_provider(_kokoro)}]
             })
         else:
             self._send_json(404, {"error": "not found"})
@@ -379,10 +430,14 @@ def main():
                         help="Download the German model (voice dm_martin) and exit")
     parser.add_argument("--no-download", action="store_true",
                         help="Never download: a missing English model file exits 1, naming it")
+    parser.add_argument("--require-gpu", action="store_true",
+                        help="Exit 1 unless the model runs on CUDAExecutionProvider "
+                             "(also: env VOICEMODE_KOKORO_REQUIRE_GPU=1)")
     args = parser.parse_args()
 
-    global _model_dir, _de_model_dir, _no_download
+    global _model_dir, _de_model_dir, _no_download, _require_gpu
     _no_download = args.no_download
+    _require_gpu = args.require_gpu or os.environ.get("VOICEMODE_KOKORO_REQUIRE_GPU") == "1"
     _model_dir = Path(args.model_dir)
     _de_model_dir = Path(args.de_model_dir or f"{args.model_dir.rstrip('/')}-de-martin")
 
@@ -395,8 +450,13 @@ def main():
         exit_if_missing_without_download()
 
     # Pre-load models
-    get_kokoro()
-    get_kokoro_de()
+    kokoro = get_kokoro()
+    kokoro_de = get_kokoro_de()
+    if _require_gpu:
+        exit_unless_on_gpu(kokoro)
+        if kokoro_de is not None:
+            exit_unless_on_gpu(kokoro_de, "German Kokoro")
+    print(f"Kokoro ONNX provider: {active_provider(kokoro) or 'unknown'}", flush=True)
 
     server = make_server(args.host, args.port)
     print(f"Kokoro ONNX TTS server listening on {args.host}:{args.port}", flush=True)
