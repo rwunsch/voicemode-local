@@ -21,9 +21,16 @@ async def voice_barge(action: str = "status") -> str:
 
     Args:
         action: "on", "off", "auto" or "status". auto listens only while the sound plays
-            to headphones or a headset, decided at each reply.
+            to headphones or a headset, decided at each reply. status also gives the measured
+            interruption latency (median and p90 of the last 50).
     """
-    return await asyncio.to_thread(barge_control, action)
+    out = await asyncio.to_thread(barge_control, action)
+    if isinstance(action, str) and action.strip().lower() == "status":
+        try:
+            out = f"{out}\n{await asyncio.to_thread(voice_pill_state.latency_summary)}"
+        except Exception:  # the status itself must still answer
+            pass
+    return out
 
 
 @mcp.tool()

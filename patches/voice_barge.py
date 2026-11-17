@@ -94,6 +94,11 @@ class BargeDetector:
         self._run = 0
         self._fired = False
 
+    @property
+    def run_windows(self) -> int:
+        """How many consecutive windows, up to the latest fed, crossed the threshold."""
+        return self._run
+
     def feed(self, prob: float, db: float) -> bool:
         if self._fired:
             return False
@@ -1190,7 +1195,7 @@ def run(poll_speaking=None, open_capture=None, vad=None, detector=None, send_bar
         clock=time.time, preroll_windows=PREROLL_WINDOWS,
         is_paused=lambda: False, on_fire=None, stretch_clock=time.monotonic,
         poll_phase=None, warm_poll_every_windows=WARM_POLL_EVERY_WINDOWS,
-        preroll_discard=None) -> None:
+        preroll_discard=None, on_fired=None) -> None:
     """Main loop. ``poll_phase`` returns "idle", "warm", "speaking", or None to shut
     down (see PhaseTracker); ``poll_speaking`` (True, False or None) is the older form,
     with no warm phase.
@@ -1198,7 +1203,12 @@ def run(poll_speaking=None, open_capture=None, vad=None, detector=None, send_bar
     The mic is open while warm or speaking. Windows read while warm are thrown away:
     they only let the mic start up and spend the warmup before the reply plays. While
     ``is_paused()`` the mic stays closed (an open one closes at the next poll).
-    ``on_fire()`` is called once per barge-in sent.
+    ``on_fire()`` is called once per barge-in sent. ``on_fired(latency_ms)`` is the same
+    call with the measured latency (instead of ``on_fire``, never both): from the moment the
+    first window of the run that fired was read (speech onset as the detector saw it, so the
+    window's own 32 ms of audio before that are not counted) to the moment the control write
+    returned (the stop was sent; the player's own stop is not observable from here).
+    ``latency_ms`` is None when the write failed or the detector cannot say where the run began.
 
     After a barge the mic keeps reading until the server listens, then hands the audio to
     ``preroll_sink(samples, start_t)``; a pause in that time drops it and calls
@@ -1241,6 +1251,7 @@ def run(poll_speaking=None, open_capture=None, vad=None, detector=None, send_bar
 
         stretch = None
         fired = False
+        onset_at = None
         count = 0
         recent = deque(maxlen=preroll_windows)
         if phase == "speaking":
@@ -1280,15 +1291,25 @@ def run(poll_speaking=None, open_capture=None, vad=None, detector=None, send_bar
                     stretch.first_window_at = stretch_clock()
                 if count <= warmup_windows:
                     continue
+                read_at = stretch_clock()
                 if stretch.heard_at is None:
-                    stretch.heard_at = stretch_clock()
+                    stretch.heard_at = read_at
                 recent.append(window)
                 prob = vad.prob(window)
                 db = window_db(window)
                 stretch.stats.add(db)
-                if detector.feed(prob, db):
+                fired_now = detector.feed(prob, db)
+                if getattr(detector, "run_windows", None) == 1:
+                    onset_at = read_at   # the first window of a run that may be the one that fires
+                if fired_now:
                     delivered = send_barge()   # False: the control write failed (None: unknown)
-                    if on_fire is not None:
+                    if on_fired is not None:
+                        try:
+                            on_fired(None if delivered is False or onset_at is None
+                                     else max(0.0, (stretch_clock() - onset_at) * 1000.0))
+                        except Exception:
+                            logger.exception("on_fired failed")
+                    elif on_fire is not None:
                         try:
                             on_fire()
                         except Exception:
@@ -1472,7 +1493,7 @@ def main() -> int:
         preroll_sink=lambda samples, start_t: write_preroll(preroll_path(), samples, start_t),
         preroll_discard=lambda: preroll_path().unlink(missing_ok=True),
         is_paused=(lambda: is_paused() or gate.closed()) if gate is not None else is_paused,
-        on_fire=lambda: record_interruption(time.time()),
+        on_fired=lambda ms: record_interruption(time.time(), latency_ms=ms),
     )
     logger.info("stopped")
     return 0

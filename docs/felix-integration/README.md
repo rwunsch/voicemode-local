@@ -34,7 +34,7 @@ twice, 90 s + 90 s, and nothing was spoken). What FELIX takes, and must do, when
   `patch_tts_no_double_synthesis.py` (core.py, streaming.py), after `patch_git_timeout.py`. FELIX's
   `manifest.mac.json` needs the same three steps in the same place.
 - **A new setting FELIX must pass:** `VOICEMODE_TTS_CHUNK_CHARS`, the largest part in characters.
-  Unset or 0 keeps one request per reply. Size it so one part's generation stays well inside
+  Unset means 300 since 2026-11-17 (0 keeps one request per reply). Size it so one part's generation stays well inside
   `VOICEMODE_TTS_TIMEOUT_LOCAL`: at about 22 characters per second of audio and 5x slower than real
   time, 200 characters is about 9 s of audio and up to about 46 s of generation, inside 90 s.
   **Set the two together:** that sizing assumes `VOICEMODE_TTS_TIMEOUT_LOCAL=90`; voice-mode's own

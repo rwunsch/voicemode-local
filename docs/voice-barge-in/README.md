@@ -216,6 +216,42 @@ delivers through warm, drain and speaking).
 
 Steps for a real Mac: `tests/manual/mac_barge_vp_check.md`.
 
+## Interruption latency from real sessions (since v1.2.18)
+
+"Interruption does not kick in fast enough" was reported (2026-11-17). The designed minimum
+is 0.23-0.34 s warm (192 ms minimum speech = 6 windows of 32 ms, the capture buffer, the
+player's 50 ms poll), but nobody had measured it in a real session, so every interruption
+now records its latency. **No threshold or default was changed.**
+
+What is measured: from the moment the first window of the run that fired was read (speech
+onset as the trigger saw it) to the moment the control write to the voice server returned
+(the stop was sent). Two things it does not include: the 32 ms of audio inside that first
+window before it was read, and the player's actual stop after the server got the request
+(not observable from the trigger; an earlier measurement put `barge_in` to the player's stop
+log line at 7 to 35 ms, n=3, 2026-11-04). So the real time to silence is a little above
+the number shown. A failed control write records the interruption with no latency.
+
+Where it is stored: `interruptions.log` in the pill state directory. Each interruption is
+its timestamp line, followed by a `latency_ms=<n>` line when measured. The latency line is
+not a number, so the pill (and any older reader that counts lines that parse as a number)
+still counts one per interruption. Lines from before v1.2.18 have no latency and are still
+counted.
+
+How to read it: `voice_barge status` (the MCP tool; also asked in chat) ends with one line,
+for example `interruption latency (speech onset to stop sent), last 12: median 310 ms, p90
+480 ms`, over the last 50 interruptions that have a latency, or `no interruptions recorded
+yet`. Median is the typical wait; p90 is the wait you feel on a bad one in ten. The numbers
+are only as good as n: under about 10, treat them as an example.
+
+What to try once there are real numbers (nothing is changed for you):
+- Median near the designed 0.23-0.34 s: the trigger is as fast as its settings allow, and
+  what feels slow is the minimum speech time itself. On **headphones only** (no echo into
+  the mic), `VOICEMODE_VOICE_BARGE_MIN_SPEECH_MS=128` takes 64 ms off. Do not use it on
+  speakers: 96 ms gave false triggers from echo (see the settings table).
+- Median well above that (say over 0.6 s): the time is going somewhere else (load on the
+  machine, a slow control socket, a busy mic reader); look there before touching thresholds.
+- A large p90 with a normal median: occasional stalls; check machine load at those times.
+
 ## Measurements (2026-11-04, one person, WSLg, n=1 per row unless stated)
 
 | Setup | Test | Result |

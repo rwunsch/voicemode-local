@@ -176,6 +176,114 @@ class TestRunLoop:
         assert h.vad.resets == 2
 
 
+class ClockedCapture:
+    """Each window read advances the fake clock by one window (32 ms)."""
+
+    def __init__(self, frames, vad, clock):
+        self.frames, self.vad, self.clock = list(frames), vad, clock
+        self.closed = False
+
+    def read_window(self):
+        if not self.frames:
+            return None
+        self.clock["t"] += voice_barge.WINDOW_S
+        prob, db = self.frames.pop(0)
+        self.vad.next_prob = prob
+        return np.full(512, 10 ** (db / 20), dtype=np.float32)
+
+    def close(self):
+        self.closed = True
+
+
+class TestBargeLatency:
+    """The time from the first window of the run that fired to the stop being sent."""
+
+    def _run(self, frames, ack_s=0.05, need=3, on_fired=None, on_fire=None, send=None):
+        clock = {"t": 100.0}
+        vad = FakeVad()
+        polls = {"n": 0}
+
+        def poll():   # speaking for the first polls, then the loop ends
+            polls["n"] += 1
+            return True if polls["n"] <= 12 else None
+
+        def send_barge():
+            clock["t"] += ack_s
+            return True
+        kw = {}
+        if on_fired is not None:
+            kw["on_fired"] = on_fired
+        if on_fire is not None:
+            kw["on_fire"] = on_fire
+        voice_barge.run(
+            poll_speaking=poll,
+            open_capture=lambda: ClockedCapture(frames, vad, clock),
+            vad=vad, detector=detector(need=need), send_barge=send or send_barge,
+            sleep=lambda _s: None, warmup_windows=0, poll_every_windows=1,
+            stretch_clock=lambda: clock["t"], clock=lambda: clock["t"], **kw)
+
+    def test_latency_is_onset_to_stop_sent(self):
+        got = []
+        # two quiet windows, then speech from the 3rd window on; fires at the 5th window
+        self._run([(NOT_SPEECH, LOUD)] * 2 + [(SPEECH, LOUD)] * 5, on_fired=got.append)
+        assert len(got) == 1
+        # onset = read of window 3; fire = read of window 5 (2 windows later) + 50 ms ack
+        assert got[0] == pytest.approx((2 * voice_barge.WINDOW_S + 0.05) * 1000, abs=0.5)
+
+    def test_a_broken_run_restarts_the_onset(self):
+        got = []
+        frames = [(SPEECH, LOUD)] * 2 + [(NOT_SPEECH, LOUD)] + [(SPEECH, LOUD)] * 4
+        self._run(frames, on_fired=got.append)
+        assert got[0] == pytest.approx((2 * voice_barge.WINDOW_S + 0.05) * 1000, abs=0.5)
+
+    def test_a_single_window_trigger(self):
+        got = []
+        self._run([(SPEECH, LOUD)] * 3, need=1, on_fired=got.append)
+        assert got[0] == pytest.approx(50.0, abs=0.5)
+
+    def test_a_failed_control_write_records_no_latency(self):
+        got = []
+        self._run([(SPEECH, LOUD)] * 5, on_fired=got.append, send=lambda: False)
+        assert got == [None]
+
+    def test_an_unknown_delivery_still_records_it(self):
+        got = []
+        self._run([(SPEECH, LOUD)] * 5, on_fired=got.append, send=lambda: None)
+        assert len(got) == 1 and got[0] is not None
+
+    def test_a_failing_recorder_never_breaks_the_barge_in(self):
+        sent = []
+
+        def boom(_ms):
+            raise OSError("disk full")
+        self._run([(SPEECH, LOUD)] * 5, on_fired=boom, send=lambda: sent.append(1) or True)
+        assert sent == [1]
+
+    def test_the_old_on_fire_hook_still_works_without_on_fired(self):
+        calls = []
+        self._run([(SPEECH, LOUD)] * 5, on_fire=lambda: calls.append(1))
+        assert calls == [1]
+
+    def test_on_fired_replaces_on_fire_so_one_interruption_is_one_record(self):
+        fired, old = [], []
+        self._run([(SPEECH, LOUD)] * 5, on_fired=fired.append, on_fire=lambda: old.append(1))
+        assert len(fired) == 1 and old == []
+
+    def test_a_detector_without_run_windows_records_no_latency(self):
+        class Plain:
+            def reset(self): pass
+            def feed(self, prob, db): return True
+        got = []
+        clock = {"t": 0.0}
+        vad = FakeVad()
+        polls = iter([True] * 8)
+        voice_barge.run(poll_speaking=lambda: next(polls, None),
+                        open_capture=lambda: ClockedCapture([(SPEECH, LOUD)] * 3, vad, clock),
+                        vad=vad, detector=Plain(), send_barge=lambda: True, sleep=lambda _s: None,
+                        warmup_windows=0, poll_every_windows=1, on_fired=got.append)
+        assert got == [None]
+
+
 class TestSpeakingQuery:
     def test_missing_socket_means_not_speaking(self, tmp_path):
         assert voice_barge.is_speaking(tmp_path / "absent.sock") is False
