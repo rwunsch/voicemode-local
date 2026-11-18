@@ -470,5 +470,8 @@ def test_switch_diagnose_writes_the_report_and_prints_its_path(tmp_path):
     assert len(reports) == 1
     assert f"Report written to {reports[0]}" in r.stdout
     text = reports[0].read_text()
-    assert "kokoro-onnx" in text and "Conch: free" in text and "pid 4242" in text
+    # The switch prefers the checkout's own .venv/bin/voicemode when it exists (a real checkout has one, a
+    # fresh worktree does not), so the conch section is either the stub's line or the real CLI's answer.
+    assert "== Conch" in text and ("Conch: free" in text or "the conch is free" in text)
+    assert "kokoro-onnx" in text and "pid 4242" in text
     assert f"Dead ({dead}, stt, not configured): not answering" in text and "== Suspects" in text
