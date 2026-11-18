@@ -29,6 +29,11 @@ With neither set the model loads exactly as before (kokoro_onnx.Kokoro(model, vo
 provider from kokoro-onnx's ONNX_PROVIDER). With either, the server builds the onnxruntime
 session itself and passes it to kokoro_onnx.Kokoro.from_session. See
 docs/native-gpu-tts/README.md, "Provider and threads".
+
+Warm-up (default on; off with --no-warmup or env VOICEMODE_KOKORO_WARMUP=0): after loading,
+the server synthesises "Hello." once BEFORE it listens, so the first real request does not pay
+the first-inference initialisation (GPU, 2026-11-18, n=3: 3.8-4.4 s first, ~1 s after). Log
+line: "warm-up: <seconds> s". /health does not answer until it is done.
 """
 
 import argparse
@@ -568,6 +573,40 @@ class TTSHandler(BaseHTTPRequestHandler):
             self._send_json(500, {"error": str(e)})
 
 
+WARMUP_TEXT = "Hello."
+
+
+def warmup_enabled(no_warmup_flag):
+    """Warm-up is on unless --no-warmup or VOICEMODE_KOKORO_WARMUP=0."""
+    if no_warmup_flag:
+        return False
+    return os.environ.get("VOICEMODE_KOKORO_WARMUP", "1").strip() != "0"
+
+
+def warm_up(kokoro):
+    """One tiny synthesis before the server listens. Measured 2026-11-18 (GPU, load 34-55,
+    n=3): the first create() after loading took 3.8-4.4 s, the second 0.85-1.06 s; the cost
+    is a first-inference initialisation. Run here, /health does not answer until it is done
+    (as during the model load). A failure is logged and the server serves anyway."""
+    voices = known_voices(kokoro)
+    voice = DEFAULT_VOICE if DEFAULT_VOICE in voices else None
+    if voice is None:
+        try:
+            voice = list(kokoro.get_voices())[0]
+        except Exception:  # noqa: BLE001 - let kokoro_onnx decide below
+            voice = DEFAULT_VOICE
+    start = time.time()
+    try:
+        with _INFERENCE_LOCK:
+            kokoro.create(WARMUP_TEXT, voice=voice, speed=1.0,
+                          lang=ESPEAK_LANG_BY_PREFIX.get(voice[:1], "en-us"))
+    except Exception as error:  # noqa: BLE001 - the warm-up must never stop the server
+        print(f"warm-up failed after {time.time() - start:.1f} s ({error}); serving anyway",
+              flush=True)
+        return
+    print(f"warm-up: {time.time() - start:.1f} s", flush=True)
+
+
 def make_server(host, port):
     """The HTTP server, one thread per request (daemon threads, so a client that left
     cannot keep the process alive at shutdown)."""
@@ -600,6 +639,9 @@ def main():
     parser.add_argument("--threads", type=int, default=None,
                         help="onnxruntime intra-op threads; 0 = its default "
                              "(also: env VOICEMODE_KOKORO_THREADS)")
+    parser.add_argument("--no-warmup", action="store_true",
+                        help="Skip the one tiny synthesis run before the server listens "
+                             "(also: env VOICEMODE_KOKORO_WARMUP=0)")
     args = parser.parse_args()
 
     global _model_dir, _de_model_dir, _no_download, _require_gpu, _provider_requested, _threads
@@ -650,6 +692,8 @@ def main():
         if kokoro_de is not None:
             exit_unless_on_gpu(kokoro_de, "German Kokoro")
     print(provider_log_line(active_provider(kokoro)), flush=True)
+    if warmup_enabled(args.no_warmup):
+        warm_up(kokoro)
 
     server = make_server(args.host, args.port)
     print(f"Kokoro ONNX TTS server listening on {args.host}:{args.port}", flush=True)
