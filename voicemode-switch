@@ -1831,6 +1831,12 @@ PY
         shift
         python3 "$SCRIPT_DIR/voicemode-test-tts.py" "$@"
         ;;
+    diagnose)
+        # Read-only snapshot for a voice stall: run it DURING the stall, before /mcp reconnect.
+        # See docs/stall-diagnose/README.md. The conch CLI is passed in when it exists.
+        VM=$(_vm_cli 2>/dev/null) || VM=""
+        "$VENV_PY" "$SCRIPT_DIR/patches/stall_diagnose.py" --voicemode-cli "$VM"
+        ;;
     *)
         echo "Usage: voicemode-switch <command>"
         echo ""
@@ -1855,6 +1861,7 @@ PY
         echo "  queue-log Tail the per-session queue event log (debug)"
         echo "  sysaudio  Fold system output into voice input: on|off|status|setup|teardown"
         echo "  pill      Small on-screen status window: pill [on|off|status]"
+        echo "  diagnose  Read-only stall snapshot (run during a stall, before /mcp); report in ~/.voicemode/logs"
         echo ""
         echo "After switching modes, restart Claude Code for changes to take effect."
         ;;
