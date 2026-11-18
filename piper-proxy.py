@@ -9,6 +9,12 @@ Piper CLI:          piper --model <path> --output_file <tmp.wav>
 
 Usage:
     python3 piper-proxy.py [--port 8881] [--voices-file voices/piper-voices.json] [--models-dir models/piper]
+                           [--no-warmup]
+
+Warm-up (default on; off with --no-warmup or env VOICEMODE_PIPER_WARMUP=0): after pre-loading
+the default voice, it speaks "Hallo." once and converts the audio before the proxy serves, so
+the first real request does not pay the first-call cost (2026-11-18, n=3: the lazy scipy
+import in convert_wav, 3.8-7.6 s). Log line: "[piper-proxy] warm-up: <seconds> s".
 """
 
 import argparse
@@ -87,8 +93,18 @@ def synthesize_wav_bytes(voice, text):
     import wave
 
     buf = io.BytesIO()
-    with wave.open(buf, "wb") as wav_file:
+    wav_file = wave.open(buf, "wb")
+    try:
         voice.synthesize_wav(text, wav_file)
+    except BaseException:
+        # Closing a WAV whose header was never set raises "# channels not specified",
+        # which would replace the synthesis error the caller needs to see.
+        try:
+            wav_file.close()
+        except Exception:
+            pass
+        raise
+    wav_file.close()
     return buf.getvalue()
 
 
@@ -134,6 +150,30 @@ def convert_wav(wav_bytes, response_format):
         w.setframerate(TARGET_SAMPLE_RATE)
         w.writeframes(pcm)
     return buf.getvalue(), "audio/wav"
+
+
+WARMUP_TEXT = "Hallo."
+
+
+def warmup_enabled(no_warmup_flag):
+    """Warm-up is on unless --no-warmup or VOICEMODE_PIPER_WARMUP=0."""
+    if no_warmup_flag:
+        return False
+    return os.environ.get("VOICEMODE_PIPER_WARMUP", "1").strip() != "0"
+
+
+def warm_up_voice(model_path):
+    """Speak WARMUP_TEXT once with the (loaded) voice and convert it as a request would.
+    Returns the seconds it took. Measured 2026-11-18 (n=3, load ~22): the first request's
+    extra cost was convert_wav's first call (3.8-7.6 s, its lazy scipy import), not the
+    synthesis. Raises whatever the synthesis or conversion raises."""
+    import time
+    start = time.time()
+    voice = load_piper_voice(model_path)
+    if voice is None:
+        raise RuntimeError("piper Python API unavailable")
+    convert_wav(synthesize_wav_bytes(voice, WARMUP_TEXT), "pcm")
+    return time.time() - start
 
 
 class PiperProxyHandler(BaseHTTPRequestHandler):
@@ -347,6 +387,12 @@ def main():
         default=None,
         help="Directory for piper model files (default: models_dir from voices config or models/piper)",
     )
+    parser.add_argument(
+        "--no-warmup",
+        action="store_true",
+        help="Only pre-load the default voice; skip its one tiny synthesis before serving "
+             "(also: env VOICEMODE_PIPER_WARMUP=0)",
+    )
     args = parser.parse_args()
 
     voices_path = pathlib.Path(args.voices_file)
@@ -392,6 +438,14 @@ def main():
             try:
                 if load_piper_voice(model_path) is not None:
                     print(f"[piper-proxy] Default voice warm.")
+                    if warmup_enabled(args.no_warmup):
+                        # One tiny synthesis + conversion before serving: the first real
+                        # request otherwise pays the first-call initialisation.
+                        try:
+                            seconds = warm_up_voice(model_path)
+                            print(f"[piper-proxy] warm-up: {seconds:.1f} s", flush=True)
+                        except Exception as e:
+                            print(f"[piper-proxy] warm-up failed ({e}); serving anyway", flush=True)
                 else:
                     print("[piper-proxy] piper Python API unavailable; using CLI per request.")
             except Exception as e:
