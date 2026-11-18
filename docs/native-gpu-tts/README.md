@@ -326,6 +326,39 @@ whose name or image contains `kokoro` / `whisper` by `docker stop <name>`, anyth
 in one line and the install stops (exit 1) with nothing killed. Tests:
 `tests/test_install_ports.py`.
 
+## Warm-up (cold first request)
+
+Measured 2026-11-18 on this WSL machine with spare-port servers, n=3 fresh starts each, the
+same 2.4 s sentence, timed right after `/health` turned 200:
+
+| engine | load before / after | before: req 1 / req 2 | after warm-up: req 1 / req 2 | warm-up at start |
+|---|---|---|---|---|
+| GPU Kokoro | 50-55 / 45-49 | 5.3-11.8 s / 0.9-1.2 s | 2.9-5.1 s / 1.0-1.35 s | 3.5-7.3 s |
+| CPU Kokoro | 45-51 / 40-44 | 5.4-8.3 s / 5.8-12.0 s (no cold penalty) | 4.2-9.9 s / 3.7-11.0 s | 3.6-5.1 s |
+| Piper (thorsten-high) | 41-46 / 38-42 | 13.4-19.4 s / 3.7-6.1 s | 6.2-8.6 s / 5.8-7.6 s | 6.8-8.1 s |
+
+Where the cost was (in-process, load 26-44): GPU Kokoro's first `create()` 3.4-5.6 s, then
+0.75-1.1 s (n=9); not the model load (done before the server listens), not espeak (first
+phonemize 0.07-0.23 s, n=3), and not cuDNN algorithm search (`cudnn_conv_algo_search=HEURISTIC`
+first call 4.3-5.6 s vs EXHAUSTIVE 3.4-4.4 s, n=3 each). After a "Hello." warm-up the first
+real sentence still took 1.5-2.0 s vs 0.6-0.8 s warm (n=3): a smaller per-new-input cost the
+warm-up does not remove.
+Piper: not the synthesis (first and second alike) but `convert_wav`'s first call, 3.8-7.6 s,
+its lazy scipy import.
+
+So both servers run one tiny synthesis before they serve: Kokoro says "Hello." before it binds
+its port, Piper says "Hallo." with the pre-loaded default voice (only that one) and converts
+it. Log line `warm-up: <seconds> s`; a failing warm-up is logged and the server serves anyway.
+Behaviour change: start takes the warm-up longer; old behaviour via `VOICEMODE_KOKORO_WARMUP=0`
+/ `--no-warmup` and `VOICEMODE_PIPER_WARMUP=0` / `--no-warmup`. `/health` does not answer
+during the warm-up (as during the model load), so nothing is reported healthy early and the
+pid file keeps `ensure` from starting a second copy. Tests: `tests/test_kokoro_onnx_warmup.py`,
+`tests/test_piper_proxy_warmup.py`.
+
+Not covered: the first request after a long idle (39.8 s GPU, 38.0 s Piper, 73.1 s CPU on
+2026-11-18, n=1 each) is NOT explained by this: a fresh start's cold request was 5-19 s.
+Idle-dependent paging (or GPU clocks/power state) was not tested.
+
 ## Verification
 
 - `voicemode-switch status`: "Kokoro ONNX (native GPU, port 8880)", the PID, and
