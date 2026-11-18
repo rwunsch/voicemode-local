@@ -125,6 +125,35 @@ def test_another_sessions_override_is_not_ours(make):
     assert _kwargs(failover)["language"] == "auto"
 
 
+@pytest.fixture
+def no_settings(tmp_path, monkeypatch):
+    """The remember switch from a throwaway HOME and the environment only."""
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("VOICEMODE_PILL_REMEMBER_LAST", raising=False)
+
+
+# A first call takes its voice from the pill's last choice (no override yet): the recognition
+# language must come from the same place (2026-11-18).
+def test_the_last_choice_language_is_used_without_an_override(make, no_settings):
+    failover, state = make()
+    state.set_last_choice("dm_martin", "German")
+    assert _kwargs(failover)["language"] == "de"
+
+
+def test_the_override_wins_over_the_last_choice(make, no_settings):
+    failover, state = make()
+    state.set_last_choice("dm_martin", "German")
+    state.set_override(os.getpid(), None, "Spanish")
+    assert _kwargs(failover)["language"] == "es"
+
+
+def test_remember_last_off_ignores_the_last_choice_for_stt(make, no_settings, monkeypatch):
+    failover, state = make()
+    state.set_last_choice("dm_martin", "German")
+    monkeypatch.setenv("VOICEMODE_PILL_REMEMBER_LAST", "false")
+    assert _kwargs(failover)["language"] == "auto"
+
+
 def test_a_broken_state_never_breaks_stt(make, monkeypatch):
     failover, state = make()
 

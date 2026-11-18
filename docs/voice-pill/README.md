@@ -567,3 +567,32 @@ existing look; no redesign.
 
 Not checked yet: the look on a real Windows or Mac window, and sound from the child on a real
 machine (the tests use a fake player and fake TTS servers).
+
+## Which voice a turn speaks with (2026-11-18)
+
+From a FELIX-MAC run (FELIX #1840, v1.2.19, 2026-11-18, n=1 each). Read at every converse
+call, no restart; both settings come from the environment, else voicemode.env.
+
+- **The pill's last choice is remembered.** The pill starts with a chat's first converse, so
+  a choice made in it arrives after that call already resolved its voice (Mac, as FELIX-MAC
+  reported it from its logs, not re-checked here: autostart
+  17:41:33, first speech with am_puck 76 ms later, the page's set_voice/set_language at
+  17:41:48, after that speech ended). The backend now writes every voice/language it applies
+  to `<pill dir>/last_choice.json`, and a session with no override of its own yet uses it,
+  for the voice, the language note and the speech-recognition language
+  (`patch_stt_language.py`) alike. A machine with no such file behaves as before. The file is
+  machine-wide: a new session in any project starts with the last choice.
+  **Behaviour change:** a new session's first turn uses the voice last chosen in the pill;
+  old behaviour via `VOICEMODE_PILL_REMEMBER_LAST=false`.
+- **The voice follows the language of the text.** The pill's voice replaces the caller's when
+  the caller passed no voice, the install's default (converse's own `TTS_VOICES[0]` in the
+  server, else the first of `VOICEMODE_VOICES`), or a voice
+  of the same language (`voice_languages.language_from_id`), and also when either language is
+  unknown. A caller voice of another language is kept: Spanish text with `em_alex` is spoken by
+  `em_alex` even with the pill on `dm_martin`, and the turn's result tells the agent
+  ("Spoken with your voice em_alex (Spanish), not the pill's dm_martin (German) ..."). The
+  pill's language stays the default and the "write in ..." hint.
+  **Behaviour change:** the pill's voice no longer replaces a caller voice of another
+  language; old behaviour (replace always) via `VOICEMODE_PILL_VOICE_FOLLOWS_LANGUAGE=false`.
+
+Not checked on a real Mac or Windows run yet; the tests use fake state folders.

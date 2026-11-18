@@ -830,6 +830,12 @@ def _set_override(ctx, floor, **change):
     cur = st.get_override(floor["pid"], ctx.base)
     cur.update(change)
     st.set_override(floor["pid"], cur.get("voice"), cur.get("language"), ctx.base)
+    # Also the machine's last choice: a new chat's first call resolves its voice before this
+    # pill (started by that call) can send anything (FELIX-MAC, 2026-11-18).
+    try:
+        st.set_last_choice(cur.get("voice"), cur.get("language"), ctx.base)
+    except OSError as e:
+        print(f"voice_pill: could not remember the choice: {e}", file=sys.stderr, flush=True)
 
 
 def _toggle_barge(action, switch):

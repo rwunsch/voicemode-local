@@ -551,13 +551,104 @@ def get_override(pid: int, base=None) -> dict:
     return {k: data[k] for k in ("voice", "language") if data.get(k)}
 
 
+# The pill's last choice, machine-wide (FELIX-MAC, 2026-11-18): the pill starts with a chat's
+# first converse, so a choice made in it lands after that call resolved its voice. The backend
+# writes every choice it applies here, and a session with no override of its own yet uses it.
+REMEMBER_LAST_SETTING = "VOICEMODE_PILL_REMEMBER_LAST"            # default true
+FOLLOWS_LANGUAGE_SETTING = "VOICEMODE_PILL_VOICE_FOLLOWS_LANGUAGE"  # default true
+_OFF = ("false", "0", "no", "off")
+
+
+def _setting_on(name: str, home=None) -> bool:
+    return (setting(name, "", home) or "").strip().strip('"').lower() not in _OFF
+
+
+def _last_choice_path(base) -> Path:
+    return _base(base) / "last_choice.json"
+
+
+def set_last_choice(voice: str | None, language: str | None, base=None) -> None:
+    _write_json(_last_choice_path(base),
+                {k: v for k, v in (("voice", voice), ("language", language)) if v})
+
+
+def get_last_choice(base=None) -> dict:
+    """{voice, language} last chosen in the pill, or {}; a missing or corrupt file is {}."""
+    data, status = _read_json_state(_last_choice_path(base))
+    if status != "ok":
+        return {}
+    return {k: data[k] for k in ("voice", "language") if isinstance(data.get(k), str) and data[k]}
+
+
+def pill_choice(pid: int, base=None) -> dict:
+    """This session's override; without one, the pill's last choice (unless
+    VOICEMODE_PILL_REMEMBER_LAST=false)."""
+    override = get_override(pid, base)
+    if override or not _setting_on(REMEMBER_LAST_SETTING):
+        return override
+    return get_last_choice(base)
+
+
+def _language_from_id(voice):
+    """voice_languages.language_from_id (the one shared table), or None when it is absent."""
+    global _LANGUAGES
+    if _LANGUAGES is None:
+        _LANGUAGES = False
+        try:
+            if __package__:
+                from . import voice_languages as mod
+            else:
+                path = Path(__file__).with_name("voice_languages.py")
+                spec = importlib.util.spec_from_file_location("_vml_voice_languages", path)
+                mod = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(mod)
+            _LANGUAGES = mod.language_from_id
+        except Exception:  # noqa: BLE001 - unknown language: the pill's voice wins, as before
+            _warn_once("voice pill: voice_languages not found; the pill's voice replaces every voice")
+    return _LANGUAGES(voice) if _LANGUAGES else None
+
+
+def _install_default() -> str | None:
+    """The voice converse uses with none given: its own TTS_VOICES[0] (it imports the name
+    from config at start, converse.py:61), else config's, when the server has loaded them;
+    else default_voice() from the settings."""
+    for name in ("voice_mode.tools.converse", "voice_mode.config"):
+        voices = getattr(sys.modules.get(name), "TTS_VOICES", None)
+        if isinstance(voices, (list, tuple)) and voices and isinstance(voices[0], str):
+            return voices[0]
+    return default_voice()
+
+
+_LANGUAGES = None
+_KEPT_NOTES = {}  # pid -> note for this turn's result: the caller's voice was kept
+
+
 def effective_voice(pid: int, voice: str | None, base=None) -> str | None:
-    return get_override(pid, base).get("voice") or voice
+    """The voice to speak with. The pill's voice replaces the caller's when the caller passed
+    none, passed the install's default, or one of the same language; also when either
+    language is unknown. A caller voice of another language is kept (the voice follows the
+    language of the text) and the turn's result says so. Replace always:
+    VOICEMODE_PILL_VOICE_FOLLOWS_LANGUAGE=false."""
+    _KEPT_NOTES.pop(pid, None)
+    pinned = pill_choice(pid, base).get("voice")
+    if not pinned:
+        return voice
+    if not voice or voice == pinned or voice == _install_default() \
+            or not _setting_on(FOLLOWS_LANGUAGE_SETTING):
+        return pinned
+    own, chosen = _language_from_id(voice), _language_from_id(pinned)
+    if own is None or chosen is None or own == chosen:
+        return pinned
+    _KEPT_NOTES[pid] = (
+        f"\n\nSpoken with your voice {voice} ({own}), not the pill's {pinned} ({chosen}): "
+        f"the voice follows the language of your text. For {chosen} text pass no voice, "
+        f"or a {chosen} voice.")
+    return voice
 
 
 def language_note(pid: int, base=None) -> str:
     """Text for the agent, not spoken: a voice speaks only its own language."""
-    language = get_override(pid, base).get("language")
+    language = pill_choice(pid, base).get("language")
     if not language:
         return ""
     return f"\n\nThe user selected {language}. Write your next messages in {language}."
@@ -663,7 +754,7 @@ def _barge_note_once(pid: int, base) -> str:
 def result_note(pid: int, base=None, already: str = "") -> str:
     """Everything the agent should read after a turn. The stop note covers a turn cut by the
     socket, which only says playback stopped; our rule to keep talking would otherwise win."""
-    note = language_note(pid, base)
+    note = language_note(pid, base) + _KEPT_NOTES.pop(pid, "")
     if _read_json(_session_path(pid, base)).get("stopped") and STOPPED_MESSAGE not in already:
         note += "\n\n" + STOPPED_MESSAGE
     return note + _barge_note_once(pid, base)

@@ -21,8 +21,12 @@
    recorder (``record_audio``) blocked in ``sd.wait()``, so it polls instead and
    does the same.
 
-5. The pill's voice override replaces the caller's voice. Its language override is
-   added to the result for the agent, not spoken.
+5. The pill's voice (the session's override, else the pill's last choice) replaces the
+   caller's voice when the caller passed none, the install's default, or a voice of the
+   same language; a caller voice of another language is kept, and the result says so
+   (voice_pill_state.effective_voice; VOICEMODE_PILL_VOICE_FOLLOWS_LANGUAGE=false replaces
+   always, VOICEMODE_PILL_REMEMBER_LAST=false ignores the last choice). The pill's language
+   is added to the result for the agent, not spoken.
 
 6. The pill's Beeps switch decides every chime, read as each one is about to play.
 
