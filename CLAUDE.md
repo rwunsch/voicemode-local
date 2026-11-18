@@ -261,6 +261,8 @@ faster than it plays (no pauses); on CPU every part is slower than playback (gap
 Root cause is still open — see `docs/stt-61s-stall/README.md` for what has
 already been ruled out by measurement, so it doesn't get re-proposed.
 
+**Mic stream fails to start** ("Wait timed out [PaErrorCode -9987]", 2026-11-18): `patches/patch_audio_recover.py` re-initialises PortAudio and retries once with silence detection (behaviour change: old behaviour via `VOICEMODE_AUDIO_RECOVER=false`); the fixed-length fallback ends on ESC/cancel and `VOICEMODE_FALLBACK_RECORD_MAX_S` caps it (unset = unchanged). See `docs/audio-recover/README.md`.
+
 **Routing config lives in `~/.voicemode/voicemode.env`** (plural `VOICEMODE_TTS_BASE_URLS`/`VOICEMODE_STT_BASE_URLS`/`VOICEMODE_VOICES`), NOT `~/.claude.json` (which holds only `OPENAI_API_KEY`). voice-mode reads ONLY the plural list vars; the singular `TTS_BASE_URL`/etc. are ignored. Each requested voice routes to the first engine that owns it (Kokoro and Piper reject foreign voices fast); OpenAI is strictly last-resort and is **never** silently substituted for a local voice. The MCP command is the `voicemode-mcp` wrapper, which auto-starts (detached) the needed proxies on session load. Test routing with `voicemode-switch test-tts`.
 
 ## Whisper Proxy Auto-Start
