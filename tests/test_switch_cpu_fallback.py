@@ -401,6 +401,100 @@ def test_status_says_when_a_fallback_is_down(made):
     assert "faster-whisper CPU fallback not running" in out
 
 
+# 2026-11-18: `status` printed "✗ Kokoro CPU fallback not running" while 8882 answered /health
+# with provider CPUExecutionProvider (a hand-started server, no pid file). The running line now
+# judges by what answers: no live pid file but the right engine answering is "✓ running (not
+# started by voicemode-switch: no pid file)"; ✗ only when nothing of that identity answers.
+
+NO_PID = "running (not started by voicemode-switch: no pid file)"
+
+
+def _line(out, needle):
+    return next((l for l in out.splitlines() if needle in l), "")
+
+
+def test_status_a_hand_started_kokoro_cpu_fallback_is_running(made):
+    b = made(KFB)
+    b.holder(8882, CPU_OK, b.fake("anything.py", where="elsewhere"))
+    out = b.run("status").stdout
+    line = _line(out, "Kokoro CPU fallback " + NO_PID)
+    assert line and "✓" in line, out
+    assert "Kokoro CPU fallback not running" not in out
+
+
+def test_status_a_hand_started_stt_cpu_fallback_is_running(made):
+    b = made(SFB)
+    b.holder(2023, FW_CPU, b.fake("anything.py", where="elsewhere"))
+    out = b.run("status").stdout
+    assert "✓" in _line(out, "faster-whisper CPU fallback " + NO_PID), out
+    assert "faster-whisper CPU fallback not running" not in out
+
+
+def test_status_a_loading_hand_started_stt_cpu_fallback_is_running(made):
+    b = made(SFB)
+    # faster-whisper-server.py's 503 body while loading names no engine, only status and device.
+    b.holder(2023, '{"status":"loading","error":null,"model":"base","device":"cpu"}',
+             b.fake("anything.py", where="elsewhere"))
+    out = b.run("status").stdout
+    assert "✓" in _line(out, "faster-whisper CPU fallback " + NO_PID), out
+
+
+def test_status_the_wrong_engine_on_the_fallback_port_is_still_not_running(made):
+    b = made(KFB + SFB)
+    b.holder(8882, CUDA, b.fake("a.py", where="elsewhere"))
+    b.holder(2023, FW_CUDA, b.fake("b.py", where="elsewhere"))
+    out = b.run("status").stdout
+    assert "✗" in _line(out, "Kokoro CPU fallback not running"), out
+    assert "✗" in _line(out, "faster-whisper CPU fallback not running"), out
+    assert NO_PID not in out
+
+
+def test_status_a_stale_pid_file_with_the_engine_answering_is_running(made):
+    b = made(KFB)
+    (b.scratch / "kokoro-cpu-fallback.pid").write_text("999999")
+    b.holder(8882, CPU_OK, b.fake("anything.py", where="elsewhere"))
+    out = b.run("status").stdout
+    line = _line(out, "Kokoro CPU fallback running (not started by voicemode-switch")
+    assert line and "✓" in line, out
+
+
+def test_status_a_hand_started_gpu_kokoro_is_running(made):
+    b = made(GPU)
+    b.holder(8880, CUDA, b.fake("anything.py", where="elsewhere"))
+    out = b.run("status").stdout
+    assert "✓" in _line(out, "Kokoro ONNX server " + NO_PID), out
+    assert "Kokoro ONNX server not running" not in out
+
+
+def test_status_a_gpu_kokoro_port_held_by_something_else_is_not_running(made):
+    b = made(GPU)
+    b.holder(8880, '{"status":"healthy"}', b.fake("anything.py", where="elsewhere"))
+    out = b.run("status").stdout
+    assert "✗" in _line(out, "Kokoro ONNX server not running"), out
+
+
+def test_status_a_hand_started_faster_whisper_is_running(made):
+    b = made(FW)
+    b.holder(2022, FW_CUDA, b.fake("anything.py", where="elsewhere"))
+    out = b.run("status").stdout
+    assert "✓" in _line(out, "faster-whisper server " + NO_PID), out
+    assert "faster-whisper server not running" not in out
+
+
+def test_status_whisper_proxy_on_2022_is_not_the_faster_whisper_server(made):
+    b = made(FW)
+    b.holder(2022, '{"status":"ok"}', b.fake("anything.py", where="elsewhere"))
+    out = b.run("status").stdout
+    assert "✗" in _line(out, "faster-whisper server not running"), out
+
+
+def test_status_a_hand_started_cpu_kokoro_onnx_is_running(made):
+    b = made("KOKORO_ONNX=true\nKOKORO_ONNX_PORT=8882\n")
+    b.holder(8882, CPU_OK, b.fake("anything.py", where="elsewhere"))
+    out = b.run("status").stdout
+    assert "✓" in _line(out, "Kokoro ONNX server " + NO_PID), out
+
+
 def test_status_without_fallbacks_mentions_none(made):
     b = made(GPU + FW)
     assert "CPU fallback" not in b.run("status").stdout

@@ -394,11 +394,8 @@ cmd_status() {
     fi
     if is_kokoro_onnx_gpu; then
         echo "Kokoro ONNX (native GPU, port $onnx_port):"
-        if [ -f "$KOKORO_ONNX_PID_FILE" ] && kill -0 "$(cat "$KOKORO_ONNX_PID_FILE")" 2>/dev/null; then
-            ok "Kokoro ONNX server running (PID $(cat "$KOKORO_ONNX_PID_FILE"))"
-        else
-            fail "Kokoro ONNX server not running (log: /tmp/kokoro-onnx-server.log)"
-        fi
+        status_engine_running "Kokoro ONNX server" "$KOKORO_ONNX_PID_FILE" "$onnx_port" \
+            is_kokoro_onnx_body "log: /tmp/kokoro-onnx-server.log"
         check_service "Kokoro ONNX TTS" "http://127.0.0.1:$onnx_port/health" || true
         # /health names the provider the session really runs on.
         local provider body reason
@@ -417,22 +414,16 @@ cmd_status() {
     elif is_kokoro_onnx; then
         echo "Kokoro ONNX (native, port $onnx_port):"
         KOKORO_ONNX_PID_FILE="/tmp/kokoro-onnx-server.pid"
-        if [ -f "$KOKORO_ONNX_PID_FILE" ] && kill -0 "$(cat "$KOKORO_ONNX_PID_FILE")" 2>/dev/null; then
-            ok "Kokoro ONNX server running (PID $(cat "$KOKORO_ONNX_PID_FILE"))"
-        else
-            fail "Kokoro ONNX server not running"
-        fi
+        status_engine_running "Kokoro ONNX server" "$KOKORO_ONNX_PID_FILE" "$onnx_port" \
+            is_kokoro_onnx_body
         check_service "Kokoro ONNX TTS" "http://127.0.0.1:$onnx_port/health" || true
         status_kokoro_settings
     fi
     if is_faster_whisper; then
         echo ""
         echo "Speech recognition (faster-whisper, native, port 2022):"
-        if [ -f "$FASTER_WHISPER_PID_FILE" ] && kill -0 "$(cat "$FASTER_WHISPER_PID_FILE")" 2>/dev/null; then
-            ok "faster-whisper server running (PID $(cat "$FASTER_WHISPER_PID_FILE"))"
-        else
-            fail "faster-whisper server not running (log: /tmp/faster-whisper-server.log)"
-        fi
+        status_engine_running "faster-whisper server" "$FASTER_WHISPER_PID_FILE" 2022 \
+            is_faster_whisper_body "log: /tmp/faster-whisper-server.log"
         # /health is 200 only once the model is loaded and warmed up.
         check_service "faster-whisper STT (model loaded)" "http://127.0.0.1:2022/health" || true
     else
@@ -475,18 +466,47 @@ print(f'  OpenAI key (in .claude.json): {\"set\" if ce.get(\"OPENAI_API_KEY\") e
     verify_routing
 }
 
-# The CPU fallbacks in `status`: process (pid file), and what /health says it runs on.
+# `status`: the "running" line of a native engine. 2026-11-18: a hand-started CPU Kokoro on
+# 8882 answered /health with CPUExecutionProvider while status said "✗ not running", because
+# only the pid file was asked. Now: a live pid file is "✓ running (PID n)"; otherwise, when
+# what answers the port IS the engine (by its /health identity), "✓ running (not started by
+# voicemode-switch: ...)"; ✗ only when nothing of that identity answers.
+status_engine_running() {   # $1 = label, $2 = pid file, $3 = port, $4 = identity fn, $5 = hint
+    local pid body why
+    pid="$(cat "$2" 2>/dev/null)" || true
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+        ok "$1 running (PID $pid)"
+        return 0
+    fi
+    body="$(port_health_body "$3")" || true
+    if [ -n "$body" ] && "$4" "$body"; then
+        if [ -f "$2" ]; then why="its pid file names no live process"; else why="no pid file"; fi
+        ok "$1 running (not started by voicemode-switch: $why)"
+        return 0
+    fi
+    fail "$1 not running${5:+ ($5)}"
+}
+# Identity tests over a /health body (see the servers' health handlers).
+is_kokoro_onnx_body() { [ "$(json_field "$1" engine)" = "kokoro-onnx" ]; }
+is_kokoro_cpu_body() { [ "$(json_field "$1" provider)" = "CPUExecutionProvider" ]; }
+# faster-whisper-server.py names its engine only once ready; while loading /health is 503
+# {"status": "loading", "model", "device"}, which counts too (the process runs).
+is_faster_whisper_body() {
+    [ "$(json_field "$1" engine)" = "faster-whisper" ] && return 0
+    [ "$(json_field "$1" status)" = "loading" ] && [ -n "$(json_field "$1" device)" ]
+}
+is_faster_whisper_cpu_body() { is_faster_whisper_body "$1" && [ "$(json_field "$1" device)" = "cpu" ]; }
+
+# The CPU fallbacks in `status`: process (pid file, else what answers), and what /health says
+# it runs on.
 status_cpu_fallbacks() {
     local port body value
     if is_kokoro_cpu_fallback; then
         port="$(kokoro_cpu_fallback_port)"
         echo ""
         echo "Kokoro CPU fallback (port $port):"
-        if [ -f "$KOKORO_CPU_PID_FILE" ] && kill -0 "$(cat "$KOKORO_CPU_PID_FILE")" 2>/dev/null; then
-            ok "Kokoro CPU fallback running (PID $(cat "$KOKORO_CPU_PID_FILE"))"
-        else
-            fail "Kokoro CPU fallback not running (log: /tmp/kokoro-cpu-fallback.log)"
-        fi
+        status_engine_running "Kokoro CPU fallback" "$KOKORO_CPU_PID_FILE" "$port" \
+            is_kokoro_cpu_body "log: /tmp/kokoro-cpu-fallback.log"
         body="$(port_health_body "$port")" || true
         value="$(json_field "$body" provider)"
         if [ "$value" = "CPUExecutionProvider" ]; then
@@ -499,11 +519,8 @@ status_cpu_fallbacks() {
         port="$(stt_cpu_fallback_port)"
         echo ""
         echo "Speech recognition CPU fallback (faster-whisper, port $port):"
-        if [ -f "$STT_CPU_PID_FILE" ] && kill -0 "$(cat "$STT_CPU_PID_FILE")" 2>/dev/null; then
-            ok "faster-whisper CPU fallback running (PID $(cat "$STT_CPU_PID_FILE"))"
-        else
-            fail "faster-whisper CPU fallback not running (log: /tmp/faster-whisper-cpu.log)"
-        fi
+        status_engine_running "faster-whisper CPU fallback" "$STT_CPU_PID_FILE" "$port" \
+            is_faster_whisper_cpu_body "log: /tmp/faster-whisper-cpu.log"
         body="$(port_health_body "$port")" || true
         value="$(json_field "$body" device)"
         if [ "$value" = "cpu" ]; then
