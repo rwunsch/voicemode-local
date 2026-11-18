@@ -1,4 +1,9 @@
-"""MCP tools any client can call: voice_barge, voice_stop and voice_pill.
+"""MCP tools any client can call: voice_barge, voice_stop, voice_pill and voice_sensitivity.
+
+voice_sensitivity lives here so every install that already loads this module
+(VOICEMODE_TOOLS_ENABLED=...,voice_barge_tool) gets it without a settings change; it
+imports voice_mode.voice_sensitivity only when called, so the other tools still load
+where that module was not copied in.
 
 voice-mode's update_config can write the barge setting but cannot start or stop
 the trigger process, so voice_barge goes through voicemode-switch.
@@ -126,3 +131,31 @@ async def voice_pill(action: str = "status") -> str:
         return await asyncio.to_thread(work)
     except Exception as e:
         return f"The pill {action.strip().lower()} failed ({type(e).__name__}: {e})."
+
+
+@mcp.tool()
+async def voice_sensitivity(action: str = "status", level: str | None = None,
+                            vad_aggressiveness: int | None = None,
+                            silence_ms: int | None = None) -> str:
+    """Change how early voice mode ends the user's turn: how much background noise counts as
+    silence (VAD aggressiveness) and how long a pause ends the turn (silence length).
+
+    Use when the user says voice mode reacts too late or too early, ends too soon, cuts them
+    off, or keeps listening because of background noise (they have to mute to end a turn).
+    A change applies from the next listen; no restart. Do not also pass vad_aggressiveness
+    to converse: a converse argument wins over this setting for that call.
+
+    Args:
+        action: "status" (configured, override and effective values), "set" or "reset"
+            (back to the configured values).
+        level: for set, a preset: "earlier" (aggressiveness 3, 1200 ms: ends sooner, noise
+            counts as silence), "noisy" (3, 800 ms: loud background) or "later" (1, 2500 ms:
+            waits through pauses).
+        vad_aggressiveness: for set, 0-3; higher counts more background noise as silence.
+        silence_ms: for set, 300-5000; the pause in milliseconds that ends the turn.
+    """
+    try:
+        from voice_mode.voice_sensitivity import control
+    except Exception as e:
+        return f"Voice sensitivity is not installed in this voice server ({type(e).__name__}: {e})."
+    return await asyncio.to_thread(control, action, level, vad_aggressiveness, silence_ms)

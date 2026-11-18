@@ -119,6 +119,8 @@ When the user says "stop voice mode", call the `voice_stop` MCP tool and continu
 
 When the user asks to show or hide the voice pill, call the `voice_pill` MCP tool (show / hide / status).
 
+When the user says voice mode ends the turn too late or too early, or background noise keeps it listening, call the `voice_sensitivity` MCP tool (status / set with `level` earlier, noisy, later or numbers / reset); it applies at the next listen, no restart. See `docs/voice-sensitivity/README.md`.
+
 ## Never End a Voice Conversation on Your Own Initiative
 
 Only the **user** ends a voice conversation (e.g. "goodbye", "that's all",
