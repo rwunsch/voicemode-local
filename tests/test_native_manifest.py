@@ -161,6 +161,9 @@ INTENDED_STEP_LINES.append(b'    {"copy": "voice_sensitivity.py", "to": "voice_s
 INTENDED_STEP_LINES.append(b'    {"patch": "patch_vad_override.py", "targets": ["tools/converse.py"], "why": "each recording resolves VAD aggressiveness and silence length: converse argument, else the override, else config; needs voice_sensitivity.py"},\n')
 INTENDED_PATCHES.append(("patch_vad_override.py", ["tools/converse.py"]))
 INTENDED_COPIES += ["voice_sensitivity.py"]
+# 2026-11-18: a mic stream that fails to start is retried once; the fallback ends on cancel.
+INTENDED_STEP_LINES.append(b'    {"patch": "patch_audio_recover.py", "targets": ["tools/converse.py"], "why": "a mic stream that fails to start (Wait timed out, -9987) is re-initialised and retried once with silence detection; the fixed-length fallback ends on cancel and VOICEMODE_FALLBACK_RECORD_MAX_S caps it"},\n')
+INTENDED_PATCHES.append(("patch_audio_recover.py", ["tools/converse.py"]))
 # Text edits those additions force on lines that were already there: (now, before).
 INTENDED_EDITS = [
     (b'    "streaming.py",\n    "conch_notify.py",\n    "conch_queue.py",\n    "conch.py",\n    "config.py",\n    "tools/configuration_management.py"\n', b'    "streaming.py"\n'),

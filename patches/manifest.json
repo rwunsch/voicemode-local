@@ -80,6 +80,7 @@
     {"patch": "patch_stt_language.py", "targets": ["simple_failover.py"], "why": "the STT request passes the pill's language for the session; needs voice_pill_state.py and voice_languages.py"},
     {"copy": "voice_sensitivity.py", "to": "voice_sensitivity.py", "why": "the voice_sensitivity tool's override of VAD aggressiveness and silence length (<base dir>/sensitivity.json)"},
     {"patch": "patch_vad_override.py", "targets": ["tools/converse.py"], "why": "each recording resolves VAD aggressiveness and silence length: converse argument, else the override, else config; needs voice_sensitivity.py"},
+    {"patch": "patch_audio_recover.py", "targets": ["tools/converse.py"], "why": "a mic stream that fails to start (Wait timed out, -9987) is re-initialised and retried once with silence detection; the fixed-length fallback ends on cancel and VOICEMODE_FALLBACK_RECORD_MAX_S caps it"},
     {"patch": "patch_env_provider_keys.py", "targets": ["config.py", "tools/configuration_management.py"], "why": "optional: the two provider keys upstream reads may also come from voicemode.env; not in the Windows manifest or FELIX"}
   ]
 }
