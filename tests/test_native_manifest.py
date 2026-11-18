@@ -156,6 +156,11 @@ INTENDED_PATCHES.append(("patch_stt_language.py", ["simple_failover.py"]))
 INTENDED_STEP_LINES.append(b'    {"patch": "patch_load_scipy_early.py", "targets": ["tools/converse.py"],\n'
                            b'     "why": "import scipy.signal at start, not mid-recording: a cold import outlasts the 5 s stall backstop (voicemode#545)"},\n')
 INTENDED_PATCHES.append(("patch_load_scipy_early.py", ["tools/converse.py"]))
+# 2026-11-18: the voice_sensitivity override, resolved at each recording.
+INTENDED_STEP_LINES.append(b'    {"copy": "voice_sensitivity.py", "to": "voice_sensitivity.py", "why": "the voice_sensitivity tool\'s override of VAD aggressiveness and silence length (<base dir>/sensitivity.json)"},\n')
+INTENDED_STEP_LINES.append(b'    {"patch": "patch_vad_override.py", "targets": ["tools/converse.py"], "why": "each recording resolves VAD aggressiveness and silence length: converse argument, else the override, else config; needs voice_sensitivity.py"},\n')
+INTENDED_PATCHES.append(("patch_vad_override.py", ["tools/converse.py"]))
+INTENDED_COPIES += ["voice_sensitivity.py"]
 # Text edits those additions force on lines that were already there: (now, before).
 INTENDED_EDITS = [
     (b'    "streaming.py",\n    "conch_notify.py",\n    "conch_queue.py",\n    "conch.py",\n    "config.py",\n    "tools/configuration_management.py"\n', b'    "streaming.py"\n'),

@@ -63,6 +63,8 @@
     {"patch": "patch_voice_fallback.py", "targets": ["simple_failover.py", "tools/converse.py"], "why": "an uninstalled voice is spoken with an installed one of its language, never a 500, and converse says so; needs voice_fallback.py"},
     {"patch": "patch_echo_labels.py", "targets": ["tools/converse.py"], "why": "the transcript echo lines' labels come from VOICEMODE_ECHO_ASSISTANT_LABEL and VOICEMODE_ECHO_USER_LABEL"},
     {"patch": "patch_stt_language.py", "targets": ["simple_failover.py"], "why": "the STT request passes the pill's language for the session; needs voice_pill_state.py and voice_languages.py"},
+    {"copy": "voice_sensitivity.py", "to": "voice_sensitivity.py", "why": "the voice_sensitivity tool's override of VAD aggressiveness and silence length (<base dir>/sensitivity.json)"},
+    {"patch": "patch_vad_override.py", "targets": ["tools/converse.py"], "why": "each recording resolves VAD aggressiveness and silence length: converse argument, else the override, else config; needs voice_sensitivity.py"},
     {"patch": "patch_windows_tempfile.py", "targets": ["core.py", "streaming.py"], "why": "close temp audio files before deleting them; Windows refuses to delete an open file (WinError 32)"},
     {"patch": "patch_native_client_folder.py", "targets": ["tools/converse.py"], "why": "the session label uses the client's folder; voice-mode itself runs in the runtime folder"}
   ]

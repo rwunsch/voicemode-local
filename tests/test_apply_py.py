@@ -112,6 +112,7 @@ INTENDED_SINCE_BASELINE = [
     ("patch_echo_labels.py", ["tools/converse.py"]),   # 2026-11-17: echo labels from settings
     ("patch_stt_language.py", ["simple_failover.py"]),   # 2026-11-17: STT language follows the pill
     ("patch_load_scipy_early.py", ["tools/converse.py"]),   # 2026-11-17: scipy.signal loaded before the stall backstop starts
+    ("patch_vad_override.py", ["tools/converse.py"]),   # 2026-11-18: VAD aggressiveness and silence length resolved per recording
 ]
 # Modules added as "copy" steps since the baseline (2026-11-07: session_wake.py).
 INTENDED_COPIES_SINCE_BASELINE = ["session_wake.py"]
@@ -123,6 +124,7 @@ INTENDED_COPIES_SINCE_BASELINE += ["conch_wakers.py"]   # 2026-11-11
 INTENDED_COPIES_SINCE_BASELINE += ["conch_hold.py", "mcp_progress.py"]   # 2026-11-11
 INTENDED_COPIES_SINCE_BASELINE += ["tts_chunks.py"]   # 2026-11-14
 INTENDED_COPIES_SINCE_BASELINE += ["voice_languages.py", "voice_fallback.py"]   # 2026-11-17
+INTENDED_COPIES_SINCE_BASELINE += ["voice_sensitivity.py"]   # 2026-11-18
 
 
 def apply_intended(pkg: Path) -> None:
@@ -143,7 +145,7 @@ def without_intended_log(out: str) -> str:
     return "".join(line for line in out.splitlines(keepends=True)
                    if "(ptt instant)" not in line and "(tts timeout knob)" not in line
                    and "(tts chunks)" not in line and "(tts no double synthesis)" not in line
-                   and "(voice fallback)" not in line and "(echo labels)" not in line and "(stt language)" not in line and not line.strip().startswith(copied))
+                   and "(voice fallback)" not in line and "(echo labels)" not in line and "(stt language)" not in line and "(vad override)" not in line and not line.strip().startswith(copied))
 
 
 def hardlink_core(venv: Path, outside: Path) -> None:
