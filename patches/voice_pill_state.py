@@ -608,6 +608,17 @@ def _language_from_id(voice):
     return _LANGUAGES(voice) if _LANGUAGES else None
 
 
+def _install_default() -> str | None:
+    """The voice converse uses with none given: its own TTS_VOICES[0] (it imports the name
+    from config at start, converse.py:61), else config's, when the server has loaded them;
+    else default_voice() from the settings."""
+    for name in ("voice_mode.tools.converse", "voice_mode.config"):
+        voices = getattr(sys.modules.get(name), "TTS_VOICES", None)
+        if isinstance(voices, (list, tuple)) and voices and isinstance(voices[0], str):
+            return voices[0]
+    return default_voice()
+
+
 _LANGUAGES = None
 _KEPT_NOTES = {}  # pid -> note for this turn's result: the caller's voice was kept
 
@@ -622,7 +633,7 @@ def effective_voice(pid: int, voice: str | None, base=None) -> str | None:
     pinned = pill_choice(pid, base).get("voice")
     if not pinned:
         return voice
-    if not voice or voice == pinned or voice == default_voice() \
+    if not voice or voice == pinned or voice == _install_default() \
             or not _setting_on(FOLLOWS_LANGUAGE_SETTING):
         return pinned
     own, chosen = _language_from_id(voice), _language_from_id(pinned)

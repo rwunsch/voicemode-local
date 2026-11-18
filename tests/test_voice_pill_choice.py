@@ -142,6 +142,31 @@ def test_no_caller_voice_or_the_default_voice_is_replaced(base):
     assert st.effective_voice(PID, "am_puck", base=base) == "dm_martin"   # the install default
 
 
+def test_the_default_is_upstreams_tts_voices_as_converse_sees_it(base, monkeypatch):
+    # The server: converse's own TTS_VOICES (config_reload may have changed it since start).
+    fake = type(sys)("voice_mode.tools.converse")
+    fake.TTS_VOICES = ["bf_emma", "af_sky"]
+    monkeypatch.setitem(sys.modules, "voice_mode.tools.converse", fake)
+    st.set_override(PID, "dm_martin", "German", base=base)
+    assert st.effective_voice(PID, "bf_emma", base=base) == "dm_martin"   # upstream's default
+    assert st.effective_voice(PID, "am_puck", base=base) == "am_puck"     # not, here: kept
+
+
+def test_without_upstream_the_default_comes_from_the_settings(base, monkeypatch):
+    monkeypatch.delitem(sys.modules, "voice_mode.tools.converse", raising=False)
+    monkeypatch.delitem(sys.modules, "voice_mode.config", raising=False)
+    st.set_override(PID, "dm_martin", "German", base=base)
+    assert st.effective_voice(PID, "am_puck", base=base) == "dm_martin"   # VOICEMODE_VOICES
+
+
+def test_an_empty_upstream_list_falls_back_to_the_settings(base, monkeypatch):
+    fake = type(sys)("voice_mode.tools.converse")
+    fake.TTS_VOICES = []
+    monkeypatch.setitem(sys.modules, "voice_mode.tools.converse", fake)
+    st.set_override(PID, "dm_martin", "German", base=base)
+    assert st.effective_voice(PID, "am_puck", base=base) == "dm_martin"
+
+
 @pytest.mark.parametrize("caller,pinned", [("nova", "dm_martin"), ("em_alex", "custom_voice")])
 def test_an_unknown_language_replaces_as_before(base, caller, pinned):
     st.set_override(PID, pinned, None, base=base)

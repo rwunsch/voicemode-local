@@ -2,8 +2,9 @@
 """Patch voice_mode/simple_failover.py: the STT request follows the pill's language.
 
 Whisper guesses the language of every recording unless told, and Stephan saw a transcription
-"in another language". When the pill's language override for this session
-(voice_pill_state.get_override(os.getpid())["language"], a name such as "German") is set,
+"in another language". When the pill's language for this session is set -- its override,
+else the pill's last choice, the same resolver as the voice
+(voice_pill_state.pill_choice(os.getpid())["language"], a name such as "German") --
 simple_stt_failover passes its ISO 639-1 code (voice_languages.iso_code) as the request's
 `language`, to local Whisper and to OpenAI alike. Unset, unknown, or unreadable: today's
 behaviour (VOICEMODE_WHISPER_LANGUAGE, else auto-detect). voice_pill_state is only read.
@@ -26,7 +27,8 @@ def _vml_stt_language():
         import os
         from . import voice_pill_state
         from .voice_languages import iso_code
-        name = voice_pill_state.get_override(os.getpid()).get("language")
+        # The voice's own resolver: this session's override, else the pill's last choice.
+        name = voice_pill_state.pill_choice(os.getpid()).get("language")
     except Exception as error:  # the pill's state must never break speech recognition
         logger.debug(f"STT: could not read the pill's language: {error}")
         return None

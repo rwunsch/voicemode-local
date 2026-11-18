@@ -579,12 +579,14 @@ call, no restart; both settings come from the environment, else voicemode.env.
   17:41:33, first speech with am_puck 76 ms later, the page's set_voice/set_language at
   17:41:48, after that speech ended). The backend now writes every voice/language it applies
   to `<pill dir>/last_choice.json`, and a session with no override of its own yet uses it,
-  voice and language note alike. A machine with no such file behaves as before. The file is
+  for the voice, the language note and the speech-recognition language
+  (`patch_stt_language.py`) alike. A machine with no such file behaves as before. The file is
   machine-wide: a new session in any project starts with the last choice.
   **Behaviour change:** a new session's first turn uses the voice last chosen in the pill;
   old behaviour via `VOICEMODE_PILL_REMEMBER_LAST=false`.
 - **The voice follows the language of the text.** The pill's voice replaces the caller's when
-  the caller passed no voice, the install's default (first of `VOICEMODE_VOICES`), or a voice
+  the caller passed no voice, the install's default (converse's own `TTS_VOICES[0]` in the
+  server, else the first of `VOICEMODE_VOICES`), or a voice
   of the same language (`voice_languages.language_from_id`), and also when either language is
   unknown. A caller voice of another language is kept: Spanish text with `em_alex` is spoken by
   `em_alex` even with the pill on `dm_martin`, and the turn's result tells the agent
