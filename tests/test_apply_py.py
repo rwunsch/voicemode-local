@@ -113,6 +113,7 @@ INTENDED_SINCE_BASELINE = [
     ("patch_stt_language.py", ["simple_failover.py"]),   # 2026-11-17: STT language follows the pill
     ("patch_load_scipy_early.py", ["tools/converse.py"]),   # 2026-11-17: scipy.signal loaded before the stall backstop starts
     ("patch_vad_override.py", ["tools/converse.py"]),   # 2026-11-18: VAD aggressiveness and silence length resolved per recording
+    ("patch_audio_recover.py", ["tools/converse.py"]),   # 2026-11-18: a failed stream start is retried once; the fallback ends on cancel
 ]
 # Modules added as "copy" steps since the baseline (2026-11-07: session_wake.py).
 INTENDED_COPIES_SINCE_BASELINE = ["session_wake.py"]
@@ -145,7 +146,7 @@ def without_intended_log(out: str) -> str:
     return "".join(line for line in out.splitlines(keepends=True)
                    if "(ptt instant)" not in line and "(tts timeout knob)" not in line
                    and "(tts chunks)" not in line and "(tts no double synthesis)" not in line
-                   and "(voice fallback)" not in line and "(echo labels)" not in line and "(stt language)" not in line and "(vad override)" not in line and not line.strip().startswith(copied))
+                   and "(voice fallback)" not in line and "(echo labels)" not in line and "(stt language)" not in line and "(vad override)" not in line and "(audio recover)" not in line and not line.strip().startswith(copied))
 
 
 def hardlink_core(venv: Path, outside: Path) -> None:
