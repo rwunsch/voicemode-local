@@ -585,10 +585,10 @@ call, no restart; both settings come from the environment, else voicemode.env.
   **Behaviour change:** a new session's first turn uses the voice last chosen in the pill;
   old behaviour via `VOICEMODE_PILL_REMEMBER_LAST=false`.
 - **The voice follows the language of the text.** The pill's voice replaces the caller's when
-  the caller passed no voice, the install's default (converse's own `TTS_VOICES[0]` in the
-  server, else the first of `VOICEMODE_VOICES`), or a voice
-  of the same language (`voice_languages.language_from_id`), and also when either language is
-  unknown. A caller voice of another language is kept: Spanish text with `em_alex` is spoken by
+  the caller passed no voice or a voice of the same language
+  (`voice_languages.language_from_id`), and also when either language is unknown. The
+  languages are compared first; the install's default voice is a voice like any other. A
+  caller voice of another language is kept, the install's default included: Spanish text with `em_alex` is spoken by
   `em_alex` even with the pill on `dm_martin`, and the turn's result tells the agent
   ("Spoken with your voice em_alex (Spanish), not the pill's dm_martin (German) ..."). The
   pill's language stays the default and the "write in ..." hint.
@@ -596,6 +596,15 @@ call, no restart; both settings come from the environment, else voicemode.env.
   every such call: a call with no voice always speaks with the pill's voice.
   **Behaviour change:** the pill's voice no longer replaces a caller voice of another
   language; old behaviour (replace always) via `VOICEMODE_PILL_VOICE_FOLLOWS_LANGUAGE=false`.
+  (2026-11-19, Talos on FELIX #1910, second round: with a German pin, English text passed with
+  the English install default `am_puck` was read by `dm_martin`, because the default was
+  replaced before the languages were compared.)
+  **Behaviour change:** an install-default voice of another language than the pill's pinned
+  voice is now kept; old behaviour: it was replaced by the pin. There is no separate switch;
+  `VOICEMODE_PILL_VOICE_FOLLOWS_LANGUAGE=false` replaces every voice, as before.
+  Trade-off: a model that habitually passes the install default while writing in the pill's
+  language now gets the default voice; agents should pass no voice unless the user asks for
+  one (FELIX's skill says so).
 - **One choice in force, everywhere (2026-11-19, Talos on FELIX #1910).** The window, a
   voice-only or language-only change in the pill, the voice, the "write in ..." hint and the
   speech-recognition language all read the same choice (`voice_pill_state.pill_choice`): the

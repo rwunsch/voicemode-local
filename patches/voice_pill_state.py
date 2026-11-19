@@ -626,16 +626,15 @@ _KEPT_NOTES = {}  # pid -> note for this turn's result: the caller's voice was k
 
 def effective_voice(pid: int, voice: str | None, base=None) -> str | None:
     """The voice to speak with. The pill's voice replaces the caller's when the caller passed
-    none, passed the install's default, or one of the same language; also when either
-    language is unknown. A caller voice of another language is kept (the voice follows the
-    language of the text) and the turn's result says so. Replace always:
+    none or one of the same language; also when either language is unknown. A caller voice
+    of another language is kept (the voice follows the language of the text), the install's
+    default included, and the turn's result says so. Replace always:
     VOICEMODE_PILL_VOICE_FOLLOWS_LANGUAGE=false."""
     _KEPT_NOTES.pop(pid, None)
     pinned = pill_choice(pid, base).get("voice")
     if not pinned:
         return voice
-    if not voice or voice == pinned or voice == _install_default() \
-            or not _setting_on(FOLLOWS_LANGUAGE_SETTING):
+    if not voice or voice == pinned or not _setting_on(FOLLOWS_LANGUAGE_SETTING):
         return pinned
     own, chosen = _language_from_id(voice), _language_from_id(pinned)
     if own is None or chosen is None or own == chosen:
