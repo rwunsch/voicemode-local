@@ -622,7 +622,10 @@ def gather(ctx) -> dict:
         st._status(ctx.sock), sessions, conch, paused=st.is_paused(ctx.base),
         ptt=ptt, closed=st.pill_closed(ctx.base),
         last_floor=_remember_floor(ctx, conch),
-        overrides={s["pid"]: st.get_override(s["pid"], ctx.base) for s in sessions},
+        # The choice in force, as the voice and the recognition language resolve it: without
+        # an override, the remembered one (Talos on FELIX #1910). A turn whose caller voice of
+        # another language was kept still shows the pill's choice, which stays the default.
+        overrides={s["pid"]: st.pill_choice(s["pid"], ctx.base, ctx.home) for s in sessions},
         barge=barge, ui=st.load_ui(ctx.base), beeps=_beeps_on(ctx),
         default_voice=st.default_voice(ctx.home),
         play={"label": play.label} if play else None, wake=wake_view(ctx), platform=platform,
@@ -827,7 +830,9 @@ def guard_preview(ctx, snap) -> None:
 # -- commands ----------------------------------------------------------------
 
 def _set_override(ctx, floor, **change):
-    cur = st.get_override(floor["pid"], ctx.base)
+    # From the choice in force, so a voice-only or language-only change in a new chat keeps
+    # the other half of the remembered choice (Talos on FELIX #1910).
+    cur = dict(st.pill_choice(floor["pid"], ctx.base, ctx.home))
     cur.update(change)
     st.set_override(floor["pid"], cur.get("voice"), cur.get("language"), ctx.base)
     # Also the machine's last choice: a new chat's first call resolves its voice before this
@@ -910,7 +915,7 @@ def handle_command(msg, ctx=None):
             if key == "language" and msg[key] in ("English", "German"):
                 # A voice speaks only its own language: move the voice with the language.
                 cur = _floor_voice(floor, is_holder, sessions, conch,
-                                   {floor["pid"]: st.get_override(floor["pid"], ctx.base)}) \
+                                   {floor["pid"]: st.pill_choice(floor["pid"], ctx.base, ctx.home)}) \
                     or st.default_voice(ctx.home)
                 if voice_language(cur) != msg[key]:
                     default = st.default_voice(ctx.home)

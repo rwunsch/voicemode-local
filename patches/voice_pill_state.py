@@ -580,11 +580,12 @@ def get_last_choice(base=None) -> dict:
     return {k: data[k] for k in ("voice", "language") if isinstance(data.get(k), str) and data[k]}
 
 
-def pill_choice(pid: int, base=None) -> dict:
+def pill_choice(pid: int, base=None, home=None) -> dict:
     """This session's override; without one, the pill's last choice (unless
-    VOICEMODE_PILL_REMEMBER_LAST=false)."""
+    VOICEMODE_PILL_REMEMBER_LAST=false). The one resolver for the voice, the language note,
+    the speech-recognition language, the window and a partial change in the pill."""
     override = get_override(pid, base)
-    if override or not _setting_on(REMEMBER_LAST_SETTING):
+    if override or not _setting_on(REMEMBER_LAST_SETTING, home):
         return override
     return get_last_choice(base)
 

@@ -592,7 +592,21 @@ call, no restart; both settings come from the environment, else voicemode.env.
   `em_alex` even with the pill on `dm_martin`, and the turn's result tells the agent
   ("Spoken with your voice em_alex (Spanish), not the pill's dm_martin (German) ..."). The
   pill's language stays the default and the "write in ..." hint.
+  To speak a language other than the pill's, the agent must pass a voice of that language on
+  every such call: a call with no voice always speaks with the pill's voice.
   **Behaviour change:** the pill's voice no longer replaces a caller voice of another
   language; old behaviour (replace always) via `VOICEMODE_PILL_VOICE_FOLLOWS_LANGUAGE=false`.
+- **One choice in force, everywhere (2026-11-19, Talos on FELIX #1910).** The window, a
+  voice-only or language-only change in the pill, the voice, the "write in ..." hint and the
+  speech-recognition language all read the same choice (`voice_pill_state.pill_choice`): the
+  session's override, else the remembered last choice. Before, in a new chat with a remembered
+  choice and no override yet, the window showed the session's own voice, and a voice-only
+  change dropped the remembered language (a language-only change dropped the voice).
+  In a turn whose caller voice of another language was kept (Spanish `ef_dora` over a
+  remembered German), the window shows the pill's choice (German, `dm_martin`), as the hint
+  and Whisper use it, not the voice that spoke; the snapshot has no field for that voice.
+  **Behaviour change:** without an override, the window shows the remembered voice and
+  language, and a partial change keeps the other half of it; old behaviour via
+  `VOICEMODE_PILL_REMEMBER_LAST=false`, which also stops remembering for the voice.
 
 Not checked on a real Mac or Windows run yet; the tests use fake state folders.
