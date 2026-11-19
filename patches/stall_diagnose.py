@@ -3,7 +3,8 @@
     voicemode-switch diagnose          (or: python stall_diagnose.py [--voicemode-cli PATH])
 
 One plain-text report, printed and written to ~/.voicemode/logs/diagnose-<timestamp>.txt.
-Sections: load and cores; top CPU processes; every voice-mode MCP process (owner, /proc state,
+Sections: load and cores; top CPU processes; under WSL the Windows host (CPU load, top processes
+by name, committed memory, vmmem, audio services, via powershell.exe); every voice-mode MCP process (owner, /proc state,
 thread states); engine health, identity and one small latency probe each; the audio path (pactl);
 the last exchanges with their timings; matching lines of ~/voicemode_debug.log; the conch; a
 py-spy dump of the user's own voice-mode processes when py-spy is installed; and Suspects.
@@ -42,6 +43,11 @@ STT_PROBE_SLOW_S = 5.0          # one second of silence; NOT derived from a meas
 EXCHANGE_TTFA_SUSPECT_S = 10.0  # a real turn's time to first audio (exchanges log)
 EXCHANGE_STT_SUSPECT_S = 15.0   # a real turn's transcription time (exchanges log)
 LOG_WINDOW_S = 3600.0           # log events and exchanges count only within the last hour
+# Windows host (WSL only). 2026-11-18: a stall coincided with the host CPU at 100 % while WSL's
+# own load looked survivable; these are first settings, not derived from measured stalls.
+HOST_CPU_SUSPECT_PCT = 90.0     # Win32_Processor LoadPercentage (average), WARN
+HOST_PROC_SUSPECT_PCT = 25.0    # one non-WSL Windows process, as a share of the whole host
+POWERSHELL_SLOW_S = 10.0        # the powershell.exe call itself: slow under host overload
 
 # -- timeouts ------------------------------------------------------------------------------------
 CMD_TIMEOUT_S = 5.0
@@ -49,6 +55,7 @@ HEALTH_TIMEOUT_S = 3.0
 PROBE_TIMEOUT_S = 15
 CONCH_TIMEOUT_S = 20.0          # the voicemode CLI imports voice_mode: slow under load
 PYSPY_TIMEOUT_S = 10
+POWERSHELL_TIMEOUT_S = 20
 TOP_SAMPLE_S = 1.0
 TOP_N = 8
 EXCHANGE_ROWS = 12
@@ -66,6 +73,29 @@ LOG_PATTERN = re.compile(r"PaErrorCode|Wait timed out|underrun|timed out|\bstall
 SPOKEN_TEXT = re.compile(r"full text:|Transcribed:|Response text:|Turns result:|Survey result:")
 LOG_STAMP = re.compile(r"^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)")
 LOCAL_HOSTS = ("127.0.0.1", "localhost", "0.0.0.0", "::1")
+WSL_PROCESS_NAMES = ("vmmem", "vmmemwsl", "wsl", "wslhost", "wslservice", "wslrelay")
+AUDIO_SERVICES = ("Audiosrv", "AudioEndpointBuilder")
+# One line, single quotes only: it is passed from WSL as one argument to a Windows command line.
+# Privacy: process names, ids and CPU seconds only. Never command lines, paths or window titles.
+HOST_SCRIPT = (
+    "$ErrorActionPreference='SilentlyContinue'; $r=@{}; "
+    "$c=@(Get-CimInstance Win32_Processor); "
+    "$r.load=($c|Measure-Object -Property LoadPercentage -Average).Average; "
+    "$r.logical=($c|Measure-Object -Property NumberOfLogicalProcessors -Sum).Sum; "
+    "$r.physical=($c|Measure-Object -Property NumberOfCores -Sum).Sum; "
+    "$a=@{}; foreach($p in Get-Process){$a[$p.Id]=$p.CPU}; "
+    "$t=[Diagnostics.Stopwatch]::StartNew(); Start-Sleep -Milliseconds 1000; $b=@(Get-Process); "
+    "$r.interval=$t.Elapsed.TotalSeconds; "
+    "$r.top=@($b|Where-Object{$a.ContainsKey($_.Id) -and $null -ne $_.CPU -and $null -ne $a[$_.Id]}"
+    "|ForEach-Object{[pscustomobject]@{name=$_.ProcessName;pid=$_.Id;cpu_s=[math]::Round($_.CPU-$a[$_.Id],3)}}"
+    "|Sort-Object cpu_s -Descending|Select-Object -First 8); "
+    "$r.commit_pct=(Get-CimInstance Win32_PerfFormattedData_PerfOS_Memory).PercentCommittedBytesInUse; "
+    "$r.vmmem=@(Get-Process -Name vmmem,vmmemWSL"
+    "|ForEach-Object{[pscustomobject]@{name=$_.ProcessName;pid=$_.Id;ws=$_.WorkingSet64}}); "
+    "$r.services=@(Get-Service -Name Audiosrv,AudioEndpointBuilder"
+    "|ForEach-Object{[pscustomobject]@{name=$_.Name;status=[string]$_.Status}}); "
+    "$r|ConvertTo-Json -Compress -Depth 4"
+)
 
 
 # -- the environment (everything external goes through here, so tests can fake it) --------------
@@ -100,8 +130,10 @@ def _engines_from_env():
 
 class Env:
     def __init__(self, home, system, run, http, which, loadavg, cpu_count, uid, proc_root,
-                 now, monotonic, sleep, ports=None, clk_tck=100, voicemode_cli=None, debug_log=None):
+                 now, monotonic, sleep, ports=None, clk_tck=100, voicemode_cli=None, debug_log=None,
+                 environ=None):
         self.home, self.system, self.run, self.http, self.which = Path(home), system, run, http, which
+        self.environ = dict(environ) if environ is not None else {}
         self.loadavg, self.cpu_count, self.uid, self.proc_root = loadavg, cpu_count, uid, Path(proc_root)
         self.now, self.monotonic, self.sleep, self.clk_tck = now, monotonic, sleep, clk_tck
         self.ports = list(ports) if ports else list(DEFAULT_ENGINES)
@@ -118,7 +150,8 @@ class Env:
                    which=shutil.which, loadavg=os.getloadavg, cpu_count=os.cpu_count,
                    uid=os.getuid() if hasattr(os, "getuid") else None, proc_root="/proc",
                    now=time.time, monotonic=time.monotonic, sleep=time.sleep,
-                   ports=_engines_from_env(), clk_tck=tck, voicemode_cli=voicemode_cli)
+                   ports=_engines_from_env(), clk_tck=tck, voicemode_cli=voicemode_cli,
+                   environ=os.environ)
 
 
 def _cmd(env, cmd, timeout=CMD_TIMEOUT_S):
@@ -207,6 +240,100 @@ def collect_top(env):
         lines += [f"  {pid:>7} {Path(comm).name[:20]:<20} {pc:5.1f}%" for pc, pid, comm in rows[:TOP_N]]
         return {"lines": lines, "cpu": {pid: pc for pc, pid, _ in rows}}
     return {"lines": [f"  not collected on this OS ({env.system})"], "cpu": {}}
+
+
+# -- Windows host (WSL only) --------------------------------------------------------------------------
+
+def is_wsl(env):
+    if env.system != "Linux":
+        return False
+    if env.environ.get("WSL_DISTRO_NAME"):
+        return True
+    try:
+        return "microsoft" in (env.proc_root / "version").read_text().lower()
+    except OSError:
+        return False
+
+
+def _num(x):
+    return float(x) if isinstance(x, (int, float)) and not isinstance(x, bool) else None
+
+
+def _items(x):
+    """ConvertTo-Json writes a one-element array as the element itself."""
+    return [x] if isinstance(x, dict) else [i for i in x if isinstance(i, dict)] if isinstance(x, list) else []
+
+
+def _host_json(out):
+    for ln in reversed((out or "").replace("﻿", "").splitlines()):
+        ln = ln.strip()
+        if ln.startswith("{"):
+            try:
+                data = json.loads(ln)
+            except ValueError:
+                return None
+            return data if isinstance(data, dict) else None
+    return None
+
+
+def collect_windows_host(env):
+    if not is_wsl(env):
+        return {"lines": ["  not collected on this OS (not WSL)"], "host": None}
+    host = {"wsl": True, "ps_s": None, "ps_error": None, "load": None, "logical": None, "physical": None,
+            "commit_pct": None, "top": [], "vmmem": [], "services": {}, "services_collected": False}
+    t0 = env.monotonic()
+    out, note = _cmd(env, ["powershell.exe", "-NoProfile", "-Command", HOST_SCRIPT], POWERSHELL_TIMEOUT_S)
+    host["ps_s"] = round(env.monotonic() - t0, 2)
+    lines = [f"  powershell.exe took {host['ps_s']:.1f} s (timeout {POWERSHELL_TIMEOUT_S:g} s)"]
+    if out is None:
+        host["ps_error"] = note
+        return {"lines": lines + [f"  {note}"], "host": host}
+    data = _host_json(out)
+    if data is None:
+        host["ps_error"] = "output not understood"
+        lines.append(f"  powershell.exe output not understood ({len(out)} characters)")
+        return {"lines": lines, "host": host}
+    load, logical, physical = _num(data.get("load")), _num(data.get("logical")), _num(data.get("physical"))
+    host.update(load=load, logical=int(logical) if logical else None, physical=int(physical) if physical else None,
+                commit_pct=_num(data.get("commit_pct")))
+    interval = _num(data.get("interval")) or TOP_SAMPLE_S
+    top = []
+    for p in _items(data.get("top")):
+        name, pid, cpu_s = p.get("name"), p.get("pid"), _num(p.get("cpu_s"))
+        if isinstance(name, str) and isinstance(pid, int) and cpu_s is not None:
+            pct = cpu_s / interval / host["logical"] * 100.0 if host["logical"] else None
+            top.append({"name": name, "pid": pid, "cpu_s": cpu_s, "pct": pct})
+    host["top"] = sorted(top, key=lambda p: p["cpu_s"], reverse=True)[:TOP_N]
+    for v in _items(data.get("vmmem")):
+        if isinstance(v.get("name"), str) and isinstance(v.get("pid"), int):
+            host["vmmem"].append({"name": v["name"], "pid": v["pid"], "ws": _num(v.get("ws"))})
+    if isinstance(data.get("services"), (list, dict)):
+        host["services_collected"] = True
+        for s in _items(data.get("services")):
+            if isinstance(s.get("name"), str) and isinstance(s.get("status"), str):
+                host["services"][s["name"]] = s["status"]
+
+    def fmt(x, unit=""):
+        return f"{x:g}{unit}" if x is not None else "?"
+    lines.append(f"  host CPU load {fmt(load, '%')} (Win32_Processor LoadPercentage, average), "
+                 f"{host['logical'] or '?'} logical / {host['physical'] or '?'} physical processors")
+    lines.append(f"  committed memory {fmt(host['commit_pct'], '%')}")
+    for v in host["vmmem"]:
+        ws = f"{v['ws'] / (1 << 30):.1f} GB" if v["ws"] is not None else "?"
+        lines.append(f"  {v['name']} pid {v['pid']} working set {ws}")
+    if not host["vmmem"]:
+        lines.append("  vmmem / vmmemWSL: not seen")
+    if host["services_collected"]:
+        lines.append("  audio services: " + ", ".join(
+            f"{name} {host['services'].get(name, 'not found')}" for name in AUDIO_SERVICES))
+    else:
+        lines.append("  audio services: not collected")
+    lines.append(f"  top {len(host['top'])} processes by CPU over {interval:.1f} s "
+                 "(% of the whole host; names only, no command lines or window titles)")
+    for p in host["top"]:
+        pct = f"{p['pct']:5.1f}%" if p["pct"] is not None else f"{p['cpu_s']:.2f} cpu s"
+        lines.append(f"  {p['pid']:>7} {p['name'][:24]:<24} {pct}")
+    return {"lines": lines, "host": host}
 
 
 # -- voice-mode MCP processes -------------------------------------------------------------------------
@@ -680,6 +807,32 @@ def suspects(f, now):
             out.append(f"exchange {x.get('conv', '')}: ttfa {x['ttfa']} s > {EXCHANGE_TTFA_SUSPECT_S} s ({x['timing']})")
         if x.get("stt") is not None and x["stt"] > EXCHANGE_STT_SUSPECT_S:
             out.append(f"exchange {x.get('conv', '')}: stt {x['stt']} s > {EXCHANGE_STT_SUSPECT_S} s ({x['timing']})")
+    out.extend(_host_suspects(f.get("host")))
+    return out
+
+
+def _host_suspects(h):
+    if not isinstance(h, dict):
+        return []
+    out = []
+    load = _num(h.get("load"))
+    if load is not None and load >= HOST_CPU_SUSPECT_PCT:
+        out.append(f"Windows host CPU load {load:g}% >= {HOST_CPU_SUSPECT_PCT}% (WARN)")
+    for p in h.get("top") or []:
+        pct = _num(p.get("pct")) if isinstance(p, dict) else None
+        name = str(p.get("name", "")) if isinstance(p, dict) else ""
+        if pct is not None and pct > HOST_PROC_SUSPECT_PCT and name.lower() not in WSL_PROCESS_NAMES:
+            out.append(f"Windows process {name} pid {p.get('pid')} uses {pct:.1f}% of the host "
+                       f"> {HOST_PROC_SUSPECT_PCT}%")
+    if h.get("ps_error") is None and h.get("services_collected", True):
+        services = h.get("services") if isinstance(h.get("services"), dict) else {}
+        for name in AUDIO_SERVICES:
+            status = services.get(name)
+            if status != "Running":
+                out.append(f"Windows audio service {name} {status or 'not found'} (not Running)")
+    ps_s = _num(h.get("ps_s"))
+    if ps_s is not None and ps_s > POWERSHELL_SLOW_S:
+        out.append(f"powershell.exe took {ps_s:.1f} s > {POWERSHELL_SLOW_S} s (a sign of host overload)")
     return out
 
 
@@ -723,6 +876,7 @@ def diagnose(env=None):
     section("Load", _step(collect_load, env), "load")
     top = _step(collect_top, env)
     section("Top CPU", top)
+    section("Windows host", _step(collect_windows_host, env), "host")
     procs = _step(collect_processes, env, top.get("cpu"))
     section("voice-mode MCP processes", procs, "procs")
     section("py-spy", _step(collect_pyspy, env, facts.get("procs", [])))
@@ -742,7 +896,10 @@ def diagnose(env=None):
     out.append(f"  thresholds: load > {LOAD_PER_CORE_SUSPECT} x cores; tts probe > {TTS_PROBE_SLOW_S} s; "
                f"stt probe > {STT_PROBE_SLOW_S} s; exchange ttfa > {EXCHANGE_TTFA_SUSPECT_S} s or "
                f"stt > {EXCHANGE_STT_SUSPECT_S} s; PaErrorCode / fixed-duration fallback / slow exchanges "
-               f"within {LOG_WINDOW_S / 60:g} min; thread state D; a stream on a SUSPENDED device")
+               f"within {LOG_WINDOW_S / 60:g} min; thread state D; a stream on a SUSPENDED device; "
+               f"WSL only: Windows host CPU >= {HOST_CPU_SUSPECT_PCT}%, a non-WSL Windows process "
+               f"> {HOST_PROC_SUSPECT_PCT}% of the host, an audio service not Running, "
+               f"powershell.exe > {POWERSHELL_SLOW_S} s")
     text = "\n".join(out) + "\n"
     try:
         path = _write(env, text)

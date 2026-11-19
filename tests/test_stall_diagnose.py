@@ -413,6 +413,196 @@ def test_top_cpu_on_linux_is_sampled_over_one_interval(tmp_path):
     assert "busy" in data["lines"][1] and "80.0%" in data["lines"][1] and "threads 4" in data["lines"][1]
 
 
+# -- Windows host (WSL only, 2026-11-19) ---------------------------------------------------------
+# A real stall coincided with WSL's PulseAudio not answering for 5 s while the Windows host CPU
+# was at 100 %, so the host side belongs in the report. powershell.exe is always a fake here.
+
+def host_json(**kw):
+    base = {"load": 97, "logical": 16, "physical": 8, "interval": 1.0, "commit_pct": 71.5,
+            "top": [{"name": "chrome", "pid": 4100, "cpu_s": 6.4},
+                    {"name": "vmmemWSL", "pid": 3000, "cpu_s": 8.0},
+                    {"name": "Teams", "pid": 5200, "cpu_s": 1.6},
+                    {"name": "Taskmgr", "pid": 6000, "cpu_s": 0.8}],
+            "vmmem": [{"name": "vmmemWSL", "pid": 3000, "ws": 12884901888}],
+            "services": [{"name": "Audiosrv", "status": "Running"},
+                         {"name": "AudioEndpointBuilder", "status": "Running"}]}
+    base.update(kw)
+    return json.dumps(base)
+
+
+def wsl_env(tmp_path, answer, *, took=2.0, environ=None):
+    """A WSL env whose powershell.exe answers `answer` and takes `took` seconds."""
+    t = {"mono": 100.0}
+    run = FakeRun({"powershell.exe -NoProfile -Command": answer})
+
+    def timed(cmd, timeout):
+        if cmd[0] == "powershell.exe":
+            t["mono"] += took
+        return run(cmd, timeout)
+    env = make_env(tmp_path, run=timed)
+    env.monotonic = lambda: t["mono"]
+    env.environ = {"WSL_DISTRO_NAME": "Ubuntu-22.04"} if environ is None else environ
+    return env, run
+
+
+def test_wsl_is_detected_from_the_distro_variable_or_proc_version(tmp_path):
+    env = make_env(tmp_path)
+    env.environ = {}
+    assert not sd.is_wsl(env)
+    env.environ = {"WSL_DISTRO_NAME": "Ubuntu"}
+    assert sd.is_wsl(env)
+    env.environ = {}
+    (env.proc_root / "version").write_text("Linux version 6.6.87.2-microsoft-standard-WSL2 (gcc)\n")
+    assert sd.is_wsl(env)
+    env.system = "Darwin"
+    assert not sd.is_wsl(env)
+
+
+def test_the_host_section_is_not_collected_outside_wsl(tmp_path):
+    env, run = wsl_env(tmp_path, host_json(), environ={})
+    data = sd.collect_windows_host(env)
+    assert data["lines"] == ["  not collected on this OS (not WSL)"]
+    assert data["host"] is None
+    assert not any(c[0][0] == "powershell.exe" for c in run.calls)
+    text, _, _ = sd.diagnose(env)
+    assert "== Windows host\n  not collected on this OS (not WSL)" in text
+
+
+def test_the_host_section_reports_load_processes_memory_services_and_call_time(tmp_path):
+    env, run = wsl_env(tmp_path, host_json(), took=3.4)
+    data = sd.collect_windows_host(env)
+    ps = [c for c in run.calls if c[0][0] == "powershell.exe"]
+    assert len(ps) == 1
+    assert ps[0][0][:3] == ["powershell.exe", "-NoProfile", "-Command"]
+    assert ps[0][1] == sd.POWERSHELL_TIMEOUT_S == 20
+    text = "\n".join(data["lines"])
+    assert "powershell.exe took 3.4 s" in text
+    assert "host CPU load 97%" in text and "16 logical / 8 physical" in text
+    assert "committed memory 71.5%" in text
+    assert "vmmemWSL pid 3000 working set 12.0 GB" in text
+    assert "Audiosrv Running" in text and "AudioEndpointBuilder Running" in text
+    # cpu_s over the interval, as a share of the whole host: 6.4 s / 1 s / 16 = 40 %
+    chrome = next(ln for ln in data["lines"] if "chrome" in ln)
+    assert "4100" in chrome and "40.0%" in chrome
+    top = data["host"]["top"]
+    assert [p["name"] for p in top] == ["vmmemWSL", "chrome", "Teams", "Taskmgr"]
+    assert data["host"]["load"] == 97 and data["host"]["ps_s"] == pytest.approx(3.4)
+
+
+def test_the_host_top_list_has_at_most_eight_processes(tmp_path):
+    many = [{"name": f"p{i}", "pid": 100 + i, "cpu_s": float(i)} for i in range(12)]
+    env, _ = wsl_env(tmp_path, host_json(top=many))
+    data = sd.collect_windows_host(env)
+    assert len(data["host"]["top"]) == sd.TOP_N == 8
+    assert data["host"]["top"][0]["name"] == "p11"
+
+
+def test_the_host_script_and_report_carry_no_command_lines_or_window_titles(tmp_path):
+    for word in ("CommandLine", "MainWindowTitle", "Win32_Process ", "Win32_Process'", ".Path",
+                 "StartInfo", "Get-WmiObject", "Arguments"):
+        assert word not in sd.HOST_SCRIPT, word
+    leaky = json.loads(host_json())
+    leaky["top"][0].update(CommandLine="chrome.exe --token=SECRET", MainWindowTitle="SECRET mail",
+                           Path="C:\\SECRET\\chrome.exe")
+    env, _ = wsl_env(tmp_path, json.dumps(leaky))
+    data = sd.collect_windows_host(env)
+    assert "SECRET" not in "\n".join(data["lines"])
+    assert "SECRET" not in json.dumps(data["host"])
+
+
+def test_the_host_script_uses_no_double_quotes_or_newlines():
+    # It is one argument passed from WSL to a Windows command line: keep quoting trivial.
+    assert '"' not in sd.HOST_SCRIPT and "\n" not in sd.HOST_SCRIPT
+    assert "ConvertTo-Json" in sd.HOST_SCRIPT and "Get-Service" in sd.HOST_SCRIPT
+    assert "Win32_Processor" in sd.HOST_SCRIPT and "LoadPercentage" in sd.HOST_SCRIPT
+
+
+def test_a_powershell_timeout_is_a_line_and_a_suspect_never_an_error(tmp_path):
+    env, _ = wsl_env(tmp_path, subprocess.TimeoutExpired("powershell.exe", 20), took=20.0)
+    data = sd.collect_windows_host(env)
+    text = "\n".join(data["lines"])
+    assert "timed out after 20 s" in text
+    assert data["host"]["ps_s"] == pytest.approx(20.0)
+    hit = sd.suspects(facts(host=data["host"]), NOW)
+    assert any("powershell.exe took 20.0 s > 10.0 s" in s for s in hit)
+
+
+def test_a_failing_or_missing_powershell_is_a_line(tmp_path):
+    env, _ = wsl_env(tmp_path, (1, "", "Access is denied."))
+    text = "\n".join(sd.collect_windows_host(env)["lines"])
+    assert "failed (exit 1)" in text and "Access is denied" in text
+    env, _ = wsl_env(tmp_path, FileNotFoundError(2, "No such file", "powershell.exe"))
+    text = "\n".join(sd.collect_windows_host(env)["lines"])
+    assert "failed: FileNotFoundError" in text
+
+
+@pytest.mark.parametrize("out", ["", "garbage, not json", "[1, 2, 3]", '{"load": "high", "top": 7}',
+                                 '{"top": [{"name": null, "pid": "x", "cpu_s": "y"}, 5],'
+                                 ' "services": "Running", "vmmem": {"ws": "big"}}'])
+def test_malformed_powershell_output_is_a_line_not_an_error(tmp_path, out):
+    env, _ = wsl_env(tmp_path, out)
+    data = sd.collect_windows_host(env)
+    assert data["lines"]
+    sd.suspects(facts(host=data["host"]), NOW)   # must not raise
+
+
+def test_powershell_noise_before_the_json_is_skipped(tmp_path):
+    env, _ = wsl_env(tmp_path, "\ufeffWARNING: something\r\n" + host_json() + "\r\n")
+    assert "host CPU load 97%" in "\n".join(sd.collect_windows_host(env)["lines"])
+
+
+def host_fact(**kw):
+    base = {"wsl": True, "ps_s": 2.0, "ps_error": None, "load": 50, "logical": 16, "physical": 8,
+            "top": [], "services": {"Audiosrv": "Running", "AudioEndpointBuilder": "Running"}}
+    base.update(kw)
+    return base
+
+
+def test_host_cpu_at_ninety_percent_is_a_warn_suspect():
+    assert sd.HOST_CPU_SUSPECT_PCT == 90.0
+    hit = sd.suspects(facts(host=host_fact(load=90)), NOW)
+    assert any("WARN" in s and "Windows host CPU load 90% >= 90.0%" in s for s in hit)
+    assert sd.suspects(facts(host=host_fact(load=89)), NOW) == []
+
+
+def test_a_non_wsl_process_over_a_quarter_of_the_host_is_a_suspect():
+    assert sd.HOST_PROC_SUSPECT_PCT == 25.0
+    top = [{"name": "chrome", "pid": 4100, "pct": 25.1}, {"name": "vmmemWSL", "pid": 3000, "pct": 60.0},
+           {"name": "wsl", "pid": 3100, "pct": 30.0}, {"name": "Teams", "pid": 5200, "pct": 25.0}]
+    hit = sd.suspects(facts(host=host_fact(top=top)), NOW)
+    assert any("chrome" in s and "4100" in s and "25.1%" in s for s in hit)
+    assert not any("vmmemWSL" in s or "Teams" in s or "pid 3100" in s for s in hit)
+
+
+def test_an_audio_service_that_is_not_running_is_a_suspect():
+    hit = sd.suspects(facts(host=host_fact(services={"Audiosrv": "Stopped",
+                                                    "AudioEndpointBuilder": "Running"})), NOW)
+    assert any("Audiosrv" in s and "Stopped" in s for s in hit)
+    missing = sd.suspects(facts(host=host_fact(services={"AudioEndpointBuilder": "Running"})), NOW)
+    assert any("Audiosrv" in s and "not found" in s for s in missing)
+
+
+def test_a_slow_powershell_call_is_a_suspect():
+    assert sd.POWERSHELL_SLOW_S == 10.0
+    assert any("powershell.exe took 10.5 s > 10.0 s" in s
+               for s in sd.suspects(facts(host=host_fact(ps_s=10.5)), NOW))
+    assert sd.suspects(facts(host=host_fact(ps_s=10.0)), NOW) == []
+
+
+def test_no_host_facts_means_no_host_suspects():
+    assert sd.suspects(facts(host=None), NOW) == []
+    assert sd.suspects(facts(), NOW) == []
+
+
+def test_the_whole_report_has_the_host_section_when_powershell_fails(tmp_path):
+    def broken(*a, **k):
+        raise OSError("boom")
+    env, _ = wsl_env(tmp_path, host_json())
+    env.run = broken
+    text, _, _ = sd.diagnose(env)
+    assert "== Windows host" in text and "failed" in text.split("== Windows host")[1].split("==")[0]
+
+
 # -- the switch, end to end ----------------------------------------------------------------------
 
 def _stub(path: Path, body: str) -> None:
@@ -459,6 +649,8 @@ def test_switch_diagnose_writes_the_report_and_prints_its_path(tmp_path):
     for name in ("pactl", "ss", "py-spy"):
         _stub(fakebin / name, "exit 1")
     _stub(fakebin / "voicemode", 'echo "Conch: free"')
+    # Under WSL the switch asks the Windows host: never the real powershell.exe in a test.
+    _stub(fakebin / "powershell.exe", 'echo \'{"load": 12, "logical": 4, "physical": 2, "interval": 1.0}\'')
     env = {**os.environ, "HOME": str(home), "PATH": f"{fakebin}:{os.environ['PATH']}",
            "VOICEMODE_DIAGNOSE_PORTS": f"Kokoro:{port}:tts,Dead:{dead}:stt"}
     try:
@@ -475,3 +667,6 @@ def test_switch_diagnose_writes_the_report_and_prints_its_path(tmp_path):
     assert "== Conch" in text and ("Conch: free" in text or "the conch is free" in text)
     assert "kokoro-onnx" in text and "pid 4242" in text
     assert f"Dead ({dead}, stt, not configured): not answering" in text and "== Suspects" in text
+    assert "== Windows host" in text
+    if os.environ.get("WSL_DISTRO_NAME"):
+        assert "host CPU load 12%" in text
