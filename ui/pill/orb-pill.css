@@ -125,7 +125,7 @@ body[data-orb-layout] .orb-felix-stars {
   animation: turn-stars 38s linear infinite paused;
   transition: opacity 240ms ease;
 }
-body[data-orb-layout][data-orb-palette=speaking][data-felix-frames=true] .orb-felix-stars { opacity: .76; }
+body[data-orb-layout][data-orb-palette=speaking][data-felix-frames=true] .orb-felix-stars { opacity: .54; }
 body[data-orb-layout][data-orb-palette=speaking][data-felix-frames=true][data-orb-motion=true] .orb-felix-stars {
   animation-play-state: running;
 }
