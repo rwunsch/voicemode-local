@@ -137,6 +137,16 @@ run: a native converse turn through Claude Code, and macOS.
   its pipe broke, the window logs it and posts `{"window":{"dropped":"<cmd>"}}` to the page,
   so the page can show Disconnected at once. It is never replayed: a late Stop could land on
   a turn it was not meant for.
+- **A Stop with no turn running ends only the next turn, and only soon** (v1.2.26, FELIX
+  #2094). With no conch holder (between turns, or the turn ended as you clicked), Stop
+  cannot cut anything, so it leaves `stop/<pid>` for the last session; its next `converse`
+  returns "Voice was stopped from the pill ... call converse again, which resumes voice."
+  The file now holds the time it was pressed, and that turn honours it only if it begins
+  within `VOICEMODE_PILL_STOP_WINDOW_S` seconds (default 30, Robert 2026-11-27; 0 = only a
+  Stop during the turn). 30 s covers a Stop pressed while the assistant writes its next
+  reply (3-20 s); before, the file never expired and cancelled a turn asked for minutes
+  later (field report: 122 ms "stopped" about 2 min after the last turn). An empty file from
+  an older version is aged by its mtime. Behaviour change; old (no expiry) has no setting.
 - **Push-to-talk** (2026-11-07): while the key is down the pill shows **Holding…** (phase
   `holding`, from the `holding` field patch_ptt_instant adds to the server's status reply,
   above Speaking and Listening, green like Listening). The keys hint reads `tap: stop, hold:
