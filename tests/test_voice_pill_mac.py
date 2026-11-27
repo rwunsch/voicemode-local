@@ -531,7 +531,8 @@ def test_slide_in_checks_for_a_newer_slide_before_its_jump_and_lands_exactly():
 
 def test_top_row_order_is_expand_dock_minimize():
     page = (REPO / "ui/pill/index.html").read_text()
-    assert page.index('id="expand"') < page.index('id="dockTop"') < page.index('id="minimize"') < page.index('id="dismiss"') < page.index('id="more"')
+    assert page.index('id="expand"') < page.index('id="dockTop"') < page.index('id="minimize"') < page.index('id="more"')
+    assert 'id="dismiss"' not in page  # one window button: _ minimizes to the tray / menu bar
     assert '$("dockTop").onclick' in (REPO / "ui/pill/app.js").read_text()
     css = (REPO / "ui/pill/pill.css").read_text()
     assert "[data-mode=docked] #dockTop" in css and "[data-mode=rail] #dockTop" in css

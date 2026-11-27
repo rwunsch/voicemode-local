@@ -18,7 +18,8 @@ test("disconnected after 3s with no snapshot", () => {
   assert.equal(vm.stop.enabled, false);
   assert.equal(vm.pickersEnabled, false);
   assert.equal(vm.barge.enabled, false);
-  assert.deepEqual([vm.minimizeEnabled, vm.dismissEnabled], [true, true]);
+  assert.equal(vm.minimizeEnabled, true);
+  assert.equal("dismissEnabled" in vm, false); // no X: _ minimizes, Quit is in the tray menu
   assert.equal(viewModel(snap(), 1000, 3999).connected, true);
   assert.equal(viewModel(null, null, 5).label, "Disconnected");
 });
@@ -146,7 +147,8 @@ test("the voice list follows the language", () => {
 
 test("minimize and dismiss stay enabled when connected too", () => {
   const vm = viewModel(snap(), 0, 0);
-  assert.deepEqual([vm.minimizeEnabled, vm.dismissEnabled], [true, true]);
+  assert.equal(vm.minimizeEnabled, true);
+  assert.equal("dismissEnabled" in vm, false); // no X: _ minimizes, Quit is in the tray menu
 });
 
 test("nextHidden: un-hides on false to true", () => {

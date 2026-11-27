@@ -40,8 +40,8 @@
     voiceoff: "Voice off: continue in text", resumevoice: "Resume voice: listen to you again",
     pausemic: "Pause mic: close the mic and discard what was said; voice stays on" };
   function closeHint(platform) {
-    return platform === "mac" ? "Close to the menu bar; Quit is in its menu (right-click)"
-      : "Close to the tray; Quit is in its menu (right-click)";
+    return platform === "mac" ? "Minimize to the menu bar; Quit is in its menu (right-click)"
+      : "Minimize to the tray; Quit is in its menu (right-click)";
   }
   var LABELS = { speaking: "Speaking", listening: "Listening", holding: "Holding\u2026", working: "Between turns",
     idle: "Not in a voice turn", paused: "Paused",
@@ -111,7 +111,7 @@
         primary: HIDDEN, end: button("voiceoff", "stop", "Voice off", STOP, false), mic: HIDDEN, stop: off,
         close: { action: "minimize", hint: closeHint(snapshot && snapshot.platform) },
         indicator: indicatorFor("disconnected", "", false),
-        inTurn: false, pickersEnabled: false, minimizeEnabled: true, dismissEnabled: true, queue: [], queueMore: "", voice: null, language: null, keys: [], session: "", stateText: LABELS.disconnected, waitingText: "",
+        inTurn: false, pickersEnabled: false, minimizeEnabled: true, queue: [], queueMore: "", voice: null, language: null, keys: [], session: "", stateText: LABELS.disconnected, waitingText: "",
         barge: { visible: false, on: false, enabled: false, countText: "" }, beeps: { on: false }, voices: VOICES, languages: LANGUAGES,
         wakeText: "" };
     }
@@ -171,7 +171,7 @@
       close: { action: "minimize", hint: closeHint(s.platform) },
       indicator: indicatorFor(phase, name, interrupted),
       stop: { enabled: floorOn && phase !== "stopped" },
-      pickersEnabled: !!s.floor, minimizeEnabled: true, dismissEnabled: true,
+      pickersEnabled: !!s.floor, minimizeEnabled: true,
       queue: rows.slice(0, MAX_ROWS).map(function (r) {
         var text = r.state === "waiting" && r.position ? "waiting, " + ordinal(r.position) : r.state;
         return { name: r.label || "session " + r.pid, text: text, state: r.state };

@@ -179,12 +179,14 @@ run: a native converse turn through Claude Code, and macOS.
   **Pause mic** (Robert 2026-11-27): while listening the expanded panel adds a third button
   between Done and Voice off (compact stays at two): it sends `pause`, which closes the mic and
   discards what was said, voice stays on (a phone call, someone walking in).
-  **Close shrinks, Quit is in the menu** (Robert 2026-11-27, Stefan's "discoverable resume
-  path"): the ✕ now minimizes to the tray (Windows) or menu bar (Mac), like `_`. Right-click
+  **Minimize only, Quit is in the menu** (Robert 2026-11-27, Stefan's "discoverable resume
+  path"): the pill has one window button, `_`, which minimizes to the tray (Windows) or menu
+  bar (Mac). The ✕ is gone: it had come to do the same as `_` (Robert: "remove the X and keep
+  minimize"). Right-click
   on that icon (or Control-click on a Mac) opens a menu: "Show pill" (`{"cmd":"restore"}`) and
   "Quit pill (until the next voice session)" (`{"cmd":"quit"}`, which the page turns into the
   old close: `dismiss` + hidden). Windows: a `ContextMenuStrip` on the `NotifyIcon`, compiled
-  and started on real Windows, the menu itself not yet clicked by a person. Mac: the status
+  and started on real Windows; the menu was opened by Robert on WSL/Windows 2026-11-27 (n=1: "Show pill" and "Quit pill" shown). Mac: the status
   item sends its action on right mouse up too and pops an `NSMenu`; **not yet run on a Mac**.
 
 - **Wake and the button layout, before v1.2.26** (2026-11-07, Robert's decision: a play and a

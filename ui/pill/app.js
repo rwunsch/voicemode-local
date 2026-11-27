@@ -94,7 +94,7 @@
     }
     document.body.hidden = hidden;
     [["voice", vm.pickersEnabled], ["language", vm.pickersEnabled], ["barge", vm.barge.enabled],
-      ["minimize", vm.minimizeEnabled], ["dismiss", vm.dismissEnabled], ["expand", true], ["dock", true]]
+      ["minimize", vm.minimizeEnabled], ["expand", true], ["dock", true]]
       .forEach(function (p) { $(p[0]).disabled = !p[1]; });
     // Two spots in a fixed place (FELIX #2094, UX review 2026-11-27): left = primary (Pause,
     // Done, Resume, Wake, Resume voice), right = Voice off. The compact row shows icons; the
@@ -104,8 +104,8 @@
     setSpot($("main"), $("ctlPause"), $("ctlPauseIcon"), $("ctlPauseText"), vm.primary);
     setSpot($("pause"), $("ctlMain"), $("ctlMainIcon"), $("ctlMainText"), vm.end);
     setPanelOnly($("ctlMic"), vm.mic);   // Pause mic while listening, panel only
-    $("dismiss").dataset.hint = vm.close.hint; $("dismiss").title = vm.close.hint;
-    $("dismiss").setAttribute("aria-label", vm.close.hint);
+    $("minimize").dataset.hint = vm.close.hint; $("minimize").title = vm.close.hint;
+    $("minimize").setAttribute("aria-label", vm.close.hint);
     $("expand").setAttribute("aria-expanded", String(vm.mode === "expanded" || vm.mode === "docked"));
     $("dock").textContent = vm.mode === "docked" ? "Undock" : "Dock";
     $("tuck").textContent = vm.side === "left" ? "\u2039" : "\u203A";
@@ -197,7 +197,6 @@
     lastMode = modeOf(ui);
     render();
   }
-  $("dismiss").onclick = function () { saveUi({ minimized: true }); };
   // Hear the voice shown in the list; one at a time (the button waits for the answer).
   $("preview").onclick = function () {
     if (!$("voice").value) return;
