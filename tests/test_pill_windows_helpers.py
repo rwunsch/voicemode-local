@@ -281,7 +281,7 @@ def test_autostart_keeps_wsl_arguments(win_dir):
                    "DataDir": winpath(data)}
 
 
-# Robert 2026-11-27: the pill's close button shrinks it to the tray; Quit is in the tray
+# Robert 2026-11-27: the pill's minimize button (_) shrinks it to the tray; Quit is in the tray
 # icon's right-click menu and tells the page {"cmd":"quit"} (the old close).
 def test_the_tray_icon_has_show_and_quit_in_its_menu():
     src = (REPO / "pill-windows.ps1").read_text(encoding="utf-8")
@@ -289,3 +289,11 @@ def test_the_tray_icon_has_show_and_quit_in_its_menu():
     assert 'menu.Items.Add("Show pill"' in src and '{\\"cmd\\":\\"restore\\"}' in src
     assert 'menu.Items.Add("Quit pill (until the next voice session)"' in src
     assert '{\\"cmd\\":\\"quit\\"}' in src
+
+
+def test_tray_icon_hover_says_where_quit_is():
+    # Robert 2026-11-27: minimized, the hover must say that Quit is in the menu. NotifyIcon.Text
+    # is limited (63 characters before .NET 4.6.2, 127 after): the longest phase must fit 63.
+    src = (REPO / "pill-windows.ps1").read_text(encoding="utf-8")
+    assert 'tray.Text = "Voice pill: " + phase + ". Right-click: Show or Quit";' in src
+    assert len("Voice pill: " + "Not responding" + ". Right-click: Show or Quit") <= 63

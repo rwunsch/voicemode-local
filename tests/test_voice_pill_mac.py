@@ -843,3 +843,16 @@ def test_the_ball_sends_its_action_on_right_clicks_too():
     src = (REPO / "patches/voice_pill_mac.py").read_text()
     assert "sendActionOn_(LEFT_UP_MASK | RIGHT_UP_MASK)" in src
     assert "popUpStatusItemMenu_(menu)" in src
+
+
+def test_menu_bar_icon_hover_says_where_quit_is():
+    # Robert 2026-11-27: minimized, the hover must say that Quit is in the menu.
+    tip = m.tray_tip("Listening")
+    assert tip.startswith("Voice pill: Listening")
+    assert "Quit" in tip and "right-click" in tip.lower() and "control-click" in tip.lower()
+    assert m.tray_tip("") == "Voice pill. Right-click or Control-click: Show or Quit"
+
+
+def test_menu_bar_icon_sets_the_tooltip():
+    src = (PATCHES / "voice_pill_mac.py").read_text()
+    assert "self.tray.button().setToolTip_(tray_tip(" in src

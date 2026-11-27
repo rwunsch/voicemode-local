@@ -615,7 +615,7 @@ document.addEventListener('DOMContentLoaded',function(){
         }
         if (tray == null) return;
         tray.Icon = TrayIcon();
-        tray.Text = "Voice pill: " + phase;
+        tray.Text = "Voice pill: " + phase + ". Right-click: Show or Quit";
         tray.Visible = want;
     }
 

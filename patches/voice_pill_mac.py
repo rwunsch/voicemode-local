@@ -366,6 +366,12 @@ CONTROL_FLAG = 1 << 18        # NSEventModifierFlagControl
 LEFT_UP_MASK, RIGHT_UP_MASK = 1 << 2, 1 << 4   # NSEventMaskLeftMouseUp, NSEventMaskRightMouseUp
 
 
+def tray_tip(phase: str) -> str:
+    """The menu-bar icon's hover text. Minimized, it is the only place that says where Quit is."""
+    where = "Right-click or Control-click: Show or Quit"
+    return f"Voice pill: {phase}. {where}" if phase else f"Voice pill. {where}"
+
+
 def tray_click_is_menu(event_type, modifier_flags) -> bool:
     """A right-click or a Control-click opens the menu; any other click restores the pill."""
     return event_type == RIGHT_MOUSE_UP or bool(int(modifier_flags or 0) & CONTROL_FLAG)
@@ -736,6 +742,7 @@ class App:
             self.tray.button().sendActionOn_(LEFT_UP_MASK | RIGHT_UP_MASK)  # right-click: the menu
         if not self.tray:
             return
+        self.tray.button().setToolTip_(tray_tip(self.state.phase))
         r, g, b = tray_rgb(self.state.phase)
         image = NSImage.alloc().initWithSize_((16, 16))
         image.lockFocus()
