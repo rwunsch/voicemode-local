@@ -1,0 +1,17 @@
+{
+  "name": "voicemode-pill-spectrum",
+  "private": true,
+  "type": "module",
+  "scripts": { "build": "node build.mjs" },
+  "dependencies": {
+    "@spectrum-web-components/action-button": "1.12.6",
+    "@spectrum-web-components/button": "1.12.6",
+    "@spectrum-web-components/divider": "1.12.6",
+    "@spectrum-web-components/field-label": "1.12.6",
+    "@spectrum-web-components/menu": "1.12.6",
+    "@spectrum-web-components/picker": "1.12.6",
+    "@spectrum-web-components/switch": "1.12.6",
+    "@spectrum-web-components/theme": "1.12.6"
+  },
+  "devDependencies": { "esbuild": "0.25.12" }
+}

@@ -285,6 +285,7 @@ public class VmlPill {
     const int WIDTH = 350, DEFAULT_H = 68;
     const int MIN_WIDTH = 320, MAX_WIDTH = 640;
     const int TAB_W = 22, TAB_H = 64, RAIL_W = 76, MINI_SIZE = 68;
+    const int ORB_ROW = 56;
     static readonly IntPtr TOPMOST = new IntPtr(-1);
     const string HOST = "pill.voicemode.example";
     const string BRIDGE = @"
@@ -293,7 +294,7 @@ window.chrome.webview.addEventListener('message',function(e){if(window.pillRecei
 document.addEventListener('DOMContentLoaded',function(){
   document.documentElement.classList.add('windows');
   var c=document.getElementById('card');
-  new ResizeObserver(function(){if(c.offsetHeight)window.chrome.webview.postMessage(JSON.stringify({window:{height:c.offsetHeight}}))}).observe(c);
+  new ResizeObserver(function(){if(c.offsetHeight&&!document.body.hasAttribute('data-orb-layout'))window.chrome.webview.postMessage(JSON.stringify({window:{height:c.offsetHeight}}))}).observe(c);
 });";
 
     string distro, command, local, posFile, logFile, exe, args, stopName; bool force, native;
@@ -302,6 +303,7 @@ document.addEventListener('DOMContentLoaded',function(){
     JavaScriptSerializer json = new JavaScriptSerializer();
     double backoff = 1; bool closing, started, hadOutput; int exitCode;
     bool snapshotVisible, dismissed; string mode = "pill", side = "right"; int cssHeight = DEFAULT_H;
+    string orbSurface = "compact"; bool orbAbove;
     int[] orbRegion;
     IntPtr keyboardPrevious;
     bool hasPos, hasDock; int posX, posY, dockCy, cssWidth = WIDTH;
@@ -594,13 +596,14 @@ document.addEventListener('DOMContentLoaded',function(){
         if (w.ContainsKey("slide")) { SlideOut(); return; }
         if (w.TryGetValue("phase", out v) && v is string) { phase = (string)v; UpdateTray(); return; }
         if (w.ContainsKey("resize")) { StartResize(w["resize"] as string); return; }
-        if (w.TryGetValue("height", out v) && v is int) { cssHeight = (int)v; Apply(); return; }
+        if (w.TryGetValue("height", out v) && v is int) { if (!IsOrbMode()) { cssHeight = (int)v; Apply(); } return; }
         if (w.TryGetValue("mode", out v) && v is string) {
             string next = (string)v;
             dismissed = next == "hidden";
             string prev = mode;
             if (!dismissed) mode = next;
             object sv;
+            if (w.TryGetValue("surface", out sv) && sv is string) orbSurface = (string)sv;
             side = w.TryGetValue("side", out sv) && (sv as string) == "left" ? "left" : "right";
             Apply();
             if (prev == "tab" && (mode == "docked" || mode == "rail") && !dismissed) SlideIn();
@@ -609,6 +612,7 @@ document.addEventListener('DOMContentLoaded',function(){
 
     // -- window --------------------------------------------------------------
     int Scale(int css) { return (int)Math.Round(css * GetDpiForWindow(hwnd) / 96.0); }
+    bool IsOrbMode() { return mode == "orb-docked" || mode == "orb-floating"; }
 
     MONITORINFO MonitorAt(int x, int y) {
         var p = new POINT { x = x, y = y };
@@ -693,7 +697,30 @@ document.addEventListener('DOMContentLoaded',function(){
         int h = Scale(mode == "mini" ? MINI_SIZE : mode == "tab" ? TAB_H : cssHeight);
         var a = (hasPos ? MonitorAt(posX, posY) : MonitorAt(0, 0)).rcWork;
         int x = hasPos ? posX : a.right - w - Scale(16), y = hasPos ? posY : a.bottom - Scale(DEFAULT_H) - Scale(16);
-        if (edge) {  // floats on the screen edge, at the height it was dragged to, or the middle
+        if (IsOrbMode()) {
+            int row = Scale(ORB_ROW), widest = Math.Min(Scale(326), a.right - a.left);
+            w = Math.Min(a.right - a.left, Scale(orbSurface == "settings" ? 326 :
+                orbSurface == "strip" || orbSurface == "menu" ? 304 : ORB_ROW));
+            h = Scale(orbSurface == "settings" ? 433 : orbSurface == "menu" ? 242 : ORB_ROW);
+            bool leftSide = side == "left", dockedOrb = mode == "orb-docked";
+            int anchorY = (hasDock ? dockCy : (a.top + a.bottom) / 2) - row / 2;
+            int anchorX = leftSide ? a.left : a.right - row;
+            if (!dockedOrb) {
+                anchorX = hasPos ? posX : anchorX + (leftSide ? Scale(16) : -Scale(16));
+                if (hasPos) anchorY = posY;
+                int lo = leftSide ? a.left : a.left + widest - row;
+                int hi = leftSide ? a.right - widest : a.right - row;
+                anchorX = Math.Max(lo, Math.Min(anchorX, hi));
+            }
+            anchorY = Math.Max(a.top, Math.Min(anchorY, a.bottom - row));
+            int belowRoom = a.bottom - anchorY, aboveRoom = anchorY + row - a.top;
+            orbAbove = h > belowRoom && aboveRoom > belowRoom;
+            h = Math.Min(h, orbAbove ? aboveRoom : belowRoom);
+            x = leftSide ? anchorX : anchorX + row - w;
+            y = orbAbove ? anchorY + row - h : anchorY;
+            if (ctl != null) ctl.CoreWebView2.ExecuteScriptAsync(
+                "window.pillOrbAbove && window.pillOrbAbove(" + (orbAbove ? "true" : "false") + ")");
+        } else if (edge) {  // floats on the screen edge, at the height it was dragged to, or the middle
             x = side == "left" ? a.left : a.right - w;
             y = (hasDock ? dockCy : (a.top + a.bottom) / 2) - h / 2;
         }
@@ -709,6 +736,11 @@ document.addEventListener('DOMContentLoaded',function(){
         GetWindowRect(hwnd, out r);
         int w = r.right - r.left, h = r.bottom - r.top;
         int round = mode == "mini" ? w : mode == "tab" ? Scale(12) : Scale(32);
+        if (IsOrbMode() && orbSurface == "compact") {
+            int pad = Scale(3);
+            SetWindowRgn(hwnd, CreateRoundRectRgn(pad, pad, w - pad + 1, h - pad + 1, w - 2 * pad, h - 2 * pad), true);
+            return;
+        }
         if (mode == "pill" && orbRegion != null) {
             int left = Scale(orbRegion[0]), top = Scale(orbRegion[1]);
             int ow = Scale(orbRegion[2]), oh = Scale(orbRegion[3]);
@@ -724,7 +756,7 @@ document.addEventListener('DOMContentLoaded',function(){
     // process, and the system move loop would activate the window.
     void StartDrag() {
         if (dragTimer != null || mode == "tab") return;
-        bool vertical = mode == "docked" || mode == "rail";  // docked: up and down the screen edge only
+        bool vertical = mode == "docked" || mode == "rail" || mode == "orb-docked";
         RECT start; GetWindowRect(hwnd, out start);
         var area = MonitorAt(start.left, start.top).rcWork;
         int height = start.bottom - start.top;
@@ -743,8 +775,14 @@ document.addEventListener('DOMContentLoaded',function(){
             if ((GetAsyncKeyState(1) & 0x8000) == 0) {
                 dragTimer.Stop(); dragTimer = null;
                 if (moved) {
-                    if (vertical) { dockCy = r.y + height / 2; hasDock = true; }
-                    else { posX = r.x; posY = r.y; hasPos = true; }
+                    bool orbMode = IsOrbMode();
+                    int row = orbMode ? Scale(ORB_ROW) : height;
+                    int anchorTop = orbMode && orbAbove ? r.y + height - row : r.y;
+                    if (vertical) { dockCy = anchorTop + row / 2; hasDock = true; }
+                    else {
+                        posX = orbMode && side == "right" ? r.x + start.right - start.left - row : r.x;
+                        posY = anchorTop; hasPos = true;
+                    }
                     SavePosition(); Apply();
                 }
             }
@@ -754,7 +792,7 @@ document.addEventListener('DOMContentLoaded',function(){
 
     // Same loop as a drag, for the same reasons. The opposite edge stays where it is.
     void StartResize(string edge) {
-        if (dragTimer != null || mode == "docked" || mode == "rail") return;
+        if (dragTimer != null || mode == "docked" || mode == "rail" || IsOrbMode()) return;
         POINT c; GetCursorPos(out c);
         RECT r0; GetWindowRect(hwnd, out r0);
         var a = MonitorAt(r0.left, r0.top).rcWork;

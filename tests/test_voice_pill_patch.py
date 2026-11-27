@@ -473,6 +473,49 @@ def test_flagged_recording_is_discarded_even_after_a_quick_resume(work, st, cont
     assert rec.stt == [[9]]
 
 
+def test_mute_keeps_the_mic_closed_and_discards_even_a_fast_toggle(work, st, control, monkeypatch):
+    state = control.ControlState()
+    takes = [np.array([1]), np.array([9])]
+    opened = []
+
+    def record(*_):
+        opened.append(st.mic_muted())
+        audio = takes.pop(0)
+        if takes:
+            st.set_mic_muted(True)
+            st.set_mic_muted(False)  # released before the executor returns the samples
+        return audio, True
+
+    ns, rec = _listen_ns(work, st, control, monkeypatch, record)
+    st.set_mic_muted(True)
+    release = threading.Timer(0.18, st.set_mic_muted, (False,))
+    release.start()
+    try:
+        result = _listen(ns, state)
+    finally:
+        release.join()
+    assert opened == [False, False]
+    assert rec.stt == [[9]]
+    assert result.outcome == "answered"
+
+
+def test_stop_while_muted_completes_without_opening_mic(work, st, control, monkeypatch):
+    state = control.ControlState()
+    st.set_mic_muted(True)
+
+    def record(*_):
+        pytest.fail("a muted, stopped turn must not open the mic")
+
+    ns, rec = _listen_ns(work, st, control, monkeypatch, record)
+    stop = threading.Timer(0.12, state.request_stop)
+    stop.start()
+    try:
+        result = _listen(ns, state)
+    finally:
+        stop.join()
+    assert result.outcome == "stopped" and rec.stt == []
+
+
 def test_stop_during_pause_ends_the_listen(work, st, control, monkeypatch):
     state = control.ControlState()
 
@@ -564,6 +607,19 @@ def test_fixed_duration_recording_under_pause_never_reaches_stt(work, st, contro
     assert rec.stt == [[2, 2]]  # only the take after resume
     assert result.outcome == "answered"
     assert sd.stopped == 1  # the mic was closed at once
+
+
+def test_mute_closes_a_running_fixed_duration_mic(work, st, control, monkeypatch):
+    class MuteOnPoll(_FakeRec):
+        def _pause_then_resume(self):
+            self.st.set_mic_muted(True)
+            threading.Timer(0.18, self.st.set_mic_muted, (False,)).start()
+
+    state = control.ControlState()
+    sd = MuteOnPoll(st)
+    ns, rec = _fixed_ns(work, st, control, monkeypatch, sd, state)
+    assert _listen(ns, state).outcome == "answered"
+    assert sd.stopped == 1 and rec.stt == [[2, 2]]
 
 
 def test_pause_closes_the_fixed_duration_mic(work, st, control, monkeypatch):

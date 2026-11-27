@@ -29,6 +29,10 @@ HERE = Path(__file__).resolve().parent
 WIDTH, MARGIN, DEFAULT_H = 350, 16, 68
 MIN_WIDTH, MAX_WIDTH = 320, 640
 TAB_W, TAB_H, RAIL_W, MINI_SIZE = 22, 64, 76, 68
+ORB_ROW = 56
+ORB_SURFACES = {"compact": (ORB_ROW, ORB_ROW), "strip": (304, ORB_ROW),
+                "menu": (304, 242), "settings": (326, 433)}
+ORB_MODES = ("orb-docked", "orb-floating")
 BACKOFF_CAP_S = 30
 NONACTIVATING_PANEL = 1 << 7  # NSWindowStyleMaskNonactivatingPanel
 WINDOW_BEHAVIOUR = 1 << 0  # canJoinAllSpaces
@@ -104,6 +108,7 @@ class WindowState:
     dismissed: bool = False
     visible: bool = False  # last snapshot's flag
     phase: str = ""
+    orb_surface: str = "compact"
 
     @property
     def shown(self):
@@ -131,12 +136,17 @@ class WindowState:
             return "phase"
         h = w.get("height")
         if isinstance(h, int) and not isinstance(h, bool):
+            if self.mode in ORB_MODES:
+                return None  # their height comes from the surface, not the old card observer
             self.css_height = h
             return "changed"
         if isinstance(w.get("mode"), str):
             self.dismissed = w["mode"] == "hidden"
             if not self.dismissed:
                 self.mode = w["mode"]
+            surface = w.get("surface")
+            if isinstance(surface, str) and surface in ORB_SURFACES:
+                self.orb_surface = surface
             self.side = "left" if w.get("side") == "left" else "right"
             return "changed"
         return None
@@ -147,6 +157,34 @@ class WindowState:
         return changed
 
 
+def orb_geometry(state, area, pos=None):
+    """(window frame, panel opens above). The row keeps its original screen coordinates."""
+    ax, ay, aw, ah = area
+    w, h = ORB_SURFACES[state.orb_surface]
+    w, h = min(w, aw), min(h, ah)
+    left = state.side == "left"
+    if state.mode == "orb-docked":
+        anchor_x = ax if left else ax + aw - ORB_ROW
+        anchor_y = (state.dock_y if state.dock_y is not None else ay + ah // 2) - ORB_ROW // 2
+    elif pos is not None:
+        anchor_x, anchor_y = pos
+    else:
+        anchor_x = ax + MARGIN if left else ax + aw - ORB_ROW - MARGIN
+        anchor_y = (state.dock_y if state.dock_y is not None else ay + ah // 2) - ORB_ROW // 2
+    if state.mode == "orb-floating":
+        widest = min(aw, ORB_SURFACES["settings"][0])
+        lo = ax if left else ax + widest - ORB_ROW
+        hi = ax + aw - (widest if left else ORB_ROW)
+        anchor_x = max(lo, min(anchor_x, hi))
+    anchor_y = max(ay, min(anchor_y, ay + ah - ORB_ROW))
+    below_room, above_room = ay + ah - anchor_y, anchor_y + ORB_ROW - ay
+    above = h > below_room and above_room > below_room
+    h = min(h, above_room if above else below_room)
+    x = anchor_x if left else anchor_x + ORB_ROW - w
+    y = anchor_y + ORB_ROW - h if above else anchor_y
+    return (max(ax, min(x, ax + aw - w)), max(ay, min(y, ay + ah - h)), w, h), above
+
+
 def geometry(state, area, pos=None):
     """(x, y, w, h) in points, y down. `area` is the usable screen (x, y, w, h).
 
@@ -154,6 +192,8 @@ def geometry(state, area, pos=None):
     panel, and "tab" is what is left of it after sliding away. Both sit at dock_y, or the middle of the screen.
     """
     ax, ay, aw, ah = area
+    if state.mode in ORB_MODES:
+        return orb_geometry(state, area, pos)[0]
     if state.mode in ("docked", "rail", "tab"):
         w = {"tab": TAB_W, "rail": RAIL_W}.get(state.mode, state.css_width)
         h = TAB_H if state.mode == "tab" else state.css_height
@@ -264,7 +304,7 @@ HANDLER = "pill"
 BRIDGE = """
 window.pillTransport={send:function(j){window.webkit.messageHandlers.pill.postMessage(j)}};
 document.addEventListener('DOMContentLoaded',function(){var c=document.getElementById('card');
-new ResizeObserver(function(){if(c.offsetHeight)window.pillTransport.send(JSON.stringify({window:{height:c.offsetHeight}}))}).observe(c)});
+new ResizeObserver(function(){if(c.offsetHeight&&!document.body.hasAttribute('data-orb-layout'))window.pillTransport.send(JSON.stringify({window:{height:c.offsetHeight}}))}).observe(c)});
 """
 
 
@@ -682,7 +722,14 @@ class App:
 
         def go():
             area, full_h = self.screen()  # inline: already on the main thread
-            x, y, w, h = to_cocoa(geometry(self.state, area, self.pos), full_h)
+            if self.state.mode in ORB_MODES:
+                frame, above = orb_geometry(self.state, area, self.pos)
+                wv = self.webview()
+                if wv is not None:
+                    wv.evaluateJavaScript_completionHandler_("window.pillOrbAbove?.(" + json.dumps(above) + ")", None)
+            else:
+                frame = geometry(self.state, area, self.pos)
+            x, y, w, h = to_cocoa(frame, full_h)
             native.setFrame_display_(NSMakeRect(x, y, w, h), True)
             native.orderFrontRegardless()  # pywebview's own show() makes it key
             self.set_surface_visible(True)
@@ -784,7 +831,7 @@ class App:
             native = self.win.native
             c0, o0 = NSEvent.mouseLocation(), run_on_main(lambda: native.frame().origin)
             moved = False
-            vertical = self.state.mode in ("docked", "rail")  # docked: up and down the screen edge only
+            vertical = self.state.mode in ("docked", "rail", "orb-docked")
             while NSEvent.pressedMouseButtons() & 1:
                 c = NSEvent.mouseLocation()
                 x = o0.x if vertical else o0.x + c.x - c0.x
@@ -796,10 +843,14 @@ class App:
                 fr = run_on_main(lambda: native.frame())
                 o, size = fr.origin, fr.size
                 top = self.screen()[1] - o.y - size.height
+                orb_mode = self.state.mode in ORB_MODES
+                if orb_mode and orb_geometry(self.state, self.screen()[0], self.pos)[1]:
+                    top += size.height - ORB_ROW
                 if vertical:
-                    self.state.dock_y = int(top + size.height / 2)
+                    self.state.dock_y = int(top + (ORB_ROW if orb_mode else size.height) / 2)
                 else:
-                    self.pos = (int(o.x), int(top))
+                    anchor_x = o.x + size.width - ORB_ROW if orb_mode and self.state.side == "right" else o.x
+                    self.pos = (int(anchor_x), int(top))
                 self.save_position()
                 self.apply()
         finally:
@@ -853,7 +904,7 @@ class App:
             self.apply()  # the height may have changed on the way in
 
     def resize(self, edge):
-        if self.dragging or self.state.mode in ("docked", "rail"):
+        if self.dragging or self.state.mode in ("docked", "rail", *ORB_MODES):
             return
         self.dragging = True
         threading.Thread(target=self.resize_loop, args=(edge,), daemon=True).start()

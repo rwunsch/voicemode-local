@@ -33,7 +33,8 @@
   }
   var PAUSE = "\u23F8\uFE0E", RESUME = "\u23EF\uFE0E"  /* play/pause, not a plain play: no second play-like icon */;
   var LABELS = { speaking: "Speaking", listening: "Listening", holding: "Holding\u2026", working: "Between turns",
-    idle: "Not in a voice turn", paused: "Paused", stopped: "Stopped", disconnected: "Disconnected" };
+    idle: "Not in a voice turn", paused: "Paused", stopped: "Stopped",
+    "mic-muted": "Waiting with microphone muted", disconnected: "Disconnected" };
 
   // The coloured indicator (2026-11-17): who is speaking, as a tone and always a text label too.
   var TONES = { speaking: "speaking", listening: "listening", holding: "neutral", working: "neutral", idle: "neutral",
@@ -139,7 +140,8 @@
     // The main button is Wake between turns (idle, between turns, stopped) when the backend
     // can name a session to wake, and Stop otherwise. One button, never both. Pause/Resume
     // exist only during a voice turn. (There is no Skip: the backend "interrupt" command stays.)
-    var inTurn = phase === "speaking" || phase === "listening" || phase === "holding" || phase === "paused";
+    var inTurn = phase === "speaking" || phase === "listening" || phase === "holding" ||
+      phase === "paused" || phase === "mic-muted";
     var wakeable = !!s.play && (phase === "idle" || phase === "working" || phase === "stopped");
     var stopOn = !!s.floor && phase !== "stopped";
     var main = wakeable

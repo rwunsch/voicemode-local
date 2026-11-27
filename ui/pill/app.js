@@ -11,6 +11,7 @@
   var lastBargeCount = null, interruptedUntil = null;   // the Interrupted flash (model.js interruptFlash)
   var previewAnswer = null;   // the backend's last preview answer, stamped with when it came
   var hidden = false, snapshot = null, lastSeen = null, ui = null, lastMode = null, lastPhase = null, floorPid = null, filled = false;
+  var orbPill = window.setupOrbPill(send, saveUi, card, orbButton);
 
   function send(obj) {
     try { if (window.pillTransport) window.pillTransport.send(JSON.stringify(obj)); } catch (e) { /* no transport */ }
@@ -48,6 +49,8 @@
       var mode = M.presentation(ui, orbEnabled);
       vm.mode = mode; vm.side = mode === "docked" || mode === "rail" || mode === "tab" ? (ui.side || "right") : null;
     }
+    // Migrate old rail/tab/mini preferences to the Orb's single compact/strip surface.
+    if (orbEnabled && vm.mode !== "dot") vm.mode = "pill";
     document.body.dataset.mode = vm.mode;
     document.body.dataset.phase = vm.phase;
     document.body.dataset.tone = vm.indicator.tone;
@@ -55,13 +58,12 @@
     if (vm.indicator.tone === "speaking" || vm.indicator.tone === "listening") orbPalette = vm.indicator.tone;
     else if (vm.phase !== "paused") orbPalette = null;
     document.body.dataset.orbPalette = orbPalette || "";
-    document.body.dataset.conceal = String(orbEnabled && vm.mode === "pill" && vm.indicator.tone === "speaking");
     document.body.dataset.orbMotion = String(orbEnabled && lastVisible && surfaceVisible && !hidden &&
       vm.mode !== "dot" && vm.mode !== "tab" && (vm.indicator.tone === "speaking" || vm.indicator.tone === "listening"));
     var interruptible = vm.phase === "speaking" && snapshot && snapshot.playback_id;
-    var orbText = vm.mode === "mini" ? "Restore voice controls" :
-      interruptible ? "Interrupt speech and listen" : "Toggle voice controls";
+    var orbText = interruptible ? (snapshot.mic_muted ? "Interrupt speech" : "Interrupt speech and listen") : "Toggle voice controls";
     var orbState = [vm.indicator.who, vm.indicator.text].filter(Boolean).join(": ");
+    if (snapshot && snapshot.mic_muted) orbState += " — microphone muted";
     orbButton.setAttribute("aria-label", orbText + " — " + orbState);
     orbButton.title = orbText;
     orbButton.tabIndex = orbEnabled ? 0 : -1;
@@ -153,7 +155,12 @@
     }
     $("keys").replaceChildren.apply($("keys"), vm.keys.map(keysNode));
     if (vm.phase !== lastPhase) { lastPhase = vm.phase; send({ window: { phase: vm.phase } }); } // tray colour
-    if (vm.mode !== lastMode) { lastMode = vm.mode; window.pillHover(-1, -1); send({ window: { mode: vm.mode, side: vm.side } }); }
+    orbPill.update(vm, snapshot, ui, orbEnabled && vm.mode !== "dot", lastVisible && surfaceVisible && !hidden);
+    if (orbPill.active) lastMode = null;
+    else if (vm.mode !== lastMode) {
+      lastMode = vm.mode; window.pillHover(-1, -1);
+      send({ window: { mode: vm.mode, side: vm.side } });
+    }
     updateOrbRegion();
   }
 
@@ -217,29 +224,33 @@
   window.pillFocusControls = function () {
     card.dataset.keyboard = "true";
     orbButton.focus();
+    orbPill.reveal();
     updateOrbRegion();
   };
   window.addEventListener("blur", function () {
     delete card.dataset.keyboard;
+    orbPill.reveal();
     updateOrbRegion();
   });
   document.addEventListener("keydown", function (e) {
-    if (e.key === "Escape" && e.target.tagName !== "SELECT") {
+    if (e.key === "Escape" && e.target.tagName !== "SELECT" && !e.target.open) {
       delete card.dataset.keyboard;
       document.activeElement.blur();
+      orbPill.reveal();
       updateOrbRegion();
       send({ window: { keyboard: false } });
     }
   });
   orbButton.onpointerdown = function (e) {
     miniPointer = null;
-    if (e.button === 0 && ui && ui.mini) {
+    if (!orbPill.active && e.button === 0 && ui && ui.mini) {
       miniPointer = [e.screenX, e.screenY];
       send({ window: { drag: true } });
     }
   };
   orbButton.onclick = function (e) {
     if (!snapshot || !snapshot.orb) return;
+    if (orbPill.orbClick()) return;
     if (ui && ui.mini) {
       var moved = e.detail && miniPointer && Math.hypot(e.screenX - miniPointer[0], e.screenY - miniPointer[1]) > 4;
       miniPointer = null;
@@ -265,7 +276,7 @@
   $("edgeR").onmousedown = function (e) { if (e.button === 0) { e.preventDefault(); send({ window: { resize: "right" } }); } };
   function updateOrbRegion() {
     // In Windows the native window is opaque. Clip it to the orb until controls appear.
-    if (!document.documentElement.classList.contains("windows")) return;
+    if (!document.documentElement.classList.contains("windows") || orbPill.active) return;
     var only = document.body.dataset.conceal === "true" && !card.classList.contains("pointer-in") &&
       card.dataset.keyboard !== "true" && !card.querySelector(":focus-visible");
     if (only === lastOrbOnly) return;
@@ -279,6 +290,7 @@
   var hovered = null;
   window.pillHover = function (x, y) {
     var el = x < 0 ? null : document.elementFromPoint(x, y);
+    orbPill.point(el);
     card.classList.toggle("pointer-in", !!(el && (el.closest(".orb-action") ||
       (card.classList.contains("pointer-in") && card.contains(el)))));
     el = el && el.closest(".btn,.tab,.edge");
@@ -288,11 +300,14 @@
     hovered = el;
   };
   card.addEventListener("pointerover", function (e) {
+    orbPill.point(e.target);
     if (e.target.closest(".orb-action")) { card.classList.add("pointer-in"); updateOrbRegion(); }
   });
-  card.addEventListener("pointerleave", function () { card.classList.remove("pointer-in"); updateOrbRegion(); });
-  card.addEventListener("focusin", updateOrbRegion);
-  card.addEventListener("focusout", function () { setTimeout(updateOrbRegion, 0); });
+  card.addEventListener("pointerleave", function () {
+    card.classList.remove("pointer-in"); orbPill.point(null); updateOrbRegion();
+  });
+  card.addEventListener("focusin", function () { orbPill.reveal(); updateOrbRegion(); });
+  card.addEventListener("focusout", function () { setTimeout(function () { orbPill.reveal(); updateOrbRegion(); }, 0); });
   window.pillSurfaceVisible = function (visible) { surfaceVisible = visible; render(); };
   document.addEventListener("visibilitychange", function () {
     surfaceVisible = !document.hidden;

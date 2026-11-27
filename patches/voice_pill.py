@@ -472,19 +472,25 @@ def _floor_voice(floor, is_holder, sessions, conch, overrides):
 def build_snapshot(status, sessions, conch, *, paused=False, ptt=False, closed=False,
                    last_floor=None, overrides=None, barge=None, ui=None, platform=None, beeps=False,
                    default_voice=st.FALLBACK_VOICE, play=None, wake=None,
-                   german=True, ptt_listener=None, german_list=None, voices=None, orb=True) -> dict:
+                   german=True, ptt_listener=None, german_list=None, voices=None, orb=True,
+                   mic_muted=False) -> dict:
     overrides = overrides or {}
     floor, is_holder = _floor(sessions, conch, last_floor)
     visible = bool(sessions or ptt) and not closed
+    if floor and any(s["pid"] == floor["pid"] and s.get("hide_after_end") for s in sessions):
+        visible = False
     if paused:
         phase = "paused"
-    elif status.get("holding"):
+    elif status.get("holding") and not mic_muted:
         # The push-to-talk key is down (patch_ptt_instant's status field): the press
         # has cut the reply, so this outranks speaking and listening.
         phase = "holding"
     elif status.get("speaking"):
         phase = "speaking"
-    elif status.get("listening"):
+    elif mic_muted and (status.get("holding") or status.get("listening") or
+                        (is_holder and status.get("state") == "running")):
+        phase = "mic-muted"
+    elif status.get("listening") and not mic_muted:
         phase = "listening"
     elif floor and any(s["pid"] == floor["pid"] and s.get("stopped") for s in sessions):
         phase = "stopped"
@@ -516,7 +522,8 @@ def build_snapshot(status, sessions, conch, *, paused=False, ptt=False, closed=F
         level = None
     playback_id = status.get("pill_playback_id") if phase == "speaking" else None
     return {"visible": visible, "phase": phase, "floor": floor, "sessions": rows,
-            "orb": orb, "audio_level": level, "playback_id": playback_id if isinstance(playback_id, str) else None,
+            "orb": orb, "mic_muted": mic_muted, "audio_level": level,
+            "playback_id": playback_id if isinstance(playback_id, str) else None,
             "voice": voice, "language": language,
             "barge": barge or {"enabled": False, "available": False, "count": 0},
             "beeps": beeps,
@@ -626,7 +633,7 @@ def gather(ctx) -> dict:
     platform = detect_platform()
     return build_snapshot(
         st._status(ctx.sock), sessions, conch, paused=st.is_paused(ctx.base),
-        ptt=ptt, closed=st.pill_closed(ctx.base),
+        ptt=ptt, closed=st.pill_closed(ctx.base), mic_muted=st.mic_muted(ctx.base),
         last_floor=_remember_floor(ctx, conch),
         overrides={s["pid"]: st.get_override(s["pid"], ctx.base) for s in sessions},
         barge=barge, ui=st.load_ui(ctx.base), beeps=_beeps_on(ctx),
@@ -889,6 +896,8 @@ def handle_command(msg, ctx=None):
         playback_id = msg.get("playback_id")
         if isinstance(playback_id, str) and playback_id.isascii() and playback_id.isdecimal() and len(playback_id) <= 32:
             st.send_control(ctx.sock, "pill_interrupt", message=playback_id)
+    elif cmd == "set_mic_muted" and type(msg.get("on")) is bool:
+        st.set_mic_muted(msg["on"], ctx.base)
     elif cmd == "pause":
         # Our own pid owns the pause (mic held closed); the socket pause holds TTS.
         # Upstream stops a paused turn after VOICEMODE_CONTROL_PAUSE_TIMEOUT (300 s).
@@ -897,12 +906,14 @@ def handle_command(msg, ctx=None):
     elif cmd == "resume":
         st.set_paused(False, os.getpid(), ctx.base)
         st.send_control(ctx.sock, "resume")
-    elif cmd == "stop":
+    elif cmd in ("stop", "end_voice"):
         floor, is_holder = _floor(st.live_sessions(ctx.base), read_conch(ctx.home),
                                   st._read_json(ctx.base / "last_floor.json"))
+        if cmd == "end_voice" and (not floor or type(msg.get("pid")) is not int or msg["pid"] != floor["pid"]):
+            return  # a delayed click must not end the next session
         if floor:
             # A live socket belongs to the holder's turn; only a holder may be cut by it.
-            st.mark_stopped(floor["pid"], True, ctx.base)  # first: the cut turn's result reads it
+            st.mark_stopped(floor["pid"], True, ctx.base, hide=(cmd == "end_voice"))
             if not (is_holder and st.send_control(ctx.sock, "stop")):
                 st.request_stop(floor["pid"], ctx.base)
     elif cmd == "dismiss":

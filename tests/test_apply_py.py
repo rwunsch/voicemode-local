@@ -91,6 +91,9 @@ def current_modules(old):
     for name in {s["copy"] for s in steps if "copy" in s}:
         (old / name).parent.mkdir(parents=True, exist_ok=True)  # "../ui/pill/..." leave patches/
         shutil.copyfile(PATCHES / name, old / name)
+    # The shell path and the manifest both invoke the same recorder patch. It
+    # now also applies the input-only mute gate to that seam.
+    shutil.copyfile(PATCHES / "patch_voice_pill.py", old / "patch_voice_pill.py")
     return old
 
 
@@ -128,6 +131,8 @@ INTENDED_COPIES_SINCE_BASELINE += ["conch_hold.py", "mcp_progress.py"]   # 2026-
 INTENDED_COPIES_SINCE_BASELINE += ["tts_chunks.py"]   # 2026-11-14
 INTENDED_COPIES_SINCE_BASELINE += ["voice_languages.py", "voice_fallback.py"]   # 2026-11-17
 INTENDED_COPIES_SINCE_BASELINE += ["voice_sensitivity.py"]   # 2026-11-18
+INTENDED_COPIES_SINCE_BASELINE += ["ui/pill/orb-pill.css", "ui/pill/orb-pill.js",
+                                  "ui/pill/spectrum.js", "ui/pill/spectrum.NOTICES.txt"]
 
 
 def apply_intended(pkg: Path) -> None:

@@ -415,12 +415,16 @@ def touch_session(pid: int, voice: str | None = None, base=None,
     _write_json(path, s)
 
 
-def mark_stopped(pid: int, stopped: bool, base=None) -> None:
-    """A stopped session stays listed: the pill closes only when its server exits."""
+def mark_stopped(pid: int, stopped: bool, base=None, *, hide=False) -> None:
+    """Keep the session listed; End voice may also hide its Pill until the next turn."""
     path = _session_path(pid, base)
     s = _read_json(path)
     if s:
         s["stopped"] = stopped
+        if stopped and hide:
+            s["hide_after_end"] = True
+        elif not stopped:
+            s.pop("hide_after_end", None)
         _write_json(path, s)
 
 
@@ -450,8 +454,10 @@ def live_sessions(base=None) -> list[dict]:
                 take_stop(pid, base)
                 _unlink(_barge_told_path(pid, base))
             continue
-        out.append({k: s.get(k) for k in
-                    ("pid", "label", "voice", "started_at", "last_voice_at", "stopped")})
+        row = {k: s.get(k) for k in ("pid", "label", "voice", "started_at", "last_voice_at", "stopped")}
+        if s.get("hide_after_end"):
+            row["hide_after_end"] = True
+        out.append(row)
     return out
 
 
@@ -508,6 +514,34 @@ def is_paused(base=None) -> bool:
 async def wait_while_paused(until=None, poll: float = 0.25, base=None) -> None:
     """Sleep until resume, or until the optional until() says to stop waiting."""
     while is_paused(base) and not (until is not None and until()):
+        await asyncio.sleep(poll)
+
+
+def mic_mute_state(base=None) -> tuple[bool, int]:
+    """Mute only VoiceMode's input. The revision invalidates audio captured across a toggle."""
+    value, status = _read_json_state(_base(base) / "mic-mute.json")
+    if status == "missing":
+        return False, 0
+    if status != "ok" or type(value.get("on")) is not bool or type(value.get("revision")) is not int:
+        return True, -1  # don't reopen a microphone when a saved mute cannot be read
+    return value["on"], value["revision"]
+
+
+def set_mic_muted(on: bool, base=None) -> None:
+    root = _base(base)
+    before, revision = mic_mute_state(root)
+    if before != on or revision < 0:
+        _write_json(root / "mic-mute.json", {"on": on, "revision": time.time_ns()})
+    if on:
+        _unlink(root / "barge_preroll.bin")
+
+
+def mic_muted(base=None) -> bool:
+    return mic_mute_state(base)[0]
+
+
+async def wait_for_mic(until, poll: float = 0.08, base=None) -> None:
+    while (mic_muted(base) or is_paused(base)) and not until():
         await asyncio.sleep(poll)
 
 

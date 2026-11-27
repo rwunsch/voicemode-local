@@ -44,6 +44,12 @@ def apply_command(line: bytes, live: dict) -> None:
         live["beeps"] = bool(msg.get("on"))
     elif cmd == "set_barge":
         live["barge"] = {**DEFAULT["barge"], "enabled": bool(msg.get("on"))}
+    elif cmd == "set_mic_muted":
+        live["mic_muted"] = bool(msg.get("on"))
+    elif cmd == "end_voice":
+        live.update(phase="stopped", visible=False)
+    elif cmd == "interrupt_playback":
+        live.update(phase="mic-muted" if live.get("mic_muted") else "listening", playback_id=None)
 
 
 _chunks = None

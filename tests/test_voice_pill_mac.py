@@ -55,6 +55,19 @@ def test_shown_needs_snapshot_visible_and_not_dismissed():
     assert not s.shown
 
 
+def test_orb_anchor_does_not_move_when_revealing_controls():
+    for side in ("left", "right"):
+        for cy in (120, 405, 770):
+            state = m.WindowState(mode="orb-docked", side=side, dock_y=cy)
+            x0, y0, row, _ = m.geometry(state, AREA)
+            for surface in ("strip", "menu", "settings"):
+                state.on_window({"mode": "orb-docked", "side": side, "surface": surface})
+                (x, y, w, h), above = m.orb_geometry(state, AREA)
+                assert (x if side == "left" else x + w - row) == x0
+                assert (y + h - row if above else y) == y0
+                assert m.on_resize_edge(0, w, state.mode) is False
+
+
 def test_geometry_per_mode():
     s = m.WindowState(visible=True)
     assert m.geometry(s, AREA) == (1440 - 350 - 16, 25 + 800 - 68 - 16, 350, 68)
@@ -700,8 +713,8 @@ def test_resize_log_shows_whole_pixels():
 
 def test_a_mode_change_clears_a_stale_hover():
     js = (REPO / "ui/pill/app.js").read_text()
-    body = js[js.index("if (vm.mode !== lastMode)"):]
-    assert "window.pillHover(-1, -1)" in body[:body.index("\n")]
+    body = js.split("if (vm.mode !== lastMode)", 1)[1].split("window.pillReceive", 1)[0]
+    assert body.index("window.pillHover(-1, -1)") < body.index("send({ window: { mode:")
 
 
 def test_pill_page_has_one_main_button_and_no_skip():

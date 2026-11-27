@@ -1,0 +1,2 @@
+# esbuild preserves meaningful whitespace in dependency template literals.
+ui/pill/spectrum.js linguist-generated=true -whitespace
