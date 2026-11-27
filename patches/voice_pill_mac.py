@@ -359,8 +359,9 @@ def make_hover_tracker(app):
 
 
 # The menu bar ball's menu (Robert 2026-11-27): the pill's _ only shrinks it to the menu bar,
-# so quitting lives here. Quit = the old close: hidden until the next voice session.
-TRAY_MENU = (("Show pill", "restore"), ("Quit pill (until the next voice session)", "quit"))
+# so quitting lives here. Quit = the old close: hidden until voice restarts
+# from scratch or the pill is asked for (voice_pill show).
+TRAY_MENU = (("Show pill", "restore"), ("Quit pill (say 'show the pill' to get it back)", "quit"))
 
 
 def tray_tip(phase: str) -> str:

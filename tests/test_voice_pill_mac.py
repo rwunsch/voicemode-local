@@ -835,7 +835,7 @@ def test_any_click_on_the_ball_opens_its_menu():
 
 def test_tray_menu_offers_show_and_quit():
     assert [cmd for _, cmd in m.TRAY_MENU] == ["restore", "quit"]
-    assert "Quit pill" in m.TRAY_MENU[1][0]
+    assert m.TRAY_MENU[1][0] == "Quit pill (say 'show the pill' to get it back)"
 
 
 def test_page_command_is_a_quoted_json_string():

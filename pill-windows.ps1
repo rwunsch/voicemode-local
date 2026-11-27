@@ -606,10 +606,10 @@ document.addEventListener('DOMContentLoaded',function(){
                     ctl.CoreWebView2.PostWebMessageAsString("{\"cmd\":\"restore\"}");
             };
             // Right-click (Robert 2026-11-27): the pill's close button only shrinks it here, so
-            // quitting lives in this menu. Quit = the old close: hidden until the next voice session.
+            // quitting lives in this menu. Quit = the old close: hidden until voice restarts from scratch or the pill is asked for.
             var menu = new System.Windows.Forms.ContextMenuStrip();
             menu.Items.Add("Show pill", null, (s, e) => ctl.CoreWebView2.PostWebMessageAsString("{\"cmd\":\"restore\"}"));
-            menu.Items.Add("Quit pill (until the next voice session)", null,
+            menu.Items.Add("Quit pill (say 'show the pill' to get it back)", null,
                 (s, e) => ctl.CoreWebView2.PostWebMessageAsString("{\"cmd\":\"quit\"}"));
             tray.ContextMenuStrip = menu;
         }

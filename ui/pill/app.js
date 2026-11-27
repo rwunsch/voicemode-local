@@ -186,7 +186,7 @@
   $("pause").onclick = press("end"); $("ctlMain").onclick = press("end");
   $("ctlMic").onclick = press("mic");
   // Close shrinks to the tray / menu bar (Robert 2026-11-27); quitting the pill is in that
-  // icon's menu, whose wrapper sends {"cmd":"quit"}: until the next voice session, as before.
+  // icon's menu, whose wrapper sends {"cmd":"quit"}: hidden until voice restarts or the pill is asked for.
   // Quit is only reachable from the tray, so ui.minimized is true then; left so, the next voice
   // session would come back as a tray icon only (code review of 33d87cb). Un-minimize first,
   // without showing the window now: lastMode is set so render does not send the mode.

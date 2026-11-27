@@ -634,7 +634,8 @@ test("close shrinks to the tray; its hint says where Quit is", () => {
   for (const platform of ["windows", "mac"]) {
     const c = viewModel(snap({ platform }), 0, 0).close;
     assert.equal(c.action, "minimize", platform);
-    assert.match(c.hint, platform === "mac" ? /menu bar/ : /tray/, platform);
-    assert.match(c.hint, /Quit/);
+    assert.match(c.hint, platform === "mac" ? /click the dot/ : /right-click the icon/, platform);
+    assert.match(c.hint, /quit/);
+    assert.ok(c.hint.length <= 40, c.hint); // FELIX-MAC: the status line cut a longer one
   }
 });

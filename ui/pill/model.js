@@ -40,8 +40,8 @@
     voiceoff: "Voice off: continue in text", resumevoice: "Resume voice: listen to you again",
     pausemic: "Pause mic: close the mic and discard what was said; voice stays on" };
   function closeHint(platform) {
-    return platform === "mac" ? "Minimize to the menu bar; click the dot there for Show or Quit"
-      : "Minimize to the tray; Quit is in its menu (right-click)";
+    return platform === "mac" ? "Minimize; click the dot to quit"
+      : "Minimize; right-click the icon to quit";
   }
   var LABELS = { speaking: "Speaking", listening: "Listening", holding: "Holding\u2026", working: "Between turns",
     idle: "Not in a voice turn", paused: "Paused",

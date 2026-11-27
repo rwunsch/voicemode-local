@@ -287,7 +287,10 @@ def test_the_tray_icon_has_show_and_quit_in_its_menu():
     src = (REPO / "pill-windows.ps1").read_text(encoding="utf-8")
     assert "tray.ContextMenuStrip = menu;" in src
     assert 'menu.Items.Add("Show pill"' in src and '{\\"cmd\\":\\"restore\\"}' in src
-    assert 'menu.Items.Add("Quit pill (until the next voice session)"' in src
+    # FELIX-MAC 2026-11-27: "until the next voice session" was wrong while other sessions run;
+    # a dismiss sticks until voice restarts from scratch or someone asks for the pill.
+    assert "menu.Items.Add(\"Quit pill (say 'show the pill' to get it back)\"" in src
+    assert "until the next voice session" not in src
     assert '{\\"cmd\\":\\"quit\\"}' in src
 
 
