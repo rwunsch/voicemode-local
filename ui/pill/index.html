@@ -35,11 +35,11 @@
     <sp-action-button id="orbMore" size="s" quiet aria-expanded="false" aria-controls="orbMenu">More</sp-action-button>
   </div>
   <section id="orbMenu" class="orb-panel" aria-label="More voice controls" hidden>
-    <sp-action-button id="orbOpenSettings" size="s" quiet>Voice settings…</sp-action-button>
+    <sp-action-button id="orbOpenSettings" size="s" quiet>Voice settings</sp-action-button>
     <sp-divider size="s"></sp-divider>
     <sp-action-button id="orbDock" size="s" quiet>Undock</sp-action-button>
     <sp-action-button id="orbTray" size="s" quiet hidden>Move to system tray</sp-action-button>
-    <sp-action-button id="orbKeyboard" size="s" quiet>Use keyboard controls</sp-action-button>
+    <sp-action-button id="orbKeyboard" size="s" quiet aria-controls="orbKeyboardHelp">Keyboard controls</sp-action-button>
   </section>
   <section id="orbSettings" class="orb-panel" aria-labelledby="orbSettingsTitle" hidden>
     <div class="row between"><strong id="orbSettingsTitle">Voice settings</strong>
@@ -53,6 +53,13 @@
     <sp-switch id="orbBarge" size="s">Interrupt by voice</sp-switch>
     <sp-switch id="orbBeeps" size="s">Feedback sounds</sp-switch>
     <div id="orbPreviewStatus" role="status" aria-live="polite"></div>
+  </section>
+  <section id="orbKeyboardHelp" class="orb-panel" aria-labelledby="orbKeyboardTitle" hidden>
+    <div class="row between"><strong id="orbKeyboardTitle">Keyboard controls</strong>
+      <sp-button size="s" variant="secondary" id="orbKeyboardDone">Done</sp-button></div>
+    <div class="row"><kbd>Tab</kbd> / <kbd>Shift</kbd> + <kbd>Tab</kbd> Move between controls</div>
+    <div class="row"><kbd>Enter</kbd> / <kbd>Space</kbd> Use the focused control</div>
+    <div class="row"><kbd>Esc</kbd> Return to your app</div>
   </section>
   <section id="more" class="more">
     <div id="controls" class="row controls" role="group" aria-label="Voice controls">

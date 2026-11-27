@@ -6,6 +6,7 @@
   var M = window.PillModel, $ = function (id) { return document.getElementById(id); };
   var orbButton = $("orbAction"), card = $("card"), orbBubble = orbButton.querySelector(".orb-bubble");
   var lastVisible = false, surfaceVisible = true, levelTimer = null, miniPointer = null;
+  var orbPress = null, orbMoved = false;
   var orbPalette = null, lastOrbOnly = null;
   var felixPlayback = null, felixHasSignal = false;
   var bargePending = null, bargeLastShown = null;
@@ -67,7 +68,7 @@
     var orbState = [vm.indicator.who, vm.indicator.text].filter(Boolean).join(": ");
     if (snapshot && snapshot.mic_muted) orbState += " — microphone muted";
     orbButton.setAttribute("aria-label", orbText + " — " + orbState);
-    orbButton.title = orbText;
+    orbButton.title = orbText + (orbEnabled && ui && ui.orbDocked === false ? " · Drag to move" : "");
     orbButton.tabIndex = orbEnabled ? 0 : -1;
     orbButton.setAttribute("aria-hidden", String(!orbEnabled));
     $("tray").hidden = !orbEnabled;
@@ -244,7 +245,10 @@
     updateOrbRegion();
   };
   window.addEventListener("blur", function () {
-    delete card.dataset.keyboard;
+    if (card.dataset.keyboard === "true") {
+      delete card.dataset.keyboard;
+      orbPill.closeKeyboardHelp();
+    }
     orbPill.reveal();
     updateOrbRegion();
   });
@@ -257,15 +261,30 @@
       send({ window: { keyboard: false } });
     }
   });
+  window.pillOrbDragging = function (moving) {
+    if (moving) orbMoved = true;
+    card.toggleAttribute("data-dragging", moving);
+    orbPill.reveal();
+  };
   orbButton.onpointerdown = function (e) {
     miniPointer = null;
-    if (!orbPill.active && e.button === 0 && ui && ui.mini) {
+    orbPress = null;
+    orbMoved = false;
+    if (orbPill.active && e.button === 0 && ui && ui.orbDocked === false) {
+      orbPress = [e.screenX, e.screenY];
+      send({ window: { drag: true, fromOrb: true } });
+    } else if (!orbPill.active && e.button === 0 && ui && ui.mini) {
       miniPointer = [e.screenX, e.screenY];
       send({ window: { drag: true } });
     }
   };
   orbButton.onclick = function (e) {
     if (!snapshot || !snapshot.orb) return;
+    if (e.detail && orbPress) {
+      var travelled = Math.max(Math.abs(e.screenX - orbPress[0]), Math.abs(e.screenY - orbPress[1]));
+      orbPress = null;
+      if (orbMoved || travelled >= 5) return;
+    }
     if (orbPill.orbClick()) return;
     if (ui && ui.mini) {
       var moved = e.detail && miniPointer && Math.hypot(e.screenX - miniPointer[0], e.screenY - miniPointer[1]) > 4;

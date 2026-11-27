@@ -32,6 +32,9 @@ body[data-orb-layout] #drag {
 }
 body[data-orb-layout][data-orb-side=left] #drag { right: auto; left: 0; }
 body[data-orb-layout] .orb-action { width: 46px; height: 46px; }
+body[data-orb-floating] .orb-action { cursor: grab; }
+body[data-orb-floating] #card[data-dragging] .orb-action { cursor: grabbing; }
+body[data-orb-layout] #card[data-keyboard=true] .orb-action:focus { outline: 2px solid var(--a); outline-offset: 1px; }
 body[data-orb-layout] .orb { width: 40px; height: 40px; border: 0; }
 body[data-orb-layout] #orbStrip {
   position: absolute; z-index: 1; top: 0; left: 14px; right: var(--orb-row);

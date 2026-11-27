@@ -677,7 +677,10 @@ class App:
         what = self.state.on_window(r[1])
         self.note_state()
         if what == "drag":
-            self.drag()
+            if r[1].get("fromOrb") is True and self.state.mode == "orb-floating":
+                self.drag(from_orb=True)
+            else:
+                self.drag()
         elif what == "resize":
             self.resize(r[1]["resize"])
         elif what == "phase":
@@ -819,25 +822,39 @@ class App:
         edge = x is not None and on_resize_edge(x, size.width, self.state.mode)
         (NSCursor.resizeLeftRightCursor() if edge else NSCursor.arrowCursor()).set()
 
-    def drag(self):
+    def drag(self, from_orb=False):
         if self.dragging or self.state.mode == "tab":
             return
         self.dragging = True
-        threading.Thread(target=self.drag_loop, daemon=True).start()
+        threading.Thread(target=self.drag_loop, args=(from_orb,), daemon=True).start()
 
-    def drag_loop(self):
+    def drag_loop(self, from_orb=False):
         from AppKit import NSEvent, NSMakePoint
         from PyObjCTools import AppHelper
+        moved = False
+
+        def notify(moving):
+            def go():
+                wv = self.webview()
+                if wv is not None:
+                    wv.evaluateJavaScript_completionHandler_("window.pillOrbDragging?.(" + json.dumps(moving) + ")", None)
+            AppHelper.callAfter(go)
+
         try:
             native = self.win.native
             c0, o0 = NSEvent.mouseLocation(), run_on_main(lambda: native.frame().origin)
-            moved = False
             vertical = self.state.mode in ("docked", "rail", "orb-docked")
             while NSEvent.pressedMouseButtons() & 1:
                 c = NSEvent.mouseLocation()
-                x = o0.x if vertical else o0.x + c.x - c0.x
-                AppHelper.callAfter(native.setFrameOrigin_, NSMakePoint(x, o0.y + c.y - c0.y))
-                moved = moved or c.x != c0.x or c.y != c0.y
+                dx, dy = c.x - c0.x, c.y - c0.y
+                if from_orb and not moved:
+                    if max(abs(dx), abs(dy)) < 5:
+                        time.sleep(0.016)
+                        continue
+                    notify(True)
+                x = o0.x if vertical else o0.x + dx
+                AppHelper.callAfter(native.setFrameOrigin_, NSMakePoint(x, o0.y + dy))
+                moved = moved or bool(dx or dy)
                 time.sleep(0.016)
             if moved:
                 time.sleep(0.05)  # let the last move land
@@ -856,6 +873,8 @@ class App:
                 self.apply()
         finally:
             self.dragging = False
+            if from_orb and moved:
+                notify(False)
 
     def save_position(self):
         try:

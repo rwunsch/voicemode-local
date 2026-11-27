@@ -592,7 +592,10 @@ document.addEventListener('DOMContentLoaded',function(){
             ApplyRegion();
             return;
         }
-        if (w.ContainsKey("drag")) { StartDrag(); return; }
+        if (w.ContainsKey("drag")) {
+            StartDrag(mode == "orb-floating" && w.TryGetValue("fromOrb", out v) && v is bool && (bool)v);
+            return;
+        }
         if (w.ContainsKey("slide")) { SlideOut(); return; }
         if (w.TryGetValue("phase", out v) && v is string) { phase = (string)v; UpdateTray(); return; }
         if (w.ContainsKey("resize")) { StartResize(w["resize"] as string); return; }
@@ -754,7 +757,7 @@ document.addEventListener('DOMContentLoaded',function(){
 
     // Own drag loop: a drag started inside WebView2 has its mouse capture in another
     // process, and the system move loop would activate the window.
-    void StartDrag() {
+    void StartDrag(bool fromOrb) {
         if (dragTimer != null || mode == "tab") return;
         bool vertical = mode == "docked" || mode == "rail" || mode == "orb-docked";
         RECT start; GetWindowRect(hwnd, out start);
@@ -766,13 +769,20 @@ document.addEventListener('DOMContentLoaded',function(){
         dragTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(16) };
         dragTimer.Tick += (s, e) => {
             POINT p; GetCursorPos(out p);
+            bool pressed = (GetAsyncKeyState(1) & 0x8000) != 0;
+            if (fromOrb && !moved && Math.Max(Math.Abs(p.x - c.x), Math.Abs(p.y - c.y)) < Scale(5)) {
+                if (!pressed) { dragTimer.Stop(); dragTimer = null; }
+                return;
+            }
             int nx = vertical ? r.x : p.x - dragDx;
             int ny = vertical ? Math.Max(area.top, Math.Min(p.y - dragDy, area.bottom - height)) : p.y - dragDy;
             if (nx != r.x || ny != r.y) {
+                if (fromOrb && !moved && ctl != null)
+                    ctl.CoreWebView2.ExecuteScriptAsync("window.pillOrbDragging?.(true)");
                 r.x = nx; r.y = ny; moved = true;
                 SetWindowPos(hwnd, IntPtr.Zero, r.x, r.y, 0, 0, NOACTIVATE | NOSIZE | NOZORDER);
             }
-            if ((GetAsyncKeyState(1) & 0x8000) == 0) {
+            if (!pressed) {
                 dragTimer.Stop(); dragTimer = null;
                 if (moved) {
                     bool orbMode = IsOrbMode();
@@ -784,6 +794,8 @@ document.addEventListener('DOMContentLoaded',function(){
                         posY = anchorTop; hasPos = true;
                     }
                     SavePosition(); Apply();
+                    if (fromOrb && ctl != null)
+                        ctl.CoreWebView2.ExecuteScriptAsync("window.pillOrbDragging?.(false)");
                 }
             }
         };

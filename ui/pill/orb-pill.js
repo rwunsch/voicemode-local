@@ -5,7 +5,7 @@
     var $ = function (id) { return document.getElementById(id); };
     var body = document.body, theme = $("pillTheme");
     var lang = $("orbLanguage"), voice = $("orbVoice"), mute = $("orbMute"), end = $("orbEnd");
-    var menu = $("orbMenu"), settings = $("orbSettings"), strip = $("orbStrip");
+    var menu = $("orbMenu"), settings = $("orbSettings"), strip = $("orbStrip"), keys = $("orbKeyboardHelp");
     var tray = $("orbTray"), pause = $("orbPause");
     var panel = "", active = false, opened = false, hover = false, intro = false, pinned = false;
     var introTimer, closeTimer, lastFrame = "", mutePending, muted, vm, snapshot, ui;
@@ -26,7 +26,7 @@
     function showRegion() {
       if (!active) return;
       var keyFocus = card.dataset.keyboard === "true" || !!card.querySelector(":focus-visible");
-      var visible = !!(intro || hover || panel || pinned || keyFocus);
+      var visible = !!(intro || hover || panel || pinned || keyFocus || card.hasAttribute("data-dragging"));
       var was = body.dataset.orbReveal === "true";
       var first = !lastFrame;
       body.dataset.orbReveal = String(visible);
@@ -35,9 +35,10 @@
       strip.inert = !visible;
       menu.hidden = panel !== "menu";
       settings.hidden = panel !== "settings";
+      keys.hidden = panel !== "keyboard";
       if (visible || first) {
         clearTimeout(closeTimer);
-        layout(visible ? panel || "strip" : "compact");
+        layout(visible ? (panel === "keyboard" ? "menu" : panel || "strip") : "compact");
       } else if (was) {
         clearTimeout(closeTimer);
         closeTimer = setTimeout(function () {
@@ -55,6 +56,16 @@
       panel = "";
       if (card.dataset.keyboard === "true") $("orbMore").focus();
       showRegion();
+    }
+    function closeKeyboardHelp() {
+      if (panel === "keyboard") panel = "";
+      showRegion();
+    }
+    function releaseKeyboard() {
+      delete card.dataset.keyboard;
+      if (card.contains(document.activeElement)) document.activeElement.blur();
+      closeKeyboardHelp();
+      send({ window: { keyboard: false } });
     }
     function setText(el, value) { if (el.textContent !== value) el.textContent = value; }
     function picker(el, values, value) {
@@ -77,15 +88,17 @@
           delete body.dataset.orbLayout;
           delete body.dataset.orbReveal;
           delete body.dataset.orbAbove;
+          delete body.dataset.orbFloating;
           orb.removeAttribute("aria-expanded");
         }
         active = opened = pinned = hover = false; panel = ""; lastFrame = "";
-        menu.hidden = settings.hidden = true;
+        menu.hidden = settings.hidden = keys.hidden = true;
         finishIntro(); clearTimeout(closeTimer);
         return;
       }
       active = true;
       body.dataset.orbLayout = "";
+      body.toggleAttribute("data-orb-floating", !!(ui && ui.orbDocked === false));
       if (isShown && !opened) beginIntro();
       if (!isShown && opened) { finishIntro(); pinned = hover = false; panel = ""; lastFrame = ""; }
       opened = isShown;
@@ -159,9 +172,10 @@
       if (!tray.hidden) { panel = ""; save({ minimized: true }); }
     });
     $("orbKeyboard").addEventListener("click", function () {
+      openedPanel("keyboard");
       send({ window: { keyboard: true } });
-      showRegion();
     });
+    $("orbKeyboardDone").addEventListener("click", releaseKeyboard);
     $("orbPreview").addEventListener("click", function () { $("preview").click(); });
     $("orbBarge").addEventListener("change", function () { $("barge").click(); });
     $("orbBeeps").addEventListener("change", function () { $("beeps").click(); });
@@ -175,13 +189,14 @@
       if (!active || e.key !== "Escape" || !panel || voice.open || lang.open) return;
       e.preventDefault();
       e.stopImmediatePropagation();
-      backToOrb();
+      if (panel === "keyboard") releaseKeyboard(); else backToOrb();
     });
     return {
-      update: update, point: point, reveal: showRegion,
+      update: update, point: point, reveal: showRegion, closeKeyboardHelp: closeKeyboardHelp,
       orbClick: function () {
         if (!active) return false;
-        if (panel) backToOrb();
+        if (panel === "keyboard") releaseKeyboard();
+        else if (panel) backToOrb();
         else if (vm.phase === "speaking" && snapshot.playback_id) {
           send({ cmd: "interrupt_playback", playback_id: snapshot.playback_id });
         } else { pinned = !pinned; showRegion(); }
