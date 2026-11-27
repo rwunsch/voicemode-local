@@ -147,6 +147,11 @@ run: a native converse turn through Claude Code, and macOS.
   reply (3-20 s); before, the file never expired and cancelled a turn asked for minutes
   later (field report: 122 ms "stopped" about 2 min after the last turn). An empty file from
   an older version is aged by its mtime. Behaviour change; old (no expiry) has no setting.
+- **Still listening** (FELIX #2107, 2026-11-28): after `VOICEMODE_PILL_STILL_LISTENING_S`
+  seconds of listening (default 30; 0 = off) the status line says "Still listening. Press ↵
+  Done when you have finished". It is text only: a sound would be recorded and could keep the
+  turn open. The snapshot field is `still_listening`. See `docs/turn-stats/README.md`, which also
+  covers the per-turn numbers on `RECORDING_END`.
 - **Push-to-talk** (2026-11-07): while the key is down the pill shows **Holding…** (phase
   `holding`, from the `holding` field patch_ptt_instant adds to the server's status reply,
   above Speaking and Listening, green like Listening). The keys hint reads `tap: stop, hold:

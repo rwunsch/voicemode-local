@@ -84,6 +84,8 @@
     {"copy": "audio_deadline.py", "to": "audio_deadline.py"},
     {"patch": "patch_audio_deadline.py", "targets": ["core.py", "tools/converse.py", "control_socket.py"],
      "why": "audio-device calls off the event loop with a deadline; loop watchdog exits a stuck server (FELIX #2095)"},
+    {"copy": "turn_stats.py", "to": "turn_stats.py"},
+    {"patch": "patch_turn_stats.py", "targets": ["tools/converse.py"], "why": "RECORDING_END carries per-turn numbers and how the recording ended, no audio or text (FELIX #2107); needs turn_stats.py"},
     {"patch": "patch_env_provider_keys.py", "targets": ["config.py", "tools/configuration_management.py"], "why": "optional: the two provider keys upstream reads may also come from voicemode.env; not in the Windows manifest or FELIX"}
   ]
 }

@@ -297,7 +297,7 @@ def test_snapshot_shape_and_json_serialisable():
     assert json.loads(json.dumps(s)) == s
     assert set(s) == {"visible", "phase", "floor", "sessions", "voice", "language",
                       "barge", "beeps", "platform", "ui", "play", "wake", "german_available", "german_voices", "ptt",
-                      "voices_by_language"}
+                      "voices_by_language", "still_listening"}
     assert s["play"] is None and s["wake"] is None
     assert s["platform"] == "mac" and s["ui"] == {"docked": True}
     assert s["barge"] == {"enabled": True, "available": False, "count": 2}
@@ -1795,3 +1795,28 @@ def test_done_when_not_listening_does_nothing(ctx, control, monkeypatch, status)
 
 def test_done_with_no_socket_is_harmless(ctx):
     vp.handle_command({"cmd": "done"}, ctx)
+
+
+# FELIX #2107: a turn that keeps listening gets a note in the pill after N seconds ("still
+# listening, press Done"); never a sound (it would land in the recording) and never an end.
+@pytest.mark.parametrize("status, after, still", [
+    ({"listening": True, "listen_started_at": 1000.0}, 30.0, True),     # 31 s
+    ({"listening": True, "listen_started_at": 1010.0}, 30.0, False),    # 21 s
+    ({"listening": True, "listen_started_at": 1000.0}, 0.0, False),     # 0 = off
+    ({"speaking": True, "listen_started_at": 1000.0}, 30.0, False),     # not listening
+    ({"listening": True}, 30.0, False),                                 # older server: no field
+    ({"listening": True, "listen_started_at": "x"}, 30.0, False),
+])
+def test_still_listening_after_n_seconds(status, after, still):
+    s = snap(status=status, sessions=[sess(1)], still_after_s=after, now=1031.0)
+    assert s["still_listening"] is still
+
+
+def test_still_listening_setting(monkeypatch, tmp_path):
+    monkeypatch.setenv("VOICEMODE_PILL_STILL_LISTENING_S", "45")
+    assert vp.still_after(tmp_path) == 45.0
+    for bad in ("x", "-1", "nan", "inf"):
+        monkeypatch.setenv("VOICEMODE_PILL_STILL_LISTENING_S", bad)
+        assert vp.still_after(tmp_path) == 30.0
+    monkeypatch.setenv("VOICEMODE_PILL_STILL_LISTENING_S", "0")
+    assert vp.still_after(tmp_path) == 0.0

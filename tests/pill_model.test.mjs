@@ -639,3 +639,16 @@ test("close shrinks to the tray; its hint says where Quit is", () => {
     assert.ok(c.hint.length <= 40, c.hint); // FELIX-MAC: the status line cut a longer one
   }
 });
+
+// FELIX #2107: after N s of listening the backend sets still_listening; the status line then
+// says how to end the turn. Text only: a sound would land in the recording.
+test("still listening: the status line points at Done", () => {
+  const vm = model.viewModel(snap({ phase: "listening", still_listening: true }), 0, 0);
+  assert.equal(vm.stateText, model.STILL_LISTENING_TEXT);
+  assert.match(vm.stateText, /Done/);
+  assert.equal(vm.primary.kind, "done");
+  const plain = model.viewModel(snap({ phase: "listening" }), 0, 0);
+  assert.notEqual(plain.stateText, model.STILL_LISTENING_TEXT);
+  const speaking = model.viewModel(snap({ phase: "speaking", still_listening: true }), 0, 0);
+  assert.notEqual(speaking.stateText, model.STILL_LISTENING_TEXT);
+});
