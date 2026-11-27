@@ -182,12 +182,15 @@ run: a native converse turn through Claude Code, and macOS.
   **Minimize only, Quit is in the menu** (Robert 2026-11-27, Stefan's "discoverable resume
   path"): the pill has one window button, `_`, which minimizes to the tray (Windows) or menu
   bar (Mac). The ✕ is gone: it had come to do the same as `_` (Robert: "remove the X and keep
-  minimize"). Right-click
-  on that icon (or Control-click on a Mac) opens a menu: "Show pill" (`{"cmd":"restore"}`) and
-  "Quit pill (until the next voice session)" (`{"cmd":"quit"}`, which the page turns into the
-  old close: `dismiss` + hidden). Windows: a `ContextMenuStrip` on the `NotifyIcon`, compiled
-  and started on real Windows; the menu was opened by Robert on WSL/Windows 2026-11-27 (n=1: "Show pill" and "Quit pill" shown). Mac: the status
-  item sends its action on right mouse up too and pops an `NSMenu`; **not yet run on a Mac**.
+  minimize"). The icon's menu has "Show pill" (`{"cmd":"restore"}`) and "Quit pill (until the
+  next voice session)" (`{"cmd":"quit"}`, which the page turns into the old close: `dismiss` +
+  hidden); the icon's hover says where it is. Windows: right-click the tray icon (a
+  `ContextMenuStrip` on the `NotifyIcon`; a left click restores). Opened by Robert on
+  WSL/Windows 2026-11-27 (n=1: "Show pill" and "Quit pill" shown). Mac: **any click** on the
+  menu-bar dot opens the menu (`statusItem.setMenu_`, the Mac convention, AppKit does the
+  clicking). The first build restored on a click and opened the menu on right-click or
+  Control-click via `sendActionOn_`; on Robert's Mac the right-click gave no menu, so Quit
+  could not be reached. Click-opens-menu: not yet confirmed on a Mac.
 
 - **Wake and the button layout, before v1.2.26** (2026-11-07, Robert's decision: a play and a
   stop button together make no sense, and Skip is dropped). The pill has one main button in

@@ -820,13 +820,17 @@ def test_a_page_log_line_is_kept_short(monkeypatch):
     assert len(lines) == 1 and len(lines[0]) <= 220
 
 
-# Robert 2026-11-27: the close button shrinks the pill to the menu bar; Quit is in the ball's
-# menu (right-click or Control-click). A plain click still restores.
-def test_tray_click_kind():
-    assert m.tray_click_is_menu(m.RIGHT_MOUSE_UP, 0) is True
-    assert m.tray_click_is_menu(2, m.CONTROL_FLAG) is True      # Control + left mouse up
-    assert m.tray_click_is_menu(2, 0) is False                  # NSEventTypeLeftMouseUp
-    assert m.tray_click_is_menu(2, None) is False
+# Robert 2026-11-27: _ shrinks the pill to the menu bar; Quit is in the ball's menu. On the Mac a
+# right-click on the ball gave no menu (Robert, first try), so ANY click opens the menu, the Mac
+# convention, and AppKit handles it: statusItem.setMenu_, no click target of our own.
+def test_any_click_on_the_ball_opens_its_menu():
+    src = (REPO / "patches/voice_pill_mac.py").read_text()
+    assert "self.tray.setMenu_(make_tray_menu(self))" in src
+    # FELIX-MAC: the first build logged nothing at the click, so a failure could not be placed
+    assert 'app.log("tray: menu opened")' in src and "menu.setDelegate_(app.tray_target)" in src
+    assert 'app.log(f"tray: menu chose {cmd}")' in src
+    for gone in ("tray_click_is_menu", "sendActionOn_", "popUpStatusItemMenu_", "setAction_(\"clicked:\")"):
+        assert gone not in src, gone
 
 
 def test_tray_menu_offers_show_and_quit():
@@ -839,18 +843,12 @@ def test_page_command_is_a_quoted_json_string():
     assert js == 'window.pillReceive("{\\"cmd\\": \\"quit\\"}")'
 
 
-def test_the_ball_sends_its_action_on_right_clicks_too():
-    src = (REPO / "patches/voice_pill_mac.py").read_text()
-    assert "sendActionOn_(LEFT_UP_MASK | RIGHT_UP_MASK)" in src
-    assert "popUpStatusItemMenu_(menu)" in src
-
-
 def test_menu_bar_icon_hover_says_where_quit_is():
     # Robert 2026-11-27: minimized, the hover must say that Quit is in the menu.
     tip = m.tray_tip("Listening")
     assert tip.startswith("Voice pill: Listening")
-    assert "Quit" in tip and "right-click" in tip.lower() and "control-click" in tip.lower()
-    assert m.tray_tip("") == "Voice pill. Right-click or Control-click: Show or Quit"
+    assert "Quit" in tip and "click" in tip.lower() and "right-click" not in tip.lower()
+    assert m.tray_tip("") == "Voice pill. Click: Show pill or Quit"
 
 
 def test_menu_bar_icon_sets_the_tooltip():
