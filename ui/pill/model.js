@@ -33,13 +33,16 @@
   }
   var PAUSE = "\u23F8\uFE0E", RESUME = "\u23EF\uFE0E"  /* play/pause, not a plain play: no second play-like icon */;
   var LABELS = { speaking: "Speaking", listening: "Listening", holding: "Holding\u2026", working: "Between turns",
-    idle: "Not in a voice turn", paused: "Paused", stopped: "Stopped", disconnected: "Disconnected" };
+    idle: "Not in a voice turn", paused: "Paused", stopped: "Stopped", disconnected: "Disconnected",
+    not_responding: "Not responding" };
 
   // The coloured indicator (2026-11-17): who is speaking, as a tone and always a text label too.
   var TONES = { speaking: "speaking", listening: "listening", holding: "neutral", working: "neutral", idle: "neutral",
-    stopped: "neutral", paused: "muted", disconnected: "off" };
+    stopped: "neutral", paused: "muted", disconnected: "off", not_responding: "interrupted" };
   var TONE_TEXT = { speaking: "Assistant speaking", listening: "Listening to you", paused: "Paused",
-    interrupted: "Interrupted", disconnected: "Disconnected" };
+    interrupted: "Interrupted", disconnected: "Disconnected",
+    // FELIX #2095: the voice server's loop is stuck; it restarts itself after 90 s.
+    not_responding: "Voice server not responding" };
   function indicatorFor(phase, who, interrupted) {
     if (phase === "disconnected") return { tone: "off", text: TONE_TEXT.disconnected, who: "" };
     if (interrupted) return { tone: "interrupted", text: TONE_TEXT.interrupted, who: who };

@@ -1,0 +1,287 @@
+"""Deadlines for audio-device calls, and a watchdog for the voice server's event loop.
+
+FELIX #2095 (2026-11-27, a Mac): converse started, the client gave up after 180 s, and even
+``voice_stop`` (one unlink) timed out after 180 s, while the pill showed Speaking with no
+audio. So the event loop answered nothing. upstream 8.12.0 makes several PortAudio calls
+straight on the loop, and one of them waits with no timeout at all:
+
+- the chimes and system audio (core.py) call ``player.play(..., blocking=True)``, which
+  waits for the end of playback with no timeout. An output device that stops calling back
+  never ends it.
+- every converse starts with ``sd._terminate(); sd._initialize()`` on the loop.
+
+Which call hung there is not known (no stack was taken). So this module does two things:
+
+1. ``play`` and ``call`` run such a call on a thread of its own, with a deadline. A missed
+   deadline marks the process ``wedged``: a CoreAudio call that does not return cannot be
+   cancelled from Python, and PortAudio is in an unknown state after it. ``converse`` then
+   ends with an error that says what to do, and the process exits shortly after, so the
+   host starts a fresh one (or the user restarts the chat).
+2. ``Watchdog``: a task on the loop stamps a heartbeat every second; a plain thread checks
+   it. A loop stuck longer than VOICEMODE_LOOP_STALL_EXIT_S writes the stack of every
+   thread to the log (the evidence the field report lacked) and exits the process.
+   ``faulthandler.dump_traceback_later`` is the backstop when the GIL itself is held.
+   The control socket's status reply carries ``loop_lag_s`` from here, so the pill (a
+   separate process) can show "not responding" instead of a stale Speaking.
+
+Settings (process environment; voice-mode loads voicemode.env into it):
+  VOICEMODE_AUDIO_DEADLINE_S    slack after the sound's own length (default 10; 0 = off,
+                                calls run on the loop with no deadline, as before)
+  VOICEMODE_LOOP_STALL_EXIT_S   loop stall before the process exits (default 90; 0 = off)
+"""
+from __future__ import annotations
+
+import asyncio
+import faulthandler
+import logging
+import math
+import os
+import sys
+import threading
+import time
+
+logger = logging.getLogger("voicemode.audio_deadline")
+
+DEADLINE_SETTING = "VOICEMODE_AUDIO_DEADLINE_S"
+DEADLINE_DEFAULT = 10.0
+STALL_SETTING = "VOICEMODE_LOOP_STALL_EXIT_S"
+STALL_DEFAULT = 90.0
+EXIT_CODE = 75            # EX_TEMPFAIL: try again with a fresh process
+EXIT_DELAY_S = 2.0        # lets the converse result reach the client before the exit
+BEAT_S = 1.0
+BACKSTOP_EXTRA_S = 15.0   # faulthandler fires this long after the watchdog thread should have
+
+WEDGED_MESSAGE = (
+    "Voice stopped: the audio device did not respond ({reason}). The voice server exits now "
+    "so a fresh one can start. Continue in text. If the next voice call fails, restart the "
+    "chat (in FELIX, restart FELIX); unplugging or reconnecting headphones may have caused it.")
+
+# Set once an audio-device call missed its deadline; the process is not trusted after it.
+wedged: str | None = None
+_exit_scheduled = False
+
+
+class DeadlineMissed(Exception):
+    """An audio-device call did not return in time. The thread running it is abandoned."""
+
+
+def _seconds(name: str, default: float) -> float:
+    raw = os.environ.get(name, "")
+    try:
+        v = float(raw) if raw.strip() else default
+    except ValueError:
+        return default
+    return v if math.isfinite(v) and v >= 0 else default
+
+
+def deadline_slack() -> float:
+    return _seconds(DEADLINE_SETTING, DEADLINE_DEFAULT)
+
+
+def stall_limit() -> float:
+    return _seconds(STALL_SETTING, STALL_DEFAULT)
+
+
+def _exit_now(code: int = EXIT_CODE) -> None:  # replaced in tests
+    try:
+        logging.shutdown()
+    finally:
+        os._exit(code)
+
+
+def mark_wedged(reason: str) -> None:
+    global wedged
+    if wedged is None:
+        wedged = reason
+        logger.error("audio device not responding: %s; the voice server will exit after this turn", reason)
+        dump_stacks(f"audio deadline missed: {reason}")
+
+
+def schedule_exit(delay: float | None = None) -> None:
+    """Exit after ``delay`` s from a daemon thread, so the reply already returned is sent.
+    A thread, not the loop: the loop may be the thing that is stuck."""
+    global _exit_scheduled
+    if _exit_scheduled:
+        return
+    _exit_scheduled = True
+
+    wait = EXIT_DELAY_S if delay is None else delay  # read now, not when the def ran
+
+    def later():
+        time.sleep(wait)
+        _exit_now()
+
+    threading.Thread(target=later, name="vml-audio-exit", daemon=True).start()
+
+
+def wedged_result() -> str | None:
+    """The converse result while the process is wedged (and the exit, scheduled once)."""
+    if wedged is None:
+        return None
+    schedule_exit()
+    return WEDGED_MESSAGE.format(reason=wedged)
+
+
+async def call(fn, limit: float, what: str):
+    """Run ``fn()`` on a daemon thread of its own and wait at most ``limit`` s.
+
+    Not the default executor: an abandoned thread there is joined when asyncio shuts down,
+    which is exactly the exit that must not wait (upstream #554/#555). ``limit`` <= 0 runs
+    ``fn`` on the loop, as before. A miss marks the process wedged and raises DeadlineMissed.
+    """
+    if limit <= 0:
+        return fn()
+    loop = asyncio.get_running_loop()
+    fut = loop.create_future()
+
+    def settle(outcome):
+        if not fut.done():
+            fut.set_result(outcome)
+
+    def run():
+        try:
+            outcome = (True, fn())
+        except BaseException as e:  # handed to the awaiting side
+            outcome = (False, e)
+        try:
+            loop.call_soon_threadsafe(settle, outcome)
+        except RuntimeError:  # the loop is gone: nobody is waiting any more
+            pass
+
+    threading.Thread(target=run, name=f"vml-audio-{what}", daemon=True).start()
+    try:
+        ok, value = await asyncio.wait_for(asyncio.shield(fut), limit)
+    except asyncio.TimeoutError:
+        reason = f"{what} did not return within {limit:g} s"
+        mark_wedged(reason)
+        raise DeadlineMissed(reason) from None
+    if not ok:
+        raise value
+    return value
+
+
+async def play(player, samples, sample_rate) -> None:
+    """``player.play(samples, sample_rate, blocking=True)`` with a deadline, off the loop.
+
+    The deadline is the sound's length plus VOICEMODE_AUDIO_DEADLINE_S. A device that never
+    finished the sound (no end-of-stream callback) also counts as a miss, even if closing
+    the stream then returned."""
+    slack = deadline_slack()
+    if slack <= 0:
+        player.play(samples, sample_rate, blocking=True)
+        return
+    length = len(samples) / float(sample_rate)
+
+    def run():
+        player.play(samples, sample_rate, blocking=False)
+        player.wait(timeout=length + slack)  # upstream wait() also stops and closes the stream
+        return player.playback_complete.is_set()
+
+    finished = await call(run, length + 2 * slack, "playback")
+    if not finished:
+        reason = f"playback did not finish within {length + slack:g} s"
+        mark_wedged(reason)
+        raise DeadlineMissed(reason)
+
+
+def dump_stacks(why: str) -> None:
+    """Every thread's stack into the log file (and stderr): the evidence for a hang."""
+    try:
+        logger.error("voice server stack dump (%s):", why)
+        frames = sys._current_frames()
+        names = {t.ident: t.name for t in threading.enumerate()}
+        import traceback
+        for ident, frame in frames.items():
+            stack = "".join(traceback.format_stack(frame))
+            logger.error("thread %s (%s):\n%s", names.get(ident, "?"), ident, stack)
+    except Exception:  # never let the dump cost the exit
+        pass
+    try:
+        faulthandler.dump_traceback(file=sys.stderr, all_threads=True)
+    except Exception:
+        pass
+
+
+class Watchdog:
+    """Exits the process when its event loop stops turning for longer than ``limit`` s.
+
+    The loop stamps ``beat`` (monotonic) every second. A plain thread checks it; if that
+    thread itself was away far longer than its interval, the machine slept (or the process
+    was stopped), so the stamp is renewed instead of exiting: on Windows the monotonic clock
+    runs on through sleep (GetTickCount64), on macOS and Linux it does not.
+    """
+
+    def __init__(self, limit: float, clock=time.monotonic, exit_fn=None, beat_s: float = BEAT_S):
+        self.limit = limit
+        self.clock = clock
+        self.beat_s = beat_s
+        self.beat = clock()
+        self.exit_fn = exit_fn or (lambda: _exit_now())
+        self._last_check = None
+        self.fired = False
+
+    def lag(self) -> float:
+        return max(0.0, self.clock() - self.beat)
+
+    def stamp(self) -> None:
+        self.beat = self.clock()
+        if self.limit > 0:
+            try:  # the backstop for a stall that holds the GIL, where no thread runs
+                faulthandler.dump_traceback_later(self.limit + BACKSTOP_EXTRA_S, exit=True)
+            except Exception:
+                pass
+
+    def check(self) -> bool:
+        """One check (the thread calls it every beat). True when it fired."""
+        now = self.clock()
+        if self._last_check is not None and now - self._last_check > max(5 * self.beat_s, 5.0):
+            self.beat = now  # we were not running either: sleep or SIGSTOP, not a stall
+        self._last_check = now
+        if self.fired or self.limit <= 0 or now - self.beat <= self.limit:
+            return False
+        self.fired = True
+        reason = f"the voice server's event loop was stuck for {now - self.beat:.0f} s"
+        logger.error("%s (limit %s=%g); exiting so a fresh one can start",
+                     reason, STALL_SETTING, self.limit)
+        dump_stacks(reason)
+        self.exit_fn()
+        return True
+
+
+_watchdog: Watchdog | None = None
+
+
+def loop_lag() -> float | None:
+    """Seconds since the event loop last turned, or None before the watchdog started."""
+    return None if _watchdog is None else round(_watchdog.lag(), 1)
+
+
+def ensure_started() -> None:
+    """Start the heartbeat on the running loop and the checking thread, once per process.
+    With VOICEMODE_LOOP_STALL_EXIT_S=0 the heartbeat still runs (the pill reads loop_lag)
+    but nothing exits."""
+    global _watchdog
+    if _watchdog is not None:
+        return
+    loop = asyncio.get_running_loop()
+    dog = Watchdog(stall_limit())
+    _watchdog = dog
+
+    async def heartbeat():
+        while True:
+            dog.stamp()
+            await asyncio.sleep(dog.beat_s)
+
+    task = loop.create_task(heartbeat())
+    _watchdog_task.append(task)  # keep a reference: the loop holds tasks only weakly
+
+    def watch():
+        while True:
+            time.sleep(dog.beat_s)
+            if dog.check():
+                return
+
+    threading.Thread(target=watch, name="vml-loop-watchdog", daemon=True).start()
+
+
+_watchdog_task: list = []

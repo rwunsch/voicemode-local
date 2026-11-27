@@ -67,6 +67,9 @@
     {"patch": "patch_vad_override.py", "targets": ["tools/converse.py"], "why": "each recording resolves VAD aggressiveness and silence length: converse argument, else the override, else config; needs voice_sensitivity.py"},
     {"patch": "patch_audio_recover.py", "targets": ["tools/converse.py"], "why": "a mic stream that fails to start (Wait timed out, -9987) is re-initialised and retried once with silence detection; the fixed-length fallback ends on cancel and VOICEMODE_FALLBACK_RECORD_MAX_S caps it"},
     {"patch": "patch_windows_tempfile.py", "targets": ["core.py", "streaming.py"], "why": "close temp audio files before deleting them; Windows refuses to delete an open file (WinError 32)"},
-    {"patch": "patch_native_client_folder.py", "targets": ["tools/converse.py"], "why": "the session label uses the client's folder; voice-mode itself runs in the runtime folder"}
+    {"patch": "patch_native_client_folder.py", "targets": ["tools/converse.py"], "why": "the session label uses the client's folder; voice-mode itself runs in the runtime folder"},
+    {"copy": "audio_deadline.py", "to": "audio_deadline.py"},
+    {"patch": "patch_audio_deadline.py", "targets": ["core.py", "tools/converse.py", "control_socket.py"],
+     "why": "audio-device calls off the event loop with a deadline; loop watchdog exits a stuck server (FELIX #2095)"}
   ]
 }

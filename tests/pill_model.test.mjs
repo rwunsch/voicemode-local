@@ -586,3 +586,11 @@ test("app.js sends preview_voice with the voice shown in the list", async () => 
   const body = app.split('$("preview").onclick = function', 2)[1].split("\n  };", 1)[0];
   assert.ok(body.includes('cmd: "preview_voice", voice: $("voice").value'), body);
 });
+
+test("a stuck voice server reads Not responding, not Speaking (FELIX #2095)", () => {
+  const vm = viewModel(snap({ phase: "not_responding" }), 0, 0);
+  assert.equal(vm.label, "Not responding");
+  assert.equal(vm.inTurn, false);
+  assert.equal(vm.indicator.tone, "interrupted");
+  assert.match(vm.indicator.text, /not responding/i);
+});

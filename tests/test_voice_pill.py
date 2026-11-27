@@ -1756,3 +1756,19 @@ def test_the_preview_does_its_network_io_off_the_command_thread(ctx, monkeypatch
     assert vp._preview(ctx, "af_sky") is None
     ctx.preview_thread.join(5)
     assert names == ["voice-pill-preview"]
+
+
+# FELIX #2095 (2026-11-27): the voice server's loop was stuck for minutes while its control
+# socket (a thread) kept answering "speaking", so the pill showed Speaking with no audio.
+# The status reply now carries loop_lag_s (patch_audio_deadline).
+@pytest.mark.parametrize("status,paused,phase", [
+    ({"speaking": True, "loop_lag_s": 45.0}, False, "not_responding"),
+    ({"listening": True, "loop_lag_s": 11.0}, False, "not_responding"),
+    ({"speaking": True, "loop_lag_s": 45.0}, True, "not_responding"),
+    ({"speaking": True, "loop_lag_s": 9.5}, False, "speaking"),   # a slow moment, not a hang
+    ({"speaking": True, "loop_lag_s": None}, False, "speaking"),  # watchdog not started yet
+    ({"speaking": True}, False, "speaking"),                      # older server: no field
+    ({"speaking": True, "loop_lag_s": "x"}, False, "speaking"),
+])
+def test_a_stuck_server_shows_not_responding(status, paused, phase):
+    assert snap(status=status, paused=paused, sessions=[sess(1)])["phase"] == phase
