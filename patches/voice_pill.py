@@ -472,7 +472,7 @@ def _floor_voice(floor, is_holder, sessions, conch, overrides):
 def build_snapshot(status, sessions, conch, *, paused=False, ptt=False, closed=False,
                    last_floor=None, overrides=None, barge=None, ui=None, platform=None, beeps=False,
                    default_voice=st.FALLBACK_VOICE, play=None, wake=None,
-                   german=True, ptt_listener=None, german_list=None, voices=None) -> dict:
+                   german=True, ptt_listener=None, german_list=None, voices=None, orb=True) -> dict:
     overrides = overrides or {}
     floor, is_holder = _floor(sessions, conch, last_floor)
     visible = bool(sessions or ptt) and not closed
@@ -510,7 +510,13 @@ def build_snapshot(status, sessions, conch, *, paused=False, ptt=False, closed=F
     voice = voice or default_voice          # nobody has chosen: the configured default
     language = language or voice_language(voice)
     platform = platform or detect_platform()
+    levels = status.get("pill_levels")
+    level = levels.get(phase) if isinstance(levels, dict) and phase in ("speaking", "listening") else None
+    if type(level) not in (int, float) or not 0 <= level <= 1:
+        level = None
+    playback_id = status.get("pill_playback_id") if phase == "speaking" else None
     return {"visible": visible, "phase": phase, "floor": floor, "sessions": rows,
+            "orb": orb, "audio_level": level, "playback_id": playback_id if isinstance(playback_id, str) else None,
             "voice": voice, "language": language,
             "barge": barge or {"enabled": False, "available": False, "count": 0},
             "beeps": beeps,
@@ -627,7 +633,8 @@ def gather(ctx) -> dict:
         default_voice=st.default_voice(ctx.home),
         play={"label": play.label} if play else None, wake=wake_view(ctx), platform=platform,
         german=german_available(ctx.home), ptt_listener=ptt_listening(platform, ctx.home),
-        german_list=german_voices(ctx.home), voices=voices_by_language(ctx.home, wait=False))
+        german_list=german_voices(ctx.home), voices=voices_by_language(ctx.home, wait=False),
+        orb=(st.setting("VOICEMODE_PILL_APPEARANCE", "", ctx.home) or "").lower().strip() != "classic")
 
 
 # -- voice preview (2026-11-17) ----------------------------------------------------------------
@@ -877,6 +884,11 @@ def handle_command(msg, ctx=None):
     cmd = msg.get("cmd")
     if cmd == "interrupt":
         st.send_control(ctx.sock, "skip_forward")
+    elif cmd == "interrupt_playback":
+        # The server checks this playback ID under the state lock before cutting audio.
+        playback_id = msg.get("playback_id")
+        if isinstance(playback_id, str) and playback_id.isascii() and playback_id.isdecimal() and len(playback_id) <= 32:
+            st.send_control(ctx.sock, "pill_interrupt", message=playback_id)
     elif cmd == "pause":
         # Our own pid owns the pause (mic held closed); the socket pause holds TTS.
         # Upstream stops a paused turn after VOICEMODE_CONTROL_PAUSE_TIMEOUT (300 s).

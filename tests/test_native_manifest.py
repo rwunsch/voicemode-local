@@ -26,7 +26,7 @@ FELIX_THREE = ["patch_no_ffmpeg_gate.py", "patch_no_ffmpeg_warning.py", "patch_l
 NATIVE_OURS = ["patch_windows_tempfile.py", "patch_native_client_folder.py"]
 SOURCES = {
     "control_channel.py": "control_channel.py", "control_socket.py": "control_socket.py",
-    "core.py": "core.py", "simple_failover.py": "simple_failover.py", "streaming.py": "streaming.py",
+    "core.py": "core.py", "simple_failover.py": "simple_failover.py", "streaming.py": "streaming.py", "audio_player.py": "audio_player.py",
     "server.py": "server.py", "tools/converse.py": "converse.py", "conch_notify.py": "conch_notify.py",
     "conch_queue.py": "conch_queue.py", "conch.py": "conch.py",
     "config.py": "config.py",
@@ -164,8 +164,14 @@ INTENDED_COPIES += ["voice_sensitivity.py"]
 # 2026-11-18: a mic stream that fails to start is retried once; the fallback ends on cancel.
 INTENDED_STEP_LINES.append(b'    {"patch": "patch_audio_recover.py", "targets": ["tools/converse.py"], "why": "a mic stream that fails to start (Wait timed out, -9987) is re-initialised and retried once with silence detection; the fixed-length fallback ends on cancel and VOICEMODE_FALLBACK_RECORD_MAX_S caps it"},\n')
 INTENDED_PATCHES.append(("patch_audio_recover.py", ["tools/converse.py"]))
+# 2026-11-27: measured orb levels and a playback-scoped interrupt.
+INTENDED_STEP_LINES.append(b'    {"patch": "patch_voice_orb.py", "targets": ["control_channel.py", "control_socket.py", "tools/converse.py", "streaming.py", "audio_player.py", "core.py"],\n'
+                           b'     "why": "measure speaker levels and bind Pill interrupt clicks to one playback"},\n')
+INTENDED_PATCHES.append(("patch_voice_orb.py", ["control_channel.py", "control_socket.py", "tools/converse.py",
+                                              "streaming.py", "audio_player.py", "core.py"]))
 # Text edits those additions force on lines that were already there: (now, before).
 INTENDED_EDITS = [
+    (b'    "audio_player.py",\n', b''),
     (b'    "streaming.py",\n    "conch_notify.py",\n    "conch_queue.py",\n    "conch.py",\n    "config.py",\n    "tools/configuration_management.py"\n', b'    "streaming.py"\n'),
     (b'"why": "MCP tool for switching voice barge-in"},\n', b'"why": "MCP tool for switching voice barge-in"}\n'),
 ]

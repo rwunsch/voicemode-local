@@ -122,7 +122,7 @@ def test_a_labelled_preview_button_sits_beside_the_voice_list():
 
 def test_the_indicator_dot_is_labelled_and_driven_by_the_model():
     html = (UI / "index.html").read_text(encoding="utf-8")
-    m = re.search(r'<div id="orb" class="orb"([^>]*)>', html)
+    m = re.search(r'<span id="orb" class="orb"([^>]*)>', html)
     assert m and 'role="img"' in m.group(1) and "aria-label=" in m.group(1)
     js = (UI / "app.js").read_text(encoding="utf-8")
     for needle in ("document.body.dataset.tone = vm.indicator.tone",

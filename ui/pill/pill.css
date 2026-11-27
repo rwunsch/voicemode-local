@@ -71,3 +71,93 @@ html,body{height:100%}
 
 /* A barge click is shown at once, dimmed, until the backend agrees (model.js bargeShown). */
 #barge.pending { opacity: 0.6; }
+
+/* The Voice Orb is drawn from gradients, with no downloaded image or render loop. */
+.orb-action {
+  position: relative; display: inline-grid; place-items: center; flex: none;
+  padding: 0; border: 0; border-radius: 50%; width: 44px; height: 44px;
+  background: transparent; cursor: pointer; -webkit-app-region: no-drag;
+}
+.orb-action .orb { position: relative; display: block; overflow: hidden; }
+[data-orb=classic] .orb-action { width: 16px; height: 16px; pointer-events: none; }
+[data-orb=classic] .orb-pigment, [data-orb=classic] .orb-stars { display: none; }
+[data-orb=animated] .orb { width: 38px; height: 38px; }
+[data-orb=animated] .orb-action:is(:focus-visible, :hover) { outline-offset: 1px; }
+.orb-pigment, .orb-stars, .orb-bubble {
+  position: absolute; inset: 0; opacity: 0; pointer-events: none;
+}
+[data-orb=animated]:is([data-tone=speaking], [data-tone=listening]) .orb-pigment,
+[data-orb=animated]:is([data-tone=speaking], [data-tone=listening]) .orb-stars { opacity: 1; }
+.orb-pigment {
+  inset: -16%;
+  background:
+    radial-gradient(ellipse at 51% 47%, #070724 5%, #13113a 16%, #28145388 37%, transparent 52%),
+    radial-gradient(ellipse at 30% 37%, #7870ff 0%, #4331baaa 16%, transparent 40%),
+    radial-gradient(ellipse at 63% 24%, #7279ff 0%, #3025baba 16%, transparent 43%),
+    radial-gradient(ellipse at 14% 53%, #d95bfa 5%, #a44fdbe0 24%, transparent 48%),
+    radial-gradient(ellipse at 86% 53%, #c753d9 4%, #942a95d9 18%, transparent 43%),
+    radial-gradient(ellipse at 58% 80%, #fdad5a 11%, #da6899 24%, transparent 49%),
+    #2b195e;
+  animation: flow-orb 24s ease-in-out infinite alternate;
+}
+[data-orb-palette=listening] .orb-pigment {
+  background:
+    radial-gradient(ellipse at 47% 37%, #142ba1 3%, #1347ceaa 33%, transparent 60%),
+    radial-gradient(ellipse at 65% 65%, #b3e4ff 4%, #2a9beeff 25%, transparent 56%),
+    radial-gradient(ellipse at 19% 56%, #6795ff 7%, #166fee 31%, transparent 57%), #202988;
+}
+.orb-stars {
+  inset: 9%; border-radius: 50%;
+  background:
+    radial-gradient(circle at 23% 42%, #fff9 0.6%, transparent 2%),
+    radial-gradient(circle at 65% 20%, #f4eaffc9 0.7%, transparent 2.2%),
+    radial-gradient(circle at 74% 66%, #fff8 0.6%, transparent 2%),
+    radial-gradient(circle at 43% 75%, #fff9 0.7%, transparent 2.4%),
+    radial-gradient(circle at 53% 52%, #f2e6ffb8 0.9%, transparent 2.4%),
+    radial-gradient(circle at 33% 15%, #f4eaff83 0.4%, transparent 1.6%),
+    radial-gradient(circle at 84% 43%, #fff7 0.65%, transparent 2.2%),
+    radial-gradient(circle at 36% 57%, #fff8 0.6%, transparent 1.8%),
+    radial-gradient(circle at 63% 78%, #fff8 0.6%, transparent 1.8%);
+  animation: turn-stars 44s linear infinite;
+}
+.orb-bubble {
+  --level: 0;
+  inset: 2px; border-radius: 50%; border: 1px solid var(--speak);
+  background: var(--speak);
+  transition: transform .24s ease-out, opacity .24s ease-out;
+  transform: scale(calc(1 + var(--level) * .22));
+}
+[data-orb-motion=true] .orb-bubble { opacity: calc(var(--level) * .30); }
+[data-tone=listening] .orb-bubble { background: #4195ff; border-color: #4195ff; }
+body:not([data-orb-motion=true]) :is(.orb-pigment, .orb-stars) { animation-play-state: paused; }
+body[data-phase=paused][data-orb=animated]:not([data-orb-palette=""]) :is(.orb-pigment, .orb-stars) {
+  opacity: .65;
+}
+
+@keyframes flow-orb {
+  0% { transform: rotate(-13deg) scale(1); }
+  55% { transform: rotate(11deg) scale(1.07); }
+  100% { transform: rotate(32deg) scale(1.02); }
+}
+@keyframes turn-stars { to { transform: rotate(-360deg); } }
+
+[data-conceal=true] .card { transition: background .18s, border-color .18s; }
+[data-conceal=true] .card :is(.top > :not(.drag), .drag > :not(.orb-action)) { transition: opacity .18s; }
+[data-conceal=true] .card:not(.pointer-in):not([data-keyboard=true]):not(:has(:focus-visible)) { background: transparent; border-color: transparent; }
+[data-conceal=true] .card:not(.pointer-in):not([data-keyboard=true]):not(:has(:focus-visible))
+  :is(.top > :not(.drag), .drag > :not(.orb-action)) { opacity: 0; pointer-events: none; }
+
+[data-mode=mini] .card { width: 68px; height: 68px; padding: 0; background: transparent; border: 0; }
+[data-mode=mini] :is(.edge, .more, .top > :not(.drag), .drag > :not(.orb-action)) { display: none; }
+[data-mode=mini] .drag { justify-content: center; -webkit-app-region: no-drag; }
+[data-mode=mini] .orb-action { width: 68px; height: 68px; }
+[data-mode=mini] .orb { width: 50px; height: 50px; }
+[data-mode=mini] .orb-bubble { inset: 7px; }
+.foot { flex-wrap: wrap; }
+[data-mode=mini] .orb-action:focus-visible { outline-offset: -3px; }
+.windows:not(:has(body:is([data-mode=mini], [data-conceal=true]))) { background: var(--bg); }
+@media (prefers-reduced-motion: reduce) {
+  .orb-pigment, .orb-stars { animation: none; }
+  .orb-bubble, [data-conceal=true] .card, [data-conceal=true] .card * { transition: none; }
+  [data-orb-motion=true] .orb-bubble { opacity: 0; }
+}

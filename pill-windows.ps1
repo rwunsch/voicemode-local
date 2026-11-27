@@ -278,18 +278,21 @@ public class VmlPill {
     [DllImport("user32.dll")] static extern IntPtr MonitorFromPoint(POINT p, uint f);
     [DllImport("user32.dll")] static extern bool GetMonitorInfo(IntPtr m, ref MONITORINFO i);
 
+    [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")] static extern bool SetForegroundWindow(IntPtr hwnd);
+
     const uint NOACTIVATE = 0x10, NOSIZE = 0x1, NOZORDER = 0x4;
     const int WIDTH = 350, DEFAULT_H = 68;
     const int MIN_WIDTH = 320, MAX_WIDTH = 640;
-    const int TAB_W = 22, TAB_H = 64, RAIL_W = 76;
+    const int TAB_W = 22, TAB_H = 64, RAIL_W = 76, MINI_SIZE = 68;
     static readonly IntPtr TOPMOST = new IntPtr(-1);
     const string HOST = "pill.voicemode.example";
     const string BRIDGE = @"
 window.pillTransport={send:function(j){window.chrome.webview.postMessage(j)}};
 window.chrome.webview.addEventListener('message',function(e){if(window.pillReceive)window.pillReceive(e.data)});
 document.addEventListener('DOMContentLoaded',function(){
-  var r=document.documentElement,c=document.getElementById('card');
-  r.style.background=getComputedStyle(r).getPropertyValue('--bg');
+  document.documentElement.classList.add('windows');
+  var c=document.getElementById('card');
   new ResizeObserver(function(){if(c.offsetHeight)window.chrome.webview.postMessage(JSON.stringify({window:{height:c.offsetHeight}}))}).observe(c);
 });";
 
@@ -299,6 +302,8 @@ document.addEventListener('DOMContentLoaded',function(){
     JavaScriptSerializer json = new JavaScriptSerializer();
     double backoff = 1; bool closing, started, hadOutput; int exitCode;
     bool snapshotVisible, dismissed; string mode = "pill", side = "right"; int cssHeight = DEFAULT_H;
+    int[] orbRegion;
+    IntPtr keyboardPrevious;
     bool hasPos, hasDock; int posX, posY, dockCy, cssWidth = WIDTH;
     DispatcherTimer slideTimer;
     System.Windows.Forms.NotifyIcon tray; string phase = "";
@@ -416,6 +421,7 @@ document.addEventListener('DOMContentLoaded',function(){
             var env = await CoreWebView2Environment.CreateAsync(null, Path.Combine(local, "webview2-data"));
             ctl = await env.CreateCoreWebView2ControllerAsync(hwnd);
             ctl.IsVisible = false;
+            ctl.DefaultBackgroundColor = System.Drawing.Color.Transparent;
             var web = ctl.CoreWebView2;
             var st = web.Settings;
             st.AreDevToolsEnabled = false; st.AreDefaultContextMenusEnabled = false; st.IsStatusBarEnabled = false;
@@ -568,6 +574,22 @@ document.addEventListener('DOMContentLoaded',function(){
         // The page's own trace (a click, a switch changing on screen): with "cmd -> backend" below,
         // a repeat shows which hop of a click was missing or late (Mac, 2026-11-13; same here).
         if (w.TryGetValue("log", out v) && v is string) { var t = (string)v; Log("page: " + (t.Length > 200 ? t.Substring(0, 200) : t)); return; }
+        if (w.TryGetValue("keyboard", out v) && v is bool) { FocusControls((bool)v); return; }
+        if (w.TryGetValue("orbRegion", out v)) {
+            var values = v as System.Collections.IList;
+            orbRegion = null;
+            if (values != null && values.Count == 4) {
+                var bounds = new int[4];
+                bool valid = true;
+                for (int i = 0; i < 4; ++i) {
+                    if (!(values[i] is int) || (int)values[i] < 0 || (int)values[i] > MAX_WIDTH) { valid = false; break; }
+                    bounds[i] = (int)values[i];
+                }
+                if (valid) orbRegion = bounds;
+            }
+            ApplyRegion();
+            return;
+        }
         if (w.ContainsKey("drag")) { StartDrag(); return; }
         if (w.ContainsKey("slide")) { SlideOut(); return; }
         if (w.TryGetValue("phase", out v) && v is string) { phase = (string)v; UpdateTray(); return; }
@@ -628,10 +650,26 @@ document.addEventListener('DOMContentLoaded',function(){
         return icon;
     }
 
+    void FocusControls(bool enabled) {
+        if (ctl == null) return;
+        if (enabled && snapshotVisible && !dismissed && mode != "dot") {
+            IntPtr previous = GetForegroundWindow();
+            if (previous != hwnd && SetForegroundWindow(hwnd)) keyboardPrevious = previous;
+            if (GetForegroundWindow() == hwnd) {
+                ctl.MoveFocus(CoreWebView2MoveFocusReason.Programmatic);
+                ctl.CoreWebView2.ExecuteScriptAsync("window.pillFocusControls?.()");
+            }
+        } else if (keyboardPrevious != IntPtr.Zero) {
+            if (GetForegroundWindow() == hwnd) SetForegroundWindow(keyboardPrevious);
+            keyboardPrevious = IntPtr.Zero;
+        }
+    }
+
     void Apply() {
         if (closing || ctl == null) return;
         UpdateTray();
         if (!snapshotVisible || dismissed || mode == "dot") {  // "dot" is minimized: the tray has it
+            FocusControls(false);
             ShowWindow(hwnd, 0);
             ctl.IsVisible = false;
             return;
@@ -651,8 +689,8 @@ document.addEventListener('DOMContentLoaded',function(){
         // A slide outlasting the page's timer would otherwise carry the window past the monitor edge.
         if (slideTimer != null) { slideTimer.Stop(); slideTimer = null; }
         bool edge = mode == "docked" || mode == "rail" || mode == "tab";
-        int w = Scale(mode == "tab" ? TAB_W : mode == "rail" ? RAIL_W : cssWidth);
-        int h = Scale(mode == "tab" ? TAB_H : cssHeight);
+        int w = Scale(mode == "mini" ? MINI_SIZE : mode == "tab" ? TAB_W : mode == "rail" ? RAIL_W : cssWidth);
+        int h = Scale(mode == "mini" ? MINI_SIZE : mode == "tab" ? TAB_H : cssHeight);
         var a = (hasPos ? MonitorAt(posX, posY) : MonitorAt(0, 0)).rcWork;
         int x = hasPos ? posX : a.right - w - Scale(16), y = hasPos ? posY : a.bottom - Scale(DEFAULT_H) - Scale(16);
         if (edge) {  // floats on the screen edge, at the height it was dragged to, or the middle
@@ -662,8 +700,24 @@ document.addEventListener('DOMContentLoaded',function(){
         x = Math.Max(a.left, Math.Min(x, a.right - w));
         y = Math.Max(a.top, Math.Min(y, a.bottom - h));
         Move(new RECT { left = x, top = y, right = x + w, bottom = y + h });
-        int round = mode == "tab" ? Scale(12) : Scale(32);
-        SetWindowRgn(hwnd, CreateRoundRectRgn(0, 0, w + 1, h + 1, round, round), true);  // the OS owns the region now
+        ApplyRegion();
+    }
+
+    void ApplyRegion() {
+        if (hwnd == IntPtr.Zero) return;
+        RECT r;
+        GetWindowRect(hwnd, out r);
+        int w = r.right - r.left, h = r.bottom - r.top;
+        int round = mode == "mini" ? w : mode == "tab" ? Scale(12) : Scale(32);
+        if (mode == "pill" && orbRegion != null) {
+            int left = Scale(orbRegion[0]), top = Scale(orbRegion[1]);
+            int ow = Scale(orbRegion[2]), oh = Scale(orbRegion[3]);
+            if (ow > 0 && oh > 0 && left + ow <= w && top + oh <= h) {
+                SetWindowRgn(hwnd, CreateRoundRectRgn(left, top, left + ow + 1, top + oh + 1, ow, oh), true);
+                return;
+            }
+        }
+        SetWindowRgn(hwnd, CreateRoundRectRgn(0, 0, w + 1, h + 1, round, round), true); // the OS owns the region
     }
 
     // Own drag loop: a drag started inside WebView2 has its mouse capture in another

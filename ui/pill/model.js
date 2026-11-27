@@ -83,6 +83,18 @@
     return [{ keys: ["Ctrl", "Space"], text: "tap: stop, hold: talk" }];
   }
 
+  function presentation(ui, orb) {
+    if (ui.minimized) return "dot";
+    if (ui.mini && orb) return "mini";
+    return ui.docked ? (ui.tucked ? "tab" : ui.dockOpen ? "docked" : "rail") : ui.expanded ? "expanded" : "pill";
+  }
+
+  function orbLevel(snapshot, phase, lastSeenMs, nowMs) {
+    var level = snapshot && snapshot.audio_level;
+    return (phase === "speaking" || phase === "listening") && lastSeenMs != null &&
+      nowMs - lastSeenMs <= 500 && Number.isFinite(level) && level >= 0 && level <= 1 ? level : null;
+  }
+
   function viewModel(snapshot, lastSeenMs, nowMs, extra) {
     var connected = !!snapshot && lastSeenMs != null && nowMs - lastSeenMs <= STALE_MS;
     var off = { enabled: false };
@@ -137,7 +149,7 @@
     var interrupted = !!(extra && extra.interruptedUntil != null && nowMs < extra.interruptedUntil);
     var pause = { visible: inTurn, enabled: true, label: phase === "paused" ? "Resume" : "Pause",
       cmd: phase === "paused" ? "resume" : "pause", icon: phase === "paused" ? RESUME : PAUSE };
-    var mode = ui.minimized ? "dot" : ui.docked ? (ui.tucked ? "tab" : ui.dockOpen ? "docked" : "rail") : ui.expanded ? "expanded" : "pill";
+    var mode = presentation(ui, s.orb === true);
     return {
       connected: true, phase: phase, inTurn: inTurn, label: LABELS[phase] || LABELS.idle, mode: mode,
       side: mode === "docked" || mode === "rail" || mode === "tab" ? (ui.side === "left" ? "left" : "right") : null,
@@ -238,7 +250,7 @@
   }
 
   var api = { previewView: previewView, PREVIEW_SHOW_MS: PREVIEW_SHOW_MS, PREVIEW_PENDING_MS: PREVIEW_PENDING_MS,
-    interruptFlash: interruptFlash, FLASH_MS: FLASH_MS, clickBarge: clickBarge, bargeShown: bargeShown, PENDING_MS: PENDING_MS, incomingKind: incomingKind, nextHidden: nextHidden, viewModel: viewModel, languageOf: languageOf, voiceForLanguage: voiceForLanguage, VOICES: VOICES, GERMAN_VOICES: GERMAN_VOICES, LANGUAGES: LANGUAGES, STALE_MS: STALE_MS };
+    interruptFlash: interruptFlash, FLASH_MS: FLASH_MS, clickBarge: clickBarge, bargeShown: bargeShown, PENDING_MS: PENDING_MS, incomingKind: incomingKind, nextHidden: nextHidden, presentation: presentation, orbLevel: orbLevel, viewModel: viewModel, languageOf: languageOf, voiceForLanguage: voiceForLanguage, VOICES: VOICES, GERMAN_VOICES: GERMAN_VOICES, LANGUAGES: LANGUAGES, STALE_MS: STALE_MS };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   if (typeof window !== "undefined") window.PillModel = api;
 })();

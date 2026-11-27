@@ -66,6 +66,15 @@ def test_geometry_per_mode():
     assert m.geometry(s, AREA) == (0, 325, 350, 200)
 
 
+def test_mini_orb_preserves_the_window_position_and_saved_width():
+    s = m.WindowState(visible=True, css_width=411, css_height=102)
+    assert s.on_window({"mode": "mini"}) == "changed"
+    assert m.geometry(s, AREA, pos=(100, 100)) == (100, 100, 68, 68)
+    assert not s.in_tray and s.on_screen
+    assert s.on_window({"mode": "pill"}) == "changed"
+    assert m.geometry(s, AREA, pos=(100, 100)) == (100, 100, 411, 102)
+
+
 def test_saved_position_is_clamped_onto_the_screen():
     s = m.WindowState(visible=True, css_height=100)
     assert m.geometry(s, AREA, pos=(5000, -50)) == (1090, 25, 350, 100)
@@ -595,12 +604,12 @@ def test_panel_is_set_before_the_window_is_created():
     assert src.index("import webview") < src.index("use_panel()") < src.index("create_window")
 
 
-def test_panel_is_nonactivating_from_birth_and_never_key():
+def test_panel_is_nonactivating_and_allows_explicit_keyboard_focus():
     src = (REPO / "patches/voice_pill_mac.py").read_text()
     body = src[src.index("def use_panel("):src.index("class App:")]
     assert m.NONACTIVATING_PANEL == 1 << 7
     assert "mask | NONACTIVATING_PANEL" in body
-    assert "def canBecomeKeyWindow" in body and "return False" in body
+    assert "def canBecomeKeyWindow" in body and 'getattr(self, "_pill_keyboard", False)' in body
     assert "def acceptsFirstMouse_" in body and "return True" in body
     # PyObjC refuses a Category whose name differs from its class, and the app then exits at launch
     assert "class WebKitHost(objc.Category(BrowserView.WebKitHost)):" in body

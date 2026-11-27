@@ -41,8 +41,8 @@ killed and counts as "could not tell", and the window starts anyway.
 detect a failure after those 15 s. "Already running" only means a window holds the lock: that
 window may have no backend. `pill off` then `pill on` starts clean.
 
-Files are in `%LOCALAPPDATA%\voicemode-local`: `webview2\` (two DLLs), `webview2-data\`,
-`ui\` (copied at each start), `pill-position.txt` and `pill-window.log`.
+Files are in `%LOCALAPPDATA%\voicemode-local`: `webview2` (two DLLs), `webview2-data`,
+`ui` (copied at each start), `pill-position.txt` and `pill-window.log`.
 
 ## Who starts and stops the window (v1.1.1)
 
@@ -596,3 +596,28 @@ call, no restart; both settings come from the environment, else voicemode.env.
   language; old behaviour (replace always) via `VOICEMODE_PILL_VOICE_FOLLOWS_LANGUAGE=false`.
 
 Not checked on a real Mac or Windows run yet; the tests use fake state folders.
+
+## Animated Voice Orb
+
+The compact Pill fades to the orb while the assistant speaks. Hover over the
+orb to reveal the controls. To use the keyboard in the native window, expand
+the Pill and select **Focus controls**; Tab moves through the controls and
+Escape gives focus back to the previous app. The Pill does not take keyboard
+focus automatically.
+
+- The violet, magenta and orange orb marks assistant speech. Blue marks
+  Listening. The state is also named in text and in the orb's accessible label.
+- The faint outer ring follows measurements from the running microphone or
+  speaker stream. No audio or words are sent to the Pill. A runtime that cannot
+  report a live level still shows the current state without a moving ring.
+- Select the orb while it offers **Interrupt speech and listen** to interrupt
+  that playback only. **Pause** holds the conversation; **Stop** ends the active
+  session's turn. A click arriving after speech has ended is ignored.
+- Minimize collapses to a movable mini orb. Select the mini orb to restore the
+  previous view. The expanded panel still offers **Minimize to menu bar** or
+  **Minimize to system tray**. The docked rail and its tuck tab also remain.
+- The operating system's reduced motion preference removes the animation.
+
+Behaviour change: the Pill uses the animated orb by default; set
+`VOICEMODE_PILL_APPEARANCE=classic` in `~/.voicemode/voicemode.env` to restore
+the simple dot, compact controls and original minimize action.

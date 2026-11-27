@@ -8,10 +8,10 @@ pill-windows.ps1 does. Page -> wrapper: {"cmd":...} goes to the backend, {"windo
 is handled here. The top half of this file is pure logic with no GUI import, so pytest
 covers it on Linux. pywebview and pyobjc are imported lazily in main().
 
-Never takes focus and has no Dock icon. pywebview asks for the Regular policy on import and
+Does not take focus automatically and has no Dock icon. pywebview asks for the Regular policy on import and
 activates itself at start, so quiet_app() installs an application class that refuses both, before
 pywebview loads. use_panel() swaps pywebview's window for a non-activating panel, so a click on
-the pill leaves the frontmost app and its keyboard focus alone.
+the pill leaves the frontmost app and its keyboard focus alone unless the person chooses Focus controls.
 """
 import argparse
 import fcntl
@@ -28,7 +28,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 WIDTH, MARGIN, DEFAULT_H = 350, 16, 68
 MIN_WIDTH, MAX_WIDTH = 320, 640
-TAB_W, TAB_H, RAIL_W = 22, 64, 76
+TAB_W, TAB_H, RAIL_W, MINI_SIZE = 22, 64, 76, 68
 BACKOFF_CAP_S = 30
 NONACTIVATING_PANEL = 1 << 7  # NSWindowStyleMaskNonactivatingPanel
 WINDOW_BEHAVIOUR = 1 << 0  # canJoinAllSpaces
@@ -159,7 +159,7 @@ def geometry(state, area, pos=None):
         h = TAB_H if state.mode == "tab" else state.css_height
         cy = ay + ah // 2 if state.dock_y is None else state.dock_y
         return (ax if state.side == "left" else ax + aw - w, max(ay, min(cy - h // 2, ay + ah - h)), w, h)
-    w, h = state.css_width, state.css_height
+    w, h = (MINI_SIZE, MINI_SIZE) if state.mode == "mini" else (state.css_width, state.css_height)
     x, y = pos if pos else (ax + aw - w - MARGIN, ay + ah - DEFAULT_H - MARGIN)
     return (max(ax, min(x, ax + aw - w)), max(ay, min(y, ay + ah - h)), w, h)
 
@@ -387,7 +387,7 @@ def quiet_app():
 
 
 def use_panel():
-    """Before create_window: pywebview builds a non-activating panel that never becomes key."""
+    """Before create_window: pywebview builds a non-activating panel that only becomes key on explicit request."""
     import objc
     from AppKit import NSPanel
     from webview.platforms.cocoa import BrowserView
@@ -398,7 +398,7 @@ def use_panel():
                 rect, mask | NONACTIVATING_PANEL, backing, defer)
 
         def canBecomeKeyWindow(self):
-            return False
+            return bool(getattr(self, "_pill_keyboard", False))
 
     class WebKitHost(objc.Category(BrowserView.WebKitHost)):  # PyObjC requires this name
         def acceptsFirstMouse_(self, _event):  # the window is never key, so every click is a first
@@ -624,6 +624,9 @@ class App:
                 if not self.closing:
                     self.to_page(json.dumps({"window": {"dropped": cmd_name}}))
             return
+        if type(r[1].get("keyboard")) is bool:
+            self.focus_controls(r[1]["keyboard"])
+            return
         prev = self.state.mode
         if "mode" in r[1]:
             self.slide_gen += 1  # a slide still running must not carry the window past the screen edge
@@ -673,6 +676,8 @@ class App:
             return
         self.update_tray()
         if not self.state.on_screen:
+            self.focus_controls(False)
+            self.set_surface_visible(False)
             return AppHelper.callAfter(native.orderOut_, None)
 
         def go():
@@ -680,7 +685,36 @@ class App:
             x, y, w, h = to_cocoa(geometry(self.state, area, self.pos), full_h)
             native.setFrame_display_(NSMakeRect(x, y, w, h), True)
             native.orderFrontRegardless()  # pywebview's own show() makes it key
+            self.set_surface_visible(True)
         AppHelper.callAfter(go)
+
+    def focus_controls(self, enabled):
+        native = self.win.native if self.win else None
+        if native is None:
+            return
+
+        def change():
+            if enabled:
+                if not self.state.on_screen:
+                    return
+                native._pill_keyboard = True
+                native.makeKeyWindow()
+                wv = self.webview()
+                if wv is not None:
+                    native.makeFirstResponder_(wv)
+                    wv.evaluateJavaScript_completionHandler_("window.pillFocusControls?.()", None)
+            elif getattr(native, "_pill_keyboard", False):
+                native._pill_keyboard = False
+                if native.isKeyWindow():
+                    native.resignKeyWindow()
+        run_on_main(change)
+
+    def set_surface_visible(self, visible):
+        wv = self.webview()
+        if wv is not None and self.page_ready:
+            from PyObjCTools import AppHelper
+            AppHelper.callAfter(wv.evaluateJavaScript_completionHandler_,
+                                "window.pillSurfaceVisible?.(" + json.dumps(visible) + ")", None)
 
     def update_tray(self):
         from PyObjCTools import AppHelper

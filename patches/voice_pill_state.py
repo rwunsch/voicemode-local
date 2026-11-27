@@ -1028,12 +1028,15 @@ def _status(path: Path) -> dict:
     return reply if isinstance(reply, dict) else {}
 
 
-def send_control(path: Path, command: str) -> bool:
+def send_control(path: Path, command: str, *, message: str | None = None) -> bool:
     """Fire-and-forget control command. True if it was delivered to a live socket."""
     if not _use_pipe() and not path.exists():
         return False
     try:
-        _exchange(path, {"command": command}, want_reply=False)
+        payload = {"command": command}
+        if message is not None:
+            payload["message"] = message
+        _exchange(path, payload, want_reply=False)
     except OSError:
         return False
     return True

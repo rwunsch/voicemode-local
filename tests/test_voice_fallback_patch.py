@@ -179,7 +179,7 @@ def test_applies_to_pristine_8_12_0_through_apply_py(tmp_path):
     src = Path(os.environ["VM812_SRC"])
     pkg = tmp_path / "voice_mode"
     (pkg / "tools").mkdir(parents=True)
-    for name in ("control_channel.py", "control_socket.py", "core.py", "simple_failover.py", "streaming.py",
+    for name in ("control_channel.py", "control_socket.py", "core.py", "simple_failover.py", "streaming.py", "audio_player.py",
                  "conch_notify.py", "conch_queue.py", "conch.py", "config.py"):
         shutil.copy(src / name, pkg / name)
     shutil.copy(src / "converse.py", pkg / "tools" / "converse.py")

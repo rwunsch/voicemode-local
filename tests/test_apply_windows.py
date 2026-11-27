@@ -20,7 +20,7 @@ SOURCES = {
     "control_socket.py": "control_socket.py",
     "core.py": "core.py",
     "simple_failover.py": "simple_failover.py",
-    "streaming.py": "streaming.py",
+    "streaming.py": "streaming.py", "audio_player.py": "audio_player.py",
     "tools/converse.py": "converse.py",
     "conch_notify.py": "conch_notify.py",
     "conch_queue.py": "conch_queue.py",

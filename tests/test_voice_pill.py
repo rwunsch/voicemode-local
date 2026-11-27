@@ -297,7 +297,7 @@ def test_snapshot_shape_and_json_serialisable():
     assert json.loads(json.dumps(s)) == s
     assert set(s) == {"visible", "phase", "floor", "sessions", "voice", "language",
                       "barge", "beeps", "platform", "ui", "play", "wake", "german_available", "german_voices", "ptt",
-                      "voices_by_language"}
+                      "voices_by_language", "orb", "audio_level", "playback_id"}
     assert s["play"] is None and s["wake"] is None
     assert s["platform"] == "mac" and s["ui"] == {"docked": True}
     assert s["barge"] == {"enabled": True, "available": False, "count": 2}
@@ -1756,3 +1756,26 @@ def test_the_preview_does_its_network_io_off_the_command_thread(ctx, monkeypatch
     assert vp._preview(ctx, "af_sky") is None
     ctx.preview_thread.join(5)
     assert names == ["voice-pill-preview"]
+
+
+def test_orb_snapshot_uses_only_the_current_audio_direction():
+    status = {"speaking": True, "pill_playback_id": "125",
+              "pill_levels": {"speaking": .4, "listening": .9}}
+    args = (status, [], {"waiters": []})
+    assert vp.build_snapshot(*args)["audio_level"] == .4
+    assert vp.build_snapshot(*args)["playback_id"] == "125"
+    assert vp.build_snapshot(*args, paused=True)["audio_level"] is None
+    assert vp.build_snapshot(*args, paused=True)["playback_id"] is None
+    status["pill_levels"]["speaking"] = float("nan")
+    assert vp.build_snapshot(*args)["audio_level"] is None
+    assert vp.build_snapshot({"speaking": True}, [], {})["playback_id"] is None
+
+
+def test_orb_click_sends_only_a_playback_scoped_interrupt(monkeypatch, tmp_path):
+    sent = []
+    monkeypatch.setattr(st, "send_control", lambda path, cmd, **kw: sent.append((cmd, kw)))
+    ctx = vp.Context(base=tmp_path, sock=tmp_path / "control.sock")
+    for bad in (None, 123, "invalid", "9" * 33):
+        vp.handle_command({"cmd": "interrupt_playback", "playback_id": bad}, ctx)
+    vp.handle_command({"cmd": "interrupt_playback", "playback_id": "123"}, ctx)
+    assert sent == [("pill_interrupt", {"message": "123"})]

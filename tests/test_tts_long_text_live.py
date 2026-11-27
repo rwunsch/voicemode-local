@@ -27,7 +27,7 @@ REPO = Path(__file__).resolve().parent.parent
 PATCHES = REPO / "patches"
 SOURCES = {
     "control_channel.py": "control_channel.py", "control_socket.py": "control_socket.py",
-    "core.py": "core.py", "simple_failover.py": "simple_failover.py", "streaming.py": "streaming.py",
+    "core.py": "core.py", "simple_failover.py": "simple_failover.py", "streaming.py": "streaming.py", "audio_player.py": "audio_player.py",
     "server.py": "server.py", "tools/converse.py": "converse.py", "conch_notify.py": "conch_notify.py",
     "conch_queue.py": "conch_queue.py", "conch.py": "conch.py", "config.py": "config.py",
     "tools/configuration_management.py": "configuration_management.py",

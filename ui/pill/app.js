@@ -4,6 +4,9 @@
 // {"window":{"drag":true}}. "hidden" is sent once on Dismiss; the wrapper then hides the window.
 (function () {
   var M = window.PillModel, $ = function (id) { return document.getElementById(id); };
+  var orbButton = $("orbAction"), card = $("card"), orbBubble = orbButton.querySelector(".orb-bubble");
+  var lastVisible = false, surfaceVisible = true, levelTimer = null, miniPointer = null;
+  var orbPalette = null, lastOrbOnly = null;
   var bargePending = null, bargeLastShown = null;
   var lastBargeCount = null, interruptedUntil = null;   // the Interrupted flash (model.js interruptFlash)
   var previewAnswer = null;   // the backend's last preview answer, stamped with when it came
@@ -40,13 +43,42 @@
 
   function render() {
     var vm = M.viewModel(snapshot, lastSeen, Date.now(), { interruptedUntil: interruptedUntil });
+    var orbEnabled = !!(snapshot && snapshot.orb);
     if (ui) { // local ui wins: it is what the user just chose, and the backend echoes it back
-      var mode = ui.minimized ? "dot" : ui.docked ? (ui.tucked ? "tab" : ui.dockOpen ? "docked" : "rail") : ui.expanded ? "expanded" : "pill";
+      var mode = M.presentation(ui, orbEnabled);
       vm.mode = mode; vm.side = mode === "docked" || mode === "rail" || mode === "tab" ? (ui.side || "right") : null;
     }
     document.body.dataset.mode = vm.mode;
     document.body.dataset.phase = vm.phase;
     document.body.dataset.tone = vm.indicator.tone;
+    document.body.dataset.orb = orbEnabled ? "animated" : "classic";
+    if (vm.indicator.tone === "speaking" || vm.indicator.tone === "listening") orbPalette = vm.indicator.tone;
+    else if (vm.phase !== "paused") orbPalette = null;
+    document.body.dataset.orbPalette = orbPalette || "";
+    document.body.dataset.conceal = String(orbEnabled && vm.mode === "pill" && vm.indicator.tone === "speaking");
+    document.body.dataset.orbMotion = String(orbEnabled && lastVisible && surfaceVisible && !hidden &&
+      vm.mode !== "dot" && vm.mode !== "tab" && (vm.indicator.tone === "speaking" || vm.indicator.tone === "listening"));
+    var interruptible = vm.phase === "speaking" && snapshot && snapshot.playback_id;
+    var orbText = vm.mode === "mini" ? "Restore voice controls" :
+      interruptible ? "Interrupt speech and listen" : "Toggle voice controls";
+    var orbState = [vm.indicator.who, vm.indicator.text].filter(Boolean).join(": ");
+    orbButton.setAttribute("aria-label", orbText + " — " + orbState);
+    orbButton.title = orbText;
+    orbButton.tabIndex = orbEnabled ? 0 : -1;
+    orbButton.setAttribute("aria-hidden", String(!orbEnabled));
+    $("tray").hidden = !orbEnabled;
+    $("keyboard").hidden = !orbEnabled;
+    $("tray").textContent = snapshot && snapshot.platform === "mac" ? "Minimize to menu bar" : "Minimize to system tray";
+    $("minimize").title = orbEnabled ? "Minimize to mini orb" : "Minimize";
+    $("minimize").setAttribute("aria-label", $("minimize").title);
+    if (levelTimer !== null) clearTimeout(levelTimer);
+    var level = orbEnabled && document.body.dataset.orbMotion === "true" ?
+      M.orbLevel(snapshot, vm.phase, lastSeen, Date.now()) : null;
+    orbBubble.style.setProperty("--level", level === null ? 0 : Math.min(1, Math.sqrt(level) * 1.8));
+    if (level !== null) levelTimer = setTimeout(function () {
+      orbBubble.style.setProperty("--level", 0);
+      levelTimer = null;
+    }, Math.max(0, 501 - (Date.now() - lastSeen)));
     $("orb").setAttribute("aria-label", [vm.indicator.who, vm.indicator.text].filter(Boolean).join(": "));
     $("label").textContent = vm.stateText;
     $("waiting").textContent = vm.waitingText;
@@ -122,19 +154,20 @@
     $("keys").replaceChildren.apply($("keys"), vm.keys.map(keysNode));
     if (vm.phase !== lastPhase) { lastPhase = vm.phase; send({ window: { phase: vm.phase } }); } // tray colour
     if (vm.mode !== lastMode) { lastMode = vm.mode; window.pillHover(-1, -1); send({ window: { mode: vm.mode, side: vm.side } }); }
+    updateOrbRegion();
   }
 
   window.pillReceive = function (json) {
     var s; try { s = JSON.parse(json); } catch (e) { return; }
     var kind = M.incomingKind(s);
     if (kind === "ignore") return;
-    if (kind === "restore") { saveUi({ minimized: false }); return; } // the tray icon was clicked
+    if (kind === "restore") { saveUi({ minimized: false, mini: false }); return; } // the tray icon was clicked
     if (kind === "dropped") { lastSeen = null; render(); return; }    // backend restarting: say so now
     if (kind === "preview") { previewAnswer = Object.assign({ at: Date.now() }, s.window); render(); return; }
     if (kind === "window") return;
     var wasStale = lastSeen === null || Date.now() - lastSeen > M.STALE_MS;
     var prevVisible = snapshot ? snapshot.visible : null;
-    snapshot = s; lastSeen = Date.now();
+    snapshot = s; lastSeen = Date.now(); lastVisible = s.visible === true;
     var count = s.barge && typeof s.barge.count === "number" ? s.barge.count : null;
     interruptedUntil = M.interruptFlash(wasStale ? null : lastBargeCount, count, lastSeen, interruptedUntil);
     lastBargeCount = count;
@@ -175,9 +208,53 @@
   };
   $("beeps").onclick = function () { send({ cmd: "set_beeps", on: !(snapshot && snapshot.beeps) }); };
   $("expand").onclick = function () { if (ui && ui.docked) { saveUi({ dockOpen: true }); return; } saveUi({ expanded: !(ui && ui.expanded) && !(ui && ui.docked), docked: false }); };
-  $("minimize").onclick = function () { saveUi({ minimized: true }); };
+  $("minimize").onclick = function () {
+    if (snapshot && snapshot.orb) saveUi({ mini: true });
+    else saveUi({ minimized: true });
+  };
+  $("tray").onclick = function () { saveUi({ minimized: true }); };
+  $("keyboard").onclick = function () { send({ window: { keyboard: true } }); };
+  window.pillFocusControls = function () {
+    card.dataset.keyboard = "true";
+    orbButton.focus();
+    updateOrbRegion();
+  };
+  window.addEventListener("blur", function () {
+    delete card.dataset.keyboard;
+    updateOrbRegion();
+  });
+  document.addEventListener("keydown", function (e) {
+    if (e.key === "Escape" && e.target.tagName !== "SELECT") {
+      delete card.dataset.keyboard;
+      document.activeElement.blur();
+      updateOrbRegion();
+      send({ window: { keyboard: false } });
+    }
+  });
+  orbButton.onpointerdown = function (e) {
+    miniPointer = null;
+    if (e.button === 0 && ui && ui.mini) {
+      miniPointer = [e.screenX, e.screenY];
+      send({ window: { drag: true } });
+    }
+  };
+  orbButton.onclick = function (e) {
+    if (!snapshot || !snapshot.orb) return;
+    if (ui && ui.mini) {
+      var moved = e.detail && miniPointer && Math.hypot(e.screenX - miniPointer[0], e.screenY - miniPointer[1]) > 4;
+      miniPointer = null;
+      if (!moved) saveUi({ mini: false });
+      return;
+    }
+    var vm = M.viewModel(snapshot, lastSeen, Date.now());
+    if (vm.phase === "speaking" && snapshot.playback_id) {
+      send({ cmd: "interrupt_playback", playback_id: snapshot.playback_id });
+      return;
+    }
+    $("expand").click();
+  };
   $("dock").onclick = $("dockTop").onclick = function () { var d = !(ui && ui.docked); saveUi({ docked: d, expanded: false, tucked: false, dockOpen: false, side: (ui && ui.side) || "right" }); };
-  $("drag").onmousedown = $("label").onmousedown = function (e) { if (e.button === 0) send({ window: { drag: true } }); };
+  $("drag").onmousedown = $("label").onmousedown = function (e) { if (e.button === 0 && !(snapshot && snapshot.orb && e.target.closest(".orb-action"))) send({ window: { drag: true } }); };
   // The wrapper moves the window off the edge; the page swaps to the tab once it has gone.
   $("tuck").onclick = function () {
     if (ui && ui.dockOpen) { saveUi({ dockOpen: false }); return; } // full panel: back to the rail
@@ -186,16 +263,41 @@
   // The wrapper runs the resize loop, as it does for a drag.
   $("edgeL").onmousedown = function (e) { if (e.button === 0) { e.preventDefault(); send({ window: { resize: "left" } }); } };
   $("edgeR").onmousedown = function (e) { if (e.button === 0) { e.preventDefault(); send({ window: { resize: "right" } }); } };
+  function updateOrbRegion() {
+    // In Windows the native window is opaque. Clip it to the orb until controls appear.
+    if (!document.documentElement.classList.contains("windows")) return;
+    var only = document.body.dataset.conceal === "true" && !card.classList.contains("pointer-in") &&
+      card.dataset.keyboard !== "true" && !card.querySelector(":focus-visible");
+    if (only === lastOrbOnly) return;
+    lastOrbOnly = only;
+    var rect = orbButton.getBoundingClientRect();
+    send({ window: { orbRegion: only ? [Math.round(rect.x) - 3, Math.round(rect.y) - 3,
+      Math.round(rect.width) + 6, Math.round(rect.height) + 6] : null } });
+  }
+
   // Mac: WebKit gives a panel that never takes focus no hover, so the wrapper reports the pointer.
   var hovered = null;
   window.pillHover = function (x, y) {
     var el = x < 0 ? null : document.elementFromPoint(x, y);
+    card.classList.toggle("pointer-in", !!(el && (el.closest(".orb-action") ||
+      (card.classList.contains("pointer-in") && card.contains(el)))));
     el = el && el.closest(".btn,.tab,.edge");
     if (el === hovered) return;
     if (hovered) hovered.classList.remove("hover");
     if (el) el.classList.add("hover");
     hovered = el;
   };
+  card.addEventListener("pointerover", function (e) {
+    if (e.target.closest(".orb-action")) { card.classList.add("pointer-in"); updateOrbRegion(); }
+  });
+  card.addEventListener("pointerleave", function () { card.classList.remove("pointer-in"); updateOrbRegion(); });
+  card.addEventListener("focusin", updateOrbRegion);
+  card.addEventListener("focusout", function () { setTimeout(updateOrbRegion, 0); });
+  window.pillSurfaceVisible = function (visible) { surfaceVisible = visible; render(); };
+  document.addEventListener("visibilitychange", function () {
+    surfaceVisible = !document.hidden;
+    render();
+  });
   setInterval(render, 1000);
   render();
 })();
