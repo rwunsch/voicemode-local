@@ -358,12 +358,51 @@ def make_hover_tracker(app):
     return PillHoverTracker.alloc().init()
 
 
+# The menu bar ball's menu (Robert 2026-11-27): the pill's close button only shrinks it to the
+# menu bar, so quitting lives here. Quit = the old close: hidden until the next voice session.
+TRAY_MENU = (("Show pill", "restore"), ("Quit pill (until the next voice session)", "quit"))
+RIGHT_MOUSE_UP = 4            # NSEventTypeRightMouseUp
+CONTROL_FLAG = 1 << 18        # NSEventModifierFlagControl
+LEFT_UP_MASK, RIGHT_UP_MASK = 1 << 2, 1 << 4   # NSEventMaskLeftMouseUp, NSEventMaskRightMouseUp
+
+
+def tray_click_is_menu(event_type, modifier_flags) -> bool:
+    """A right-click or a Control-click opens the menu; any other click restores the pill."""
+    return event_type == RIGHT_MOUSE_UP or bool(int(modifier_flags or 0) & CONTROL_FLAG)
+
+
+def page_command(cmd: str) -> str:
+    """The script that hands the page one wrapper command (restore, quit)."""
+    return "window.pillReceive(%s)" % json.dumps(json.dumps({"cmd": cmd}))
+
+
 def make_tray_target(app):
     from Foundation import NSObject
 
     class PillTrayTarget(NSObject):
         def clicked_(self, sender):
-            app.webview().evaluateJavaScript_completionHandler_("""window.pillReceive('{"cmd":"restore"}')""", None)
+            from AppKit import NSApp
+            event = NSApp.currentEvent()
+            if event is not None and tray_click_is_menu(event.type(), event.modifierFlags()):
+                self.showMenu()
+                return
+            self.post_("restore")
+
+        def post_(self, cmd):
+            app.webview().evaluateJavaScript_completionHandler_(page_command(cmd), None)
+
+        def showMenu(self):
+            from AppKit import NSMenu, NSMenuItem
+            menu = NSMenu.alloc().init()
+            for title, cmd in TRAY_MENU:
+                item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(title, "menuChose:", "")
+                item.setTarget_(self)
+                item.setRepresentedObject_(cmd)
+                menu.addItem_(item)
+            app.tray.popUpStatusItemMenu_(menu)
+
+        def menuChose_(self, item):
+            self.post_(str(item.representedObject()))
     return PillTrayTarget.alloc().init()
 
 
@@ -694,6 +733,7 @@ class App:
             self.tray_target = make_tray_target(self)
             self.tray.button().setTarget_(self.tray_target)
             self.tray.button().setAction_("clicked:")
+            self.tray.button().sendActionOn_(LEFT_UP_MASK | RIGHT_UP_MASK)  # right-click: the menu
         if not self.tray:
             return
         r, g, b = tray_rgb(self.state.phase)

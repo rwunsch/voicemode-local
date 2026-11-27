@@ -37,7 +37,12 @@
   // no native tooltip (title).
   var HINTS = { pause: "Pause: hold voice; the mic closes and the reply waits",
     resume: "Resume: continue the voice turn", done: "Done: send what you said now",
-    voiceoff: "Voice off: continue in text", resumevoice: "Resume voice: listen to you again" };
+    voiceoff: "Voice off: continue in text", resumevoice: "Resume voice: listen to you again",
+    pausemic: "Pause mic: close the mic and discard what was said; voice stays on" };
+  function closeHint(platform) {
+    return platform === "mac" ? "Close to the menu bar; Quit is in its menu (right-click)"
+      : "Close to the tray; Quit is in its menu (right-click)";
+  }
   var LABELS = { speaking: "Speaking", listening: "Listening", holding: "Holding\u2026", working: "Between turns",
     idle: "Not in a voice turn", paused: "Paused",
     stopped: "Voice off", disconnected: "Disconnected", not_responding: "Not responding" };
@@ -101,7 +106,8 @@
     if (!connected) {
       // Never show the last known state: a stale "Listening" is worse than none.
       return { connected: false, phase: "disconnected", label: LABELS.disconnected, mode: "pill", side: null,
-        primary: HIDDEN, end: button("voiceoff", "stop", "Voice off", STOP, false), stop: off,
+        primary: HIDDEN, end: button("voiceoff", "stop", "Voice off", STOP, false), mic: HIDDEN, stop: off,
+        close: { action: "minimize", hint: closeHint(snapshot && snapshot.platform) },
         indicator: indicatorFor("disconnected", "", false),
         inTurn: false, pickersEnabled: false, minimizeEnabled: true, dismissEnabled: true, queue: [], queueMore: "", voice: null, language: null, keys: [], session: "", stateText: LABELS.disconnected, waitingText: "",
         barge: { visible: false, on: false, enabled: false, countText: "" }, beeps: { on: false }, voices: VOICES, languages: LANGUAGES,
@@ -157,6 +163,10 @@
       side: mode === "docked" || mode === "rail" || mode === "tab" ? (ui.side === "left" ? "left" : "right") : null,
       primary: primary,
       end: end,
+      // Panel only (Robert 2026-11-27): while you talk, Pause is the mute for an interruption.
+      mic: phase === "listening" ? button("pausemic", "pause", "Pause mic", PAUSE, floorOn) : HIDDEN,
+      // The close button shrinks to the tray / menu bar; Quit is in that icon's menu.
+      close: { action: "minimize", hint: closeHint(s.platform) },
       indicator: indicatorFor(phase, name, interrupted),
       stop: { enabled: floorOn && phase !== "stopped" },
       pickersEnabled: !!s.floor, minimizeEnabled: true, dismissEnabled: true,
@@ -243,6 +253,7 @@
   function incomingKind(s) {
     if (!s || typeof s !== "object") return "ignore";
     if (s.cmd === "restore") return "restore";
+    if (s.cmd === "quit") return "quit";   // "Quit pill" in the tray / menu bar icon's menu
     if (s.window && typeof s.window === "object") {
       if ("dropped" in s.window) return "dropped";
       return "preview" in s.window ? "preview" : "window";

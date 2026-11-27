@@ -817,3 +817,28 @@ def test_a_page_log_line_is_kept_short(monkeypatch):
     app.log = lines.append
     app.from_page(json.dumps({"window": {"log": "x" * 1000}}))
     assert len(lines) == 1 and len(lines[0]) <= 220
+
+
+# Robert 2026-11-27: the close button shrinks the pill to the menu bar; Quit is in the ball's
+# menu (right-click or Control-click). A plain click still restores.
+def test_tray_click_kind():
+    assert m.tray_click_is_menu(m.RIGHT_MOUSE_UP, 0) is True
+    assert m.tray_click_is_menu(2, m.CONTROL_FLAG) is True      # Control + left mouse up
+    assert m.tray_click_is_menu(2, 0) is False                  # NSEventTypeLeftMouseUp
+    assert m.tray_click_is_menu(2, None) is False
+
+
+def test_tray_menu_offers_show_and_quit():
+    assert [cmd for _, cmd in m.TRAY_MENU] == ["restore", "quit"]
+    assert "Quit pill" in m.TRAY_MENU[1][0]
+
+
+def test_page_command_is_a_quoted_json_string():
+    js = m.page_command("quit")
+    assert js == 'window.pillReceive("{\\"cmd\\": \\"quit\\"}")'
+
+
+def test_the_ball_sends_its_action_on_right_clicks_too():
+    src = (REPO / "patches/voice_pill_mac.py").read_text()
+    assert "sendActionOn_(LEFT_UP_MASK | RIGHT_UP_MASK)" in src
+    assert "popUpStatusItemMenu_(menu)" in src

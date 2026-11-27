@@ -39,6 +39,10 @@
   }
 
   var changedAt = {}, shownKind = {}, hovered = null;
+  function setPanelOnly(el, b) {
+    el.hidden = !b.visible; el.disabled = !b.enabled;
+    el.dataset.hint = b.hint || ""; el.title = b.hint || ""; el.setAttribute("aria-label", b.hint || b.text || "");
+  }
   function setSpot(icon, ctl, ctlIcon, ctlText, b) {
     var which = icon.id === "main" ? "primary" : "end";
     if (shownKind[which] !== b.kind) { shownKind[which] = b.kind; changedAt[which] = Date.now(); }
@@ -94,6 +98,9 @@
     // #pause and #ctlMain the right one.
     setSpot($("main"), $("ctlPause"), $("ctlPauseIcon"), $("ctlPauseText"), vm.primary);
     setSpot($("pause"), $("ctlMain"), $("ctlMainIcon"), $("ctlMainText"), vm.end);
+    setPanelOnly($("ctlMic"), vm.mic);   // Pause mic while listening, panel only
+    $("dismiss").dataset.hint = vm.close.hint; $("dismiss").title = vm.close.hint;
+    $("dismiss").setAttribute("aria-label", vm.close.hint);
     $("expand").setAttribute("aria-expanded", String(vm.mode === "expanded" || vm.mode === "docked"));
     $("dock").textContent = vm.mode === "docked" ? "Undock" : "Dock";
     $("tuck").textContent = vm.side === "left" ? "\u2039" : "\u203A";
@@ -142,6 +149,7 @@
     var kind = M.incomingKind(s);
     if (kind === "ignore") return;
     if (kind === "restore") { saveUi({ minimized: false }); return; } // the tray icon was clicked
+    if (kind === "quit") { quitPill(); return; }                       // "Quit pill" in the tray menu
     if (kind === "dropped") { lastSeen = null; render(); return; }    // backend restarting: say so now
     if (kind === "preview") { previewAnswer = Object.assign({ at: Date.now() }, s.window); render(); return; }
     if (kind === "window") return;
@@ -171,7 +179,11 @@
   }
   $("main").onclick = press("primary"); $("ctlPause").onclick = press("primary");
   $("pause").onclick = press("end"); $("ctlMain").onclick = press("end");
-  $("dismiss").onclick = function () { send({ cmd: "dismiss" }); hidden = true; send({ window: { mode: "hidden" } }); render(); };
+  $("ctlMic").onclick = press("mic");
+  // Close shrinks to the tray / menu bar (Robert 2026-11-27); quitting the pill is in that
+  // icon's menu, whose wrapper sends {"cmd":"quit"}: until the next voice session, as before.
+  function quitPill() { send({ cmd: "dismiss" }); hidden = true; send({ window: { mode: "hidden" } }); render(); }
+  $("dismiss").onclick = function () { saveUi({ minimized: true }); };
   // Hear the voice shown in the list; one at a time (the button waits for the answer).
   $("preview").onclick = function () {
     if (!$("voice").value) return;

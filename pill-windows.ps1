@@ -605,6 +605,13 @@ document.addEventListener('DOMContentLoaded',function(){
                 if (e.Button == System.Windows.Forms.MouseButtons.Left)
                     ctl.CoreWebView2.PostWebMessageAsString("{\"cmd\":\"restore\"}");
             };
+            // Right-click (Robert 2026-11-27): the pill's close button only shrinks it here, so
+            // quitting lives in this menu. Quit = the old close: hidden until the next voice session.
+            var menu = new System.Windows.Forms.ContextMenuStrip();
+            menu.Items.Add("Show pill", null, (s, e) => ctl.CoreWebView2.PostWebMessageAsString("{\"cmd\":\"restore\"}"));
+            menu.Items.Add("Quit pill (until the next voice session)", null,
+                (s, e) => ctl.CoreWebView2.PostWebMessageAsString("{\"cmd\":\"quit\"}"));
+            tray.ContextMenuStrip = menu;
         }
         if (tray == null) return;
         tray.Icon = TrayIcon();

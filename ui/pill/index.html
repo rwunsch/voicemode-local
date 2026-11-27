@@ -20,12 +20,13 @@
     <button id="expand" class="btn icon" title="Expand" aria-label="Expand" aria-expanded="false">&#x2304;</button>
     <button id="dockTop" class="btn icon" title="Dock to the side" aria-label="Dock to the side">&#x203A;</button>
     <button id="minimize" class="btn icon" title="Minimize" aria-label="Minimize">_</button>
-    <button id="dismiss" class="btn icon" title="Hide until the next voice session" aria-label="Hide until the next voice session">&#x2715;</button>
+    <button id="dismiss" class="btn icon" title="Close to the tray; Quit is in its menu (right-click)" aria-label="Close to the tray; Quit is in its menu (right-click)">&#x2715;</button>
     <button id="tuck" class="btn icon tuck" title="Slide out of view" aria-label="Slide out of view">&#x203A;</button>
   </div>
   <section id="more" class="more">
     <div id="controls" class="row controls" role="group" aria-label="Voice controls">
       <button id="ctlPause" class="btn ctl" data-kind="pause" aria-label="Pause: hold voice; the mic closes and the reply waits" aria-pressed="false"><span id="ctlPauseIcon" class="ic" aria-hidden="true">&#x23F8;&#xFE0E;</span><span id="ctlPauseText">Pause</span></button>
+      <button id="ctlMic" class="btn ctl" data-kind="pausemic" hidden><span id="ctlMicIcon" class="ic" aria-hidden="true">&#x23F8;&#xFE0E;</span><span id="ctlMicText">Pause mic</span></button>
       <button id="ctlMain" class="btn ctl" data-kind="voiceoff" aria-label="Voice off: continue in text"><span id="ctlMainIcon" class="ic" aria-hidden="true">&#x25A0;&#xFE0E;</span><span id="ctlMainText">Voice off</span></button>
     </div>
     <div class="row">

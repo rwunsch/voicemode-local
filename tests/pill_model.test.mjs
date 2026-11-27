@@ -273,6 +273,7 @@ test("no push-to-talk keys when the backend says no listener runs", () => {
 test("incoming messages are told apart: restore, dropped, other window message, snapshot", () => {
   const { incomingKind } = model;
   assert.equal(incomingKind({ cmd: "restore" }), "restore");
+  assert.equal(incomingKind({ cmd: "quit" }), "quit");
   assert.equal(incomingKind({ window: { dropped: "stop" } }), "dropped");
   assert.equal(incomingKind({ window: { dropped: "" } }), "dropped");
   assert.equal(incomingKind({ window: { mode: "pill" } }), "window");
@@ -610,4 +611,27 @@ test("keyboard hint says voice off, not stop", () => {
   }
   const mac = viewModel(snap({ platform: "mac" }), 0, 0).keys;
   assert.equal(mac[1].text, "voice off");
+});
+
+// Robert 2026-11-27 (1a): Pause stays reachable while you talk, in the panel only: it closes
+// the mic and throws away what was said (a phone call, someone walking in), voice stays on.
+test("listening: the panel offers Pause mic; other phases do not", () => {
+  const m = viewModel(snap({ phase: "listening" }), 0, 0).mic;
+  assert.deepEqual([m.visible, m.cmd, m.text, m.enabled], [true, "pause", "Pause mic", true]);
+  assert.match(m.hint, /discard|throw/i);
+  for (const phase of ["speaking", "paused", "working", "stopped"]) {
+    assert.equal(viewModel(snap({ phase }), 0, 0).mic.visible, false, phase);
+  }
+  assert.equal(viewModel(null, null, 5).mic.visible, false);
+});
+
+// Robert 2026-11-27 (1b): the close button shrinks the pill to the tray / menu bar while a
+// session lives; quitting the pill is in that icon's menu (wrapper sends {"cmd":"quit"}).
+test("close shrinks to the tray; its hint says where Quit is", () => {
+  for (const platform of ["windows", "mac"]) {
+    const c = viewModel(snap({ platform }), 0, 0).close;
+    assert.equal(c.action, "minimize", platform);
+    assert.match(c.hint, platform === "mac" ? /menu bar/ : /tray/, platform);
+    assert.match(c.hint, /Quit/);
+  }
 });

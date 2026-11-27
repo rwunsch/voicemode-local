@@ -279,3 +279,13 @@ def test_autostart_keeps_wsl_arguments(win_dir):
     got.pop("script")
     assert got == {"Distro": "Ubuntu-22.04", "Repo": "/home/me/my repo", "BackendCommand": command,
                    "DataDir": winpath(data)}
+
+
+# Robert 2026-11-27: the pill's close button shrinks it to the tray; Quit is in the tray
+# icon's right-click menu and tells the page {"cmd":"quit"} (the old close).
+def test_the_tray_icon_has_show_and_quit_in_its_menu():
+    src = (REPO / "pill-windows.ps1").read_text(encoding="utf-8")
+    assert "tray.ContextMenuStrip = menu;" in src
+    assert 'menu.Items.Add("Show pill"' in src and '{\\"cmd\\":\\"restore\\"}' in src
+    assert 'menu.Items.Add("Quit pill (until the next voice session)"' in src
+    assert '{\\"cmd\\":\\"quit\\"}' in src

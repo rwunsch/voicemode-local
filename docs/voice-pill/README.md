@@ -176,8 +176,16 @@ run: a native converse turn through Claude Code, and macOS.
   that never takes focus shows no native tooltip and a tooltip would be cut off by the small
   window: the Mac wrapper reports the pointer (`pillHover`), elsewhere `mouseover` does; the
   `title` stays for Windows and Linux. The push-to-talk hint reads "tap: voice off, hold: talk".
-  Not built (open, need Robert): Pause mic while listening; close shrinking to the dot while a
-  session lives.
+  **Pause mic** (Robert 2026-11-27): while listening the expanded panel adds a third button
+  between Done and Voice off (compact stays at two): it sends `pause`, which closes the mic and
+  discards what was said, voice stays on (a phone call, someone walking in).
+  **Close shrinks, Quit is in the menu** (Robert 2026-11-27, Stefan's "discoverable resume
+  path"): the ✕ now minimizes to the tray (Windows) or menu bar (Mac), like `_`. Right-click
+  on that icon (or Control-click on a Mac) opens a menu: "Show pill" (`{"cmd":"restore"}`) and
+  "Quit pill (until the next voice session)" (`{"cmd":"quit"}`, which the page turns into the
+  old close: `dismiss` + hidden). Windows: a `ContextMenuStrip` on the `NotifyIcon`, compiled
+  and started on real Windows, the menu itself not yet clicked by a person. Mac: the status
+  item sends its action on right mouse up too and pops an `NSMenu`; **not yet run on a Mac**.
 
 - **Wake and the button layout, before v1.2.26** (2026-11-07, Robert's decision: a play and a
   stop button together make no sense, and Skip is dropped). The pill has one main button in
