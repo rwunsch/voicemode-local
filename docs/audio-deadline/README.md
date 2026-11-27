@@ -72,6 +72,17 @@ a host may not keep stderr, so every dump also goes to a file of its own:
 - After an exit the conch is released by the kernel flock and the dead holder is skipped
   (read in `conch.py`, not run live).
 
+## Measured: the device refresh is not "~1ms" here
+- 2026-11-27 22:55Z, live, n=1: `Pa_Initialize()` in the device refresh did not return within
+  10 s at load average 24, while the Windows native setup installed 115 packages. The loop was
+  fine (`loop_lag_s` 0.3). The server exited as designed (stall-20261127T225508Z.txt). Whether
+  it would have returned later is unknown.
+- 2026-11-28 00:03 CET, `sd._terminate(); sd._initialize()` in a separate process at nice 19,
+  load 6.9-7.0, WSLg: n=50, median 699 ms, p95 911 ms, max 2070 ms. Upstream's comment says
+  "~1ms". So at load 7 the 10 s deadline has about 5x headroom over the worst run; at load 24 it
+  had none. Not measured: the distribution under load 15-25 (needs a deliberate load, and
+  Robert's CPU is often busy). Hypothesis only: host CPU load starves the WSL audio bridge.
+
 ## Not covered (known gap)
 - **Streaming TTS playback** (`voice_mode/streaming.py`): `stream.start()`, `stream.write()`
   and `stream.stop()` run on the event loop with no per-call deadline; this patch does not touch
