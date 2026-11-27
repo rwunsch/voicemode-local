@@ -72,5 +72,14 @@ a host may not keep stderr, so every dump also goes to a file of its own:
 - After an exit the conch is released by the kernel flock and the dead holder is skipped
   (read in `conch.py`, not run live).
 
+## Not covered (known gap)
+- **Streaming TTS playback** (`voice_mode/streaming.py`): `stream.start()`, `stream.write()`
+  and `stream.stop()` run on the event loop with no per-call deadline; this patch does not touch
+  that file. A device that hangs there is caught only by the loop watchdog (stall file, exit
+  after `VOICEMODE_LOOP_STALL_EXIT_S`, default 90 s), and the pill shows "Not responding" after
+  10 s. Buffered playback (streaming off) goes through `audio_deadline.play`. FELIX runs
+  streaming off whenever barge-in may listen (FELIX-voice, 2026-11-27, read not measured here).
+  Named by FELIX-voice on rereading; left for a later release.
+
 ## Behaviour changes
 - behaviour change: a stuck audio call or event loop ends the voice server (exit 75), old behaviour via `VOICEMODE_AUDIO_DEADLINE_S=0` and `VOICEMODE_LOOP_STALL_EXIT_S=0`
