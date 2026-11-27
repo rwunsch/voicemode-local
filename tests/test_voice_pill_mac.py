@@ -531,7 +531,8 @@ def test_slide_in_checks_for_a_newer_slide_before_its_jump_and_lands_exactly():
 
 def test_top_row_order_is_expand_dock_minimize():
     page = (REPO / "ui/pill/index.html").read_text()
-    assert page.index('id="expand"') < page.index('id="dockTop"') < page.index('id="minimize"') < page.index('id="dismiss"') < page.index('id="more"')
+    assert page.index('id="expand"') < page.index('id="dockTop"') < page.index('id="minimize"') < page.index('id="more"')
+    assert 'id="dismiss"' not in page  # one window button: _ minimizes to the tray / menu bar
     assert '$("dockTop").onclick' in (REPO / "ui/pill/app.js").read_text()
     css = (REPO / "ui/pill/pill.css").read_text()
     assert "[data-mode=docked] #dockTop" in css and "[data-mode=rail] #dockTop" in css
@@ -544,7 +545,8 @@ def test_narrowest_width_still_shows_the_status_text():
 # From the first real two-session run, 2026-11-05
 def test_stop_is_only_red_on_hover():
     css = (REPO / "ui/pill/pill.css").read_text()
-    assert ".stop{" not in css and ".stop:hover" in css
+    # 2026-11-27: Stop is now "Voice off", styled by data-kind (FELIX #2094)
+    assert "[data-kind=voiceoff]{" not in css and "[data-kind=voiceoff]:hover" in css
 
 
 def test_pickers_let_go_after_a_choice_and_when_the_floor_moves():
@@ -656,10 +658,13 @@ def test_tracking_area_works_while_the_app_is_inactive():
 
 def test_page_has_a_hover_class_for_every_hover_rule():
     css = (REPO / "ui/pill/pill.css").read_text()
-    assert ".btn.hover:not(:disabled)" in css and ".stop.hover:not(:disabled)" in css and ".tab.hover" in css
+    assert ".btn.hover:not(:disabled)" in css and "[data-kind=voiceoff].hover:not(:disabled)" in css and ".tab.hover" in css
+    assert "[data-kind=done].hover:not(:disabled)" in css and "[data-kind=wake].hover:not(:disabled)" in css
     assert ".edge.hover::after" in css and ".edge:hover::after" in css
     js = (REPO / "ui/pill/app.js").read_text()
     assert "window.pillHover" in js and 'closest(".btn,.tab,.edge")' in js
+    # the hovered button's hint is shown in the status line (no native tooltip on a Mac panel)
+    assert "hoverHint() || vm.stateText" in js
 
 
 def test_resize_logs_what_it_did():
@@ -813,3 +818,39 @@ def test_a_page_log_line_is_kept_short(monkeypatch):
     app.log = lines.append
     app.from_page(json.dumps({"window": {"log": "x" * 1000}}))
     assert len(lines) == 1 and len(lines[0]) <= 220
+
+
+# Robert 2026-11-27: _ shrinks the pill to the menu bar; Quit is in the ball's menu. On the Mac a
+# right-click on the ball gave no menu (Robert, first try), so ANY click opens the menu, the Mac
+# convention, and AppKit handles it: statusItem.setMenu_, no click target of our own.
+def test_any_click_on_the_ball_opens_its_menu():
+    src = (REPO / "patches/voice_pill_mac.py").read_text()
+    assert "self.tray.setMenu_(make_tray_menu(self))" in src
+    # FELIX-MAC: the first build logged nothing at the click, so a failure could not be placed
+    assert 'app.log("tray: menu opened")' in src and "menu.setDelegate_(app.tray_target)" in src
+    assert 'app.log(f"tray: menu chose {cmd}")' in src
+    for gone in ("tray_click_is_menu", "sendActionOn_", "popUpStatusItemMenu_", "setAction_(\"clicked:\")"):
+        assert gone not in src, gone
+
+
+def test_tray_menu_offers_show_and_quit():
+    assert [cmd for _, cmd in m.TRAY_MENU] == ["restore", "quit"]
+    assert m.TRAY_MENU[1][0] == "Quit pill (say 'show the pill' to get it back)"
+
+
+def test_page_command_is_a_quoted_json_string():
+    js = m.page_command("quit")
+    assert js == 'window.pillReceive("{\\"cmd\\": \\"quit\\"}")'
+
+
+def test_menu_bar_icon_hover_says_where_quit_is():
+    # Robert 2026-11-27: minimized, the hover must say that Quit is in the menu.
+    tip = m.tray_tip("Listening")
+    assert tip.startswith("Voice pill: Listening")
+    assert "Quit" in tip and "click" in tip.lower() and "right-click" not in tip.lower()
+    assert m.tray_tip("") == "Voice pill. Click: Show pill or Quit"
+
+
+def test_menu_bar_icon_sets_the_tooltip():
+    src = (PATCHES / "voice_pill_mac.py").read_text()
+    assert "self.tray.button().setToolTip_(tray_tip(" in src

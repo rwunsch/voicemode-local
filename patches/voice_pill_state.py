@@ -458,7 +458,45 @@ def live_sessions(base=None) -> list[dict]:
 # -- stop flag --------------------------------------------------------------
 
 def request_stop(pid: int, base=None) -> None:
-    (_sub(base, "stop") / str(int(pid))).touch()
+    """The time pressed is written in the file: enter() drops a stop from before its turn
+    began (FELIX #2094: a Stop between turns cancelled the next turn, hours later)."""
+    _write_atomic(_sub(base, "stop") / str(int(pid)), repr(time.time()))
+
+
+def stop_time(pid: int, base=None):
+    """When the stop for pid was pressed, or None if there is none. An old empty file
+    (written before the time was) falls back to its mtime."""
+    path = _sub(base, "stop") / str(int(pid))
+    try:
+        raw = _read_policy(path).decode("utf-8", "replace").strip()
+        return float(raw) if raw else path.stat().st_mtime
+    except (OSError, ValueError):
+        try:
+            return path.stat().st_mtime
+        except OSError:
+            return None
+
+
+STOP_WINDOW_SETTING = "VOICEMODE_PILL_STOP_WINDOW_S"
+STOP_WINDOW_DEFAULT = 30.0
+
+
+def stop_window(home=None) -> float:
+    """Seconds before a turn in which a pill Stop still ends it (0 = only a Stop pressed
+    during the turn). 30 s covers the 3-20 s the assistant takes to write its next reply
+    in a voice loop; a Stop older than that was for something that has ended."""
+    try:
+        v = float(setting(STOP_WINDOW_SETTING, "", home) or "x")
+    except (TypeError, ValueError):
+        return STOP_WINDOW_DEFAULT
+    return v if math.isfinite(v) and v >= 0 else STOP_WINDOW_DEFAULT
+
+
+def drop_stale_stop(pid: int, since: float, base=None) -> bool:
+    """Consume a stop pressed more than stop_window() before `since` (the start of this
+    turn). True if one was dropped."""
+    t = stop_time(pid, base)
+    return t is not None and t < since - stop_window() and take_stop(pid, base)
 
 
 def stop_requested(pid: int, base=None) -> bool:
@@ -763,7 +801,8 @@ def result_note(pid: int, base=None, already: str = "") -> str:
 # -- entering a voice turn --------------------------------------------------
 
 STOPPED_MESSAGE = ("Voice was stopped from the pill. "
-                   "Continue in text unless the user asks for voice again.")
+                   "Continue in text unless the user asks for voice again; "
+                   "then call converse again, which resumes voice.")
 
 
 # -- closed marker: the user's close sticks until voice restarts from scratch --
@@ -808,6 +847,7 @@ async def enter(pid: int, label: str, voice: str | None, base=None) -> str | Non
 
     Returns a message for the agent if this session was stopped, else None.
     """
+    began = time.time()
     voice = effective_voice(pid, voice, base)
     current = _read_json(_session_path(pid, base))
     if not current or current.get("start") != process_start(pid):
@@ -827,6 +867,8 @@ async def enter(pid: int, label: str, voice: str | None, base=None) -> str | Non
             except Exception as e:
                 _warn_once(f"voice pill autostart failed: {e}")
         threading.Thread(target=_start_pill, name="voice-pill-autostart", daemon=True).start()
+    # A Stop pressed well before this turn began was for something that has ended: drop it.
+    drop_stale_stop(pid, began, base)
     # A Stop from the pill must end the wait: it does not lift the pause.
     await wait_while_paused(until=lambda: stop_requested(pid, base), base=base)
     if take_stop(pid, base):

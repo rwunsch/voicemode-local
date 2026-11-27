@@ -763,3 +763,77 @@ def test_records_with_an_unknown_start_still_go_when_their_process_does(base, mo
     monkeypatch.undo()
     assert st.live_sessions(base=base) == []
     assert st.is_paused(base=base) is False
+
+
+# FELIX #2094 (2026-11-27): a Stop pressed between turns, with no turn running, left
+# stop/<pid> behind with no expiry, and the NEXT converse returned "stopped" in 122 ms.
+# A Stop ends what is running or waiting, and the next turn only if that begins within
+# VOICEMODE_PILL_STOP_WINDOW_S (default 30, Robert 2026-11-27): a Stop pressed while the
+# assistant writes its reply (3-20 s) still ends the loop.
+def test_an_old_empty_stop_file_from_before_the_upgrade_does_not_cancel_it(base, monkeypatch):
+    # Written by v1.2.25 or older: empty, so its age is its mtime.
+    monkeypatch.setattr(st, "autostart_hook", lambda b: None)
+    pid = os.getpid()
+    (base / "stop").mkdir(parents=True)
+    (base / "stop" / str(pid)).touch()
+    old = time.time() - 3600
+    os.utime(base / "stop" / str(pid), (old, old))
+    assert asyncio_run(st.enter(pid, "demo", None, base=base)) is None
+    assert not (base / "stop" / str(pid)).exists()  # dropped, not kept for a later turn
+    assert asyncio_run(st.enter(pid, "demo", None, base=base)) is None
+
+
+def test_a_stale_stop_is_judged_by_the_time_written_in_it(base, monkeypatch):
+    # The pressed time is in the file: a copied or touched file does not revive it.
+    monkeypatch.setattr(st, "autostart_hook", lambda b: None)
+    pid = os.getpid()
+    real = time.time
+    monkeypatch.setattr(st.time, "time", lambda: real() - 3600)
+    st.request_stop(pid, base=base)
+    monkeypatch.setattr(st.time, "time", real)
+    assert asyncio_run(st.enter(pid, "demo", None, base=base)) is None
+
+
+def test_a_stop_pressed_during_the_turn_still_ends_it(base, monkeypatch):
+    import asyncio
+    monkeypatch.setattr(st, "autostart_hook", lambda b: None)
+    st.set_paused(True, os.getpid(), base=base)
+
+    async def scenario():
+        task = asyncio.ensure_future(st.enter(os.getpid(), "demo", None, base=base))
+        await asyncio.sleep(0.2)
+        st.request_stop(os.getpid(), base=base)
+        return await asyncio.wait_for(task, timeout=1.0)
+
+    assert asyncio.run(scenario()) == st.STOPPED_MESSAGE
+
+
+def test_the_stopped_message_says_how_to_resume():
+    assert "converse" in st.STOPPED_MESSAGE and "again" in st.STOPPED_MESSAGE
+
+
+def test_a_stop_pressed_just_before_the_turn_still_ends_it(base, monkeypatch):
+    monkeypatch.setattr(st, "autostart_hook", lambda b: None)
+    pid = os.getpid()
+    real = time.time
+    monkeypatch.setattr(st.time, "time", lambda: real() - 10)  # pressed 10 s ago
+    st.request_stop(pid, base=base)
+    monkeypatch.setattr(st.time, "time", real)
+    assert asyncio_run(st.enter(pid, "demo", None, base=base)) == st.STOPPED_MESSAGE
+
+
+def test_the_stop_window_is_a_setting(base, monkeypatch):
+    monkeypatch.setattr(st, "autostart_hook", lambda b: None)
+    pid = os.getpid()
+    real = time.time
+    monkeypatch.setattr(st.time, "time", lambda: real() - 10)
+    st.request_stop(pid, base=base)
+    monkeypatch.setattr(st.time, "time", real)
+    monkeypatch.setenv("VOICEMODE_PILL_STOP_WINDOW_S", "5")
+    assert asyncio_run(st.enter(pid, "demo", None, base=base)) is None
+
+
+@pytest.mark.parametrize("raw", ["", "abc", "-3", "nan", "inf"])
+def test_a_bad_stop_window_falls_back_to_30(monkeypatch, raw):
+    monkeypatch.setenv("VOICEMODE_PILL_STOP_WINDOW_S", raw)
+    assert st.stop_window() == 30.0

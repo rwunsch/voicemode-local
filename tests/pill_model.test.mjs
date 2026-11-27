@@ -13,12 +13,13 @@ test("disconnected after 3s with no snapshot", () => {
   const vm = viewModel(snap(), 1000, 4001);
   assert.equal(vm.connected, false);
   assert.equal(vm.label, "Disconnected");
-  assert.equal(vm.main.enabled, false);
-  assert.equal(vm.pause.enabled, false);
+  assert.equal(vm.primary.visible, false);
+  assert.equal(vm.end.enabled, false);
   assert.equal(vm.stop.enabled, false);
   assert.equal(vm.pickersEnabled, false);
   assert.equal(vm.barge.enabled, false);
-  assert.deepEqual([vm.minimizeEnabled, vm.dismissEnabled], [true, true]);
+  assert.equal(vm.minimizeEnabled, true);
+  assert.equal("dismissEnabled" in vm, false); // no X: _ minimizes, Quit is in the tray menu
   assert.equal(viewModel(snap(), 1000, 3999).connected, true);
   assert.equal(viewModel(null, null, 5).label, "Disconnected");
 });
@@ -30,11 +31,11 @@ test("phase labels", () => {
 });
 
 test("pause button reads Resume when paused", () => {
-  const p = viewModel(snap({ phase: "paused" }), 0, 0).pause;
-  assert.equal(p.label, "Resume");
+  const p = viewModel(snap({ phase: "paused" }), 0, 0).primary;
+  assert.equal(p.text, "Resume");
   assert.equal(p.cmd, "resume");
-  const q = viewModel(snap(), 0, 0).pause;
-  assert.equal(q.label, "Pause");
+  const q = viewModel(snap(), 0, 0).primary;
+  assert.equal(q.text, "Pause");
   assert.equal(q.cmd, "pause");
 });
 
@@ -58,12 +59,12 @@ test("interruption count wording", () => {
 
 test("keys match platform", () => {
   assert.deepEqual(viewModel(snap({ platform: "windows" }), 0, 0).keys,
-    [{ keys: ["Ctrl", "Space"], text: "tap: stop, hold: talk" }]);
+    [{ keys: ["Ctrl", "Space"], text: "tap: voice off, hold: talk" }]);
   assert.deepEqual(viewModel(snap({ platform: "linux" }), 0, 0).keys,
-    [{ keys: ["Ctrl", "Space"], text: "tap: stop, hold: talk" }]);
+    [{ keys: ["Ctrl", "Space"], text: "tap: voice off, hold: talk" }]);
   const mac = viewModel(snap({ platform: "mac" }), 0, 0).keys;
   assert.deepEqual(mac.map((k) => k.keys.join("-")), ["Control-Option-Space", "Control-Option-Escape"]);
-  assert.equal(mac[0].text, "tap: stop, hold: talk");
+  assert.equal(mac[0].text, "tap: voice off, hold: talk");
 });
 
 test("a held push-to-talk key shows Holding", () => {
@@ -109,8 +110,8 @@ test("disconnected does not show last state", () => {
 });
 
 test("pause and resume carry icons with the text variation selector", () => {
-  assert.equal(viewModel(snap(), 0, 0).pause.icon, "\u23F8\uFE0E");
-  assert.equal(viewModel(snap({ phase: "paused" }), 0, 0).pause.icon, "\u23EF\uFE0E"); // ⏯, not ▶
+  assert.equal(viewModel(snap(), 0, 0).primary.icon, "\u23F8\uFE0E");
+  assert.equal(viewModel(snap({ phase: "paused" }), 0, 0).primary.icon, "\u23EF\uFE0E"); // ⏯, not ▶
 });
 
 test("pickers enabled only with a floor", () => {
@@ -146,7 +147,8 @@ test("the voice list follows the language", () => {
 
 test("minimize and dismiss stay enabled when connected too", () => {
   const vm = viewModel(snap(), 0, 0);
-  assert.deepEqual([vm.minimizeEnabled, vm.dismissEnabled], [true, true]);
+  assert.equal(vm.minimizeEnabled, true);
+  assert.equal("dismissEnabled" in vm, false); // no X: _ minimizes, Quit is in the tray menu
 });
 
 test("nextHidden: un-hides on false to true", () => {
@@ -194,9 +196,10 @@ test("a current voice missing from VOICES is added to the list", () => {
   assert.equal(VOICES.includes("am_onyx"), false);
 });
 
-test("a stopped session reads Stopped and cannot be stopped again", () => {
+test("a stopped session reads Voice off and cannot be stopped again", () => {
   const vm = viewModel(snap({ phase: "stopped" }), 0, 0);
-  assert.equal(vm.label, "Stopped");
+  assert.equal(vm.label, "Voice off");
+  assert.equal(vm.end.visible, false);
   assert.equal(vm.stop.enabled, false);
   assert.equal(viewModel(snap({ phase: "speaking" }), 0, 0).stop.enabled, true);
 });
@@ -219,38 +222,9 @@ test("beeps switch shows the backend's value", () => {
 });
 
 const wakeTarget = { label: "demo" };
-const buttons = (o) => { const vm = viewModel(snap(o), 0, 0);
-  return { main: vm.main.kind, mainOn: vm.main.enabled, pause: vm.pause.visible, resume: vm.pause.cmd }; };
 
-test("between turns: Wake only; in a turn: Stop + Pause; paused: Stop + Resume", () => {
-  for (const phase of ["idle", "working", "stopped"]) {
-    const b = buttons({ phase, play: wakeTarget });
-    assert.deepEqual([b.main, b.mainOn, b.pause], ["wake", true, false], phase);
-  }
-  for (const phase of ["speaking", "listening", "holding"]) {
-    const b = buttons({ phase, play: wakeTarget });
-    assert.deepEqual([b.main, b.pause, b.resume], ["stop", true, "pause"], phase);
-  }
-  const p = viewModel(snap({ phase: "paused", play: wakeTarget }), 0, 0);
-  assert.deepEqual([p.main.kind, p.pause.visible, p.pause.cmd, p.pause.icon], ["stop", true, "resume", "\u23EF\uFE0E"]);
-});
 
-test("the main button is one element that switches: wake or stop, never both", () => {
-  const w = viewModel(snap({ phase: "idle", play: wakeTarget }), 0, 0).main;
-  assert.deepEqual([w.kind, w.cmd, w.title], ["wake", "wake", "Wake demo"]);
-  const s = viewModel(snap({ phase: "speaking", play: wakeTarget }), 0, 0).main;
-  assert.deepEqual([s.kind, s.cmd, s.title], ["stop", "stop", "Stop"]);
-});
 
-test("without a wakeable session the main button is a disabled-by-floor Stop, not Wake", () => {
-  for (const o of [{ phase: "idle", play: null }, { phase: "idle" }]) {
-    const m = viewModel(snap(o), 0, 0).main;
-    assert.equal(m.kind, "stop");
-  }
-  assert.equal(viewModel(snap({ phase: "idle", play: null, floor: null }), 0, 0).main.enabled, false);
-  const d = viewModel(snap({ phase: "idle", play: wakeTarget }), 1000, 5000);
-  assert.deepEqual([d.main.kind, d.main.enabled, d.pause.visible], ["stop", false, false]); // disconnected
-});
 
 test("no Skip anywhere in the model", () => {
   const vm = viewModel(snap(), 0, 0);
@@ -291,7 +265,7 @@ test("no push-to-talk keys when the backend says no listener runs", () => {
     assert.deepEqual(viewModel(snap({ platform, ptt: false }), 0, 0).keys, [], platform);
   }
   assert.deepEqual(viewModel(snap({ platform: "windows", ptt: true }), 0, 0).keys,
-    [{ keys: ["Ctrl", "Space"], text: "tap: stop, hold: talk" }]);
+    [{ keys: ["Ctrl", "Space"], text: "tap: voice off, hold: talk" }]);
   assert.equal(viewModel(snap({ platform: "mac", ptt: true }), 0, 0).keys.length, 2);
 });
 
@@ -301,6 +275,7 @@ test("no push-to-talk keys when the backend says no listener runs", () => {
 test("incoming messages are told apart: restore, dropped, other window message, snapshot", () => {
   const { incomingKind } = model;
   assert.equal(incomingKind({ cmd: "restore" }), "restore");
+  assert.equal(incomingKind({ cmd: "quit" }), "quit");
   assert.equal(incomingKind({ window: { dropped: "stop" } }), "dropped");
   assert.equal(incomingKind({ window: { dropped: "" } }), "dropped");
   assert.equal(incomingKind({ window: { mode: "pill" } }), "window");
@@ -453,41 +428,11 @@ test("app.js sends the language's voice before the language", async () => {
 // -- 2026-11-17, a tester's feedback (n=1): controls easy to find, a coloured indicator of who
 // is speaking and when an interruption took effect, a voice preview.
 
-test("labelled controls: Pause and Stop in a turn, text not icon-only, with aria labels", () => {
-  const c = viewModel(snap({ phase: "speaking" }), 0, 0).controls;
-  assert.equal(c.pause.text, "Pause");
-  assert.equal(c.pause.aria, "Pause the voice turn");
-  assert.equal(c.pause.cmd, "pause");
-  assert.equal(c.pause.enabled, true);
-  assert.equal(c.pause.pressed, false);
-  assert.equal(c.main.text, "Stop");
-  assert.equal(c.main.aria, "Stop the voice turn");
-  assert.equal(c.main.cmd, "stop");
-  assert.equal(c.main.enabled, true);
-});
-
-test("labelled controls: paused reads Resume and is shown pressed", () => {
-  const c = viewModel(snap({ phase: "paused" }), 0, 0).controls;
-  assert.deepEqual([c.pause.text, c.pause.aria, c.pause.cmd, c.pause.pressed],
-    ["Resume", "Resume the voice turn", "resume", true]);
-  assert.equal(c.main.text, "Stop");
-});
-
-test("labelled controls: between turns Pause stays in place but disabled; the main one wakes", () => {
-  const c = viewModel(snap({ phase: "working", play: { label: "felix" } }), 0, 0).controls;
-  assert.equal(c.pause.text, "Pause");
-  assert.equal(c.pause.enabled, false);
-  assert.equal(c.main.text, "Wake");
-  assert.equal(c.main.aria, "Wake felix");
-  assert.equal(c.main.cmd, "wake");
-  assert.equal(c.main.enabled, true);
-});
-
-test("labelled controls: disconnected disables both", () => {
-  const c = viewModel(null, null, 5).controls;
-  assert.equal(c.pause.enabled, false);
-  assert.equal(c.main.enabled, false);
-  assert.equal(c.main.text, "Stop");
+test("labelled buttons: text, not icon-only, for both spots", () => {
+  const vm = viewModel(snap({ phase: "speaking" }), 0, 0);
+  assert.deepEqual([vm.primary.text, vm.end.text], ["Pause", "Voice off"]);
+  const w = viewModel(snap({ phase: "working", play: { label: "felix" } }), 0, 0).primary;
+  assert.deepEqual([w.text, w.cmd, w.hint], ["Wake", "wake", "Wake felix"]);
 });
 
 test("indicator tone per phase, with a text label for every tone", () => {
@@ -585,4 +530,112 @@ test("app.js sends preview_voice with the voice shown in the list", async () => 
   const app = await readFile(new URL("../ui/pill/app.js", import.meta.url), "utf8");
   const body = app.split('$("preview").onclick = function', 2)[1].split("\n  };", 1)[0];
   assert.ok(body.includes('cmd: "preview_voice", voice: $("voice").value'), body);
+});
+
+test("a stuck voice server reads Not responding, not Speaking (FELIX #2095)", () => {
+  const vm = viewModel(snap({ phase: "not_responding" }), 0, 0);
+  assert.equal(vm.label, "Not responding");
+  assert.deepEqual([vm.primary.visible, vm.end.visible], [false, false]);
+  assert.equal(vm.inTurn, false);
+  assert.equal(vm.indicator.tone, "interrupted");
+  assert.match(vm.indicator.text, /not responding/i);
+});
+
+
+// FELIX #2094 (Robert, 2026-11-27) and the adversarial UX review: two spots in a fixed
+// place. Left (primary) changes with the phase: Pause / Done / Resume / Wake / Resume voice.
+// Right (end) is always "Voice off", so it never jumps under a pointer aimed at Pause when a
+// reply ends. Done shows the return arrow (Robert) and sends "done", which the backend
+// forwards only while the server is listening.
+const lay = (o) => { const vm = viewModel(snap(o), 0, 0);
+  return [vm.primary.visible ? vm.primary.kind : null, vm.end.visible ? vm.end.kind : null]; };
+
+test("fixed layout per phase: primary changes, Voice off stays on the right", () => {
+  assert.deepEqual(lay({ phase: "speaking" }), ["pause", "voiceoff"]);
+  assert.deepEqual(lay({ phase: "holding" }), ["pause", "voiceoff"]);
+  assert.deepEqual(lay({ phase: "listening" }), ["done", "voiceoff"]);
+  assert.deepEqual(lay({ phase: "paused" }), ["resume", "voiceoff"]);
+  assert.deepEqual(lay({ phase: "working", play: wakeTarget }), ["wake", null]);
+  assert.deepEqual(lay({ phase: "idle", play: wakeTarget }), ["wake", null]);
+  assert.deepEqual(lay({ phase: "working" }), [null, "voiceoff"]);   // nobody to wake
+  assert.deepEqual(lay({ phase: "stopped", play: wakeTarget }), ["resumevoice", null]);
+  assert.deepEqual(lay({ phase: "stopped" }), [null, null]);
+  assert.deepEqual(lay({ phase: "not_responding" }), [null, null]);
+});
+
+test("Done: return arrow, sends done, says what it does", () => {
+  const p = viewModel(snap({ phase: "listening" }), 0, 0).primary;
+  assert.deepEqual([p.cmd, p.icon, p.text, p.enabled], ["done", "\u21B5\uFE0E", "Done", true]);
+  assert.equal(p.hint, "Done: send what you said now");
+});
+
+test("Voice off: square, sends stop, never a toggle", () => {
+  const e = viewModel(snap({ phase: "speaking" }), 0, 0).end;
+  assert.deepEqual([e.cmd, e.icon, e.text, e.toggle], ["stop", "\u25A0\uFE0E", "Voice off", false]);
+  assert.equal(e.hint, "Voice off: continue in text");
+});
+
+test("Pause and Resume keep their pressed state; hints explain them", () => {
+  const p = viewModel(snap({ phase: "speaking" }), 0, 0).primary;
+  assert.deepEqual([p.cmd, p.text, p.toggle, p.pressed], ["pause", "Pause", true, false]);
+  assert.match(p.hint, /mic|wait/i);
+  const r = viewModel(snap({ phase: "paused" }), 0, 0).primary;
+  assert.deepEqual([r.cmd, r.text, r.icon, r.pressed], ["resume", "Resume", "\u23EF\uFE0E", true]);
+});
+
+test("stopped: says voice is off and how to resume", () => {
+  const vm = viewModel(snap({ phase: "stopped" }), 0, 0);
+  assert.match(vm.stateText, /Voice off/);
+  assert.match(vm.stateText, /ask for voice/i);
+  const w = viewModel(snap({ phase: "stopped", play: wakeTarget }), 0, 0).primary;
+  assert.deepEqual([w.cmd, w.text], ["wake", "Resume voice"]);
+});
+
+test("not responding: no buttons, says it will stop and to restart the chat", () => {
+  const vm = viewModel(snap({ phase: "not_responding" }), 0, 0);
+  assert.match(vm.stateText, /will stop itself\. Then restart the chat/);
+  assert.doesNotMatch(vm.stateText, /restarts/);   // no promise nobody measured (FELIX-voice)
+});
+
+test("no floor: the buttons are shown but disabled", () => {
+  const vm = viewModel(snap({ phase: "listening", floor: null }), 0, 0);
+  assert.deepEqual([vm.primary.enabled, vm.end.enabled], [false, false]);
+});
+
+test("disconnected: nothing to press", () => {
+  const vm = viewModel(null, null, 5);
+  assert.deepEqual([vm.primary.visible, vm.end.enabled], [false, false]);
+});
+
+test("keyboard hint says voice off, not stop", () => {
+  for (const platform of ["mac", "windows", "linux"]) {
+    const keys = viewModel(snap({ platform }), 0, 0).keys;
+    assert.match(keys[0].text, /tap: voice off, hold: talk/, platform);
+  }
+  const mac = viewModel(snap({ platform: "mac" }), 0, 0).keys;
+  assert.equal(mac[1].text, "voice off");
+});
+
+// Robert 2026-11-27 (1a): Pause stays reachable while you talk, in the panel only: it closes
+// the mic and throws away what was said (a phone call, someone walking in), voice stays on.
+test("listening: the panel offers Pause mic; other phases do not", () => {
+  const m = viewModel(snap({ phase: "listening" }), 0, 0).mic;
+  assert.deepEqual([m.visible, m.cmd, m.text, m.enabled], [true, "pause", "Pause mic", true]);
+  assert.match(m.hint, /discard|throw/i);
+  for (const phase of ["speaking", "paused", "working", "stopped"]) {
+    assert.equal(viewModel(snap({ phase }), 0, 0).mic.visible, false, phase);
+  }
+  assert.equal(viewModel(null, null, 5).mic.visible, false);
+});
+
+// Robert 2026-11-27 (1b): the close button shrinks the pill to the tray / menu bar while a
+// session lives; quitting the pill is in that icon's menu (wrapper sends {"cmd":"quit"}).
+test("close shrinks to the tray; its hint says where Quit is", () => {
+  for (const platform of ["windows", "mac"]) {
+    const c = viewModel(snap({ platform }), 0, 0).close;
+    assert.equal(c.action, "minimize", platform);
+    assert.match(c.hint, platform === "mac" ? /click the dot/ : /right-click the icon/, platform);
+    assert.match(c.hint, /quit/);
+    assert.ok(c.hint.length <= 40, c.hint); // FELIX-MAC: the status line cut a longer one
+  }
 });

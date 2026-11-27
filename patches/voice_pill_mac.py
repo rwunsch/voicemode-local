@@ -358,13 +358,49 @@ def make_hover_tracker(app):
     return PillHoverTracker.alloc().init()
 
 
-def make_tray_target(app):
+# The menu bar ball's menu (Robert 2026-11-27): the pill's _ only shrinks it to the menu bar,
+# so quitting lives here. Quit = the old close: hidden until voice restarts
+# from scratch or the pill is asked for (voice_pill show).
+TRAY_MENU = (("Show pill", "restore"), ("Quit pill (say 'show the pill' to get it back)", "quit"))
+
+
+def tray_tip(phase: str) -> str:
+    """The menu-bar icon's hover text. Minimized, it is the only place that says where Quit is."""
+    where = "Click: Show pill or Quit"
+    return f"Voice pill: {phase}. {where}" if phase else f"Voice pill. {where}"
+
+
+def page_command(cmd: str) -> str:
+    """The script that hands the page one wrapper command (restore, quit)."""
+    return "window.pillReceive(%s)" % json.dumps(json.dumps({"cmd": cmd}))
+
+
+def make_tray_menu(app):
+    """The ball's menu. Any click on the ball opens it (the Mac convention; AppKit does the
+    clicking, statusItem.setMenu_). The first build restored on a click and opened the menu on a
+    right-click or Control-click; on Robert's Mac right-clicking the ball gave no menu, so Quit
+    could not be reached (2026-11-27)."""
+    from AppKit import NSMenu, NSMenuItem
     from Foundation import NSObject
 
     class PillTrayTarget(NSObject):
-        def clicked_(self, sender):
-            app.webview().evaluateJavaScript_completionHandler_("""window.pillReceive('{"cmd":"restore"}')""", None)
-    return PillTrayTarget.alloc().init()
+        def menuWillOpen_(self, _menu):  # NSMenuDelegate: proves the click reached the menu
+            app.log("tray: menu opened")
+
+        def menuChose_(self, item):
+            cmd = str(item.representedObject())
+            app.log(f"tray: menu chose {cmd}")
+            app.webview().evaluateJavaScript_completionHandler_(page_command(cmd), None)
+
+    app.tray_target = PillTrayTarget.alloc().init()  # NSMenuItem does not retain its target
+    menu = NSMenu.alloc().init()
+    menu.setDelegate_(app.tray_target)
+    for title, cmd in TRAY_MENU:
+        item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(title, "menuChose:", "")
+        item.setTarget_(app.tray_target)
+        item.setRepresentedObject_(cmd)
+        menu.addItem_(item)
+    return menu
 
 
 def quiet_app():
@@ -691,11 +727,10 @@ class App:
         want = self.state.in_tray
         if want and not self.tray:
             self.tray = NSStatusBar.systemStatusBar().statusItemWithLength_(NSVariableStatusItemLength)
-            self.tray_target = make_tray_target(self)
-            self.tray.button().setTarget_(self.tray_target)
-            self.tray.button().setAction_("clicked:")
+            self.tray.setMenu_(make_tray_menu(self))
         if not self.tray:
             return
+        self.tray.button().setToolTip_(tray_tip(self.state.phase))
         r, g, b = tray_rgb(self.state.phase)
         image = NSImage.alloc().initWithSize_((16, 16))
         image.lockFocus()

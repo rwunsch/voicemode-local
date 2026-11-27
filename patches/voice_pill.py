@@ -469,6 +469,16 @@ def _floor_voice(floor, is_holder, sessions, conch, overrides):
     return ov.get("voice") or own.get("voice") or held
 
 
+NOT_RESPONDING_S = 10.0   # loop_lag_s above this: the voice server is stuck, not just busy
+
+
+def _stuck(status) -> bool:
+    """loop_lag_s comes from patch_audio_deadline (absent from older servers, None before
+    the watchdog starts). Only a number above NOT_RESPONDING_S counts."""
+    lag = status.get("loop_lag_s")
+    return isinstance(lag, (int, float)) and not isinstance(lag, bool) and lag > NOT_RESPONDING_S
+
+
 def build_snapshot(status, sessions, conch, *, paused=False, ptt=False, closed=False,
                    last_floor=None, overrides=None, barge=None, ui=None, platform=None, beeps=False,
                    default_voice=st.FALLBACK_VOICE, play=None, wake=None,
@@ -476,7 +486,11 @@ def build_snapshot(status, sessions, conch, *, paused=False, ptt=False, closed=F
     overrides = overrides or {}
     floor, is_holder = _floor(sessions, conch, last_floor)
     visible = bool(sessions or ptt) and not closed
-    if paused:
+    if _stuck(status):
+        # The server's event loop has not turned for a while (FELIX #2095): its socket
+        # thread still says speaking/listening, which is no longer true.
+        phase = "not_responding"
+    elif paused:
         phase = "paused"
     elif status.get("holding"):
         # The push-to-talk key is down (patch_ptt_instant's status field): the press
@@ -882,6 +896,13 @@ def handle_command(msg, ctx=None):
     cmd = msg.get("cmd")
     if cmd == "interrupt":
         st.send_control(ctx.sock, "skip_forward")
+    elif cmd == "done":
+        # The pill's Done (FELIX #2094): ends the user's turn and sends what was said
+        # (skip_forward while recording). Only while the server is listening: skip_forward is
+        # sticky, so a Done landing just after listening ended would skip the next reply.
+        status = st._status(ctx.sock)
+        if status.get("listening") and not status.get("speaking"):
+            st.send_control(ctx.sock, "skip_forward")
     elif cmd == "pause":
         # Our own pid owns the pause (mic held closed); the socket pause holds TTS.
         # Upstream stops a paused turn after VOICEMODE_CONTROL_PAUSE_TIMEOUT (300 s).

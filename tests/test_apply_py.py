@@ -114,6 +114,7 @@ INTENDED_SINCE_BASELINE = [
     ("patch_load_scipy_early.py", ["tools/converse.py"]),   # 2026-11-17: scipy.signal loaded before the stall backstop starts
     ("patch_vad_override.py", ["tools/converse.py"]),   # 2026-11-18: VAD aggressiveness and silence length resolved per recording
     ("patch_audio_recover.py", ["tools/converse.py"]),   # 2026-11-18: a failed stream start is retried once; the fallback ends on cancel
+    ("patch_audio_deadline.py", ["core.py", "tools/converse.py", "control_socket.py"]),   # 2026-11-27: FELIX #2095
 ]
 # Modules added as "copy" steps since the baseline (2026-11-07: session_wake.py).
 INTENDED_COPIES_SINCE_BASELINE = ["session_wake.py"]
@@ -123,6 +124,7 @@ INTENDED_COPIES_SINCE_BASELINE += ["pill_autostart.py", "pill-windows.ps1", "voi
                                    "ui/pill/pill.css"]
 INTENDED_COPIES_SINCE_BASELINE += ["conch_wakers.py"]   # 2026-11-11
 INTENDED_COPIES_SINCE_BASELINE += ["conch_hold.py", "mcp_progress.py"]   # 2026-11-11
+INTENDED_COPIES_SINCE_BASELINE += ["audio_deadline.py"]   # 2026-11-27: FELIX #2095
 INTENDED_COPIES_SINCE_BASELINE += ["tts_chunks.py"]   # 2026-11-14
 INTENDED_COPIES_SINCE_BASELINE += ["voice_languages.py", "voice_fallback.py"]   # 2026-11-17
 INTENDED_COPIES_SINCE_BASELINE += ["voice_sensitivity.py"]   # 2026-11-18
