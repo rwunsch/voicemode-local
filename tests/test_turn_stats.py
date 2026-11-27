@@ -73,3 +73,49 @@ def test_no_audio_is_kept():
     feed(s, "S." * 100)
     f = s.fields()
     assert all(isinstance(v, (int, float, str, type(None))) for v in f.values())
+
+
+# Review of a51c406 (F1): numbers nobody consumed must never be reported for a later turn.
+def test_a_new_recording_drops_numbers_nobody_consumed():
+    a = ts.start()
+    feed(a, "SS")
+    ts.finish(a, "cancel")           # an ESC'd turn: no RECORDING_END consumed it
+    b = ts.start()                   # the next recording
+    feed(b, "S" * 5)
+    ts.finish(b, "silence")
+    assert ts.event_fields()["end_reason"] == "silence"
+
+
+def test_a_recording_that_never_finished_counting_is_a_fallback():
+    s = ts.start()                   # the stream failed to open; a fixed-length recording ran
+    feed(s, "S")
+    f = ts.event_fields()
+    assert f["end_reason"] == "fallback" and f["frames"] == 1
+    assert ts.listening_since() is None
+
+
+def test_a_late_finish_from_a_cancelled_recording_is_ignored():
+    old = ts.start()
+    new = ts.start()
+    ts.finish(old, "cancel")         # the cancelled thread ends after the new turn began
+    feed(new, "SS")
+    ts.finish(new, "done")
+    assert ts.event_fields()["end_reason"] == "done"
+
+
+def test_listening_since_is_the_current_recording_start():
+    import time
+    ts.event_fields()
+    before = time.time()
+    s = ts.start()
+    assert before <= ts.listening_since() <= time.time()
+    ts.finish(s, "silence")
+    assert ts.listening_since() is None
+
+
+def test_inner_pause_excludes_the_closing_pause():
+    s = ts.start(1000)
+    feed(s, "SSS" + "." * 20 + "SS" + "." * 34)
+    ts.finish(s, "silence")
+    f = ts.event_fields()
+    assert f["longest_inner_pause_ms"] == 20 * 30 and f["longest_pause_ms"] == 34 * 30

@@ -17,7 +17,9 @@ Idempotent (marker). Exits 1 naming the anchor when voice-mode no longer matches
 Verified against voice-mode 8.12.0 with the steps before it in manifest.json and
 manifest.windows.json.
 
-Usage: patch_turn_stats.py <voice_mode/tools/converse.py>
+control_socket.py: the status reply carries listening_since (turn_stats.listening_since()).
+
+Usage: patch_turn_stats.py <voice_mode/tools/converse.py> [<voice_mode/control_socket.py>]
 """
 import sys
 from pathlib import Path
@@ -66,11 +68,12 @@ EDITS = [
     ("end: loop condition",
      "            # Concatenate all chunks\n",
      f"            # {MARKER}: the loop condition ended it when no branch said why\n"
+     "            # (decided by the recorded length, not the clock: closing the stream may take a while)\n"
      "            if _vml_ts.reason is None:\n"
-     "                if time.monotonic() - last_audio_time >= AUDIO_STALL_TIMEOUT:\n"
-     '                    _vml_ts.end("stall")\n'
-     "                else:\n"
+     "                if recording_duration >= (_hard_max_duration if speech_detected else max_duration):\n"
      '                    _vml_ts.end("cap" if speech_detected else "no_speech")\n'
+     "                else:\n"
+     '                    _vml_ts.end("stall")\n'
      "            _vml_turn_stats.finish(_vml_ts)\n"
      "            # Concatenate all chunks\n", 1),
     ("no silence detection",
@@ -81,6 +84,25 @@ EDITS = [
      '            "samples": len(audio_data)\n',
      '            "samples": len(audio_data),\n'
      f"            **_vml_turn_stats_fields(),  # {MARKER}\n", 1),
+]
+
+SOCKET = [
+    ("status reply",
+     '        "listen_started_at": control_state.listen_started_at,\n',
+     '        "listen_started_at": control_state.listen_started_at,\n'
+     f'        "listening_since": _vml_listening_since(),  # {MARKER}\n', 1),
+    ("helper", "class ControlSocketListener:\n",
+     f"def _vml_listening_since():  # {MARKER}\n"
+     '    """Wall-clock start of the recording in progress (None between recordings). Upstream\'s\n'
+     "    listen_started_at is set only on a barge-in; the pill\'s \"still listening\" note needs this.\"\"\"\n"
+     "    try:\n"
+     "        from . import turn_stats\n"
+     "        return turn_stats.listening_since()\n"
+     "    except Exception:\n"
+     "        return None\n"
+     "\n"
+     "\n"
+     "class ControlSocketListener:\n", 1),
 ]
 
 HELPER = f'''
@@ -96,25 +118,34 @@ def _vml_turn_stats_fields():  # {MARKER}
 
 
 def apply(target: Path) -> int:
+    if target.name == "control_socket.py":
+        return _apply(target, SOCKET, "")
+    if target.name == "converse.py":
+        return _apply(target, EDITS, HELPER)
+    print(f"{target}: not a file this patch knows", file=sys.stderr)
+    return 1
+
+
+def _apply(target: Path, edits, append: str) -> int:
     source = target.read_bytes().decode("utf-8")
     if MARKER in source:
         return 0
     ending = "\r\n" if "\r\n" in source else "\n"
     text = source.replace("\r\n", "\n")
-    for name, old, new, count in EDITS:
+    for name, old, new, count in edits:
         found = text.count(old)
         if found != count:
             print(f"{target}: anchor '{name}' found {found} times, expected {count}; "
                   "voice-mode has changed", file=sys.stderr)
             return 1
         text = text.replace(old, new)
-    text += HELPER
+    text += append
     target.write_bytes(text.replace("\n", ending).encode("utf-8"))
     return 0
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 2 or Path(sys.argv[1]).name != "converse.py":
-        print("usage: patch_turn_stats.py <voice_mode/tools/converse.py>", file=sys.stderr)
-        sys.exit(2)
-    sys.exit(apply(Path(sys.argv[1])))
+    rc = 0
+    for arg in sys.argv[1:]:
+        rc = apply(Path(arg)) or rc
+    sys.exit(rc)

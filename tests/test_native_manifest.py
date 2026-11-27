@@ -173,8 +173,8 @@ INTENDED_PATCHES.append(("patch_audio_deadline.py", ["core.py", "tools/converse.
 INTENDED_COPIES += ["audio_deadline.py"]
 # 2026-11-28 (FELIX #2107): RECORDING_END carries per-turn numbers and how the recording ended.
 INTENDED_STEP_LINES.append(b'    {"copy": "turn_stats.py", "to": "turn_stats.py"},\n')
-INTENDED_STEP_LINES.append(b'    {"patch": "patch_turn_stats.py", "targets": ["tools/converse.py"], "why": "RECORDING_END carries per-turn numbers and how the recording ended, no audio or text (FELIX #2107); needs turn_stats.py"},\n')
-INTENDED_PATCHES.append(("patch_turn_stats.py", ["tools/converse.py"]))
+INTENDED_STEP_LINES.append(b'    {"patch": "patch_turn_stats.py", "targets": ["tools/converse.py", "control_socket.py"], "why": "RECORDING_END carries per-turn numbers and how the recording ended, no audio or text; the status reply carries listening_since for the pill (FELIX #2107); needs turn_stats.py"},\n')
+INTENDED_PATCHES.append(("patch_turn_stats.py", ["tools/converse.py", "control_socket.py"]))
 INTENDED_COPIES += ["turn_stats.py"]
 # Text edits those additions force on lines that were already there: (now, before).
 INTENDED_EDITS = [

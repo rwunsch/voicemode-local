@@ -17,7 +17,8 @@ fields are always present, and null when unknown:
 | `frames` | 30 ms frames seen |
 | `speech_share` | share of frames webrtcvad called speech, after the first speech frame (0..1) |
 | `pause_resets` | pauses of 300 ms or more that a speech frame cut short (the turn went on) |
-| `longest_pause_ms` | the longest non-speech run after the first speech |
+| `longest_pause_ms` | the longest non-speech run after the first speech. It includes the closing pause, so a `silence` end is always >= `silence_needed_ms` |
+| `longest_inner_pause_ms` | the longest pause that speech then ended: the pause inside the turn that came closest to ending it |
 | `quiet_dbfs` | median level of the non-speech frames, in dBFS: about -90 (silent) to 0 (loud). A noisy room shows here |
 | `silence_needed_ms` | the pause that would have ended the turn (the silence threshold in force) |
 
@@ -36,6 +37,7 @@ fields are always present, and null when unknown:
 | `device_error` | the audio device reported an error |
 | `error` | an error while processing a chunk |
 | `no_vad` | recorded without silence detection (disabled, or webrtcvad missing) |
+| `fallback` | the stream or the VAD failed, and a fixed-length recording ran instead |
 
 Reading them: a turn that ended `cap` with a high `quiet_dbfs` (say above -40) and a high
 `speech_share` points at noise that webrtcvad takes for speech. A turn that ended `done` after a
@@ -45,7 +47,9 @@ long time with many `pause_resets` shows that the person had to end it by hand.
 the recording loop. That counting is guarded and can never break a recording.
 
 ## The pill note
-After `VOICEMODE_PILL_STILL_LISTENING_S` seconds of listening (default 30; 0 = off; an invalid value
+After `VOICEMODE_PILL_STILL_LISTENING_S` seconds of listening (timed from the control socket
+status's `listening_since`, the wall-clock start of the recording in progress, which
+`patch_turn_stats` adds; upstream's `listen_started_at` is set only on a barge-in) (default 30; 0 = off; an invalid value
 means 30), the pill's status line says "Still listening. Press ↵ Done when you have finished". It
 is text only. A sound would be recorded by the microphone, could count as speech (and keep the
 turn open), and Whisper would hear it. The turn never ends because of the note.
@@ -64,6 +68,16 @@ note does not show for most turns. Long monologues see it too, which is harmless
   - `tests/test_turn_stats_patch.py`, which runs the patched loop with a fake microphone and a
     scripted VAD and checks silence, no_speech, cap, done, stop and no_vad, on both lists;
   - `tests/test_voice_pill.py` and `tests/pill_model.test.mjs` for the note.
+
+## Review (2026-11-28, independent, on a51c406)
+Fixed before release:
+- **High:** the note keyed on `listen_started_at`, which only barge-in sets, so it almost never
+  showed, and after a barge-in it showed at once. It now uses `listening_since`.
+- **Medium:** numbers nobody consumed (an ESC'd turn, a survey listen) could be reported for a
+  later turn. A new recording now drops them, a late finish from a cancelled recording is
+  ignored, and a recording that never finished counting is reported as `fallback`.
+- **Low:** cap vs stall is decided by the recorded length, not by the clock after closing the
+  stream. `longest_inner_pause_ms` was added, because `longest_pause_ms` includes the closing pause.
 
 ## What we learned before building this (offline, 2026-11-28)
 All 564 of Robert's local recordings were replayed through 8.12.0's loop.

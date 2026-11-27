@@ -75,14 +75,28 @@ sd.InputStream = FakeStream
 from voice_mode.tools import converse
 from voice_mode import turn_stats
 from voice_mode.control_channel import get_control_state
-if ACTION != "none":
+since = []
+if ACTION == "since":
+    from voice_mode import control_socket
+    def sample():
+        time.sleep(0.2)
+        since.append(control_socket._vml_listening_since())
+    threading.Thread(target=sample, daemon=True).start()
+elif ACTION != "none":
     def later():
         time.sleep(0.3)
         st = get_control_state()
         (st.request_skip_forward if ACTION == "done" else st.request_stop)()
     threading.Thread(target=later, daemon=True).start()
+t0 = time.time()
 converse.record_audio_with_silence_detection(MAX)
-print(json.dumps(turn_stats.event_fields()))
+out = converse._vml_turn_stats_fields()   # the helper the RECORDING_END event calls
+if ACTION == "since":
+    from voice_mode import control_socket
+    out["_since_during"] = since[0] if since else None
+    out["_since_after"] = control_socket._vml_listening_since()
+    out["_t0"] = t0
+print(json.dumps(out))
 '''
 
 
@@ -101,6 +115,11 @@ def _record(root, tmp_path, script, action="none", max_s=5.0, env=None):
 def test_markers_and_idempotence(tree):
     conv = tree / "voice_mode" / "tools" / "converse.py"
     assert conv.read_text(encoding="utf-8").count(MARKER) == 17
+    sock = tree / "voice_mode" / "control_socket.py"
+    assert sock.read_text(encoding="utf-8").count(MARKER) == 2
+    src = conv.read_text(encoding="utf-8")
+    event = src[src.index("event_logger.RECORDING_END, {"):][:300]
+    assert "**_vml_turn_stats_fields()" in event      # the fields really go into the event
     assert (tree / "voice_mode" / "turn_stats.py").is_file()
     before = conv.read_bytes()
     assert subprocess.run([sys.executable, str(PATCHES / "patch_turn_stats.py"), str(conv)]).returncode == 0
@@ -111,6 +130,7 @@ def test_a_pause_ends_the_turn_as_silence(tree, tmp_path):
     f = _record(tree, tmp_path, "SSSSSSSSSSSSSSSSSSSSSSSSS.")    # 0.75 s speech, then silence
     assert f["end_reason"] == "silence"
     assert f["longest_pause_ms"] >= 1000 and f["silence_needed_ms"] == 1000
+    assert f["longest_inner_pause_ms"] == 0          # no pause inside the speech
     assert f["frames"] > 25 and 0 < f["speech_share"] < 1
     assert f["quiet_dbfs"] is not None and f["quiet_dbfs"] < -40
 
@@ -151,3 +171,11 @@ def test_silence_detection_off_is_no_vad(tree, tmp_path):
                          env=e, timeout=120, cwd=str(tmp_path))
     assert out.returncode == 0, out.stdout + out.stderr
     assert json.loads(out.stdout.strip().splitlines()[-1])["end_reason"] == "no_vad"
+
+
+# Review of a51c406 (F3): the pill's note needs the start of every recording, not upstream's
+# barge-only listen_started_at. The status reply's listening_since is set while recording.
+def test_listening_since_is_set_while_recording(tree, tmp_path):
+    f = _record(tree, tmp_path, "S", action="since", max_s=0.6)
+    assert f["_since_during"] is not None and abs(f["_since_during"] - f["_t0"]) < 2
+    assert f["_since_after"] is None

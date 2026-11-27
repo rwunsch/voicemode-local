@@ -1800,12 +1800,14 @@ def test_done_with_no_socket_is_harmless(ctx):
 # FELIX #2107: a turn that keeps listening gets a note in the pill after N seconds ("still
 # listening, press Done"); never a sound (it would land in the recording) and never an end.
 @pytest.mark.parametrize("status, after, still", [
-    ({"listening": True, "listen_started_at": 1000.0}, 30.0, True),     # 31 s
-    ({"listening": True, "listen_started_at": 1010.0}, 30.0, False),    # 21 s
-    ({"listening": True, "listen_started_at": 1000.0}, 0.0, False),     # 0 = off
-    ({"speaking": True, "listen_started_at": 1000.0}, 30.0, False),     # not listening
+    ({"listening": True, "listening_since": 1000.0}, 30.0, True),     # 31 s
+    ({"listening": True, "listening_since": 1010.0}, 30.0, False),    # 21 s
+    ({"listening": True, "listening_since": 1000.0}, 0.0, False),     # 0 = off
+    ({"speaking": True, "listening_since": 1000.0}, 30.0, False),     # not listening
     ({"listening": True}, 30.0, False),                                 # older server: no field
-    ({"listening": True, "listen_started_at": "x"}, 30.0, False),
+    ({"listening": True, "listening_since": "x"}, 30.0, False),
+    # review of a51c406: upstream's barge-only listen_started_at must not drive the note
+    ({"listening": True, "listen_started_at": 1.0}, 30.0, False),
 ])
 def test_still_listening_after_n_seconds(status, after, still):
     s = snap(status=status, sessions=[sess(1)], still_after_s=after, now=1031.0)

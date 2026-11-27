@@ -510,8 +510,9 @@ def build_snapshot(status, sessions, conch, *, paused=False, ptt=False, closed=F
     else:
         phase = "working" if sessions else "idle"
     # FELIX #2107: a long listen gets a note (the page says "press Done"), never a sound and
-    # never an end. listen_started_at is wall-clock time (converse marks it with time.time()).
-    started = status.get("listen_started_at")
+    # never an end. listening_since is the wall-clock start of the recording in progress
+    # (patch_turn_stats); upstream's listen_started_at is set only on a barge-in.
+    started = status.get("listening_since")
     still = (phase == "listening" and still_after_s > 0 and isinstance(started, (int, float))
              and not isinstance(started, bool)
              and (time.time() if now is None else now) - started >= still_after_s)
