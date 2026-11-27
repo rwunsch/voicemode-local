@@ -19,7 +19,7 @@ Which call hung there is not known (no stack was taken). So this module does two
    host starts a fresh one (or the user restarts the chat).
 2. ``Watchdog``: a task on the loop stamps a heartbeat every second; a plain thread checks
    it. A loop stuck longer than VOICEMODE_LOOP_STALL_EXIT_S writes the stack of every
-   thread to the log (the evidence the field report lacked) and exits the process.
+   thread to logs/stall/stall-<UTC>.txt (the evidence the field report lacked) and exits.
    ``faulthandler.dump_traceback_later`` is the backstop when the GIL itself is held.
    The control socket's status reply carries ``loop_lag_s`` from here, so the pill (a
    separate process) can show "not responding" instead of a stale Speaking.
@@ -184,17 +184,88 @@ async def play(player, samples, sample_rate) -> None:
         raise DeadlineMissed(reason)
 
 
-def dump_stacks(why: str) -> None:
-    """Every thread's stack into the log file (and stderr): the evidence for a hang."""
+KEEP_DUMPS = 5
+
+
+def stall_dir():
+    """<VOICEMODE_BASE_DIR, else ~/.voicemode>/logs/stall: voice-mode logs only to stderr
+    unless VOICEMODE_DEBUG is set, and a host (Copilot desktop) may not keep stderr."""
+    from pathlib import Path
+    base = os.environ.get("VOICEMODE_BASE_DIR") or str(Path.home() / ".voicemode")
+    return Path(os.path.expanduser(base)) / "logs" / "stall"
+
+
+def _stack_text(why: str, lag) -> str:
+    """Reason, loop lag and every thread's stack. Stacks only: no locals, arguments or
+    message text, so the file can be attached to a report that leaves the machine."""
+    import traceback
+    lines = [f"reason: {why}",
+             f"time (UTC): {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}",
+             f"voice-mode pid: {os.getpid()}",
+             f"loop_lag_s: {lag if lag is not None else loop_lag()}",
+             f"python: {sys.version.split()[0]} on {sys.platform}", ""]
+    names = {t.ident: t.name for t in threading.enumerate()}
+    for ident, frame in sys._current_frames().items():
+        lines.append(f"thread {names.get(ident, '?')} ({ident}):")
+        lines.append("".join(traceback.format_stack(frame)))
+    return "\n".join(lines)
+
+
+def _prune(folder, pattern: str, keep: int) -> None:
+    files = sorted(folder.glob(pattern), key=lambda p: p.stat().st_mtime)
+    for old in files[:max(0, len(files) - keep)]:
+        try:
+            old.unlink()
+        except OSError:
+            pass
+
+
+def write_dump(why: str, lag=None):
+    """logs/stall/stall-<UTC yyyymmddThhmmssZ>.txt (a -N suffix if that second is taken);
+    the last KEEP_DUMPS are kept. Returns the path, or None if it could not be written."""
     try:
-        logger.error("voice server stack dump (%s):", why)
-        frames = sys._current_frames()
-        names = {t.ident: t.name for t in threading.enumerate()}
-        import traceback
-        for ident, frame in frames.items():
-            stack = "".join(traceback.format_stack(frame))
-            logger.error("thread %s (%s):\n%s", names.get(ident, "?"), ident, stack)
-    except Exception:  # never let the dump cost the exit
+        folder = stall_dir()
+        folder.mkdir(parents=True, exist_ok=True)
+        stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+        path, n = folder / f"stall-{stamp}.txt", 1
+        while path.exists():
+            path, n = folder / f"stall-{stamp}-{n}.txt", n + 1
+        path.write_text(_stack_text(why, lag), encoding="utf-8")
+        _prune(folder, "stall-*.txt", KEEP_DUMPS)
+        return path
+    except Exception:
+        return None
+
+
+def open_backstop():
+    """Open logs/stall/backstop-<pid>.txt in advance for faulthandler, which can only write
+    to an open file. Empty backstop files of earlier runs are removed (a non-empty one
+    fired: kept, the last KEEP_DUMPS of them). None if it cannot be opened."""
+    try:
+        folder = stall_dir()
+        folder.mkdir(parents=True, exist_ok=True)
+        mine = folder / f"backstop-{os.getpid()}.txt"
+        for old in folder.glob("backstop-*.txt"):
+            if old != mine:
+                try:
+                    if old.stat().st_size == 0:
+                        old.unlink()
+                except OSError:
+                    pass
+        _prune(folder, "backstop-*.txt", KEEP_DUMPS)
+        return open(mine, "w", encoding="utf-8")
+    except Exception:
+        return None
+
+
+def dump_stacks(why: str, lag=None) -> None:
+    """Every thread's stack: to a file of its own (stall-*.txt), to the log, and to stderr.
+    The evidence for a hang; never allowed to cost the exit."""
+    path = write_dump(why, lag)
+    try:
+        logger.error("voice server stack dump (%s) written to %s", why, path or "(could not write)")
+        logger.error("%s", _stack_text(why, lag))
+    except Exception:
         pass
     try:
         faulthandler.dump_traceback(file=sys.stderr, all_threads=True)
@@ -219,6 +290,7 @@ class Watchdog:
         self.exit_fn = exit_fn or (lambda: _exit_now())
         self._last_check = None
         self.fired = False
+        self.backstop = None   # an open file for faulthandler (open_backstop), else stderr
 
     def lag(self) -> float:
         return max(0.0, self.clock() - self.beat)
@@ -227,7 +299,11 @@ class Watchdog:
         self.beat = self.clock()
         if self.limit > 0:
             try:  # the backstop for a stall that holds the GIL, where no thread runs
-                faulthandler.dump_traceback_later(self.limit + BACKSTOP_EXTRA_S, exit=True)
+                if self.backstop is not None:
+                    faulthandler.dump_traceback_later(self.limit + BACKSTOP_EXTRA_S, exit=True,
+                                                      file=self.backstop)
+                else:
+                    faulthandler.dump_traceback_later(self.limit + BACKSTOP_EXTRA_S, exit=True)
             except Exception:
                 pass
 
@@ -243,7 +319,7 @@ class Watchdog:
         reason = f"the voice server's event loop was stuck for {now - self.beat:.0f} s"
         logger.error("%s (limit %s=%g); exiting so a fresh one can start",
                      reason, STALL_SETTING, self.limit)
-        dump_stacks(reason)
+        dump_stacks(reason, lag=round(now - self.beat, 1))
         self.exit_fn()
         return True
 
@@ -265,6 +341,8 @@ def ensure_started() -> None:
         return
     loop = asyncio.get_running_loop()
     dog = Watchdog(stall_limit())
+    if dog.limit > 0:
+        dog.backstop = open_backstop()
     _watchdog = dog
 
     async def heartbeat():

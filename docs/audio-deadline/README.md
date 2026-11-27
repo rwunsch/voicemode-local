@@ -29,16 +29,28 @@ the pill showed Speaking with no audio. So the voice server's event loop answere
   with code 75 two seconds later.
 - **Watchdog.** A loop task stamps a heartbeat every second; a thread checks it. Stuck longer
   than `VOICEMODE_LOOP_STALL_EXIT_S` (default 90, below the 180 s client timeout; 0 = off):
-  every thread's stack goes to the log, then exit 75. `faulthandler.dump_traceback_later`
+  every thread's stack goes to a stall file and the log, then exit 75. `faulthandler.dump_traceback_later`
   (limit + 15 s) is the backstop if the GIL itself is held. A checking thread that was itself
   away > 5 s means the machine slept, so the stamp is renewed instead.
 - **Pill.** The status reply carries `loop_lag_s`. Above 10 s the pill shows **Not responding**
   ("Voice server not responding") instead of Speaking or Listening. There is no heartbeat file.
 
-## Log lines (for diagnostics; logger `voicemode.audio_deadline`, level ERROR)
+## Stall files (for diagnostics)
+voice-mode logs only to stderr unless `VOICEMODE_DEBUG` is set (`config.py` basicConfig), and
+a host may not keep stderr, so every dump also goes to a file of its own:
+
+- `<VOICEMODE_BASE_DIR, else ~/.voicemode>/logs/stall/stall-<UTC yyyymmddThhmmssZ>.txt`
+  (`-1`, `-2` ... when that second is taken). Reason, UTC time, pid, `loop_lag_s`, Python
+  version and platform, then each thread's stack. Stacks only: no locals, tool arguments or
+  message text (but they do contain file paths, e.g. the home folder). The last 5 are kept.
+- `logs/stall/backstop-<pid>.txt`, opened when the watchdog starts, for faulthandler's
+  backstop (it can only write to a file already open). Empty unless it fired; empty ones of
+  earlier runs are removed at the next start, non-empty ones kept (last 5).
+
+## Log lines (logger `voicemode.audio_deadline`, level ERROR, stderr)
 - `audio device not responding: <reason>; the voice server will exit after this turn`
 - `the voice server's event loop was stuck for <N> s (limit VOICEMODE_LOOP_STALL_EXIT_S=<L>); exiting so a fresh one can start`
-- `voice server stack dump (<why>):` followed by one `thread <name> (<id>):` entry per thread
+- `voice server stack dump (<why>) written to <path>`, then the same text as the stall file
 - faulthandler also writes `Current thread ... (most recent call first):` blocks to stderr.
 
 ## Not known yet

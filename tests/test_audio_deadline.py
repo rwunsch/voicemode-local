@@ -1,6 +1,7 @@
 """audio_deadline: audio-device calls off the event loop with a deadline, and the loop
 watchdog (FELIX #2095: the voice server answered nothing for minutes, pill on Speaking)."""
 import asyncio
+import os
 import faulthandler
 import importlib.util
 import threading
@@ -13,7 +14,9 @@ MODULE = Path(__file__).resolve().parent.parent / "patches" / "audio_deadline.py
 
 
 @pytest.fixture
-def ad(monkeypatch):
+def ad(monkeypatch, tmp_path):
+    # Every dump and backstop file goes under the test's own folder, never ~/.voicemode.
+    monkeypatch.setenv("VOICEMODE_BASE_DIR", str(tmp_path))
     spec = importlib.util.spec_from_file_location("audio_deadline_under_test", MODULE)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
@@ -189,8 +192,9 @@ def test_watchdog_off_never_fires(ad):
     assert dog.check() is False
 
 
-def test_a_blocked_loop_is_caught_by_the_real_thread(ad, monkeypatch):
+def test_a_blocked_loop_is_caught_by_the_real_thread(ad, monkeypatch, tmp_path):
     monkeypatch.setenv(ad.STALL_SETTING, "0.5")
+    monkeypatch.setenv("VOICEMODE_BASE_DIR", str(tmp_path))  # its backstop file goes here
     fired = []
 
     async def go():
@@ -202,7 +206,62 @@ def test_a_blocked_loop_is_caught_by_the_real_thread(ad, monkeypatch):
         time.sleep(1.5)  # the hang: nothing on this loop runs
     asyncio.run(go())
     assert fired == [True]
+    assert (tmp_path / "logs" / "stall" / f"backstop-{os.getpid()}.txt").exists()
+    assert list((tmp_path / "logs" / "stall").glob("stall-*.txt"))  # the dump
 
 
 def test_loop_lag_is_none_before_start(ad):
     assert ad.loop_lag() is None
+
+
+# FELIX-voice review of f2d6b79: under FELIX voice-mode logs only to stderr (no file unless
+# VOICEMODE_DEBUG), so the stack dump would be lost. It goes to a file of its own.
+def _stall_dir(tmp_path):
+    return tmp_path / "logs" / "stall"
+
+
+def test_a_stack_dump_goes_to_a_file_of_its_own(ad, monkeypatch, tmp_path):
+    monkeypatch.setenv("VOICEMODE_BASE_DIR", str(tmp_path))
+    ad.dump_stacks("the voice server's event loop was stuck for 91 s", lag=91.2)
+    (f,) = _stall_dir(tmp_path).glob("stall-*.txt")
+    import re
+    assert re.fullmatch(r"stall-\d{8}T\d{6}Z(-\d+)?\.txt", f.name)
+    text = f.read_text()
+    assert "loop was stuck for 91 s" in text and "loop_lag_s: 91.2" in text
+    assert "MainThread" in text and "test_a_stack_dump_goes_to_a_file_of_its_own" in text
+    assert "voice-mode pid:" in text
+
+
+def test_only_the_last_five_dumps_are_kept(ad, monkeypatch, tmp_path):
+    monkeypatch.setenv("VOICEMODE_BASE_DIR", str(tmp_path))
+    d = _stall_dir(tmp_path)
+    d.mkdir(parents=True)
+    for i in range(7):
+        p = d / f"stall-2026010{i}T000000Z.txt"
+        p.write_text("old")
+        os.utime(p, (1000 + i, 1000 + i))
+    ad.dump_stacks("probe")
+    names = sorted(p.name for p in d.glob("stall-*.txt"))
+    assert len(names) == ad.KEEP_DUMPS == 5
+    assert "stall-20260100T000000Z.txt" not in names
+
+
+def test_the_backstop_file_is_opened_in_advance_and_empty_ones_are_pruned(ad, monkeypatch, tmp_path):
+    monkeypatch.setenv("VOICEMODE_BASE_DIR", str(tmp_path))
+    d = _stall_dir(tmp_path)
+    d.mkdir(parents=True)
+    (d / "backstop-999999999.txt").write_text("")              # an old run, nothing written
+    (d / "backstop-999999998.txt").write_text("Current thread")  # an old run that fired: kept
+    f = ad.open_backstop()
+    assert f is not None and Path(f.name).name == f"backstop-{os.getpid()}.txt"
+    left = {p.name for p in d.glob("backstop-*.txt")}
+    assert left == {"backstop-999999998.txt", f"backstop-{os.getpid()}.txt"}
+    f.close()
+
+
+def test_a_dump_never_fails_when_the_folder_cannot_be_written(ad, monkeypatch, tmp_path):
+    blocker = tmp_path / "file"
+    blocker.write_text("x")
+    monkeypatch.setenv("VOICEMODE_BASE_DIR", str(blocker))  # logs/ cannot be made under a file
+    ad.dump_stacks("probe")   # no exception
+    assert ad.open_backstop() is None
