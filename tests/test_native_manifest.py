@@ -164,6 +164,13 @@ INTENDED_COPIES += ["voice_sensitivity.py"]
 # 2026-11-18: a mic stream that fails to start is retried once; the fallback ends on cancel.
 INTENDED_STEP_LINES.append(b'    {"patch": "patch_audio_recover.py", "targets": ["tools/converse.py"], "why": "a mic stream that fails to start (Wait timed out, -9987) is re-initialised and retried once with silence detection; the fixed-length fallback ends on cancel and VOICEMODE_FALLBACK_RECORD_MAX_S caps it"},\n')
 INTENDED_PATCHES.append(("patch_audio_recover.py", ["tools/converse.py"]))
+# 2026-11-27 (FELIX #2095): audio-device calls get a deadline; a stuck voice server exits.
+INTENDED_STEP_LINES.append(b'    {"copy": "audio_deadline.py", "to": "audio_deadline.py"},\n')
+INTENDED_STEP_LINES.append(
+    b'    {"patch": "patch_audio_deadline.py", "targets": ["core.py", "tools/converse.py", "control_socket.py"],\n'
+    b'     "why": "audio-device calls off the event loop with a deadline; loop watchdog exits a stuck server (FELIX #2095)"},\n')
+INTENDED_PATCHES.append(("patch_audio_deadline.py", ["core.py", "tools/converse.py", "control_socket.py"]))
+INTENDED_COPIES += ["audio_deadline.py"]
 # Text edits those additions force on lines that were already there: (now, before).
 INTENDED_EDITS = [
     (b'    "streaming.py",\n    "conch_notify.py",\n    "conch_queue.py",\n    "conch.py",\n    "config.py",\n    "tools/configuration_management.py"\n', b'    "streaming.py"\n'),

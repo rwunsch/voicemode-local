@@ -1772,3 +1772,26 @@ def test_the_preview_does_its_network_io_off_the_command_thread(ctx, monkeypatch
 ])
 def test_a_stuck_server_shows_not_responding(status, paused, phase):
     assert snap(status=status, paused=paused, sessions=[sess(1)])["phase"] == phase
+
+
+# FELIX #2094, UX review 2026-11-27: the pill's Done sends "done". It ends YOUR turn
+# (skip_forward ends the recording and transcribes it), so it is forwarded only while the
+# server says it is listening: a Done that lands just after listening ended must not skip
+# the assistant's next reply.
+def test_done_while_listening_sends_skip_forward(ctx, control, monkeypatch):
+    monkeypatch.setattr(st, "_status", lambda path: {"listening": True, "speaking": False})
+    vp.handle_command({"cmd": "done"}, ctx)
+    time.sleep(0.1)
+    assert control.received == ["skip_forward"]
+
+
+@pytest.mark.parametrize("status", [{"listening": False, "speaking": True}, {}, {"listening": True, "speaking": True}])
+def test_done_when_not_listening_does_nothing(ctx, control, monkeypatch, status):
+    monkeypatch.setattr(st, "_status", lambda path: status)
+    vp.handle_command({"cmd": "done"}, ctx)
+    time.sleep(0.1)
+    assert control.received == []
+
+
+def test_done_with_no_socket_is_harmless(ctx):
+    vp.handle_command({"cmd": "done"}, ctx)

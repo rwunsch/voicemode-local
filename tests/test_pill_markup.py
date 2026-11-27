@@ -53,8 +53,9 @@ def test_the_panel_has_labelled_pause_and_stop_buttons():
     assert 'role="group"' in attrs and 'aria-label="Voice controls"' in attrs
     # first thing in the expanded panel, so it is found before the settings
     assert html.index('id="more"') < html.index('id="controls"') < html.index('id="voice"')
-    for el_id, text, aria in (("ctlPause", "Pause", "Pause the voice turn"),
-                              ("ctlMain", "Stop", "Stop the voice turn")):
+    # 2026-11-27 (FELIX #2094): left = the primary action (Pause at rest), right = Voice off.
+    for el_id, text, aria in (("ctlPause", "Pause", "Pause: hold voice; the mic closes and the reply waits"),
+                              ("ctlMain", "Voice off", "Voice off: continue in text")):
         tag, attrs, inner = _tag(html, el_id)
         assert tag == "button", el_id
         assert f'aria-label="{aria}"' in attrs, el_id
@@ -64,11 +65,11 @@ def test_the_panel_has_labelled_pause_and_stop_buttons():
 
 def test_app_drives_the_labelled_controls_from_the_model():
     js = (UI / "app.js").read_text(encoding="utf-8")
-    for needle in ('$("ctlPauseText").textContent = vm.controls.pause.text',
-                   '$("ctlMainText").textContent = vm.controls.main.text',
-                   '"aria-label", vm.controls.pause.aria', '"aria-label", vm.controls.main.aria',
-                   '"aria-pressed", String(vm.controls.pause.pressed)',
-                   '$("ctlPause").onclick', '$("ctlMain").onclick'):
+    for needle in ('setSpot($("main"), $("ctlPause"), $("ctlPauseIcon"), $("ctlPauseText"), vm.primary)',
+                   'setSpot($("pause"), $("ctlMain"), $("ctlMainIcon"), $("ctlMainText"), vm.end)',
+                   'ctlText.textContent = b.text', 'el.setAttribute("aria-label", b.hint || b.text',
+                   'el.setAttribute("aria-pressed", String(!!b.pressed)); else el.removeAttribute("aria-pressed")',
+                   '$("ctlPause").onclick = press("primary")', '$("ctlMain").onclick = press("end")'):
         assert needle in js, needle
 
 

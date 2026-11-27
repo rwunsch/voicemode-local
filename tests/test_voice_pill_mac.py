@@ -544,7 +544,8 @@ def test_narrowest_width_still_shows_the_status_text():
 # From the first real two-session run, 2026-11-05
 def test_stop_is_only_red_on_hover():
     css = (REPO / "ui/pill/pill.css").read_text()
-    assert ".stop{" not in css and ".stop:hover" in css
+    # 2026-11-27: Stop is now "Voice off", styled by data-kind (FELIX #2094)
+    assert "[data-kind=voiceoff]{" not in css and "[data-kind=voiceoff]:hover" in css
 
 
 def test_pickers_let_go_after_a_choice_and_when_the_floor_moves():
@@ -656,10 +657,13 @@ def test_tracking_area_works_while_the_app_is_inactive():
 
 def test_page_has_a_hover_class_for_every_hover_rule():
     css = (REPO / "ui/pill/pill.css").read_text()
-    assert ".btn.hover:not(:disabled)" in css and ".stop.hover:not(:disabled)" in css and ".tab.hover" in css
+    assert ".btn.hover:not(:disabled)" in css and "[data-kind=voiceoff].hover:not(:disabled)" in css and ".tab.hover" in css
+    assert "[data-kind=done].hover:not(:disabled)" in css and "[data-kind=wake].hover:not(:disabled)" in css
     assert ".edge.hover::after" in css and ".edge:hover::after" in css
     js = (REPO / "ui/pill/app.js").read_text()
     assert "window.pillHover" in js and 'closest(".btn,.tab,.edge")' in js
+    # the hovered button's hint is shown in the status line (no native tooltip on a Mac panel)
+    assert "hoverHint() || vm.stateText" in js
 
 
 def test_resize_logs_what_it_did():

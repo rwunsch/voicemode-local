@@ -896,6 +896,13 @@ def handle_command(msg, ctx=None):
     cmd = msg.get("cmd")
     if cmd == "interrupt":
         st.send_control(ctx.sock, "skip_forward")
+    elif cmd == "done":
+        # The pill's Done (FELIX #2094): ends the user's turn and sends what was said
+        # (skip_forward while recording). Only while the server is listening: skip_forward is
+        # sticky, so a Done landing just after listening ended would skip the next reply.
+        status = st._status(ctx.sock)
+        if status.get("listening") and not status.get("speaking"):
+            st.send_control(ctx.sock, "skip_forward")
     elif cmd == "pause":
         # Our own pid owns the pause (mic held closed); the socket pause holds TTS.
         # Upstream stops a paused turn after VOICEMODE_CONTROL_PAUSE_TIMEOUT (300 s).
