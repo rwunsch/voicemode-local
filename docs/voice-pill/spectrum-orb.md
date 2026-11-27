@@ -11,7 +11,8 @@ The Orb uses the approved 18 November FELIX exports: the still and the recorded
 motion frames. The asset preparation crops the Orb itself to transparent
 circles and rescales the frames for the 40 pt surface. It does not retint the
 art or include the underlying reference screenshot, mockup chrome or demo halo.
-The pill draws its own outer halo from measured audio levels, and the face is
+The pill draws its own outer halo from measured audio levels. The warm face
+uses the approved still until a reply produces a measured signal, and stays
 still when reduced motion is requested. The blue listener and warm speaker
 crossfade. The mute shade blends over the face and the blue listening state
 does not appear while input is blocked.

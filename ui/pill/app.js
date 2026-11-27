@@ -7,6 +7,7 @@
   var orbButton = $("orbAction"), card = $("card"), orbBubble = orbButton.querySelector(".orb-bubble");
   var lastVisible = false, surfaceVisible = true, levelTimer = null, miniPointer = null;
   var orbPalette = null, lastOrbOnly = null;
+  var felixPlayback = null, felixHasSignal = false;
   var bargePending = null, bargeLastShown = null;
   var lastBargeCount = null, interruptedUntil = null;   // the Interrupted flash (model.js interruptFlash)
   var previewAnswer = null;   // the backend's last preview answer, stamped with when it came
@@ -76,6 +77,16 @@
     if (levelTimer !== null) clearTimeout(levelTimer);
     var level = orbEnabled && document.body.dataset.orbMotion === "true" ?
       M.orbLevel(snapshot, vm.phase, lastSeen, Date.now()) : null;
+    // Keep the approved still until this reply has actually produced audio.
+    if (orbEnabled && vm.phase === "speaking") {
+      if (felixPlayback !== snapshot.playback_id) felixHasSignal = false;
+      felixPlayback = snapshot.playback_id;
+      if (level > 0) felixHasSignal = true;
+    } else if (!orbEnabled || vm.phase !== "paused") {
+      felixPlayback = null;
+      felixHasSignal = false;
+    }
+    document.body.dataset.felixFrames = String(felixHasSignal);
     orbBubble.style.setProperty("--level", level === null ? 0 : Math.min(1, Math.sqrt(level) * 1.8));
     if (level !== null) levelTimer = setTimeout(function () {
       orbBubble.style.setProperty("--level", 0);

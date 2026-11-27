@@ -88,11 +88,13 @@ body[data-orb-layout] .orb-pigment:not(.orb-blue) {
 body[data-orb-layout] .orb-pigment:not(.orb-blue)::after {
   content: ""; position: absolute; inset: 0; background-image: url(orb-felix-motion.webp);
   background-size: 1000% 600%; background-repeat: no-repeat;
+  opacity: 0; transition: opacity 180ms ease;
   animation: felix-frame-column 800ms steps(10, jump-none) infinite,
              felix-frame-row 4800ms steps(6, jump-none) infinite;
   animation-play-state: paused;
 }
-body[data-orb-layout][data-orb-motion=true] .orb-pigment:not(.orb-blue)::after {
+body[data-orb-layout][data-felix-frames=true] .orb-pigment:not(.orb-blue)::after { opacity: 1; }
+body[data-orb-layout][data-felix-frames=true][data-orb-motion=true] .orb-pigment:not(.orb-blue)::after {
   animation-play-state: running;
 }
 @keyframes felix-frame-column { from { background-position-x: 0%; } to { background-position-x: 100%; } }
