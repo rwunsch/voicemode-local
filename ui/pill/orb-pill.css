@@ -111,6 +111,24 @@ body[data-orb-layout][data-orb=animated] .orb-blue {
 }
 body[data-orb-layout][data-orb-palette=listening]:is([data-tone=listening], [data-tone=muted]) .orb-blue { opacity: 1; }
 body[data-orb-layout]:not([data-orb-palette=listening]) .orb-stars { opacity: 0; }
+/* A few crisp stars add depth separately from the approved FELIX face. */
+.orb-felix-stars { display: none; }
+body[data-orb-layout] .orb-felix-stars {
+  display: block; position: absolute; inset: 10%; opacity: 0; pointer-events: none;
+  background:
+    radial-gradient(circle at 32% 38%, #fff2faee 0.50px, transparent 0.96px),
+    radial-gradient(circle at 59% 25%, #fdf0ffbb 0.36px, transparent 0.83px),
+    radial-gradient(circle at 70% 48%, #fff9eccf 0.38px, transparent 0.87px),
+    radial-gradient(circle at 48% 53%, #fff7ffe8 0.53px, transparent 1.03px),
+    radial-gradient(circle at 27% 63%, #f5dcffbb 0.33px, transparent 0.78px),
+    radial-gradient(circle at 57% 73%, #fff0dacf 0.39px, transparent 0.91px);
+  animation: turn-stars 38s linear infinite paused;
+  transition: opacity 240ms ease;
+}
+body[data-orb-layout][data-orb-palette=speaking][data-felix-frames=true] .orb-felix-stars { opacity: .76; }
+body[data-orb-layout][data-orb-palette=speaking][data-felix-frames=true][data-orb-motion=true] .orb-felix-stars {
+  animation-play-state: running;
+}
 body[data-orb-layout] .orb-shade {
   display: block; position: absolute; inset: 0; opacity: 0; pointer-events: none;
   background:
@@ -125,6 +143,7 @@ body[data-orb-layout][data-mic-muted=true]:not([data-tone=speaking]) .orb {
 body[data-orb-layout][data-mic-muted=true]:not([data-tone=speaking]) :is(.orb-pigment, .orb-stars) { opacity: 0; }
 @media (prefers-reduced-motion: reduce) {
   body[data-orb-layout] .orb-pigment:not(.orb-blue)::after { display: none; }
+  body[data-orb-layout] .orb-felix-stars { visibility: hidden; animation: none; }
   body[data-orb-layout] :is(#orbStrip, .orb-pigment, .orb-shade),
   body[data-orb-layout] .top::before { animation: none; transition: none; }
 }
