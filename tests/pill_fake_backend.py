@@ -3,8 +3,8 @@
 Usage: pill_fake_backend.py <dir>
 
 Each second it emits <dir>/state.json merged over a default snapshot, and appends
-every line received on stdin to <dir>/commands.log. Voice, language, barge and beeps commands
-take effect in what it emits, so those controls hold when clicked. <dir>/startup_exit, if present,
+every line received on stdin to <dir>/commands.log. Voice, language, barge, beeps and pause/resume
+commands take effect in what it emits, so those controls hold when clicked. <dir>/startup_exit, if present,
 holds an exit code to use at once, before printing anything (a refused second instance
 exits 1 this way). <dir>/go_silent, if present, makes it stop writing after its next line while
 staying alive. <dir>/exit_now does the same after output has started, and is deleted
@@ -28,7 +28,7 @@ DEFAULT = {"visible": True, "phase": "listening", "floor": {"pid": 1, "label": "
            "platform": "windows", "ui": {}}
 
 
-def apply_command(line: bytes, live: dict) -> None:
+def apply_command(line: bytes, live: dict, paused: dict) -> None:
     try:
         msg = json.loads(line)
     except ValueError:
@@ -46,9 +46,20 @@ def apply_command(line: bytes, live: dict) -> None:
         live["barge"] = {**DEFAULT["barge"], "enabled": bool(msg.get("on"))}
     elif cmd == "set_mic_muted":
         live["mic_muted"] = bool(msg.get("on"))
+    elif cmd == "pause" and "phase" not in paused:
+        paused["phase"] = live.get("phase")
+        live["phase"] = "paused"
+    elif cmd == "resume" and "phase" in paused:
+        phase = paused.pop("phase")
+        if phase is None:
+            live.pop("phase", None)
+        else:
+            live["phase"] = phase
     elif cmd == "end_voice":
+        paused.clear()
         live.update(phase="stopped", visible=False)
     elif cmd == "interrupt_playback":
+        paused.clear()
         live.update(phase="mic-muted" if live.get("mic_muted") else "listening", playback_id=None)
 
 
@@ -90,6 +101,7 @@ def main(folder: str) -> int:
         f.write(f"{time.time():.1f} pid={os.getpid()}\n")
     buf = b""
     live = {}
+    paused = {}
     while True:
         try:
             state = json.loads((d / "state.json").read_text())
@@ -115,7 +127,7 @@ def main(folder: str) -> int:
                 line, buf = buf.split(b"\n", 1)
                 with (d / "commands.log").open("ab") as f:
                     f.write(line + b"\n")
-                apply_command(line, live)
+                apply_command(line, live, paused)
 
 
 if __name__ == "__main__":

@@ -6,7 +6,7 @@
     var body = document.body, theme = $("pillTheme");
     var lang = $("orbLanguage"), voice = $("orbVoice"), mute = $("orbMute"), end = $("orbEnd");
     var menu = $("orbMenu"), settings = $("orbSettings"), strip = $("orbStrip");
-    var tray = $("orbTray");
+    var tray = $("orbTray"), pause = $("orbPause");
     var panel = "", active = false, opened = false, hover = false, intro = false, pinned = false;
     var introTimer, closeTimer, lastFrame = "", mutePending, muted, vm, snapshot, ui;
     var appearance = matchMedia("(prefers-color-scheme: dark)");
@@ -95,10 +95,14 @@
       setText(mute, muted ? "Unmute mic" : "Mute mic");
       mute.toggleAttribute("selected", muted);
       mute.disabled = !vm.connected || typeof data.mic_muted !== "boolean" || !!mutePending;
-      setText(end, vm.controls.main.kind === "wake" ? "Start voice" : "End voice");
+      var wake = vm.controls.main.kind === "wake", paused = vm.controls.pause.pressed;
+      setText(end, wake ? "Start voice" : "End voice");
+      end.variant = wake ? "accent" : "negative";
       end.disabled = !vm.controls.main.enabled;
-      setText($("orbPause"), vm.controls.pause.pressed ? "Resume voice" : "Pause voice");
-      $("orbPause").disabled = !vm.controls.pause.enabled;
+      setText(pause, paused ? "Resume" : "Pause");
+      pause.setAttribute("aria-label", paused ? "Resume voice" : "Pause voice");
+      pause.toggleAttribute("selected", paused);
+      pause.disabled = !vm.controls.pause.enabled;
       setText($("orbDock"), ui && ui.orbDocked === false ? "Dock to screen edge" : "Undock");
       tray.hidden = data.platform === "mac";
       if (panel === "settings") {
@@ -147,7 +151,7 @@
     $("orbMore").addEventListener("click", function () { openedPanel("menu"); });
     $("orbOpenSettings").addEventListener("click", function () { openedPanel("settings"); });
     $("orbSettingsDone").addEventListener("click", backToOrb);
-    $("orbPause").addEventListener("click", function () { $("ctlPause").click(); backToOrb(); });
+    pause.addEventListener("click", function () { if (!pause.disabled) $("ctlPause").click(); });
     $("orbDock").addEventListener("click", function () {
       panel = ""; save({ orbDocked: ui && ui.orbDocked === false });
     });

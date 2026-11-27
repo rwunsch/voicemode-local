@@ -285,7 +285,7 @@ public class VmlPill {
     const int WIDTH = 350, DEFAULT_H = 68;
     const int MIN_WIDTH = 320, MAX_WIDTH = 640;
     const int TAB_W = 22, TAB_H = 64, RAIL_W = 76, MINI_SIZE = 68;
-    const int ORB_ROW = 56;
+    const int ORB_ROW = 56, ORB_OPEN_WIDTH = 356;
     static readonly IntPtr TOPMOST = new IntPtr(-1);
     const string HOST = "pill.voicemode.example";
     const string BRIDGE = @"
@@ -698,10 +698,10 @@ document.addEventListener('DOMContentLoaded',function(){
         var a = (hasPos ? MonitorAt(posX, posY) : MonitorAt(0, 0)).rcWork;
         int x = hasPos ? posX : a.right - w - Scale(16), y = hasPos ? posY : a.bottom - Scale(DEFAULT_H) - Scale(16);
         if (IsOrbMode()) {
-            int row = Scale(ORB_ROW), widest = Math.Min(Scale(326), a.right - a.left);
-            w = Math.Min(a.right - a.left, Scale(orbSurface == "settings" ? 326 :
-                orbSurface == "strip" || orbSurface == "menu" ? 304 : ORB_ROW));
-            h = Scale(orbSurface == "settings" ? 433 : orbSurface == "menu" ? 242 : ORB_ROW);
+            int row = Scale(ORB_ROW), widest = Math.Min(Scale(ORB_OPEN_WIDTH), a.right - a.left);
+            bool openOrb = orbSurface == "strip" || orbSurface == "menu" || orbSurface == "settings";
+            w = openOrb ? widest : Math.Min(a.right - a.left, row);
+            h = Scale(orbSurface == "settings" ? 433 : orbSurface == "menu" ? 210 : ORB_ROW);
             bool leftSide = side == "left", dockedOrb = mode == "orb-docked";
             int anchorY = (hasDock ? dockCy : (a.top + a.bottom) / 2) - row / 2;
             int anchorX = leftSide ? a.left : a.right - row;

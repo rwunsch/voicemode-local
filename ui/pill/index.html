@@ -30,12 +30,12 @@
   </div>
   <div id="orbStrip" aria-label="Voice controls" role="group">
     <sp-action-button id="orbMute" size="s">Mute mic</sp-action-button>
-    <sp-button id="orbEnd" size="s" variant="secondary" treatment="outline">End voice</sp-button>
+    <sp-action-button id="orbPause" size="s" aria-label="Pause voice">Pause</sp-action-button>
+    <sp-button id="orbEnd" size="s" variant="negative" treatment="fill">End voice</sp-button>
     <sp-action-button id="orbMore" size="s" quiet aria-expanded="false" aria-controls="orbMenu">More</sp-action-button>
   </div>
   <section id="orbMenu" class="orb-panel" aria-label="More voice controls" hidden>
     <sp-action-button id="orbOpenSettings" size="s" quiet>Voice settings…</sp-action-button>
-    <sp-action-button id="orbPause" size="s" quiet>Pause voice</sp-action-button>
     <sp-divider size="s"></sp-divider>
     <sp-action-button id="orbDock" size="s" quiet>Undock</sp-action-button>
     <sp-action-button id="orbTray" size="s" quiet hidden>Move to system tray</sp-action-button>

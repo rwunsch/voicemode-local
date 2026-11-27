@@ -3,8 +3,9 @@
 The Orb starts docked at the screen edge and stays on top. The first appearance shows
 the horizontal controls briefly. Then hover or explicit keyboard focus reveals
 the controls, and the native window shrinks to the Orb when they fade. The compact,
-strip and settings frames share the same screen anchor. More contains Voice settings,
-Pause, docking and keyboard actions. On Windows, it also offers the system tray.
+strip and settings frames share the same screen anchor. Mute, Pause/Resume and
+the red End voice action are on the strip. More contains Voice settings,
+docking and keyboard actions. On Windows, it also offers the system tray.
 The classic appearance remains available
 through the existing `VOICEMODE_PILL_APPEARANCE=classic` setting.
 

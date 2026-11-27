@@ -30,8 +30,9 @@ WIDTH, MARGIN, DEFAULT_H = 350, 16, 68
 MIN_WIDTH, MAX_WIDTH = 320, 640
 TAB_W, TAB_H, RAIL_W, MINI_SIZE = 22, 64, 76, 68
 ORB_ROW = 56
-ORB_SURFACES = {"compact": (ORB_ROW, ORB_ROW), "strip": (304, ORB_ROW),
-                "menu": (304, 212), "settings": (326, 433)}
+ORB_OPEN_WIDTH = 356
+ORB_SURFACES = {"compact": (ORB_ROW, ORB_ROW), "strip": (ORB_OPEN_WIDTH, ORB_ROW),
+                "menu": (ORB_OPEN_WIDTH, 180), "settings": (ORB_OPEN_WIDTH, 433)}
 ORB_MODES = ("orb-docked", "orb-floating")
 BACKOFF_CAP_S = 30
 NONACTIVATING_PANEL = 1 << 7  # NSWindowStyleMaskNonactivatingPanel
