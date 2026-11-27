@@ -34,6 +34,32 @@ mkdir -p "$LOG_DIR" "$RUN_DIR" 2>/dev/null || true
 # can run multiple sessions under one parent PID, so neither PPID nor sibling
 # status is safe evidence that a server is stale.
 # exec keeps our PID, so $$ recorded now == the new voice-mode PID.
+#
+# A session ID is NOT enough on its own (2026-11-26): a client started from inside
+# a Claude Code session (e.g. `copilot -p` run by the Bash tool) inherits
+# CLAUDE_CODE_SESSION_ID. Its own voicemode launch then reaped the live Claude Code
+# voice server of that session, and voice mode dropped mid-conversation. So the old
+# process is reaped only when it is ours to replace:
+#   - its parent is the same kind of client as ours (same executable name, e.g.
+#     Claude Code reconnecting its own server), or
+#   - it is orphaned (parent is launchd/init/systemd), the original stale case.
+# A live server whose parent is a different client is left alone and logged.
+_parent_name() {  # basename of a process's executable, "" if unknown
+    local name
+    name="$(ps -o comm= -p "$1" 2>/dev/null)" || return 0
+    name="${name##*/}"
+    printf '%s' "${name#-}"
+}
+_reapable_by_us() {  # $1 = old pid
+    local old_ppid old_parent our_parent
+    old_ppid="$(ps -o ppid= -p "$1" 2>/dev/null | tr -d ' ')"
+    [ -n "$old_ppid" ] || return 0
+    [ "$old_ppid" = "1" ] && return 0
+    old_parent="$(_parent_name "$old_ppid")"
+    case "$old_parent" in launchd|init|systemd|"") return 0 ;; esac
+    our_parent="$(_parent_name "$PPID")"
+    [ "$old_parent" = "$our_parent" ]
+}
 reap_stale_voicemode() {
     local key="${CLAUDE_CODE_SESSION_ID:-}"
     [ -n "$key" ] || return 0
@@ -46,6 +72,11 @@ reap_stale_voicemode() {
         if [ "$old" != "$$" ] && kill -0 "$old" 2>/dev/null; then
             # Confirm it really is a voice-mode process before signalling it.
             if { tr '\0' ' ' < "/proc/$old/cmdline" 2>/dev/null || ps -o command= -p "$old" 2>/dev/null; } | grep -q 'voice-mode'; then
+                if ! _reapable_by_us "$old"; then
+                    echo "$(date +%Y-%m-%dT%H:%M:%S%z) not reaping voice-mode pid=$old (session=$key): it belongs to a different client ($(_parent_name "$(ps -o ppid= -p "$old" | tr -d ' ')")), we were started by $(_parent_name "$PPID")" \
+                        >> "$LOG_DIR/reap.log" 2>&1
+                    return 0
+                fi
                 echo "$(date +%Y-%m-%dT%H:%M:%S%z) reaping stale voice-mode pid=$old (session=$key)" \
                     >> "$LOG_DIR/reap.log" 2>&1
                 kill -TERM "$old" 2>/dev/null || true

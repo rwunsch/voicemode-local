@@ -86,6 +86,45 @@ def test_same_explicit_session_reaps_previous_server(launcher):
     assert second.poll() is None
 
 
+def test_same_session_from_a_different_client_does_not_reap(launcher, tmp_path):
+    """2026-11-26: `copilot -p` run from a Claude Code Bash tool inherits
+    CLAUDE_CODE_SESSION_ID; its voicemode launch must not kill Claude Code's live
+    server for that session. A different client = a parent with another name."""
+    import signal
+    first = launcher("shared-session")
+    # A symlink, not a copy: macOS SIGKILLs a copied /bin/bash, and `ps -o comm=`
+    # reports the name the process was started under, so the parent looks like
+    # a different client.
+    other_client = tmp_path / "other-client"
+    os.symlink(shutil.which("bash"), other_client)
+    env = dict(os.environ, HOME=str(tmp_path), CLAUDE_CODE_SESSION_ID="shared-session")
+    # "; true" keeps bash alive as the launcher's parent (no exec of the last command).
+    second = subprocess.Popen(
+        [str(other_client), "-c", f'"{tmp_path / "voicemode-mcp"}"; true'],
+        env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        start_new_session=True,
+    )
+    try:
+        with selectors.DefaultSelector() as selector:
+            selector.register(second.stdout, selectors.EVENT_READ)
+            assert selector.select(timeout=10), "second launcher did not become ready"
+        assert second.stdout.readline() == "ready\n"
+        assert first.poll() is None, "a different client reaped the live server"
+        log = (tmp_path / ".voicemode" / "logs" / "reap.log").read_text()
+        assert "not reaping" in log
+        # The pidfile still names the original server, so its own client can replace it.
+        pidfile = tmp_path / ".voicemode" / "run" / "voicemode-shared-session.pid"
+        assert pidfile.read_text() == str(first.pid)
+    finally:
+        # Stop the launcher (now the fake server) under the client shell, then the shell.
+        subprocess.run(["pkill", "-TERM", "-P", str(second.pid)], check=False)
+        if second.poll() is None:
+            second.send_signal(signal.SIGTERM)
+        second.wait(timeout=5)
+        second.stdout.close()
+        second.stderr.close()
+
+
 def _wsl_launcher_env(tmp_path, pill):
     """A WSL-looking environment: WSL_DISTRO_NAME set, a powershell.exe on PATH, and the
     pill setting in voicemode.env. The fake voicemode-switch records its arguments."""
