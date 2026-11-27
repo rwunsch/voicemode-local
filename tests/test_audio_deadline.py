@@ -21,7 +21,10 @@ def ad(monkeypatch, tmp_path):
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     exits = []
-    monkeypatch.setattr(mod, "_exit_now", lambda code=mod.EXIT_CODE: exits.append(code))
+    # Set directly, never restored: each test loads its own copy of the module, and an exit
+    # thread it started (mark_wedged schedules one 30 s ahead) may outlive the test. With
+    # monkeypatch the real os._exit came back at teardown and ended pytest (rc 75, 2026-11-27).
+    mod._exit_now = lambda code=mod.EXIT_CODE: exits.append(code)
     mod.exits = exits
     yield mod
     faulthandler.cancel_dump_traceback_later()
