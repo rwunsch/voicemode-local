@@ -285,7 +285,7 @@ public class VmlPill {
     const int WIDTH = 350, DEFAULT_H = 68;
     const int MIN_WIDTH = 320, MAX_WIDTH = 640;
     const int TAB_W = 22, TAB_H = 64, RAIL_W = 76, MINI_SIZE = 68;
-    const int ORB_ROW = 56, ORB_OPEN_WIDTH = 356, ORB_DOCK_MARGIN = 14;
+    const int ORB_ROW = 56, ORB_OPEN_WIDTH = 324, ORB_DOCK_MARGIN = 14;
     static readonly IntPtr TOPMOST = new IntPtr(-1);
     const string HOST = "pill.voicemode.example";
     const string BRIDGE = @"

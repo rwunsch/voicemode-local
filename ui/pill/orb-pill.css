@@ -39,7 +39,7 @@ body[data-orb-layout] .orb { width: 40px; height: 40px; border: 0; }
 body[data-orb-layout] #orbStrip {
   position: absolute; z-index: 1; top: 0; left: 14px; right: var(--orb-row);
   height: var(--orb-row); display: flex;
-  align-items: center; justify-content: flex-end; gap: 5px;
+  align-items: center; justify-content: center; gap: 4px;
   opacity: 0; visibility: hidden; pointer-events: none;
   transform: translateX(4px);
   transition: opacity 165ms ease, transform 180ms ease, visibility 165ms;
@@ -49,12 +49,11 @@ body[data-orb-layout][data-orb-reveal=true] #orbStrip {
   transition: opacity 165ms ease, transform 180ms ease;
 }
 body[data-orb-layout][data-orb-side=left] #orbStrip {
-  left: var(--orb-row); right: 14px; justify-content: flex-start;
+  left: var(--orb-row); right: 14px;
 }
 body[data-orb-layout][data-orb-reveal=false] #orbStrip * { pointer-events: none; }
 body[data-orb-layout] :is(sp-action-button, sp-button, sp-picker, sp-switch) { -webkit-app-region: no-drag; }
 body[data-orb-layout] #orbStrip > * { flex: none; }
-body[data-orb-layout] #orbEnd { margin-inline: 4px; }
 body[data-orb-layout] .orb-panel {
   position: absolute; z-index: 2; top: calc(var(--orb-row) + 2px); right: 6px; left: 6px;
   display: grid; gap: 8px; padding: 10px;
