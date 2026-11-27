@@ -4,7 +4,8 @@ The Orb starts docked at the screen edge and stays on top. The first appearance 
 the horizontal controls briefly. Then hover or explicit keyboard focus reveals
 the controls, and the native window shrinks to the Orb when they fade. The compact,
 strip and settings frames share the same screen anchor. More contains Voice settings,
-Pause, docking, tray and keyboard actions. The classic appearance remains available
+Pause, docking and keyboard actions. On Windows, it also offers the system tray.
+The classic appearance remains available
 through the existing `VOICEMODE_PILL_APPEARANCE=classic` setting.
 
 The Orb uses the approved 18 November FELIX exports: the still and the recorded

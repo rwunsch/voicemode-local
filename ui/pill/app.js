@@ -50,8 +50,9 @@
       var mode = M.presentation(ui, orbEnabled);
       vm.mode = mode; vm.side = mode === "docked" || mode === "rail" || mode === "tab" ? (ui.side || "right") : null;
     }
-    // Migrate old rail/tab/mini preferences to the Orb's single compact/strip surface.
-    if (orbEnabled && vm.mode !== "dot") vm.mode = "pill";
+    // Migrate old presentations to the compact/strip surface. On Mac this
+    // also recovers a Pill saved in the menu bar before that action was removed.
+    if (orbEnabled && (snapshot.platform === "mac" || vm.mode !== "dot")) vm.mode = "pill";
     document.body.dataset.mode = vm.mode;
     document.body.dataset.phase = vm.phase;
     document.body.dataset.tone = vm.indicator.tone;
@@ -193,6 +194,10 @@
     if (hidden && !h) lastMode = null; // resend the mode so the wrapper shows the window again
     hidden = h;
     if (ui === null) ui = Object.assign({}, s.ui); // restore once; afterwards the page owns it
+    if (s.orb && s.platform === "mac" && ui.minimized === true) {
+      ui = Object.assign({}, ui, { minimized: false });
+      send({ cmd: "save_ui", ui: ui });
+    }
     render();
   };
 

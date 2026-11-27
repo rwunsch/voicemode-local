@@ -6,6 +6,7 @@
     var body = document.body, theme = $("pillTheme");
     var lang = $("orbLanguage"), voice = $("orbVoice"), mute = $("orbMute"), end = $("orbEnd");
     var menu = $("orbMenu"), settings = $("orbSettings"), strip = $("orbStrip");
+    var tray = $("orbTray");
     var panel = "", active = false, opened = false, hover = false, intro = false, pinned = false;
     var introTimer, closeTimer, lastFrame = "", mutePending, muted, vm, snapshot, ui;
     var appearance = matchMedia("(prefers-color-scheme: dark)");
@@ -99,7 +100,7 @@
       setText($("orbPause"), vm.controls.pause.pressed ? "Resume voice" : "Pause voice");
       $("orbPause").disabled = !vm.controls.pause.enabled;
       setText($("orbDock"), ui && ui.orbDocked === false ? "Dock to screen edge" : "Undock");
-      setText($("orbTray"), data.platform === "mac" ? "Move to menu bar" : "Move to system tray");
+      tray.hidden = data.platform === "mac";
       if (panel === "settings") {
         picker(lang, vm.languages, vm.language);
         picker(voice, vm.voices, vm.voice);
@@ -150,7 +151,9 @@
     $("orbDock").addEventListener("click", function () {
       panel = ""; save({ orbDocked: ui && ui.orbDocked === false });
     });
-    $("orbTray").addEventListener("click", function () { panel = ""; save({ minimized: true }); });
+    tray.addEventListener("click", function () {
+      if (!tray.hidden) { panel = ""; save({ minimized: true }); }
+    });
     $("orbKeyboard").addEventListener("click", function () {
       send({ window: { keyboard: true } });
       showRegion();
