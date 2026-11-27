@@ -69,9 +69,19 @@ body[data-orb-layout] :is(#card, #pillTheme) { height: 100%; }
 #orbPreviewStatus:empty { display: none; }
 html.windows:has(body[data-orb-layout]) { background: transparent; }
 
-/* WebKit's composited layers can escape overflow:hidden on a rounded box.
-   Clip the face explicitly; the FELIX export also has transparent pixels in the corners. */
-[data-orb-layout] .orb { clip-path: circle(50%); }
+/* Mask the composited face and the moving layers themselves. WebKit can paint
+   an animated child beyond a parent's rounded clip as the Pill resizes. */
+[data-orb-layout] .orb {
+  --orb-circle: radial-gradient(circle closest-side, #000 calc(100% - .4px), transparent 100%);
+  clip-path: circle(50%);
+  -webkit-mask-image: var(--orb-circle);
+  mask-image: var(--orb-circle);
+}
+[data-orb-layout] :is(.orb-blue, .orb-stars),
+[data-orb-layout] .orb-pigment:not(.orb-blue)::after {
+  -webkit-mask-image: var(--orb-circle);
+  mask-image: var(--orb-circle);
+}
 [data-orb-layout][data-orb-palette=listening] .orb::after {
   content: ""; position: absolute; inset: 0; border-radius: inherit;
   box-shadow: inset 0 0 0 1px #e1d9ff94; pointer-events: none;
@@ -110,7 +120,7 @@ body[data-orb-layout][data-orb=animated] .orb-blue {
   opacity: 0;
 }
 body[data-orb-layout][data-orb-palette=listening]:is([data-tone=listening], [data-tone=muted]) .orb-blue { opacity: 1; }
-body[data-orb-layout]:not([data-orb-palette=listening]) .orb-stars { opacity: 0; }
+body[data-orb-layout]:not([data-orb-palette=listening]) .orb-stars { display: none; }
 body[data-orb-layout] .orb-shade {
   display: block; position: absolute; inset: 0; opacity: 0; pointer-events: none;
   background:
