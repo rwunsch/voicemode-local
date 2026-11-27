@@ -279,3 +279,24 @@ def test_autostart_keeps_wsl_arguments(win_dir):
     got.pop("script")
     assert got == {"Distro": "Ubuntu-22.04", "Repo": "/home/me/my repo", "BackendCommand": command,
                    "DataDir": winpath(data)}
+
+
+# Robert 2026-11-27: the pill's minimize button (_) shrinks it to the tray; Quit is in the tray
+# icon's right-click menu and tells the page {"cmd":"quit"} (the old close).
+def test_the_tray_icon_has_show_and_quit_in_its_menu():
+    src = (REPO / "pill-windows.ps1").read_text(encoding="utf-8")
+    assert "tray.ContextMenuStrip = menu;" in src
+    assert 'menu.Items.Add("Show pill"' in src and '{\\"cmd\\":\\"restore\\"}' in src
+    # FELIX-MAC 2026-11-27: "until the next voice session" was wrong while other sessions run;
+    # a dismiss sticks until voice restarts from scratch or someone asks for the pill.
+    assert "menu.Items.Add(\"Quit pill (say 'show the pill' to get it back)\"" in src
+    assert "until the next voice session" not in src
+    assert '{\\"cmd\\":\\"quit\\"}' in src
+
+
+def test_tray_icon_hover_says_where_quit_is():
+    # Robert 2026-11-27: minimized, the hover must say that Quit is in the menu. NotifyIcon.Text
+    # is limited (63 characters before .NET 4.6.2, 127 after): the longest phase must fit 63.
+    src = (REPO / "pill-windows.ps1").read_text(encoding="utf-8")
+    assert 'tray.Text = "Voice pill: " + phase + ". Right-click: Show or Quit";' in src
+    assert len("Voice pill: " + "Not responding" + ". Right-click: Show or Quit") <= 63

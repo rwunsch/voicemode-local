@@ -137,14 +137,65 @@ run: a native converse turn through Claude Code, and macOS.
   its pipe broke, the window logs it and posts `{"window":{"dropped":"<cmd>"}}` to the page,
   so the page can show Disconnected at once. It is never replayed: a late Stop could land on
   a turn it was not meant for.
+- **A Stop with no turn running ends only the next turn, and only soon** (v1.2.26, FELIX
+  #2094). With no conch holder (between turns, or the turn ended as you clicked), Stop
+  cannot cut anything, so it leaves `stop/<pid>` for the last session; its next `converse`
+  returns "Voice was stopped from the pill ... call converse again, which resumes voice."
+  The file now holds the time it was pressed, and that turn honours it only if it begins
+  within `VOICEMODE_PILL_STOP_WINDOW_S` seconds (default 30, Robert 2026-11-27; 0 = only a
+  Stop during the turn). 30 s covers a Stop pressed while the assistant writes its next
+  reply (3-20 s); before, the file never expired and cancelled a turn asked for minutes
+  later (field report: 122 ms "stopped" about 2 min after the last turn). An empty file from
+  an older version is aged by its mtime. Behaviour change; old (no expiry) has no setting.
 - **Push-to-talk** (2026-11-07): while the key is down the pill shows **Holding…** (phase
   `holding`, from the `holding` field patch_ptt_instant adds to the server's status reply,
   above Speaking and Listening, green like Listening). The keys hint reads `tap: stop, hold:
   talk` on every platform: key down cuts the reply and opens the mic, a release within 0.8 s
   stops (back to text), a later one sends what you said.
-- **Wake and the button layout** (2026-11-07, Robert's decision: a play and a stop button
-  together make no sense, and Skip is dropped). The pill has one main button in the leftmost
-  spot that switches state, and Pause beside it:
+- **The button layout since v1.2.26** (Robert 2026-11-27, FELIX #2094, adversarial UX
+  review). Two spots in a fixed place. The left one changes with the phase; the right one is
+  always **Voice off** (■, sends `stop`), so it never jumps under a pointer aimed at Pause as a
+  reply ends. A click on a button whose meaning changed in the last 500 ms is ignored.
+
+  | Phase | Left (primary) | Right |
+  |---|---|---|
+  | speaking, holding | ⏸ Pause | ■ Voice off |
+  | listening | **↵ Done**: sends `done` = "send what you said now" | ■ Voice off |
+  | paused | ⏯ Resume | ■ Voice off |
+  | between turns, someone to wake | Wake (sunrise) | – |
+  | between turns, nobody to wake | – | ■ Voice off |
+  | stopped (voice off) | Resume voice (sunrise) if the session can be woken, else nothing; the status line says "Voice off: continuing in text. Ask for voice to resume" | – |
+  | not responding | – (status line: "Voice server not responding: it will stop itself. Then restart the chat") | – |
+
+  Done: the backend forwards `done` as `skip_forward` (which ends the recording and
+  transcribes it, upstream VM-1754) only while the server's status says listening and not
+  speaking; skip_forward is sticky, so a late Done must not skip the next reply. Stefan's case:
+  his recording never ended in a noisy room, he reached for the only button (Stop = voice off).
+  The compact pill shows the two as 32 px icons; expanded or docked, only the labelled buttons
+  show (no second set of icons). **Hover hints** go to the status line, because a Mac panel
+  that never takes focus shows no native tooltip and a tooltip would be cut off by the small
+  window: the Mac wrapper reports the pointer (`pillHover`), elsewhere `mouseover` does; the
+  `title` stays for Windows and Linux. The push-to-talk hint reads "tap: voice off, hold: talk".
+  **Pause mic** (Robert 2026-11-27): while listening the expanded panel adds a third button
+  between Done and Voice off (compact stays at two): it sends `pause`, which closes the mic and
+  discards what was said, voice stays on (a phone call, someone walking in).
+  **Minimize only, Quit is in the menu** (Robert 2026-11-27, Stefan's "discoverable resume
+  path"): the pill has one window button, `_`, which minimizes to the tray (Windows) or menu
+  bar (Mac). The ✕ is gone: it had come to do the same as `_` (Robert: "remove the X and keep
+  minimize"). The icon's menu has "Show pill" (`{"cmd":"restore"}`) and "Quit pill (say 'show the pill' to get it back)" (`{"cmd":"quit"}`, which the page turns into the old close: `dismiss` +
+  hidden); the icon's hover says where it is. Windows: right-click the tray icon (a
+  `ContextMenuStrip` on the `NotifyIcon`; a left click restores). Opened by Robert on
+  WSL/Windows 2026-11-27 (n=1: "Show pill" and "Quit pill" shown). Mac: **any click** on the
+  menu-bar dot opens the menu (`statusItem.setMenu_`, the Mac convention, AppKit does the
+  clicking). The first build restored on a click and opened the menu on right-click or
+  Control-click via `sendActionOn_`; on Robert's Mac the right-click gave no menu, so Quit
+  could not be reached. Retested by FELIX-MAC 2026-11-27 on macOS 26.7.1 (n=1): click opens the menu, Show and Quit work.
+  Quit hides the pill until voice restarts from scratch or someone says "show the pill"; the first
+  label, "until the next voice session", was wrong while other sessions run (FELIX-MAC).
+
+- **Wake and the button layout, before v1.2.26** (2026-11-07, Robert's decision: a play and a
+  stop button together make no sense, and Skip is dropped). The pill has one main button in
+  the leftmost spot that switches state, and Pause beside it:
 
   | State | Main button (spot 1) | Spot 2 |
   |---|---|---|
@@ -585,14 +636,37 @@ call, no restart; both settings come from the environment, else voicemode.env.
   **Behaviour change:** a new session's first turn uses the voice last chosen in the pill;
   old behaviour via `VOICEMODE_PILL_REMEMBER_LAST=false`.
 - **The voice follows the language of the text.** The pill's voice replaces the caller's when
-  the caller passed no voice, the install's default (converse's own `TTS_VOICES[0]` in the
-  server, else the first of `VOICEMODE_VOICES`), or a voice
-  of the same language (`voice_languages.language_from_id`), and also when either language is
-  unknown. A caller voice of another language is kept: Spanish text with `em_alex` is spoken by
+  the caller passed no voice or a voice of the same language
+  (`voice_languages.language_from_id`), and also when either language is unknown. The
+  languages are compared first; the install's default voice is a voice like any other. A
+  caller voice of another language is kept, the install's default included: Spanish text with `em_alex` is spoken by
   `em_alex` even with the pill on `dm_martin`, and the turn's result tells the agent
   ("Spoken with your voice em_alex (Spanish), not the pill's dm_martin (German) ..."). The
   pill's language stays the default and the "write in ..." hint.
+  To speak a language other than the pill's, the agent must pass a voice of that language on
+  every such call: a call with no voice always speaks with the pill's voice.
   **Behaviour change:** the pill's voice no longer replaces a caller voice of another
   language; old behaviour (replace always) via `VOICEMODE_PILL_VOICE_FOLLOWS_LANGUAGE=false`.
+  (2026-11-19, Talos on FELIX #1910, second round: with a German pin, English text passed with
+  the English install default `am_puck` was read by `dm_martin`, because the default was
+  replaced before the languages were compared.)
+  **Behaviour change:** an install-default voice of another language than the pill's pinned
+  voice is now kept; old behaviour: it was replaced by the pin. There is no separate switch;
+  `VOICEMODE_PILL_VOICE_FOLLOWS_LANGUAGE=false` replaces every voice, as before.
+  Trade-off: a model that habitually passes the install default while writing in the pill's
+  language now gets the default voice; agents should pass no voice unless the user asks for
+  one (FELIX's skill says so).
+- **One choice in force, everywhere (2026-11-19, Talos on FELIX #1910).** The window, a
+  voice-only or language-only change in the pill, the voice, the "write in ..." hint and the
+  speech-recognition language all read the same choice (`voice_pill_state.pill_choice`): the
+  session's override, else the remembered last choice. Before, in a new chat with a remembered
+  choice and no override yet, the window showed the session's own voice, and a voice-only
+  change dropped the remembered language (a language-only change dropped the voice).
+  In a turn whose caller voice of another language was kept (Spanish `ef_dora` over a
+  remembered German), the window shows the pill's choice (German, `dm_martin`), as the hint
+  and Whisper use it, not the voice that spoke; the snapshot has no field for that voice.
+  **Behaviour change:** without an override, the window shows the remembered voice and
+  language, and a partial change keeps the other half of it; old behaviour via
+  `VOICEMODE_PILL_REMEMBER_LAST=false`, which also stops remembering for the voice.
 
 Not checked on a real Mac or Windows run yet; the tests use fake state folders.

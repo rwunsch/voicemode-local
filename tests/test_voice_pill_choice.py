@@ -73,7 +73,7 @@ def test_a_first_call_without_an_override_uses_the_last_choice(base):
     st.set_last_choice("dm_martin", "German", base=base)
     assert st.get_override(PID, base=base) == {}
     assert st.effective_voice(PID, None, base=base) == "dm_martin"
-    assert st.effective_voice(PID, "am_puck", base=base) == "dm_martin"
+    assert st.effective_voice(PID, "p_de_eva", base=base) == "dm_martin"   # same language
     assert "Write your next messages in German." in st.result_note(PID, base=base)
 
 
@@ -136,35 +136,80 @@ def test_a_later_replaced_turn_clears_the_kept_note(base):
     assert "em_alex" not in st.result_note(PID, base=base)
 
 
-def test_no_caller_voice_or_the_default_voice_is_replaced(base):
+def test_no_caller_voice_is_replaced(base):
     st.set_override(PID, "dm_martin", "German", base=base)
     assert st.effective_voice(PID, None, base=base) == "dm_martin"
-    assert st.effective_voice(PID, "am_puck", base=base) == "dm_martin"   # the install default
+    assert "Spoken with your voice" not in st.result_note(PID, base=base)
 
+
+# Talos on FELIX #1910, second round (2026-11-19): the install default was replaced by the pin
+# before the languages were compared, so a German pin read English text passed with the
+# English install default. Languages are now compared first; the default is a voice like any
+# other.
+
+def test_felix_german_pin_and_the_english_install_default_for_english_text(base):
+    st.set_override(PID, "dm_martin", "German", base=base)
+    assert st._install_default() == "am_puck"
+    assert st.effective_voice(PID, "am_puck", base=base) == "am_puck"
+    note = st.result_note(PID, base=base)
+    assert "am_puck (English)" in note and "dm_martin (German)" in note
+
+
+def test_an_install_default_of_another_language_is_kept_over_the_last_choice(base):
+    st.set_last_choice("dm_martin", "German", base=base)
+    assert st.effective_voice(PID, "am_puck", base=base) == "am_puck"
+    assert "am_puck (English)" in st.result_note(PID, base=base)
+
+
+def test_an_install_default_of_the_pins_language_is_replaced(base):
+    st.set_override(PID, "af_sky", "English", base=base)
+    assert st.effective_voice(PID, "am_puck", base=base) == "af_sky"
+    assert "Spoken with your voice" not in st.result_note(PID, base=base)
+
+
+def test_the_pin_itself_is_returned_without_a_note(base):
+    st.set_override(PID, "dm_martin", "German", base=base)
+    assert st.effective_voice(PID, "dm_martin", base=base) == "dm_martin"
+    assert "Spoken with your voice" not in st.result_note(PID, base=base)
+
+
+def test_an_unknown_language_install_default_is_replaced(base, monkeypatch):
+    monkeypatch.setenv("VOICEMODE_VOICES", "custom_voice,af_sky")
+    monkeypatch.delitem(sys.modules, "voice_mode.tools.converse", raising=False)
+    monkeypatch.delitem(sys.modules, "voice_mode.config", raising=False)
+    st.set_override(PID, "dm_martin", "German", base=base)
+    assert st._install_default() == "custom_voice"
+    assert st.effective_voice(PID, "custom_voice", base=base) == "dm_martin"
+
+
+def test_follows_language_off_replaces_the_install_default_too(base, monkeypatch):
+    monkeypatch.setenv("VOICEMODE_PILL_VOICE_FOLLOWS_LANGUAGE", "false")
+    st.set_override(PID, "dm_martin", "German", base=base)
+    assert st.effective_voice(PID, "am_puck", base=base) == "dm_martin"
+    assert "am_puck" not in st.result_note(PID, base=base)
+
+
+# The resolver of the install default (01ad6c8) is kept; it no longer decides effective_voice.
 
 def test_the_default_is_upstreams_tts_voices_as_converse_sees_it(base, monkeypatch):
     # The server: converse's own TTS_VOICES (config_reload may have changed it since start).
     fake = type(sys)("voice_mode.tools.converse")
     fake.TTS_VOICES = ["bf_emma", "af_sky"]
     monkeypatch.setitem(sys.modules, "voice_mode.tools.converse", fake)
-    st.set_override(PID, "dm_martin", "German", base=base)
-    assert st.effective_voice(PID, "bf_emma", base=base) == "dm_martin"   # upstream's default
-    assert st.effective_voice(PID, "am_puck", base=base) == "am_puck"     # not, here: kept
+    assert st._install_default() == "bf_emma"
 
 
 def test_without_upstream_the_default_comes_from_the_settings(base, monkeypatch):
     monkeypatch.delitem(sys.modules, "voice_mode.tools.converse", raising=False)
     monkeypatch.delitem(sys.modules, "voice_mode.config", raising=False)
-    st.set_override(PID, "dm_martin", "German", base=base)
-    assert st.effective_voice(PID, "am_puck", base=base) == "dm_martin"   # VOICEMODE_VOICES
+    assert st._install_default() == "am_puck"   # VOICEMODE_VOICES
 
 
 def test_an_empty_upstream_list_falls_back_to_the_settings(base, monkeypatch):
     fake = type(sys)("voice_mode.tools.converse")
     fake.TTS_VOICES = []
     monkeypatch.setitem(sys.modules, "voice_mode.tools.converse", fake)
-    st.set_override(PID, "dm_martin", "German", base=base)
-    assert st.effective_voice(PID, "am_puck", base=base) == "dm_martin"
+    assert st._install_default() == "am_puck"
 
 
 @pytest.mark.parametrize("caller,pinned", [("nova", "dm_martin"), ("em_alex", "custom_voice")])
@@ -221,4 +266,120 @@ def test_the_real_timeline_first_call_then_set_voice_then_second_call(ctx):
     vp.handle_command({"cmd": "set_language", "language": "German"}, ctx)
     assert st.effective_voice(PID, None, ctx.base) == "dm_martin"
     st.set_override(PID, None, None, ctx.base)                 # a new session: no override yet
-    assert st.effective_voice(PID, "am_puck", ctx.base) == "dm_martin"
+    assert st.effective_voice(PID, None, ctx.base) == "dm_martin"
+    # The English install default passed for English text is kept (Talos #1910, round 2).
+    assert st.effective_voice(PID, "am_puck", ctx.base) == "am_puck"
+
+
+# -- a partial change starts from the choice in force (Talos on FELIX #1910, 2026-11-19) ---
+# A new chat inherits last_choice.json but has no override. A voice-only change built its
+# override from the empty get_override(), so the remembered language was lost (and the reverse).
+
+def _floor_session(ctx, voice="am_puck"):
+    st.register_session(PID, "felix", voice, ctx.base)
+    st._write_json(ctx.base / "last_floor.json", {"pid": PID, "label": "felix"})
+
+
+def test_a_voice_only_change_in_a_new_session_keeps_the_remembered_language(ctx):
+    st.set_last_choice("dm_martin", "German", ctx.base)
+    _floor_session(ctx)
+    vp.handle_command({"cmd": "set_voice", "voice": "p_de_thorsten"}, ctx)
+    want = {"voice": "p_de_thorsten", "language": "German"}
+    assert st.get_override(PID, ctx.base) == want
+    assert st.get_last_choice(ctx.base) == want
+    assert st.pill_choice(PID, ctx.base) == want
+
+
+def test_a_language_only_change_in_a_new_session_keeps_the_remembered_voice(ctx):
+    st.set_last_choice("dm_martin", "German", ctx.base)
+    _floor_session(ctx)
+    vp.handle_command({"cmd": "set_language", "language": "Spanish"}, ctx)
+    want = {"voice": "dm_martin", "language": "Spanish"}
+    assert st.get_override(PID, ctx.base) == want
+    assert st.get_last_choice(ctx.base) == want
+
+
+def test_choosing_german_keeps_a_remembered_german_voice(ctx):
+    # German needs a German voice: the voice in force is the remembered p_de_thorsten, not the
+    # session's own am_puck, so it is not swapped for dm_martin.
+    st.set_last_choice("p_de_thorsten", "English", ctx.base)
+    _floor_session(ctx)
+    vp.handle_command({"cmd": "set_language", "language": "German"}, ctx)
+    assert st.get_override(PID, ctx.base) == {"voice": "p_de_thorsten", "language": "German"}
+
+
+def test_a_partial_change_without_a_saved_choice_is_unchanged(ctx):
+    _floor_session(ctx)
+    vp.handle_command({"cmd": "set_voice", "voice": "p_de_thorsten"}, ctx)
+    assert st.get_override(PID, ctx.base) == {"voice": "p_de_thorsten"}
+    assert st.get_last_choice(ctx.base) == {"voice": "p_de_thorsten"}
+
+
+def test_a_partial_change_with_remember_off_is_unchanged(ctx, monkeypatch):
+    monkeypatch.setenv("VOICEMODE_PILL_REMEMBER_LAST", "false")
+    st.set_last_choice("dm_martin", "German", ctx.base)
+    _floor_session(ctx)
+    vp.handle_command({"cmd": "set_voice", "voice": "p_de_thorsten"}, ctx)
+    assert st.get_override(PID, ctx.base) == {"voice": "p_de_thorsten"}
+    assert st.get_last_choice(ctx.base) == {"voice": "p_de_thorsten"}
+
+
+def test_a_partial_change_over_a_corrupt_saved_choice_writes_a_good_one(ctx):
+    ctx.base.mkdir(parents=True, exist_ok=True)
+    (ctx.base / "last_choice.json").write_bytes(b"{not json")
+    _floor_session(ctx)
+    vp.handle_command({"cmd": "set_voice", "voice": "p_de_thorsten"}, ctx)
+    assert st.get_override(PID, ctx.base) == {"voice": "p_de_thorsten"}
+    assert st.get_last_choice(ctx.base) == {"voice": "p_de_thorsten"}
+
+
+def test_a_partial_change_starts_from_the_session_override_first(ctx):
+    st.set_last_choice("dm_martin", "German", ctx.base)
+    _floor_session(ctx)
+    st.set_override(PID, "bf_emma", "English", ctx.base)
+    vp.handle_command({"cmd": "set_voice", "voice": "bm_george"}, ctx)
+    assert st.get_override(PID, ctx.base) == {"voice": "bm_george", "language": "English"}
+    assert st.get_last_choice(ctx.base) == {"voice": "bm_george", "language": "English"}
+
+
+# -- the window shows the choice in force (Talos on FELIX #1910, 2026-11-19) ---------------
+
+def test_the_window_shows_the_saved_choice_without_an_override(ctx):
+    st.set_last_choice("dm_martin", "German", ctx.base)
+    _floor_session(ctx)
+    s = vp.gather(ctx)
+    assert (s["voice"], s["language"]) == ("dm_martin", "German")
+
+
+def test_the_window_shows_the_override_over_the_saved_choice(ctx):
+    st.set_last_choice("dm_martin", "German", ctx.base)
+    _floor_session(ctx)
+    st.set_override(PID, "bf_emma", "English", ctx.base)
+    s = vp.gather(ctx)
+    assert (s["voice"], s["language"]) == ("bf_emma", "English")
+
+
+def test_the_window_ignores_the_saved_choice_with_remember_off(ctx, monkeypatch):
+    monkeypatch.setenv("VOICEMODE_PILL_REMEMBER_LAST", "false")
+    st.set_last_choice("dm_martin", "German", ctx.base)
+    _floor_session(ctx)
+    s = vp.gather(ctx)
+    assert (s["voice"], s["language"]) == ("am_puck", "English")
+
+
+def test_an_explicit_spanish_turn_over_a_remembered_german_agrees_everywhere(ctx):
+    """Talos's scenario: remembered German, no override, the agent passes ef_dora for Spanish
+    text. The caller's voice is kept for that turn; the pill's choice stays German, and the
+    window, the recognition language and the hint all say German."""
+    st.set_last_choice("dm_martin", "German", ctx.base)
+    _floor_session(ctx)
+    # What enter() does: resolve the voice, then register the session with it.
+    spoken = st.effective_voice(PID, "ef_dora", ctx.base)
+    assert spoken == "ef_dora"
+    st.register_session(PID, "felix", spoken, ctx.base)
+    assert st.pill_choice(PID, ctx.base).get("language") == "German"   # what Whisper is given
+    note = st.result_note(PID, base=ctx.base)
+    assert "Write your next messages in German." in note
+    assert "ef_dora (Spanish), not the pill's dm_martin (German)" in note
+    s = vp.gather(ctx)
+    assert (s["voice"], s["language"]) == ("dm_martin", "German")

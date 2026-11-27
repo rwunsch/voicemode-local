@@ -22,14 +22,14 @@ html,body{margin:0;background:transparent;color:var(--t);font:13px system-ui,san
 .btn:hover:not(:disabled),.btn.hover:not(:disabled){background:var(--hover)}
 .btn:disabled,select:disabled{opacity:.4;cursor:default}
 .btn.icon{padding:4px 6px}
-.stop:hover:not(:disabled),.stop.hover:not(:disabled){color:var(--r);border-color:var(--r)}
+[data-kind=voiceoff]:hover:not(:disabled),[data-kind=voiceoff].hover:not(:disabled){color:var(--r);border-color:var(--r)}
 select{flex:1;min-width:0}
 .more{display:none;margin-top:10px;flex-direction:column;gap:8px}
 [data-mode=expanded] .more,[data-mode=docked] .more{display:flex}
 .q{display:flex;justify-content:space-between;padding:3px 0;border-top:1px solid var(--line)}
 kbd{border:1px solid var(--line);border-radius:4px;padding:0 4px;font:11px ui-monospace,monospace}
 :focus-visible{outline:2px solid var(--a);outline-offset:1px}
-.pic{width:28px;height:28px;padding:0;flex:none;font-size:14px;line-height:1}
+.pic{width:32px;height:32px;padding:0;flex:none;font-size:15px;line-height:1}
 .btn.icon{width:24px;padding:4px 0;flex:none}
 option{background:var(--bg);color:var(--t)}
 html,body{height:100%}
@@ -39,11 +39,11 @@ html,body{height:100%}
 [data-mode=docked] .edge,[data-mode=rail] .edge,[data-mode=tab] .edge{display:none}
 .tuck{display:none}
 [data-mode=docked] .tuck,[data-mode=rail] .tuck{display:block}
-[data-mode=docked] #expand,[data-mode=docked] #minimize,[data-mode=docked] #dockTop,[data-mode=rail] #dockTop{display:none}
+[data-mode=docked] #expand,[data-mode=docked] #dockTop,[data-mode=rail] #dockTop{display:none}
 [data-mode=docked] .drag,[data-mode=rail] .drag{cursor:ns-resize}
 .waiting{flex:none;margin-left:auto;color:var(--m);font-size:11px}
 [data-mode=rail] .waiting{margin:0;font-size:10px}
-[data-mode=rail] #minimize,[data-mode=rail] #dismiss{display:none}
+[data-mode=rail] #minimize{display:none}
 [data-mode=rail] .card{padding:8px 6px}
 [data-mode=rail] .top{flex-wrap:wrap;justify-content:center}
 [data-mode=rail] .drag{flex:0 0 100%;flex-direction:column;gap:4px;text-align:center}
@@ -56,13 +56,18 @@ html,body{height:100%}
 [data-tone=speaking] .tab{color:var(--speak)}[data-tone=listening] .tab{color:var(--listen)}[data-tone=interrupted] .tab{color:var(--interrupt)}
 [data-mode=tab] .tab{display:block}[data-mode=tab] .card{display:none}
 [hidden]{display:none!important}
-.wake:hover:not(:disabled),.wake.hover:not(:disabled){color:var(--g);border-color:var(--g)}
+[data-kind=wake]:hover:not(:disabled),[data-kind=wake].hover:not(:disabled),[data-kind=resumevoice]:hover:not(:disabled),[data-kind=resumevoice].hover:not(:disabled){color:var(--g);border-color:var(--g)}
+[data-kind=done]{color:var(--listen);border-color:var(--listen)}[data-kind=done]:hover:not(:disabled),[data-kind=done].hover:not(:disabled){background:var(--hover)}
+/* The panel shows the two buttons with words: no second set of icons beside them (Robert 2026-11-27). */
+[data-mode=expanded] .row.top .pic,[data-mode=docked] .row.top .pic{display:none}
 .main .wakeicon{display:flex;align-items:center;justify-content:center}
 .main .sun{display:block;margin:auto}
 
 /* The panel's labelled controls (2026-11-17): first in the panel, words with their icons. */
 .controls{gap:8px}
 .btn.ctl{flex:1;display:flex;align-items:center;justify-content:center;gap:6px;padding:6px 10px;font-size:12.5px;font-weight:600}
+/* Voice off keeps its place and width when Pause mic appears beside it (code review of 33d87cb). */
+#ctlMain{flex:0 0 32%}
 .btn.ctl .ic{font-size:13px;line-height:1}
 .btn.ctl[aria-pressed=true]{border-color:var(--m);background:var(--hover)}
 
