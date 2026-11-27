@@ -132,7 +132,8 @@ INTENDED_COPIES_SINCE_BASELINE += ["tts_chunks.py"]   # 2026-11-14
 INTENDED_COPIES_SINCE_BASELINE += ["voice_languages.py", "voice_fallback.py"]   # 2026-11-17
 INTENDED_COPIES_SINCE_BASELINE += ["voice_sensitivity.py"]   # 2026-11-18
 INTENDED_COPIES_SINCE_BASELINE += ["ui/pill/orb-pill.css", "ui/pill/orb-pill.js",
-                                  "ui/pill/spectrum.js", "ui/pill/spectrum.NOTICES.txt"]
+                                  "ui/pill/spectrum.js", "ui/pill/spectrum.NOTICES.txt",
+                                  "ui/pill/orb-felix.png", "ui/pill/orb-felix-motion.webp"]
 
 
 def apply_intended(pkg: Path) -> None:

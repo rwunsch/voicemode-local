@@ -69,34 +69,38 @@ body[data-orb-layout] :is(#card, #pillTheme) { height: 100%; }
 #orbPreviewStatus:empty { display: none; }
 html.windows:has(body[data-orb-layout]) { background: transparent; }
 
-/* Re-create the approved cloud palette with original layers, without the reference bitmap. */
-[data-orb-layout] .orb { box-shadow: inset 0 0 0 1px #d9d5ff80; isolation: isolate; }
-[data-orb-layout] .orb::after {
+/* WebKit's composited layers can escape overflow:hidden on a rounded box.
+   Clip the face explicitly; the FELIX export also has transparent pixels in the corners. */
+[data-orb-layout] .orb { clip-path: circle(50%); }
+[data-orb-layout][data-orb-palette=listening] .orb::after {
   content: ""; position: absolute; inset: 0; border-radius: inherit;
   box-shadow: inset 0 0 0 1px #e1d9ff94; pointer-events: none;
 }
-body[data-orb-layout] {
-  --felix-paint:
-    radial-gradient(ellipse at 49% 51%, #0d0b2b 6%, #171139ee 18%, #35156284 34%, transparent 54%),
-    radial-gradient(ellipse at 23% 24%, #824bff 3%, #6051f9c7 27%, transparent 57%),
-    radial-gradient(ellipse at 70% 18%, #686dfc 5%, #6059eab5 28%, transparent 59%),
-    radial-gradient(ellipse at 49% 88%, #ff7445 5%, #ff945f 16%, #fa6e77d9 27%, transparent 53%),
-    radial-gradient(ellipse at 13% 68%, #e831ff 7%, #d100efc9 27%, transparent 52%),
-    radial-gradient(ellipse at 86% 73%, #ff04df 9%, #d715ddd8 28%, transparent 52%),
-    #4a29b5;
-}
 [data-orb-layout] .orb-pigment {
-  inset: -10%;
-  background: var(--felix-paint);
+  inset: 0;
   transition: opacity 340ms ease;
 }
-/* In the full design blue is a layer, so speaker changes can crossfade. */
-[data-orb-layout][data-orb-palette=listening] .orb-pigment:not(.orb-blue) {
-  background: var(--felix-paint);
+/* Use the approved exports at the real 40 pt face size. Never tint the still. */
+body[data-orb-layout] .orb-pigment:not(.orb-blue) {
+  background: url(orb-felix.png) center / 100% 100% no-repeat;
+  animation: none;
 }
-.orb-blue, .orb-clouds, .orb-shade { display: none; }
+body[data-orb-layout] .orb-pigment:not(.orb-blue)::after {
+  content: ""; position: absolute; inset: 0; background-image: url(orb-felix-motion.webp);
+  background-size: 1000% 600%; background-repeat: no-repeat;
+  animation: felix-frame-column 800ms steps(10, jump-none) infinite,
+             felix-frame-row 4800ms steps(6, jump-none) infinite;
+  animation-play-state: paused;
+}
+body[data-orb-layout][data-orb-motion=true] .orb-pigment:not(.orb-blue)::after {
+  animation-play-state: running;
+}
+@keyframes felix-frame-column { from { background-position-x: 0%; } to { background-position-x: 100%; } }
+@keyframes felix-frame-row { from { background-position-y: 0%; } to { background-position-y: 100%; } }
+.orb-blue, .orb-shade { display: none; }
 body[data-orb-layout][data-orb=animated] .orb-blue {
   display: block;
+  clip-path: circle(50%);
   background:
     radial-gradient(ellipse at 47% 39%, #141b51 0%, #153592c2 29%, transparent 60%),
     radial-gradient(ellipse at 69% 80%, #a1eeff 4%, #3b95eb 32%, transparent 64%),
@@ -104,36 +108,21 @@ body[data-orb-layout][data-orb=animated] .orb-blue {
   opacity: 0;
 }
 body[data-orb-layout][data-orb-palette=listening]:is([data-tone=listening], [data-tone=muted]) .orb-blue { opacity: 1; }
-body[data-orb-layout] .orb-clouds {
-  display: block; position: absolute; inset: -11%; opacity: 0; pointer-events: none;
-  background:
-    radial-gradient(ellipse 58% 34% at 29% 35%, #bac5ff60, #9c72fd24 42%, transparent 79%),
-    radial-gradient(ellipse 44% 27% at 68% 64%, #eabbff47, #c38cf417 52%, transparent 87%),
-    radial-gradient(ellipse 52% 39% at 37% 70%, #21143f60, #2b194f26 56%, transparent 88%);
-  mix-blend-mode: soft-light; filter: blur(.45px);
-  animation: cloud-drift 31s ease-in-out infinite alternate;
-  transition: opacity 340ms ease;
-}
-body[data-orb-layout]:is([data-tone=speaking], [data-tone=listening]) .orb-clouds { opacity: .9; }
-body:not([data-orb-motion=true]) .orb-clouds { animation-play-state: paused; }
-@keyframes cloud-drift {
-  from { transform: rotate(-22deg) translate(-4%, 3%); }
-  to { transform: rotate(34deg) translate(6%, -4%); }
-}
+body[data-orb-layout]:not([data-orb-palette=listening]) .orb-stars { opacity: 0; }
 body[data-orb-layout] .orb-shade {
   display: block; position: absolute; inset: 0; opacity: 0; pointer-events: none;
   background:
     radial-gradient(ellipse 65% 40% at 50% 104%, #a2a4be69, transparent 94%),
     radial-gradient(ellipse 91% 94% at 65% 111%, #282d42 15%, #34374ded 36%, #414557a4 54%, #49475b30 73%, transparent 94%);
-  transform: translateY(22%);
-  transition: opacity 360ms ease, transform 420ms cubic-bezier(.24,.65,.3,1);
+  transition: opacity 360ms cubic-bezier(.24,.65,.3,1);
 }
-body[data-orb-layout][data-mic-muted=true] .orb-shade { opacity: 1; transform: none; }
+body[data-orb-layout][data-mic-muted=true] .orb-shade { opacity: 1; }
 body[data-orb-layout][data-mic-muted=true]:not([data-tone=speaking]) .orb {
   background: radial-gradient(ellipse at 42% 25%, #9a9db3, #5e627f 46%, #252838 88%);
 }
-body[data-orb-layout][data-mic-muted=true]:not([data-tone=speaking]) :is(.orb-pigment, .orb-stars, .orb-clouds) { opacity: 0; }
+body[data-orb-layout][data-mic-muted=true]:not([data-tone=speaking]) :is(.orb-pigment, .orb-stars) { opacity: 0; }
 @media (prefers-reduced-motion: reduce) {
-  body[data-orb-layout] :is(#orbStrip, .orb-pigment, .orb-clouds, .orb-shade),
+  body[data-orb-layout] .orb-pigment:not(.orb-blue)::after { display: none; }
+  body[data-orb-layout] :is(#orbStrip, .orb-pigment, .orb-shade),
   body[data-orb-layout] .top::before { animation: none; transition: none; }
 }

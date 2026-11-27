@@ -46,6 +46,8 @@
     {"copy": "../ui/pill/pill.css", "to": "ui/pill/pill.css"},
     {"copy": "../ui/pill/orb-pill.css", "to": "ui/pill/orb-pill.css"},
     {"copy": "../ui/pill/orb-pill.js", "to": "ui/pill/orb-pill.js"},
+    {"copy": "../ui/pill/orb-felix.png", "to": "ui/pill/orb-felix.png"},
+    {"copy": "../ui/pill/orb-felix-motion.webp", "to": "ui/pill/orb-felix-motion.webp"},
     {"copy": "../ui/pill/spectrum.js", "to": "ui/pill/spectrum.js"},
     {"copy": "../ui/pill/spectrum.NOTICES.txt", "to": "ui/pill/spectrum.NOTICES.txt"},
     {"copy": "voice_pill.py", "to": "voice_pill.py", "why": "modules go in before the pill patch makes converse import them"},
