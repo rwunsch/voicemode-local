@@ -159,3 +159,40 @@ def test_a_missed_deadline_inside_converse_becomes_the_message(tree, tmp_path):
         print("RESULT", asyncio.run(cv._converse_core("hello")))
         """)
     assert "refreshing the audio devices did not return within 0.3 s" in out.stdout, out.stdout + out.stderr
+
+
+# Code review of 33d87cb, finding 1, through the real patched code: a start chime on a dead
+# device (upstream swallows the miss) followed by a wait with no deadline must end the turn
+# with the wedged message, not hang until the client's 180 s timeout.
+def test_a_swallowed_chime_miss_ends_the_turn(tree, tmp_path):
+    out = _run(tree, tmp_path, """
+        import asyncio, threading, time
+        import voice_mode.core as core
+        from voice_mode.tools import converse as cv
+        from voice_mode import audio_deadline
+        audio_deadline._exit_now = lambda code=75: None
+
+        class DeadPlayer:
+            def __init__(self):
+                self.playback_complete = threading.Event()
+            def play(self, samples, rate, blocking=False):
+                pass
+            def wait(self, timeout=None):
+                self.playback_complete.wait(timeout)
+
+        core.NonBlockingAudioPlayer = DeadPlayer
+
+        async def turn(*a, **k):
+            ok = await core.play_chime_start()     # upstream: except Exception -> False
+            assert ok is False
+            await asyncio.sleep(3600)              # the TTS wait with no deadline
+            return "never"
+
+        cv._vml_converse_core_before_deadline = turn
+        t0 = time.monotonic()
+        r = asyncio.run(cv._converse_core("hello"))
+        print("RESULT", round(time.monotonic() - t0, 1), r)
+        """, env={"VOICEMODE_AUDIO_DEADLINE_S": "0.3"})
+    assert "RESULT" in out.stdout and "the audio device did not respond" in out.stdout, out.stdout + out.stderr
+    took = float(out.stdout.split("RESULT ")[1].split()[0])
+    assert took < 5

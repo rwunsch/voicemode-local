@@ -12,6 +12,9 @@
   function send(obj) {
     try { if (window.pillTransport) window.pillTransport.send(JSON.stringify(obj)); } catch (e) { /* no transport */ }
   }
+  function modeOf(u) {
+    return u.minimized ? "dot" : u.docked ? (u.tucked ? "tab" : u.dockOpen ? "docked" : "rail") : u.expanded ? "expanded" : "pill";
+  }
   function saveUi(patch) {
     ui = Object.assign({}, ui, patch);
     send({ cmd: "save_ui", ui: ui });
@@ -40,6 +43,8 @@
 
   var changedAt = {}, shownKind = {}, hovered = null;
   function setPanelOnly(el, b) {
+    var shown = b.visible ? b.kind : null;   // appearing counts as a change for the click guard
+    if (shownKind.mic !== shown) { shownKind.mic = shown; changedAt.mic = Date.now(); }
     el.hidden = !b.visible; el.disabled = !b.enabled;
     el.dataset.hint = b.hint || ""; el.title = b.hint || ""; el.setAttribute("aria-label", b.hint || b.text || "");
   }
@@ -71,7 +76,7 @@
   function render() {
     var vm = M.viewModel(snapshot, lastSeen, Date.now(), { interruptedUntil: interruptedUntil });
     if (ui) { // local ui wins: it is what the user just chose, and the backend echoes it back
-      var mode = ui.minimized ? "dot" : ui.docked ? (ui.tucked ? "tab" : ui.dockOpen ? "docked" : "rail") : ui.expanded ? "expanded" : "pill";
+      var mode = modeOf(ui);
       vm.mode = mode; vm.side = mode === "docked" || mode === "rail" || mode === "tab" ? (ui.side || "right") : null;
     }
     document.body.dataset.mode = vm.mode;
@@ -182,7 +187,16 @@
   $("ctlMic").onclick = press("mic");
   // Close shrinks to the tray / menu bar (Robert 2026-11-27); quitting the pill is in that
   // icon's menu, whose wrapper sends {"cmd":"quit"}: until the next voice session, as before.
-  function quitPill() { send({ cmd: "dismiss" }); hidden = true; send({ window: { mode: "hidden" } }); render(); }
+  // Quit is only reachable from the tray, so ui.minimized is true then; left so, the next voice
+  // session would come back as a tray icon only (code review of 33d87cb). Un-minimize first,
+  // without showing the window now: lastMode is set so render does not send the mode.
+  function quitPill() {
+    ui = Object.assign({}, ui, { minimized: false });
+    send({ cmd: "save_ui", ui: ui });
+    send({ cmd: "dismiss" }); hidden = true; send({ window: { mode: "hidden" } });
+    lastMode = modeOf(ui);
+    render();
+  }
   $("dismiss").onclick = function () { saveUi({ minimized: true }); };
   // Hear the voice shown in the list; one at a time (the button waits for the answer).
   $("preview").onclick = function () {
@@ -235,7 +249,10 @@
   document.addEventListener("mouseover", function (e) {
     setHovered(e.target && e.target.closest ? e.target.closest(".btn,.tab,.edge") : null);
   });
-  document.addEventListener("mouseleave", function () { setHovered(null); });
+  // Leaving the window: mouseleave on the root element, and mouseout with no target, since
+  // WebView2 may not send mouseleave for the document (code review of 33d87cb).
+  document.documentElement.addEventListener("mouseleave", function () { setHovered(null); });
+  document.addEventListener("mouseout", function (e) { if (!e.relatedTarget) setHovered(null); });
   setInterval(render, 1000);
   render();
 })();

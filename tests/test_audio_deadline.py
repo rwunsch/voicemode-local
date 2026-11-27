@@ -265,3 +265,85 @@ def test_a_dump_never_fails_when_the_folder_cannot_be_written(ad, monkeypatch, t
     monkeypatch.setenv("VOICEMODE_BASE_DIR", str(blocker))  # logs/ cannot be made under a file
     ad.dump_stacks("probe")   # no exception
     assert ad.open_backstop() is None
+
+
+# Code review of 33d87cb, finding 1: a chime that missed its deadline was swallowed by
+# upstream's `except Exception`, so the turn went on with the dead device, every later chime
+# waited its own deadline again, and the exit came only with the next converse.
+def test_once_wedged_every_device_call_fails_at_once(ad, monkeypatch):
+    ad.mark_wedged("playback did not finish within 10 s")
+    t0 = time.monotonic()
+    with pytest.raises(ad.DeadlineMissed):
+        asyncio.run(ad.call(lambda: time.sleep(3600), 30, "probe"))
+    with pytest.raises(ad.DeadlineMissed):
+        asyncio.run(ad.play(FakePlayer(), [0.0] * 2400, 24000))
+    assert time.monotonic() - t0 < 0.5
+
+
+def test_being_wedged_schedules_the_exit_even_if_the_turn_never_returns(ad, monkeypatch):
+    monkeypatch.setattr(ad, "WEDGED_EXIT_CAP_S", 0.3)
+    ad.mark_wedged("probe")
+    deadline = time.monotonic() + 3
+    while not ad.exits and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert ad.exits == [ad.EXIT_CODE]
+
+
+def test_an_earlier_exit_wins_over_the_cap(ad, monkeypatch):
+    monkeypatch.setattr(ad, "WEDGED_EXIT_CAP_S", 30)
+    monkeypatch.setattr(ad, "EXIT_DELAY_S", 0.2)
+    ad.mark_wedged("probe")            # cap: 30 s
+    assert ad.wedged_result()          # the reply went out: exit in 0.2 s
+    deadline = time.monotonic() + 3
+    while not ad.exits and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert ad.exits == [ad.EXIT_CODE]
+
+
+def test_guard_ends_a_turn_that_hangs_after_a_swallowed_miss(ad, monkeypatch):
+    # The shape of upstream's turn: a chime whose miss is swallowed, then a wait with no
+    # deadline (TTS playback on to_thread). The wrapper must answer at once, not hang.
+    monkeypatch.setattr(ad, "EXIT_DELAY_S", 30)  # no exit during the test
+    monkeypatch.setenv(ad.DEADLINE_SETTING, "0.2")
+
+    async def turn():
+        try:
+            await ad.play(FakePlayer(hang=True), [0.0] * 2400, 24000)
+        except Exception:
+            pass                                   # upstream: logger.debug, return False
+        await asyncio.sleep(3600)                  # the TTS wait that never ends
+        return "never"
+
+    t0 = time.monotonic()
+    out = asyncio.run(ad.guard(turn()))
+    assert out.startswith("Voice stopped: the audio device did not respond")
+    assert time.monotonic() - t0 < 3
+
+
+def test_guard_passes_a_normal_result_through(ad):
+    async def turn():
+        return "ok"
+    assert asyncio.run(ad.guard(turn())) == "ok"
+
+
+# Code review of 33d87cb, finding 4: a new voice server deleted the (empty, open) backstop
+# file of a voice server still running; on POSIX its later dump would go to an unlinked file.
+def test_a_live_servers_empty_backstop_file_is_kept(ad, monkeypatch, tmp_path):
+    d = tmp_path / "logs" / "stall"
+    d.mkdir(parents=True)
+    live = d / f"backstop-{os.getppid()}.txt"
+    live.write_text("")
+    f = ad.open_backstop()
+    f.close()
+    assert live.exists()
+
+
+def test_backstop_rearm_is_not_every_beat(ad, monkeypatch):
+    calls = []
+    monkeypatch.setattr(ad.faulthandler, "dump_traceback_later", lambda *a, **k: calls.append(a))
+    clock = Clock()
+    dog = ad.Watchdog(90, clock=clock)
+    for _ in range(25):
+        dog.stamp()
+        clock.t += 1
+    assert len(calls) == 3   # at 0, 10 and 20 s

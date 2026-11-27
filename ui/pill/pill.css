@@ -66,6 +66,8 @@ html,body{height:100%}
 /* The panel's labelled controls (2026-11-17): first in the panel, words with their icons. */
 .controls{gap:8px}
 .btn.ctl{flex:1;display:flex;align-items:center;justify-content:center;gap:6px;padding:6px 10px;font-size:12.5px;font-weight:600}
+/* Voice off keeps its place and width when Pause mic appears beside it (code review of 33d87cb). */
+#ctlMain{flex:0 0 32%}
 .btn.ctl .ic{font-size:13px;line-height:1}
 .btn.ctl[aria-pressed=true]{border-color:var(--m);background:var(--hover)}
 

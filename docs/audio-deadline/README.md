@@ -27,10 +27,18 @@ the pill showed Speaking with no audio. So the voice server's event loop answere
   later one) returns "Voice stopped: the audio device did not respond (...). The voice
   server exits now ... restart the chat (in FELIX, restart FELIX) ...", and the process exits
   with code 75 two seconds later.
+- **A miss ends the turn at once** (code review of 33d87cb). upstream catches a chime's
+  failure (`except Exception`) and carries on, and its TTS playback then waits on
+  `asyncio.to_thread` with no deadline, so a miss alone did not end the turn. Now: once
+  wedged, every later device call fails at once; the outermost wrapper runs the turn under
+  `audio_deadline.guard`, which cancels it within 0.25 s of the miss and returns the message;
+  and the exit is scheduled at the miss itself (after 30 s, `WEDGED_EXIT_CAP_S`), brought
+  forward to 2 s once the reply has gone out.
 - **Watchdog.** A loop task stamps a heartbeat every second; a thread checks it. Stuck longer
   than `VOICEMODE_LOOP_STALL_EXIT_S` (default 90, below the 180 s client timeout; 0 = off):
-  every thread's stack goes to a stall file and the log, then exit 75. `faulthandler.dump_traceback_later`
-  (limit + 15 s) is the backstop if the GIL itself is held. A checking thread that was itself
+  every thread's stack goes to a stall file and the log, then exit 75 (without
+  `logging.shutdown()`, which could block on a handler lock held by a thread stuck on stderr). `faulthandler.dump_traceback_later`
+  (limit + 15 s, re-armed every 10 s, not every beat) is the backstop if the GIL itself is held. A checking thread that was itself
   away > 5 s means the machine slept, so the stamp is renewed instead.
 - **Pill.** The status reply carries `loop_lag_s`. Above 10 s the pill shows **Not responding**
   ("Voice server not responding") instead of Speaking or Listening. There is no heartbeat file.
@@ -45,7 +53,9 @@ a host may not keep stderr, so every dump also goes to a file of its own:
   message text (but they do contain file paths, e.g. the home folder). The last 5 are kept.
 - `logs/stall/backstop-<pid>.txt`, opened when the watchdog starts, for faulthandler's
   backstop (it can only write to a file already open). Empty unless it fired; empty ones of
-  earlier runs are removed at the next start, non-empty ones kept (last 5).
+  voice servers that are no longer running are removed at the next start (never another live
+  server's open file; on Windows only files no process holds open can be deleted anyway),
+  non-empty ones kept (last 5).
 
 ## Log lines (logger `voicemode.audio_deadline`, level ERROR, stderr)
 - `audio device not responding: <reason>; the voice server will exit after this turn`

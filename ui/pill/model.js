@@ -48,14 +48,16 @@
     stopped: "Voice off", disconnected: "Disconnected", not_responding: "Not responding" };
   // The status line's longer text where the short label would leave the user guessing.
   var STATE_TEXT = { stopped: "Voice off: continuing in text. Ask for voice to resume",
-    not_responding: "Voice server not responding: it restarts itself" };
+    // It ends itself after VOICEMODE_LOOP_STALL_EXIT_S; whether the host starts a new one is
+    // not known (Copilot desktop unmeasured, FELIX's launch.js does not respawn): no promise.
+    not_responding: "Voice server not responding: it will stop itself. Then restart the chat" };
 
   // The coloured indicator (2026-11-17): who is speaking, as a tone and always a text label too.
   var TONES = { speaking: "speaking", listening: "listening", holding: "neutral", working: "neutral", idle: "neutral",
     stopped: "neutral", paused: "muted", disconnected: "off", not_responding: "interrupted" };
   var TONE_TEXT = { speaking: "Assistant speaking", listening: "Listening to you", paused: "Paused",
     interrupted: "Interrupted", disconnected: "Disconnected",
-    // FELIX #2095: the voice server's loop is stuck; it restarts itself after 90 s.
+    // FELIX #2095: the voice server's loop is stuck; it ends itself after 90 s.
     not_responding: "Voice server not responding" };
   function indicatorFor(phase, who, interrupted) {
     if (phase === "disconnected") return { tone: "off", text: TONE_TEXT.disconnected, who: "" };

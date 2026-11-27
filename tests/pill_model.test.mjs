@@ -589,9 +589,10 @@ test("stopped: says voice is off and how to resume", () => {
   assert.deepEqual([w.cmd, w.text], ["wake", "Resume voice"]);
 });
 
-test("not responding: no buttons, says it restarts itself", () => {
+test("not responding: no buttons, says it will stop and to restart the chat", () => {
   const vm = viewModel(snap({ phase: "not_responding" }), 0, 0);
-  assert.match(vm.stateText, /restarts itself/);
+  assert.match(vm.stateText, /will stop itself\. Then restart the chat/);
+  assert.doesNotMatch(vm.stateText, /restarts/);   // no promise nobody measured (FELIX-voice)
 });
 
 test("no floor: the buttons are shown but disabled", () => {

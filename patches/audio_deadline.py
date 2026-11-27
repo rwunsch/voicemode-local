@@ -48,6 +48,8 @@ STALL_SETTING = "VOICEMODE_LOOP_STALL_EXIT_S"
 STALL_DEFAULT = 90.0
 EXIT_CODE = 75            # EX_TEMPFAIL: try again with a fresh process
 EXIT_DELAY_S = 2.0        # lets the converse result reach the client before the exit
+WEDGED_EXIT_CAP_S = 30.0  # wedged but the turn never returned (a wait with no deadline): exit anyway
+REARM_S = 10.0            # the faulthandler backstop is re-armed this often, not every beat
 BEAT_S = 1.0
 BACKSTOP_EXTRA_S = 15.0   # faulthandler fires this long after the watchdog thread should have
 
@@ -58,7 +60,8 @@ WEDGED_MESSAGE = (
 
 # Set once an audio-device call missed its deadline; the process is not trusted after it.
 wedged: str | None = None
-_exit_scheduled = False
+_exit_at: float | None = None      # monotonic time of the planned exit (the earliest asked for)
+_exit_lock = threading.Lock()
 
 
 class DeadlineMissed(Exception):
@@ -83,10 +86,13 @@ def stall_limit() -> float:
 
 
 def _exit_now(code: int = EXIT_CODE) -> None:  # replaced in tests
+    # No logging.shutdown(): it takes every handler's lock, and a thread blocked on a full
+    # stderr pipe would hold one for ever (code review of 33d87cb). The stall file is on disk.
     try:
-        logging.shutdown()
-    finally:
-        os._exit(code)
+        sys.stderr.flush()
+    except Exception:
+        pass
+    os._exit(code)
 
 
 def mark_wedged(reason: str) -> None:
@@ -95,20 +101,28 @@ def mark_wedged(reason: str) -> None:
         wedged = reason
         logger.error("audio device not responding: %s; the voice server will exit after this turn", reason)
         dump_stacks(f"audio deadline missed: {reason}")
+        # The turn may never return (upstream swallows the miss, then waits with no deadline):
+        # exit anyway after a while. A reply that does go out brings the exit forward.
+        schedule_exit(WEDGED_EXIT_CAP_S)
 
 
 def schedule_exit(delay: float | None = None) -> None:
-    """Exit after ``delay`` s from a daemon thread, so the reply already returned is sent.
-    A thread, not the loop: the loop may be the thing that is stuck."""
-    global _exit_scheduled
-    if _exit_scheduled:
+    """Exit after ``delay`` s (default EXIT_DELAY_S, read now) from a daemon thread, so a
+    reply already returned is sent. A thread, not the loop: the loop may be what is stuck.
+    Called again with a shorter delay, the exit comes earlier; never later."""
+    global _exit_at
+    wait = EXIT_DELAY_S if delay is None else delay
+    with _exit_lock:
+        first = _exit_at is None
+        at = time.monotonic() + wait
+        if first or at < _exit_at:
+            _exit_at = at
+    if not first:
         return
-    _exit_scheduled = True
-
-    wait = EXIT_DELAY_S if delay is None else delay  # read now, not when the def ran
 
     def later():
-        time.sleep(wait)
+        while time.monotonic() < _exit_at:
+            time.sleep(min(0.1, max(0.0, _exit_at - time.monotonic())))
         _exit_now()
 
     threading.Thread(target=later, name="vml-audio-exit", daemon=True).start()
@@ -129,6 +143,8 @@ async def call(fn, limit: float, what: str):
     which is exactly the exit that must not wait (upstream #554/#555). ``limit`` <= 0 runs
     ``fn`` on the loop, as before. A miss marks the process wedged and raises DeadlineMissed.
     """
+    if wedged is not None:  # the device already failed once: do not wait on it again
+        raise DeadlineMissed(wedged)
     if limit <= 0:
         return fn()
     loop = asyncio.get_running_loop()
@@ -166,6 +182,8 @@ async def play(player, samples, sample_rate) -> None:
     The deadline is the sound's length plus VOICEMODE_AUDIO_DEADLINE_S. A device that never
     finished the sound (no end-of-stream callback) also counts as a miss, even if closing
     the stream then returned."""
+    if wedged is not None:
+        raise DeadlineMissed(wedged)
     slack = deadline_slack()
     if slack <= 0:
         player.play(samples, sample_rate, blocking=True)
@@ -237,6 +255,25 @@ def write_dump(why: str, lag=None):
         return None
 
 
+def _pid_alive(raw) -> bool:
+    """Is that voice server still running? True when unsure, so its file is kept. On Windows
+    os.kill(pid, 0) would TERMINATE the process, so it is never called there; an open file
+    cannot be deleted on Windows anyway."""
+    try:
+        pid = int(raw)
+    except (TypeError, ValueError):
+        return False
+    if os.name == "nt":
+        return True
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True
+    return True
+
+
 def open_backstop():
     """Open logs/stall/backstop-<pid>.txt in advance for faulthandler, which can only write
     to an open file. Empty backstop files of earlier runs are removed (a non-empty one
@@ -248,14 +285,44 @@ def open_backstop():
         for old in folder.glob("backstop-*.txt"):
             if old != mine:
                 try:
-                    if old.stat().st_size == 0:
-                        old.unlink()
+                    if old.stat().st_size == 0 and not _pid_alive(old.stem.split("-", 1)[1]):
+                        old.unlink()   # one per voice server: never another live server's file
                 except OSError:
                     pass
         _prune(folder, "backstop-*.txt", KEEP_DUMPS)
         return open(mine, "w", encoding="utf-8")
     except Exception:
         return None
+
+
+GUARD_POLL_S = 0.25
+
+
+async def guard(coro):
+    """Run one converse turn; end it as soon as a device call inside misses its deadline.
+
+    upstream catches the miss (``except Exception`` around the chimes, the cached replay)
+    and carries on, and its TTS playback waits on ``asyncio.to_thread`` with no deadline,
+    so the turn can hang with a healthy loop (code review of 33d87cb, finding 1). The turn
+    is cancelled (a thread stuck inside is abandoned) and the wedged message returned."""
+    task = asyncio.ensure_future(coro)
+    try:
+        while not task.done():
+            await asyncio.wait({task}, timeout=GUARD_POLL_S)
+            if wedged is not None and not task.done():
+                task.cancel()
+                return wedged_result()
+        try:
+            result = task.result()
+        except DeadlineMissed:
+            return wedged_result()
+    except asyncio.CancelledError:
+        task.cancel()   # the caller was cancelled: take the turn down with it
+        raise
+    note = wedged_result()
+    if note and isinstance(result, str):
+        return result + "\n\n" + note
+    return note if note and result is None else result
 
 
 def dump_stacks(why: str, lag=None) -> None:
@@ -291,13 +358,15 @@ class Watchdog:
         self._last_check = None
         self.fired = False
         self.backstop = None   # an open file for faulthandler (open_backstop), else stderr
+        self._armed_at = None  # when the backstop was last re-armed (every REARM_S)
 
     def lag(self) -> float:
         return max(0.0, self.clock() - self.beat)
 
     def stamp(self) -> None:
         self.beat = self.clock()
-        if self.limit > 0:
+        if self.limit > 0 and (self._armed_at is None or self.beat - self._armed_at >= REARM_S):
+            self._armed_at = self.beat
             try:  # the backstop for a stall that holds the GIL, where no thread runs
                 if self.backstop is not None:
                     faulthandler.dump_traceback_later(self.limit + BACKSTOP_EXTRA_S, exit=True,

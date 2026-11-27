@@ -165,7 +165,7 @@ run: a native converse turn through Claude Code, and macOS.
   | between turns, someone to wake | Wake (sunrise) | – |
   | between turns, nobody to wake | – | ■ Voice off |
   | stopped (voice off) | Resume voice (sunrise) if the session can be woken, else nothing; the status line says "Voice off: continuing in text. Ask for voice to resume" | – |
-  | not responding | – (status line: "Voice server not responding: it restarts itself") | – |
+  | not responding | – (status line: "Voice server not responding: it will stop itself. Then restart the chat") | – |
 
   Done: the backend forwards `done` as `skip_forward` (which ends the recording and
   transcribes it, upstream VM-1754) only while the server's status says listening and not

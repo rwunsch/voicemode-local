@@ -11,8 +11,9 @@ tools/converse.py
   - ``sd._terminate(); sd._initialize()`` at the start of every converse runs on a thread
     with a deadline.
   - an outermost ``_converse_core`` wrapper starts the watchdog, returns the "audio device
-    did not respond" message (and schedules the exit) when the process is wedged, and turns
-    a DeadlineMissed into that message.
+    did not respond" message (and schedules the exit) when the process is wedged, and runs
+    the turn under ``audio_deadline.guard``, which ends it as soon as a miss marks the
+    process wedged (upstream swallows a chime's miss and then waits with no deadline).
 control_socket.py
   - the status reply carries ``loop_lag_s``; the pill shows "not responding" from it.
 
@@ -54,14 +55,9 @@ async def _converse_core(*args, **kwargs):
     wedged = audio_deadline.wedged_result()
     if wedged:
         return wedged
-    try:
-        result = await _vml_converse_core_before_deadline(*args, **kwargs)
-    except audio_deadline.DeadlineMissed:
-        return audio_deadline.wedged_result()
-    wedged = audio_deadline.wedged_result()
-    if wedged and isinstance(result, str):
-        return result + "\\n\\n" + wedged
-    return result
+    # guard ends the turn as soon as a device call inside misses its deadline, even where
+    # upstream swallows the miss and then waits with no deadline (TTS playback).
+    return await audio_deadline.guard(_vml_converse_core_before_deadline(*args, **kwargs))
 '''
 
 CONVERSE = [
