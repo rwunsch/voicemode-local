@@ -3,6 +3,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+from types import SimpleNamespace
 import shutil
 import sys
 
@@ -40,7 +41,6 @@ def control(tmp_path, monkeypatch):
 def test_levels_follow_real_sample_values_and_expire(control, monkeypatch):
     now = [10.0]
     # Replace only the patched module's view of the monotonic clock.
-    from types import SimpleNamespace
     monkeypatch.setattr(control, "time", SimpleNamespace(monotonic=lambda: now[0],
                         monotonic_ns=lambda: int(now[0] * 1000000000)))
     state = control.ControlState()
@@ -88,3 +88,42 @@ def test_twice_interrupt_then_listen_and_ignore_old_click(control):
         assert state.is_listening
         state.set_listening(False)
         previous = playback_id
+
+
+def test_output_callback_passes_actual_audio_and_leaves_other_players_unmetered(
+    control, tmp_path, monkeypatch
+):
+    import queue
+
+    target = tmp_path / "audio_player.py"
+    shutil.copyfile(Path(os.environ["VM812_SRC"]) / target.name, target)
+    patch = _load(PATCHES / "patch_voice_orb.py", "voice_orb_patch_player")
+    assert patch.apply(target) == 0
+    monkeypatch.setitem(sys.modules, "sounddevice", SimpleNamespace())
+    player_type = _load(target, "voice_orb_player").NonBlockingAudioPlayer
+
+    state = control.ControlState()
+    state.set_speaking(True)
+    samples = np.full((128, 2), .3, dtype=np.float32)
+    output = np.zeros_like(samples)
+    for owner in (None, state):
+        player = player_type()
+        player.pill_control = owner
+        player.audio_queue = queue.Queue()
+        player.audio_queue.put(samples)
+        player._audio_callback(output, len(output), None, None)
+        np.testing.assert_array_equal(samples, output)
+        assert state.pill_levels() == ({"speaking": .3} if owner else {})
+
+
+def test_orb_patch_leaves_a_file_unchanged_on_anchor_drift(control, capsys):
+    target = Path(control.__file__)
+    # Use a fresh target at the exact point where the orb patch normally applies.
+    shutil.copyfile(Path(os.environ["VM812_SRC"]) / target.name, target)
+    for name in ("patch_voice_barge", "patch_voice_pill"):
+        assert _load(PATCHES / f"{name}.py", name).apply(target) == 0
+    target.write_text(target.read_text().replace("def request_barge_in(", "def renamed_request_barge_in(", 1))
+    before = target.read_bytes()
+    assert _load(PATCHES / "patch_voice_orb.py", "orb_patch_drift").apply(target) == 1
+    assert "ANCHOR DRIFT" in capsys.readouterr().err
+    assert target.read_bytes() == before
