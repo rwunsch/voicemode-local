@@ -6,9 +6,9 @@
     var body = document.body, theme = $("pillTheme");
     var lang = $("orbLanguage"), voice = $("orbVoice"), mute = $("orbMute"), end = $("orbEnd");
     var menu = $("orbMenu"), settings = $("orbSettings"), strip = $("orbStrip"), keys = $("orbKeyboardHelp");
-    var tray = $("orbTray"), pause = $("orbPause");
+    var tray = $("orbTray"), pause = $("orbPause"), gear = $("orbSettingsToggle");
     var panel = "", active = false, opened = false, hover = false, intro = false, pinned = false;
-    var introTimer, closeTimer, lastFrame = "", mutePending, muted, vm, snapshot, ui;
+    var introTimer, closeTimer, lastFrame = "", mutePending, muted, vm, snapshot, ui, watchingMenu = false;
     var appearance = matchMedia("(prefers-color-scheme: dark)");
     function syncTheme() { theme.setAttribute("color", appearance.matches ? "dark" : "light"); }
     syncTheme();
@@ -23,6 +23,11 @@
       lastFrame = key;
       send({ window: { mode: mode, side: side, surface: surface } });
     }
+    function watchMenu(open) {
+      if (watchingMenu === open) return;
+      watchingMenu = open;
+      send({ window: { orbMenuOpen: open } });
+    }
     function showRegion() {
       if (!active) return;
       var keyFocus = card.dataset.keyboard === "true" || !!card.querySelector(":focus-visible");
@@ -31,7 +36,7 @@
       var first = !lastFrame;
       body.dataset.orbReveal = String(visible);
       orb.setAttribute("aria-expanded", String(visible));
-      $("orbMore").setAttribute("aria-expanded", String(panel === "menu"));
+      gear.setAttribute("aria-expanded", String(panel === "menu"));
       strip.inert = !visible;
       menu.hidden = panel !== "menu";
       settings.hidden = panel !== "settings";
@@ -45,6 +50,7 @@
           if (active && body.dataset.orbReveal === "false") layout("compact");
         }, EXIT_MS);
       }
+      watchMenu(opened && panel === "menu");
     }
     function finishIntro() { clearTimeout(introTimer); intro = false; }
     function beginIntro() {
@@ -54,7 +60,7 @@
     }
     function backToOrb() {
       panel = "";
-      if (card.dataset.keyboard === "true") $("orbMore").focus();
+      if (card.dataset.keyboard === "true") gear.focus();
       showRegion();
     }
     function closeKeyboardHelp() {
@@ -93,6 +99,7 @@
         }
         active = opened = pinned = hover = false; panel = ""; lastFrame = "";
         menu.hidden = settings.hidden = keys.hidden = true;
+        watchMenu(false);
         finishIntro(); clearTimeout(closeTimer);
         return;
       }
@@ -116,7 +123,7 @@
       pause.setAttribute("aria-label", paused ? "Resume voice" : "Pause voice");
       pause.toggleAttribute("selected", paused);
       pause.disabled = !vm.controls.pause.enabled;
-      setText($("orbDock"), ui && ui.orbDocked === false ? "Dock to screen edge" : "Undock");
+      setText($("orbDock"), ui && ui.orbDocked === false ? "Redock" : "Undock");
       tray.hidden = data.platform === "mac";
       if (panel === "settings") {
         picker(lang, vm.languages, vm.language);
@@ -148,6 +155,22 @@
       if (panel === "menu" && card.dataset.keyboard === "true") $("orbOpenSettings").focus();
     }
     window.pillOrbAbove = function (above) { body.dataset.orbAbove = String(above); };
+    window.pillOrbDismissMenu = function () {
+      if (panel !== "menu") return;
+      panel = "";
+      hover = pinned = false;
+      finishIntro();
+      if (card.dataset.keyboard === "true") releaseKeyboard(); else showRegion();
+    };
+    document.addEventListener("click", function (e) {
+      if (panel !== "menu" || !e.detail) return;
+      var path = e.composedPath();
+      if (path.includes(menu) || path.includes(gear)) return;
+      // The first click around an open menu dismisses it, even over End voice.
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      backToOrb();
+    }, true);
     mute.addEventListener("click", function () {
       if (mute.disabled) return;
       mutePending = { on: !muted, until: Date.now() + 2200 };
@@ -161,13 +184,18 @@
       finishIntro(); pinned = false; panel = "";
       showRegion();
     });
-    $("orbMore").addEventListener("click", function () { openedPanel("menu"); });
+    gear.addEventListener("click", function () { openedPanel("menu"); });
     $("orbOpenSettings").addEventListener("click", function () { openedPanel("settings"); });
     $("orbSettingsDone").addEventListener("click", backToOrb);
     pause.addEventListener("click", function () { if (!pause.disabled) $("ctlPause").click(); });
     $("orbDock").addEventListener("click", function () {
       panel = ""; save({ orbDocked: ui && ui.orbDocked === false });
     });
+    window.pillOrbDocked = function (side) {
+      if (!active || !ui || ui.orbDocked !== false || (side !== "left" && side !== "right")) return;
+      panel = "";
+      save({ orbDocked: true, side: side });
+    };
     tray.addEventListener("click", function () {
       if (!tray.hidden) { panel = ""; save({ minimized: true }); }
     });

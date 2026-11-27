@@ -285,7 +285,7 @@ public class VmlPill {
     const int WIDTH = 350, DEFAULT_H = 68;
     const int MIN_WIDTH = 320, MAX_WIDTH = 640;
     const int TAB_W = 22, TAB_H = 64, RAIL_W = 76, MINI_SIZE = 68;
-    const int ORB_ROW = 56, ORB_OPEN_WIDTH = 356;
+    const int ORB_ROW = 56, ORB_OPEN_WIDTH = 356, ORB_DOCK_MARGIN = 14;
     static readonly IntPtr TOPMOST = new IntPtr(-1);
     const string HOST = "pill.voicemode.example";
     const string BRIDGE = @"
@@ -307,7 +307,9 @@ document.addEventListener('DOMContentLoaded',function(){
     int[] orbRegion;
     IntPtr keyboardPrevious;
     bool hasPos, hasDock; int posX, posY, dockCy, cssWidth = WIDTH;
+    bool hasDockMonitor; int dockMonitorX, dockMonitorY;
     DispatcherTimer slideTimer;
+    DispatcherTimer orbMenuTimer;
     System.Windows.Forms.NotifyIcon tray; string phase = "";
     Dictionary<string, System.Drawing.Icon> trayIcons = new Dictionary<string, System.Drawing.Icon>();
     DispatcherTimer dragTimer; int dragDx, dragDy; bool moved;
@@ -576,6 +578,7 @@ document.addEventListener('DOMContentLoaded',function(){
         // The page's own trace (a click, a switch changing on screen): with "cmd -> backend" below,
         // a repeat shows which hop of a click was missing or late (Mac, 2026-11-13; same here).
         if (w.TryGetValue("log", out v) && v is string) { var t = (string)v; Log("page: " + (t.Length > 200 ? t.Substring(0, 200) : t)); return; }
+        if (w.TryGetValue("orbMenuOpen", out v) && v is bool) { WatchOrbMenu((bool)v); return; }
         if (w.TryGetValue("keyboard", out v) && v is bool) { FocusControls((bool)v); return; }
         if (w.TryGetValue("orbRegion", out v)) {
             var values = v as System.Collections.IList;
@@ -657,6 +660,32 @@ document.addEventListener('DOMContentLoaded',function(){
         return icon;
     }
 
+    static bool MouseDown() {
+        return ((GetAsyncKeyState(1) | GetAsyncKeyState(2) | GetAsyncKeyState(4)) & 0x8000) != 0;
+    }
+
+    void WatchOrbMenu(bool watching) {
+        if (!watching || closing || !snapshotVisible || dismissed || mode == "dot") {
+            if (orbMenuTimer != null) { orbMenuTimer.Stop(); orbMenuTimer = null; }
+            return;
+        }
+        if (orbMenuTimer != null) return;
+        bool previous = MouseDown();
+        orbMenuTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(16) };
+        orbMenuTimer.Tick += (s, e) => {
+            bool down = MouseDown();
+            bool pressed = down && !previous;
+            previous = down;
+            if (!pressed) return;
+            POINT p; RECT bounds;
+            if (!GetCursorPos(out p) || !GetWindowRect(hwnd, out bounds)) return;
+            if (p.x >= bounds.left && p.x < bounds.right && p.y >= bounds.top && p.y < bounds.bottom) return;
+            WatchOrbMenu(false);
+            if (ctl != null) ctl.CoreWebView2.ExecuteScriptAsync("window.pillOrbDismissMenu?.()");
+        };
+        orbMenuTimer.Start();
+    }
+
     void FocusControls(bool enabled) {
         if (ctl == null) return;
         if (enabled && snapshotVisible && !dismissed && mode != "dot") {
@@ -676,6 +705,7 @@ document.addEventListener('DOMContentLoaded',function(){
         if (closing || ctl == null) return;
         UpdateTray();
         if (!snapshotVisible || dismissed || mode == "dot") {  // "dot" is minimized: the tray has it
+            WatchOrbMenu(false);
             FocusControls(false);
             ShowWindow(hwnd, 0);
             ctl.IsVisible = false;
@@ -698,14 +728,17 @@ document.addEventListener('DOMContentLoaded',function(){
         bool edge = mode == "docked" || mode == "rail" || mode == "tab";
         int w = Scale(mode == "mini" ? MINI_SIZE : mode == "tab" ? TAB_W : mode == "rail" ? RAIL_W : cssWidth);
         int h = Scale(mode == "mini" ? MINI_SIZE : mode == "tab" ? TAB_H : cssHeight);
-        var a = (hasPos ? MonitorAt(posX, posY) : MonitorAt(0, 0)).rcWork;
+        bool dockedOrb = mode == "orb-docked";
+        var a = (dockedOrb && hasDockMonitor ? MonitorAt(dockMonitorX, dockMonitorY) :
+            hasPos ? MonitorAt(posX, posY) : MonitorAt(0, 0)).rcWork;
+        if (dockedOrb && !hasDockMonitor) RememberDockMonitor(a);
         int x = hasPos ? posX : a.right - w - Scale(16), y = hasPos ? posY : a.bottom - Scale(DEFAULT_H) - Scale(16);
         if (IsOrbMode()) {
             int row = Scale(ORB_ROW), widest = Math.Min(Scale(ORB_OPEN_WIDTH), a.right - a.left);
             bool openOrb = orbSurface == "strip" || orbSurface == "menu" || orbSurface == "settings";
             w = openOrb ? widest : Math.Min(a.right - a.left, row);
             h = Scale(orbSurface == "settings" ? 433 : orbSurface == "menu" ? 210 : ORB_ROW);
-            bool leftSide = side == "left", dockedOrb = mode == "orb-docked";
+            bool leftSide = side == "left";
             int anchorY = (hasDock ? dockCy : (a.top + a.bottom) / 2) - row / 2;
             int anchorX = leftSide ? a.left : a.right - row;
             if (!dockedOrb) {
@@ -757,6 +790,20 @@ document.addEventListener('DOMContentLoaded',function(){
 
     // Own drag loop: a drag started inside WebView2 has its mouse capture in another
     // process, and the system move loop would activate the window.
+    string OrbDropSide(POINT p, RECT bounds) {
+        int margin = Scale(ORB_DOCK_MARGIN);
+        if (p.y < bounds.top || p.y >= bounds.bottom) return null;
+        if (Math.Abs(p.x - bounds.left) <= margin) return "left";
+        if (Math.Abs(p.x - (bounds.right - 1)) <= margin) return "right";
+        return null;
+    }
+
+    void RememberDockMonitor(RECT area) {
+        dockMonitorX = area.left + (area.right - area.left) / 2;
+        dockMonitorY = area.top + (area.bottom - area.top) / 2;
+        hasDockMonitor = true;
+    }
+
     void StartDrag(bool fromOrb) {
         if (dragTimer != null || mode == "tab") return;
         bool vertical = mode == "docked" || mode == "rail" || mode == "orb-docked";
@@ -792,6 +839,20 @@ document.addEventListener('DOMContentLoaded',function(){
                     else {
                         posX = orbMode && side == "right" ? r.x + start.right - start.left - row : r.x;
                         posY = anchorTop; hasPos = true;
+                        if (fromOrb && mode == "orb-floating") {
+                            var target = MonitorAt(p.x, p.y);
+                            string edge = OrbDropSide(p, target.rcMonitor);
+                            if (edge != null) {
+                                var work = target.rcWork;
+                                posX = Math.Max(work.left, Math.Min(posX, work.right - row));
+                                posY = Math.Max(work.top, Math.Min(posY, work.bottom - row));
+                                dockCy = posY + row / 2; hasDock = true;
+                                RememberDockMonitor(work);
+                                side = edge; mode = "orb-docked";
+                                if (ctl != null) ctl.CoreWebView2.ExecuteScriptAsync(
+                                    "window.pillOrbDocked?.(" + json.Serialize(edge) + ")");
+                            }
+                        }
                     }
                     SavePosition(); Apply();
                     if (fromOrb && ctl != null)
@@ -869,16 +930,21 @@ document.addEventListener('DOMContentLoaded',function(){
             int saved;
             if (p.Length > 2 && int.TryParse(p[2], out saved)) cssWidth = Math.Max(MIN_WIDTH, Math.Min(MAX_WIDTH, saved));
             hasDock = p.Length > 3 && int.TryParse(p[3], out dockCy);
+            hasDockMonitor = p.Length > 5 && int.TryParse(p[4], out dockMonitorX) && int.TryParse(p[5], out dockMonitorY);
         } catch (Exception) { hasPos = false; }
     }
 
     void SavePosition() {
-        try { File.WriteAllText(posFile, (hasPos ? posX + " " + posY : "- -") + " " + cssWidth + " " + (hasDock ? dockCy.ToString() : "-")); } catch (IOException e) { Log("position not saved: " + e.Message); }
+        try {
+            File.WriteAllText(posFile, (hasPos ? posX + " " + posY : "- -") + " " + cssWidth + " " +
+                (hasDock ? dockCy.ToString() : "-") + (hasDockMonitor ? " " + dockMonitorX + " " + dockMonitorY : ""));
+        } catch (IOException e) { Log("position not saved: " + e.Message); }
     }
 
     void Shutdown() {
         if (closing) return;
         closing = true;
+        WatchOrbMenu(false);
         if (tray != null) { tray.Visible = false; tray.Dispose(); }  // or a dead icon stays until hovered
         try { if (stdin != null) stdin.Close(); } catch (IOException) { }  // EOF ends the backend and lifts its Pause
         try { if (proc != null && !proc.WaitForExit(2000)) proc.Kill(); } catch (Exception) { }

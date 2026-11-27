@@ -68,6 +68,14 @@ def test_orb_anchor_does_not_move_when_revealing_controls():
                 assert m.on_resize_edge(0, w, state.mode) is False
 
 
+def test_orb_drop_chooses_a_side_only_at_the_display_edge():
+    display = (-1020, 40, 1000, 800)
+    assert m.orb_drop_side(-1018, 500, display) == "left"
+    assert m.orb_drop_side(-23, 500, display) == "right"
+    assert m.orb_drop_side(-600, 500, display) is None
+    assert m.orb_drop_side(-1018, 900, display) is None
+
+
 def test_geometry_per_mode():
     s = m.WindowState(visible=True)
     assert m.geometry(s, AREA) == (1440 - 350 - 16, 25 + 800 - 68 - 16, 350, 68)

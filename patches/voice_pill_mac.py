@@ -31,6 +31,7 @@ MIN_WIDTH, MAX_WIDTH = 320, 640
 TAB_W, TAB_H, RAIL_W, MINI_SIZE = 22, 64, 76, 68
 ORB_ROW = 56
 ORB_OPEN_WIDTH = 356
+ORB_DOCK_MARGIN = 14
 ORB_SURFACES = {"compact": (ORB_ROW, ORB_ROW), "strip": (ORB_OPEN_WIDTH, ORB_ROW),
                 "menu": (ORB_OPEN_WIDTH, 180), "settings": (ORB_OPEN_WIDTH, 433)}
 ORB_MODES = ("orb-docked", "orb-floating")
@@ -156,6 +157,18 @@ class WindowState:
         changed = visible != self.visible
         self.visible = visible
         return changed
+
+
+def orb_drop_side(x, y, display):
+    """Only a drop at the physical side edge chooses a new dock position."""
+    left, bottom, width, height = display
+    if not bottom <= y < bottom + height:
+        return None
+    if abs(x - left) <= ORB_DOCK_MARGIN:
+        return "left"
+    if abs(x - (left + width - 1)) <= ORB_DOCK_MARGIN:
+        return "right"
+    return None
 
 
 def orb_geometry(state, area, pos=None):
@@ -472,6 +485,7 @@ class App:
         self.pos = None
         self.lock = threading.Lock()
         self.proc = self.stdin = self.win = self.tray = self.tray_target = None
+        self.orb_menu_monitor = None
         self.slide_gen = 0
         self.sliding = False
         self.closing = self.had_output = self.dragging = False
@@ -665,6 +679,9 @@ class App:
                 if not self.closing:
                     self.to_page(json.dumps({"window": {"dropped": cmd_name}}))
             return
+        if type(r[1].get("orbMenuOpen")) is bool:
+            self.watch_orb_menu(r[1]["orbMenuOpen"])
+            return
         if type(r[1].get("keyboard")) is bool:
             self.focus_controls(r[1]["keyboard"])
             return
@@ -720,6 +737,7 @@ class App:
             return
         self.update_tray()
         if not self.state.on_screen:
+            self.watch_orb_menu(False)
             self.focus_controls(False)
             self.set_surface_visible(False)
             return AppHelper.callAfter(native.orderOut_, None)
@@ -738,6 +756,32 @@ class App:
             native.orderFrontRegardless()  # pywebview's own show() makes it key
             self.set_surface_visible(True)
         AppHelper.callAfter(go)
+
+    def watch_orb_menu(self, watching):
+        """A nonactivating panel does not lose focus when another app is clicked."""
+        if not watching and self.orb_menu_monitor is None:
+            return
+        from AppKit import NSEvent, NSEventMaskLeftMouseDown, NSEventMaskOtherMouseDown, NSEventMaskRightMouseDown
+
+        def update():
+            if watching and self.state.on_screen and not self.closing:
+                if self.orb_menu_monitor is None:
+                    self.orb_menu_monitor = NSEvent.addGlobalMonitorForEventsMatchingMask_handler_(
+                        NSEventMaskLeftMouseDown | NSEventMaskOtherMouseDown | NSEventMaskRightMouseDown,
+                        outside)
+            elif self.orb_menu_monitor is not None:
+                NSEvent.removeMonitor_(self.orb_menu_monitor)
+                self.orb_menu_monitor = None
+
+        def outside(_event):
+            if self.orb_menu_monitor is None:
+                return
+            self.watch_orb_menu(False)
+            wv = self.webview()
+            if wv is not None:
+                wv.evaluateJavaScript_completionHandler_("window.pillOrbDismissMenu?.()", None)
+
+        run_on_main(update)
 
     def focus_controls(self, enabled):
         native = self.win.native if self.win else None
@@ -829,15 +873,15 @@ class App:
         threading.Thread(target=self.drag_loop, args=(from_orb,), daemon=True).start()
 
     def drag_loop(self, from_orb=False):
-        from AppKit import NSEvent, NSMakePoint
+        from AppKit import NSEvent, NSMakePoint, NSScreen
         from PyObjCTools import AppHelper
         moved = False
 
-        def notify(moving):
+        def notify(script):
             def go():
                 wv = self.webview()
                 if wv is not None:
-                    wv.evaluateJavaScript_completionHandler_("window.pillOrbDragging?.(" + json.dumps(moving) + ")", None)
+                    wv.evaluateJavaScript_completionHandler_(script, None)
             AppHelper.callAfter(go)
 
         try:
@@ -851,12 +895,18 @@ class App:
                     if max(abs(dx), abs(dy)) < 5:
                         time.sleep(0.016)
                         continue
-                    notify(True)
+                    notify("window.pillOrbDragging?.(true)")
                 x = o0.x if vertical else o0.x + dx
                 AppHelper.callAfter(native.setFrameOrigin_, NSMakePoint(x, o0.y + dy))
                 moved = moved or bool(dx or dy)
                 time.sleep(0.016)
             if moved:
+                edge = None
+                if from_orb and self.state.mode == "orb-floating":
+                    pointer = NSEvent.mouseLocation()
+                    bounds = run_on_main(lambda: NSScreen.screens()[0].frame())
+                    edge = orb_drop_side(pointer.x, pointer.y, (
+                        bounds.origin.x, bounds.origin.y, bounds.size.width, bounds.size.height))
                 time.sleep(0.05)  # let the last move land
                 fr = run_on_main(lambda: native.frame())
                 o, size = fr.origin, fr.size
@@ -864,23 +914,31 @@ class App:
                 orb_mode = self.state.mode in ORB_MODES
                 if orb_mode and orb_geometry(self.state, self.screen()[0], self.pos)[1]:
                     top += size.height - ORB_ROW
+                if edge:
+                    top += c.y - pointer.y  # use the release height even between drag polls
                 if vertical:
                     self.state.dock_y = int(top + (ORB_ROW if orb_mode else size.height) / 2)
                 else:
                     anchor_x = o.x + size.width - ORB_ROW if orb_mode and self.state.side == "right" else o.x
                     self.pos = (int(anchor_x), int(top))
+                    if edge:
+                        self.state.dock_y = int(top + ORB_ROW / 2)
+                        self.state.mode, self.state.side = "orb-docked", edge
+                        notify("window.pillOrbDocked?.(" + json.dumps(edge) + ")")
                 self.save_position()
                 self.apply()
         finally:
             self.dragging = False
             if from_orb and moved:
-                notify(False)
+                notify("window.pillOrbDragging?.(false)")
 
     def save_position(self):
         try:
             pos = f"{self.pos[0]} {self.pos[1]}" if self.pos else "- -"
             dock = "-" if self.state.dock_y is None else self.state.dock_y
-            self.pos_file.write_text(f"{pos} {self.state.css_width} {dock}")
+            path = self.pos_file
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(f"{pos} {self.state.css_width} {dock}")
         except OSError as e:
             self.log(f"position not saved: {e}")
 
@@ -951,6 +1009,7 @@ class App:
         if self.closing:
             return
         self.closing = True
+        self.watch_orb_menu(False)
         try:
             if self.stdin:
                 self.stdin.close()  # EOF ends the backend and lifts its Pause
