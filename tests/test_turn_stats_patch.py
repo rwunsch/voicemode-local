@@ -107,7 +107,10 @@ print(json.dumps(out))
 def _record(root, tmp_path, script, action="none", max_s=5.0, env=None):
     probe = tmp_path / "probe.py"
     probe.write_text(PROBE)
-    e = dict(os.environ, HOME=str(tmp_path), PYTHONPATH=str(root), VOICEMODE_SKIP_STARTUP_CHECKS="true",
+    # No inherited VOICEMODE_* settings: in the full suite another test has loaded the real
+    # ~/.voicemode/voicemode.env into os.environ (here VOICEMODE_SILENCE_THRESHOLD_MS=2000).
+    base = {k: v for k, v in os.environ.items() if not k.startswith("VOICEMODE_")}
+    e = dict(base, HOME=str(tmp_path), PYTHONPATH=str(root), VOICEMODE_SKIP_STARTUP_CHECKS="true",
              VOICEMODE_BASE_DIR=str(tmp_path / ".voicemode"), VOICEMODE_LISTEN_OVERRUN="0")
     e.update(env or {})
     out = subprocess.run([sys.executable, "-X", "utf8", str(probe), script, action, str(max_s)],
