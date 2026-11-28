@@ -469,6 +469,16 @@ def _floor_voice(floor, is_holder, sessions, conch, overrides):
     return ov.get("voice") or own.get("voice") or held
 
 
+NOT_RESPONDING_S = 10.0   # loop_lag_s above this: the voice server is stuck, not just busy
+
+
+def _stuck(status) -> bool:
+    """loop_lag_s comes from patch_audio_deadline (absent from older servers, None before
+    the watchdog starts). Only a number above NOT_RESPONDING_S counts."""
+    lag = status.get("loop_lag_s")
+    return isinstance(lag, (int, float)) and not isinstance(lag, bool) and lag > NOT_RESPONDING_S
+
+
 def build_snapshot(status, sessions, conch, *, paused=False, ptt=False, closed=False,
                    last_floor=None, overrides=None, barge=None, ui=None, platform=None, beeps=False,
                    default_voice=st.FALLBACK_VOICE, play=None, wake=None,
@@ -479,7 +489,11 @@ def build_snapshot(status, sessions, conch, *, paused=False, ptt=False, closed=F
     visible = bool(sessions or ptt) and not closed
     if floor and any(s["pid"] == floor["pid"] and s.get("hide_after_end") for s in sessions):
         visible = False
-    if paused:
+    if _stuck(status):
+        # The server's event loop has not turned for a while (FELIX #2095): its socket
+        # thread still says speaking/listening, which is no longer true.
+        phase = "not_responding"
+    elif paused:
         phase = "paused"
     elif status.get("holding") and not mic_muted:
         # The push-to-talk key is down (patch_ptt_instant's status field): the press
@@ -635,7 +649,10 @@ def gather(ctx) -> dict:
         st._status(ctx.sock), sessions, conch, paused=st.is_paused(ctx.base),
         ptt=ptt, closed=st.pill_closed(ctx.base), mic_muted=st.mic_muted(ctx.base),
         last_floor=_remember_floor(ctx, conch),
-        overrides={s["pid"]: st.get_override(s["pid"], ctx.base) for s in sessions},
+        # The choice in force, as the voice and the recognition language resolve it: without
+        # an override, the remembered one (Talos on FELIX #1910). A turn whose caller voice of
+        # another language was kept still shows the pill's choice, which stays the default.
+        overrides={s["pid"]: st.pill_choice(s["pid"], ctx.base, ctx.home) for s in sessions},
         barge=barge, ui=st.load_ui(ctx.base), beeps=_beeps_on(ctx),
         default_voice=st.default_voice(ctx.home),
         play={"label": play.label} if play else None, wake=wake_view(ctx), platform=platform,
@@ -841,7 +858,9 @@ def guard_preview(ctx, snap) -> None:
 # -- commands ----------------------------------------------------------------
 
 def _set_override(ctx, floor, **change):
-    cur = st.get_override(floor["pid"], ctx.base)
+    # From the choice in force, so a voice-only or language-only change in a new chat keeps
+    # the other half of the remembered choice (Talos on FELIX #1910).
+    cur = dict(st.pill_choice(floor["pid"], ctx.base, ctx.home))
     cur.update(change)
     st.set_override(floor["pid"], cur.get("voice"), cur.get("language"), ctx.base)
     # Also the machine's last choice: a new chat's first call resolves its voice before this
@@ -898,6 +917,13 @@ def handle_command(msg, ctx=None):
             st.send_control(ctx.sock, "pill_interrupt", message=playback_id)
     elif cmd == "set_mic_muted" and type(msg.get("on")) is bool:
         st.set_mic_muted(msg["on"], ctx.base)
+    elif cmd == "done":
+        # The pill's Done (FELIX #2094): ends the user's turn and sends what was said
+        # (skip_forward while recording). Only while the server is listening: skip_forward is
+        # sticky, so a Done landing just after listening ended would skip the next reply.
+        status = st._status(ctx.sock)
+        if status.get("listening") and not status.get("speaking"):
+            st.send_control(ctx.sock, "skip_forward")
     elif cmd == "pause":
         # Our own pid owns the pause (mic held closed); the socket pause holds TTS.
         # Upstream stops a paused turn after VOICEMODE_CONTROL_PAUSE_TIMEOUT (300 s).
@@ -933,7 +959,7 @@ def handle_command(msg, ctx=None):
             if key == "language" and msg[key] in ("English", "German"):
                 # A voice speaks only its own language: move the voice with the language.
                 cur = _floor_voice(floor, is_holder, sessions, conch,
-                                   {floor["pid"]: st.get_override(floor["pid"], ctx.base)}) \
+                                   {floor["pid"]: st.pill_choice(floor["pid"], ctx.base, ctx.home)}) \
                     or st.default_voice(ctx.home)
                 if voice_language(cur) != msg[key]:
                     default = st.default_voice(ctx.home)

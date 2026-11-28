@@ -35,7 +35,8 @@ PLAYERS = {
     "streaming.py": ["stream_pcm_audio", "stream_cartesia_pcm", "stream_with_buffering"],
 }
 ALL_PLAYERS = {name for names in PLAYERS.values() for name in names}
-STOP_MESSAGE = "Voice was stopped from the pill. Continue in text unless the user asks for voice again."
+STOP_MESSAGE = ("Voice was stopped from the pill. Continue in text unless the user asks for voice again; "
+                "then call converse again, which resumes voice.")
 
 
 def _patch(script, target):

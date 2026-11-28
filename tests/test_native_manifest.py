@@ -165,10 +165,23 @@ INTENDED_COPIES += ["voice_sensitivity.py"]
 INTENDED_STEP_LINES.append(b'    {"patch": "patch_audio_recover.py", "targets": ["tools/converse.py"], "why": "a mic stream that fails to start (Wait timed out, -9987) is re-initialised and retried once with silence detection; the fixed-length fallback ends on cancel and VOICEMODE_FALLBACK_RECORD_MAX_S caps it"},\n')
 INTENDED_PATCHES.append(("patch_audio_recover.py", ["tools/converse.py"]))
 # 2026-11-27: measured orb levels and a playback-scoped interrupt.
+ORB_ASSETS = ["orb-pill.css", "orb-pill.js", "orb-felix.png", "orb-felix-motion.webp",
+              "spectrum.js", "spectrum.NOTICES.txt"]
+for asset in ORB_ASSETS:
+    path = f"ui/pill/{asset}"
+    INTENDED_STEP_LINES.append(f'    {{"copy": "../{path}", "to": "{path}"}},\n'.encode())
+    INTENDED_COPIES.append(path)
 INTENDED_STEP_LINES.append(b'    {"patch": "patch_voice_orb.py", "targets": ["control_channel.py", "control_socket.py", "tools/converse.py", "streaming.py", "audio_player.py", "core.py"],\n'
                            b'     "why": "measure speaker levels and bind Pill interrupt clicks to one playback"},\n')
 INTENDED_PATCHES.append(("patch_voice_orb.py", ["control_channel.py", "control_socket.py", "tools/converse.py",
                                               "streaming.py", "audio_player.py", "core.py"]))
+# 2026-11-27 (FELIX #2095): audio-device calls get a deadline; a stuck voice server exits.
+INTENDED_STEP_LINES.append(b'    {"copy": "audio_deadline.py", "to": "audio_deadline.py"},\n')
+INTENDED_STEP_LINES.append(
+    b'    {"patch": "patch_audio_deadline.py", "targets": ["core.py", "tools/converse.py", "control_socket.py"],\n'
+    b'     "why": "audio-device calls off the event loop with a deadline; loop watchdog exits a stuck server (FELIX #2095)"},\n')
+INTENDED_PATCHES.append(("patch_audio_deadline.py", ["core.py", "tools/converse.py", "control_socket.py"]))
+INTENDED_COPIES += ["audio_deadline.py"]
 # Text edits those additions force on lines that were already there: (now, before).
 INTENDED_EDITS = [
     (b'    "audio_player.py",\n', b''),

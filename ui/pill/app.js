@@ -44,6 +44,38 @@
     return d;
   }
 
+  var changedAt = {}, shownKind = {}, hovered = null;
+  function setPanelOnly(el, b) {
+    var shown = b.visible ? b.kind : null;   // appearing counts as a change for the click guard
+    if (shownKind.mic !== shown) { shownKind.mic = shown; changedAt.mic = Date.now(); }
+    el.hidden = !b.visible; el.disabled = !b.enabled;
+    el.dataset.hint = b.hint || ""; el.title = b.hint || ""; el.setAttribute("aria-label", b.hint || b.text || "");
+  }
+  function setSpot(icon, ctl, ctlIcon, ctlText, b) {
+    var which = icon.id === "main" ? "primary" : "end";
+    if (shownKind[which] !== b.kind) { shownKind[which] = b.kind; changedAt[which] = Date.now(); }
+    [icon, ctl].forEach(function (el) {
+      el.hidden = !b.visible; el.disabled = !b.enabled;
+      el.dataset.kind = b.kind || "";
+      el.dataset.hint = b.hint || "";
+      el.title = b.title || b.hint || b.text || "";  // native tooltip where there is one (Windows, Linux)
+      el.setAttribute("aria-label", b.hint || b.text || "");
+      if (b.toggle) el.setAttribute("aria-pressed", String(!!b.pressed)); else el.removeAttribute("aria-pressed");
+    });
+    if (icon.id === "pause") icon.textContent = b.icon;
+    else { // the left button: a glyph, or the sunrise for Wake and Resume voice
+      $("mainStop").textContent = b.icon || ""; $("mainStop").hidden = !b.icon;
+      $("mainWake").hidden = !!b.icon || !b.visible;
+    }
+    ctlIcon.textContent = b.icon || ""; ctlText.textContent = b.text || "";
+  }
+  // Hover hints in the status line: a Mac panel that never takes focus shows no native
+  // tooltip, and a tooltip would be cut off by the small window. The Mac wrapper reports the
+  // pointer (pillHover, below); elsewhere mouseover does the same.
+  function hoverHint() {
+    var el = hovered && hovered.closest ? hovered.closest(".btn") : null;
+    return el && !el.hidden && el.dataset && el.dataset.hint ? el.dataset.hint : "";
+  }
   function render() {
     var vm = M.viewModel(snapshot, lastSeen, Date.now(), { interruptedUntil: interruptedUntil });
     var orbEnabled = !!(snapshot && snapshot.orb);
@@ -74,8 +106,6 @@
     $("tray").hidden = !orbEnabled;
     $("keyboard").hidden = !orbEnabled;
     $("tray").textContent = snapshot && snapshot.platform === "mac" ? "Minimize to menu bar" : "Minimize to system tray";
-    $("minimize").title = orbEnabled ? "Minimize to mini orb" : "Minimize";
-    $("minimize").setAttribute("aria-label", $("minimize").title);
     if (levelTimer !== null) clearTimeout(levelTimer);
     var level = orbEnabled && document.body.dataset.orbMotion === "true" ?
       M.orbLevel(snapshot, vm.phase, lastSeen, Date.now()) : null;
@@ -95,7 +125,7 @@
       levelTimer = null;
     }, Math.max(0, 501 - (Date.now() - lastSeen)));
     $("orb").setAttribute("aria-label", [vm.indicator.who, vm.indicator.text].filter(Boolean).join(": "));
-    $("label").textContent = vm.stateText;
+    $("label").textContent = hoverHint() || vm.stateText;
     $("waiting").textContent = vm.waitingText;
     $("sub").textContent = vm.session || "Voice pill";
     var pid = snapshot && snapshot.floor ? snapshot.floor.pid : null;
@@ -105,29 +135,19 @@
       if (f === $("voice") || f === $("language")) document.activeElement.blur();
     }
     document.body.hidden = hidden;
-    [["main", vm.main.enabled], ["pause", vm.pause.enabled],
-      ["voice", vm.pickersEnabled], ["language", vm.pickersEnabled], ["barge", vm.barge.enabled],
-      ["minimize", vm.minimizeEnabled], ["dismiss", vm.dismissEnabled], ["expand", true], ["dock", true]]
+    [["voice", vm.pickersEnabled], ["language", vm.pickersEnabled], ["barge", vm.barge.enabled],
+      ["minimize", vm.minimizeEnabled], ["expand", true], ["dock", true]]
       .forEach(function (p) { $(p[0]).disabled = !p[1]; });
-    // One button that switches: the sunrise (Wake) between turns, the square (Stop) in a turn.
-    $("main").classList.toggle("wake", vm.main.kind === "wake");
-    $("main").classList.toggle("stop", vm.main.kind === "stop");
-    $("mainWake").hidden = vm.main.kind !== "wake"; $("mainStop").hidden = vm.main.kind !== "stop";
-    $("main").title = vm.main.title; $("main").setAttribute("aria-label", vm.main.title);
-    // The panel's labelled controls: always in place, words not icons alone (2026-11-17).
-    var cp = vm.controls.pause, cm = vm.controls.main;
-    $("ctlPause").disabled = !cp.enabled; $("ctlMain").disabled = !cm.enabled;
-    $("ctlPauseIcon").textContent = cp.icon; $("ctlPauseText").textContent = vm.controls.pause.text;
-    $("ctlPause").setAttribute("aria-label", vm.controls.pause.aria);
-    $("ctlPause").setAttribute("aria-pressed", String(vm.controls.pause.pressed));
-    $("ctlMainIcon").textContent = cm.kind === "stop" ? "\u25A0\uFE0E" : "";
-    $("ctlMainText").textContent = vm.controls.main.text;
-    $("ctlMain").setAttribute("aria-label", vm.controls.main.aria); $("ctlMain").title = cm.aria;
-    $("ctlMain").classList.toggle("wake", cm.kind === "wake"); $("ctlMain").classList.toggle("stop", cm.kind === "stop");
-    $("pause").setAttribute("aria-pressed", String(cp.pressed));
-    $("pause").hidden = !vm.pause.visible;
-    $("pause").textContent = vm.pause.icon;
-    $("pause").title = vm.pause.label; $("pause").setAttribute("aria-label", vm.pause.label);
+    // Two spots in a fixed place (FELIX #2094, UX review 2026-11-27): left = primary (Pause,
+    // Done, Resume, Wake, Resume voice), right = Voice off. The compact row shows icons; the
+    // panel shows the same two buttons with words (CSS hides the icons when the panel is open).
+    // The element ids are older than this layout: #main and #ctlPause are the left spot,
+    // #pause and #ctlMain the right one.
+    setSpot($("main"), $("ctlPause"), $("ctlPauseIcon"), $("ctlPauseText"), vm.primary);
+    setSpot($("pause"), $("ctlMain"), $("ctlMainIcon"), $("ctlMainText"), vm.end);
+    setPanelOnly($("ctlMic"), vm.mic);   // Pause mic while listening, panel only
+    $("minimize").dataset.hint = vm.close.hint; $("minimize").title = vm.close.hint;
+    $("minimize").setAttribute("aria-label", vm.close.hint);
     $("expand").setAttribute("aria-expanded", String(vm.mode === "expanded" || vm.mode === "docked"));
     $("dock").textContent = vm.mode === "docked" ? "Undock" : "Dock";
     $("tuck").textContent = vm.side === "left" ? "\u2039" : "\u203A";
@@ -168,7 +188,7 @@
     }
     $("keys").replaceChildren.apply($("keys"), vm.keys.map(keysNode));
     if (vm.phase !== lastPhase) { lastPhase = vm.phase; send({ window: { phase: vm.phase } }); } // tray colour
-    orbPill.update(vm, snapshot, ui, orbEnabled && vm.mode !== "dot", lastVisible && surfaceVisible && !hidden);
+    orbPill.update(vm, snapshot, ui, orbEnabled && vm.mode !== "dot" && !hidden, lastVisible && surfaceVisible && !hidden);
     if (orbPill.active) lastMode = null;
     else if (vm.mode !== lastMode) {
       lastMode = vm.mode; window.pillHover(-1, -1);
@@ -182,6 +202,7 @@
     var kind = M.incomingKind(s);
     if (kind === "ignore") return;
     if (kind === "restore") { saveUi({ minimized: false, mini: false }); return; } // the tray icon was clicked
+    if (kind === "quit") { quitPill(); return; }                       // "Quit pill" in the tray menu
     if (kind === "dropped") { lastSeen = null; render(); return; }    // backend restarting: say so now
     if (kind === "preview") { previewAnswer = Object.assign({ at: Date.now() }, s.window); render(); return; }
     if (kind === "window") return;
@@ -203,11 +224,31 @@
   };
 
   function cmd(c, extra) { return function () { send(Object.assign({ cmd: c }, extra)); }; }
-  $("main").onclick = function () { send({ cmd: M.viewModel(snapshot, lastSeen, Date.now()).main.cmd }); };
-  $("pause").onclick = function () { send({ cmd: M.viewModel(snapshot, lastSeen, Date.now()).pause.cmd }); };
-  $("ctlPause").onclick = function () { send({ cmd: M.viewModel(snapshot, lastSeen, Date.now()).controls.pause.cmd }); };
-  $("ctlMain").onclick = function () { send({ cmd: M.viewModel(snapshot, lastSeen, Date.now()).controls.main.cmd }); };
-  $("dismiss").onclick = function () { send({ cmd: "dismiss" }); hidden = true; send({ window: { mode: "hidden" } }); render(); };
+  // A click lands on what the button showed when it was aimed at: a button whose meaning
+  // changed in the last GUARD_MS (a reply ending turns Pause into Done) ignores the click.
+  function press(which) {
+    return function () {
+      var b = M.viewModel(snapshot, lastSeen, Date.now())[which];
+      if (!b.visible || !b.enabled || !b.cmd) return;
+      if (Date.now() - (changedAt[which] || 0) < M.GUARD_MS) return;
+      send({ cmd: b.cmd });
+    };
+  }
+  $("main").onclick = press("primary"); $("ctlPause").onclick = press("primary");
+  $("pause").onclick = press("end"); $("ctlMain").onclick = press("end");
+  $("ctlMic").onclick = press("mic");
+  // Close shrinks to the tray / menu bar (Robert 2026-11-27); quitting the pill is in that
+  // icon's menu, whose wrapper sends {"cmd":"quit"}: hidden until voice restarts or the pill is asked for.
+  // Quit is only reachable from the tray, so ui.minimized is true then; left so, the next voice
+  // session would come back as a tray icon only (code review of 33d87cb). Un-minimize first,
+  // without showing the window now: lastMode is set so render does not send the mode.
+  function quitPill() {
+    ui = Object.assign({}, ui, { minimized: false, mini: false });
+    send({ cmd: "save_ui", ui: ui });
+    send({ cmd: "dismiss" }); hidden = true; send({ window: { mode: "hidden" } });
+    lastMode = snapshot && snapshot.orb ? "pill" : M.presentation(ui, false);
+    render();
+  }
   // Hear the voice shown in the list; one at a time (the button waits for the answer).
   $("preview").onclick = function () {
     if (!$("voice").value) return;
@@ -322,17 +363,20 @@
   }
 
   // Mac: WebKit gives a panel that never takes focus no hover, so the wrapper reports the pointer.
-  var hovered = null;
+  function setHovered(el) {
+    if (el === hovered) return;
+    if (hovered) hovered.classList.remove("hover");
+    if (el) el.classList.add("hover");
+    hovered = el;
+    $("label").textContent = hoverHint() || M.viewModel(snapshot, lastSeen, Date.now(),
+      { interruptedUntil: interruptedUntil }).stateText;
+  }
   window.pillHover = function (x, y) {
     var el = x < 0 ? null : document.elementFromPoint(x, y);
     orbPill.point(el);
     card.classList.toggle("pointer-in", !!(el && (el.closest(".orb-action") ||
       (card.classList.contains("pointer-in") && card.contains(el)))));
-    el = el && el.closest(".btn,.tab,.edge");
-    if (el === hovered) return;
-    if (hovered) hovered.classList.remove("hover");
-    if (el) el.classList.add("hover");
-    hovered = el;
+    setHovered(el && el.closest(".btn,.tab,.edge"));
   };
   card.addEventListener("pointerover", function (e) {
     orbPill.point(e.target);
@@ -348,6 +392,13 @@
     surfaceVisible = !document.hidden;
     render();
   });
+  document.addEventListener("mouseover", function (e) {
+    setHovered(e.target && e.target.closest ? e.target.closest(".btn,.tab,.edge") : null);
+  });
+  // Leaving the window: mouseleave on the root element, and mouseout with no target, since
+  // WebView2 may not send mouseleave for the document (code review of 33d87cb).
+  document.documentElement.addEventListener("mouseleave", function () { setHovered(null); });
+  document.addEventListener("mouseout", function (e) { if (!e.relatedTarget) setHovered(null); });
   setInterval(render, 1000);
   render();
 })();

@@ -115,14 +115,15 @@
       setText(mute, muted ? "Unmute mic" : "Mute mic");
       mute.toggleAttribute("selected", muted);
       mute.disabled = !vm.connected || typeof data.mic_muted !== "boolean" || !!mutePending;
-      var wake = vm.controls.main.kind === "wake", paused = vm.controls.pause.pressed;
+      var actions = vm.orbControls;
+      var wake = actions.end.kind === "wake", paused = actions.pause.pressed;
       setText(end, wake ? "Start voice" : "End voice");
       end.variant = wake ? "accent" : "negative";
-      end.disabled = !vm.controls.main.enabled;
+      end.disabled = !actions.end.enabled;
       setText(pause, paused ? "Resume" : "Pause");
       pause.setAttribute("aria-label", paused ? "Resume voice" : "Pause voice");
       pause.toggleAttribute("selected", paused);
-      pause.disabled = !vm.controls.pause.enabled;
+      pause.disabled = !actions.pause.enabled;
       setText($("orbDock"), ui && ui.orbDocked === false ? "Redock" : "Undock");
       tray.hidden = data.platform === "mac";
       if (panel === "settings") {
@@ -179,15 +180,16 @@
     });
     end.addEventListener("click", function () {
       if (end.disabled) return;
-      if (vm.controls.main.kind === "wake") send({ cmd: vm.controls.main.cmd });
-      else if (snapshot.floor) send({ cmd: "end_voice", pid: snapshot.floor.pid });
+      var cmd = vm.orbControls.end.cmd;
+      if (cmd === "wake") send({ cmd: cmd });
+      else if (cmd === "end_voice" && snapshot.floor) send({ cmd: cmd, pid: snapshot.floor.pid });
       finishIntro(); pinned = false; panel = "";
       showRegion();
     });
     gear.addEventListener("click", function () { openedPanel("menu"); });
     $("orbOpenSettings").addEventListener("click", function () { openedPanel("settings"); });
     $("orbSettingsDone").addEventListener("click", backToOrb);
-    pause.addEventListener("click", function () { if (!pause.disabled) $("ctlPause").click(); });
+    pause.addEventListener("click", function () { if (!pause.disabled) send({ cmd: vm.orbControls.pause.cmd }); });
     $("orbDock").addEventListener("click", function () {
       panel = ""; save({ orbDocked: ui && ui.orbDocked === false });
     });

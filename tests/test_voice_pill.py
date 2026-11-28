@@ -1811,3 +1811,42 @@ def test_end_voice_hides_only_its_own_pill_until_a_new_turn(ctx, monkeypatch):
     assert not vp.build_snapshot({}, st.live_sessions(ctx.base), conch)["visible"]
     st.mark_stopped(p, False, ctx.base)
     assert vp.build_snapshot({}, st.live_sessions(ctx.base), conch)["visible"]
+
+
+# FELIX #2095 (2026-11-27): the voice server's loop was stuck for minutes while its control
+# socket (a thread) kept answering "speaking", so the pill showed Speaking with no audio.
+# The status reply now carries loop_lag_s (patch_audio_deadline).
+@pytest.mark.parametrize("status,paused,phase", [
+    ({"speaking": True, "loop_lag_s": 45.0}, False, "not_responding"),
+    ({"listening": True, "loop_lag_s": 11.0}, False, "not_responding"),
+    ({"speaking": True, "loop_lag_s": 45.0}, True, "not_responding"),
+    ({"speaking": True, "loop_lag_s": 9.5}, False, "speaking"),   # a slow moment, not a hang
+    ({"speaking": True, "loop_lag_s": None}, False, "speaking"),  # watchdog not started yet
+    ({"speaking": True}, False, "speaking"),                      # older server: no field
+    ({"speaking": True, "loop_lag_s": "x"}, False, "speaking"),
+])
+def test_a_stuck_server_shows_not_responding(status, paused, phase):
+    assert snap(status=status, paused=paused, sessions=[sess(1)])["phase"] == phase
+
+
+# FELIX #2094, UX review 2026-11-27: the pill's Done sends "done". It ends YOUR turn
+# (skip_forward ends the recording and transcribes it), so it is forwarded only while the
+# server says it is listening: a Done that lands just after listening ended must not skip
+# the assistant's next reply.
+def test_done_while_listening_sends_skip_forward(ctx, control, monkeypatch):
+    monkeypatch.setattr(st, "_status", lambda path: {"listening": True, "speaking": False})
+    vp.handle_command({"cmd": "done"}, ctx)
+    time.sleep(0.1)
+    assert control.received == ["skip_forward"]
+
+
+@pytest.mark.parametrize("status", [{"listening": False, "speaking": True}, {}, {"listening": True, "speaking": True}])
+def test_done_when_not_listening_does_nothing(ctx, control, monkeypatch, status):
+    monkeypatch.setattr(st, "_status", lambda path: status)
+    vp.handle_command({"cmd": "done"}, ctx)
+    time.sleep(0.1)
+    assert control.received == []
+
+
+def test_done_with_no_socket_is_harmless(ctx):
+    vp.handle_command({"cmd": "done"}, ctx)

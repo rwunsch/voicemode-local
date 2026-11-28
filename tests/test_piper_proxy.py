@@ -22,7 +22,8 @@ TEST_PORT = 18881
 BASE_URL = f"http://127.0.0.1:{TEST_PORT}"
 
 
-START_TIMEOUT = 15.0  # 3 s measured at load 20 (2026-11-12); 5 s failed under a busy full suite
+START_TIMEOUT = 45.0  # a ceiling for readiness polling, free when healthy. 3 s at load 20 (2026-11-12) before the
+                      # warm-up existed; 3.4-10.1 s at load 18-19 (2026-11-19, n=3 each); 15 s failed in full suites
 
 
 def _start_proxy():
@@ -37,6 +38,8 @@ def _start_proxy():
         ],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
+        # These tests are not about the warm-up (tests/test_piper_proxy_warmup.py is): skip it so the start is short.
+        env={**os.environ, "VOICEMODE_PIPER_WARMUP": "0"},
     )
     try:
         deadline = time.time() + START_TIMEOUT

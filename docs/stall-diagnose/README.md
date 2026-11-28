@@ -18,8 +18,8 @@ From any shell, while the voice is stuck and **before** `/mcp`:
 voicemode-switch diagnose
 ```
 
-It takes a few seconds: 1 s of CPU sampling, then up to 15 s per engine probe, up to 20 s for
-the conch status and up to 10 s for py-spy dumps, which run in parallel. The report is printed and
+It takes a few seconds: 1 s of CPU sampling, under WSL up to 20 s for the Windows host, then up
+to 15 s per engine probe, up to 20 s for the conch status and up to 10 s for py-spy dumps, which run in parallel. The report is printed and
 written to `~/.voicemode/logs/diagnose-<YYYYmmdd-HHMMSS>.txt`. The last line gives the path. Run
 it again after the reconnect, then compare the two files.
 
@@ -32,7 +32,8 @@ thread of your own voice-mode processes is doing. The command never installs it 
 ## What it does and does not touch
 
 - Read only: `ps`, `/proc`, `pactl`, `ss`, `voicemode conch status`, `py-spy dump --nonblocking`,
-  and the log files.
+  the log files, and under WSL one `powershell.exe -NoProfile -Command` call that only reads
+  (`Get-CimInstance`, `Get-Process`, `Get-Service`).
 - The only requests it sends: per TTS engine that answers `/health`, one TTS request for the
   sentence "Hello."; per STT engine that answers, one request transcribing 1 s of silence that the
   report makes itself (16 kHz mono WAV).
@@ -51,6 +52,7 @@ thread of your own voice-mode processes is doing. The command never installs it 
 |---|---|---|
 | Load | 1/5/15-min load average and the number of cores | Load above 2 x cores means processes are waiting for a CPU. |
 | Top CPU | Linux: the 8 busiest processes over a 1 s sample from `/proc` (current, not lifetime), with thread counts. macOS: `ps` %cpu. Windows: not collected. | Shows who is using the CPU at that moment. |
+| Windows host | WSL only (`WSL_DISTRO_NAME` set or `/proc/version` mentions microsoft); elsewhere `not collected on this OS (not WSL)`. One `powershell.exe` call (20 s timeout): how long the call took, host CPU load (`Win32_Processor` LoadPercentage, average), logical/physical processors, committed memory %, the `vmmem`/`vmmemWSL` working set, `Audiosrv` and `AudioEndpointBuilder` state, and the 8 busiest Windows processes over 1 s (two `Get-Process` CPU readings), as % of the whole host. Process names and ids only: no command lines, paths or window titles. A timeout or failure is a line. | WSL's own load does not show the host. 2026-11-18: a stall coincided with PulseAudio not answering for 5 s while the host CPU was at 100 % (wsl, chrome, teams, Taskmgr). The PowerShell call itself is slow when the host is overloaded. The PowerShell process shows up in its own top list. |
 | voice-mode MCP processes | One line per voice-mode MCP server (pid, ppid, uid, age, threads, cpu), the Claude session that owns it (from `~/.claude/sessions/<claude pid>.json`: id, name, cwd), and on Linux `/proc` State, voluntary/nonvoluntary context switches and how many threads are in each state (R/S/D) | `D` means a thread is stuck in an uninterruptible wait, usually I/O. Many nonvoluntary switches mean the process kept losing the CPU. |
 | py-spy | Python stacks of your own voice-mode processes (10 s timeout each), or `py-spy not installed: pip install py-spy` | Shows where a stuck turn is waiting: in PortAudio, in an HTTP request, on the conch. |
 | Audio path | Linux with pactl: server, default sink and source, every sink and source with its state (SUSPENDED/IDLE/RUNNING), and the open sink-inputs and source-outputs. macOS and Windows: `not collected on this OS` | A stream on a SUSPENDED device should not happen. |
@@ -72,6 +74,17 @@ thread of your own voice-mode processes is doing. The command never installs it 
 | Fixed-duration fallback | `Falling back to fixed duration recording` in the last hour |
 | Stuck thread | a voice-mode process or thread in state `D` |
 | Suspended device | a sink-input or source-output on a SUSPENDED sink or source |
+| Windows host busy (WSL, WARN) | host CPU load >= `HOST_CPU_SUSPECT_PCT` (90 %) |
+| Windows process (WSL) | one process other than `vmmem`, `vmmemWSL`, `wsl`, `wslhost`, `wslservice`, `wslrelay` uses > `HOST_PROC_SUSPECT_PCT` (25 %) of the whole host |
+| Windows audio (WSL) | `Audiosrv` or `AudioEndpointBuilder` not `Running` (or not found) |
+| Slow PowerShell (WSL) | the `powershell.exe` call took > `POWERSHELL_SLOW_S` (10 s), a timeout included |
+
+The Windows host thresholds are first settings, not derived from measured stalls either.
+Measured on this machine on 2026-11-19 at WSL load 22-24 with the host at 100 % CPU: a trivial
+`powershell.exe` call took 3.5 and 3.7 s; the host section took 6.0, 7.1 and 12.2 s, and one
+earlier run hit the 20 s timeout (n=1, cause not found: stdin was ruled out by rerunning).
+So under host overload the section can time out exactly when it is wanted; the timeout then
+counts as a Slow PowerShell suspect.
 
 **The probe thresholds (5 s) are not measured.** They are set well above what a GPU engine
 should need for one word, but no warm baseline was measured on this machine, because the live
@@ -151,4 +164,10 @@ These would change the decision:
 - The real `voicemode-switch diagnose` writing into the real `~/.voicemode/logs`.
 - `py-spy dump` against a real process (py-spy is not installed here).
 - macOS (the `ps -axo` / `etime` path) and native Windows (most sections say `not collected`).
+- The Windows host section during a real stall. It was run read-only four times on this WSL2
+  machine on 2026-11-19 (see the thresholds above), not as part of a whole report. Whether a
+  timed-out `powershell.exe` keeps running on the Windows side after the WSL side is killed was
+  not checked; its script only reads, and finishes within seconds.
+- The host section on another Windows build or with Windows PowerShell missing from PATH
+  (that case is a `failed: FileNotFoundError` line in the tests).
 - Linux with PipeWire's `pactl` (the output format is assumed to match PulseAudio's).

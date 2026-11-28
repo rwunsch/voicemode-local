@@ -64,3 +64,15 @@ by another session does not count.
    its voice mode reconnects (`/mcp`) or the session restarts. Say so in the release message.
 7. **Tell FELIX-voice** the tag and what changed, including every `behaviour change:` line
    from the tag notes, word for word. FELIX takes releases through its own pin.
+
+## Why the tests isolate Claude Code's session registry
+
+Stray "Voice queue: your turn..." messages reached real Claude Code sessions during test
+runs (2026-11-19). The wake code (`session_wake.py`, used by `conch_wakers.py`) finds a
+session and its messaging socket only through `<claude dir>/sessions`, where the claude
+dir is `CLAUDE_CONFIG_DIR`, else `~/.claude`. Until then only a per-test fixture set it, so
+code running at import time, in module-scoped fixtures, or after a test's teardown (a
+daemon notify thread) used the real `~/.claude` (shown with a fake HOME; which test sent
+the real messages was not found). `tests/conftest.py` now sets `CLAUDE_CONFIG_DIR` to an
+empty temp dir when it is imported, and `tests/test_test_isolation.py` fails if any of
+those places resolves a path outside it. Do not remove either.

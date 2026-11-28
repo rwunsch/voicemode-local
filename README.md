@@ -2,6 +2,12 @@
 
 Talk to Claude Code with your voice — fully local, private, and free.
 
+> **Built on [VoiceMode](https://github.com/mbailey/voicemode) by Mike Bailey.** VoiceMode Local is a
+> downstream of VoiceMode: it installs upstream `voice-mode` and adds local voice services and a set
+> of patches on top. The core voice conversation work is Mike's. Our aim is to keep the list of
+> differences short: fixes go upstream first, and several of ours are part of VoiceMode 9.1.0.
+> Thank you, Mike.
+
 VoiceMode Local sets up local speech-to-text (Whisper) and text-to-speech (Kokoro, Piper) services so you can have real-time two-way voice conversations with Claude Code without sending audio to the cloud. It extends the [VoiceMode MCP](https://github.com/mbailey/voicemode) server with local voice infrastructure and multi-engine support.
 
 ## How It Works
@@ -533,10 +539,7 @@ Patches are applied by `./patches/apply.sh` (run automatically during install) a
 | `piper-proxy.py` | OpenAI `/v1/audio/speech` → piper-tts CLI wrapper |
 | `voicemode-switch` | CLI for mode switching and service management |
 | `voices/piper-voices.json` | Curated Piper voice catalog with model metadata |
-| `patches/voice_queue.py` | Multi-session FIFO voice queue module (no upstream equivalent) |
-| `patches/patch_converse_queue.py` | Splices the queue into `tools/converse.py` (anchor-based) |
 | `patches/patch_simple_failover.py` | Removes upstream's silent OpenAI voice swap |
-| `patches/fcntl_shim.py`, `resource_shim.py` | Windows stdlib shims (dormant on Linux) |
 | `patches/apply.sh` | Applies the patches into the installed voice_mode package |
 | `tests/` | Test suite (118 tests: queue, routing patchers, sysaudio) |
 
@@ -679,7 +682,7 @@ VoiceMode Local orchestrates and extends these open-source projects:
 
 | Project | License | Role |
 |---------|---------|------|
-| [VoiceMode](https://github.com/mbailey/voicemode) | MIT | MCP server for Claude Code voice conversations |
+| [VoiceMode](https://github.com/mbailey/voicemode) by Mike Bailey | MIT | MCP server for Claude Code voice conversations; the base this project builds on |
 | [Kokoro-FastAPI](https://github.com/remsky/Kokoro-FastAPI) | Apache-2.0 | OpenAI-compatible TTS server (Docker mode) |
 | [kokoro-onnx](https://github.com/thewh1teagle/kokoro-onnx) | MIT | Lightweight ONNX TTS runtime (native mode) |
 | [Piper](https://github.com/rhasspy/piper) | MIT | Multilingual TTS engine |

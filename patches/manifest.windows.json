@@ -75,6 +75,9 @@
     {"patch": "patch_voice_orb.py", "targets": ["control_channel.py", "control_socket.py", "tools/converse.py", "streaming.py", "audio_player.py", "core.py"],
      "why": "measure speaker levels and bind Pill interrupt clicks to one playback"},
     {"patch": "patch_audio_recover.py", "targets": ["tools/converse.py"], "why": "a mic stream that fails to start (Wait timed out, -9987) is re-initialised and retried once with silence detection; the fixed-length fallback ends on cancel and VOICEMODE_FALLBACK_RECORD_MAX_S caps it"},
+    {"copy": "audio_deadline.py", "to": "audio_deadline.py"},
+    {"patch": "patch_audio_deadline.py", "targets": ["core.py", "tools/converse.py", "control_socket.py"],
+     "why": "audio-device calls off the event loop with a deadline; loop watchdog exits a stuck server (FELIX #2095)"},
     {"patch": "patch_windows_tempfile.py", "targets": ["core.py", "streaming.py"], "why": "close temp audio files before deleting them; Windows refuses to delete an open file (WinError 32)"},
     {"patch": "patch_native_client_folder.py", "targets": ["tools/converse.py"], "why": "the session label uses the client's folder; voice-mode itself runs in the runtime folder"}
   ]

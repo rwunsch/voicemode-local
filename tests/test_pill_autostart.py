@@ -281,7 +281,11 @@ def test_pill_python_from_a_voicemode_env_is_refused(monkeypatch):
 def test_pill_python_from_the_environment_is_used(monkeypatch):
     monkeypatch.setenv(pa.PYTHON_SETTING, "/opt/py")
     monkeypatch.setattr(st, "setting_came_from_a_file", lambda name: False)
-    assert pa.backend_python() == "/opt/py" and pa.mac_python() == "/opt/py"
+    monkeypatch.setattr(pa, "platform_kind", lambda: "macos")
+    assert pa.mac_python() == "/opt/py"
+    assert pa.backend_python() == sys.executable
+    monkeypatch.setattr(pa, "platform_kind", lambda: "windows")
+    assert pa.backend_python() == "/opt/py"
 
 
 def test_a_backend_whose_start_could_not_be_read_still_blocks_a_second_window(env):
