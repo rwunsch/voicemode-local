@@ -3,6 +3,7 @@
 #orbStrip { display: none; }
 body[data-orb-layout] {
   --orb-row: 56px;
+  --orb-strip-inset: 12px;
 }
 body[data-orb-layout] #pillTheme {
   --orb-panel-bg: var(--spectrum-background-elevated-color, var(--bg));
@@ -37,7 +38,7 @@ body[data-orb-floating] #card[data-dragging] .orb-action { cursor: grabbing; }
 body[data-orb-layout] #card[data-keyboard=true] .orb-action:focus { outline: 2px solid var(--a); outline-offset: 1px; }
 body[data-orb-layout] .orb { width: 40px; height: 40px; border: 0; }
 body[data-orb-layout] #orbStrip {
-  position: absolute; z-index: 1; top: 0; left: 14px; right: var(--orb-row);
+  position: absolute; z-index: 1; top: 0; left: var(--orb-strip-inset); right: var(--orb-row);
   height: var(--orb-row); display: flex;
   align-items: center; justify-content: center; gap: 4px;
   opacity: 0; visibility: hidden; pointer-events: none;
@@ -49,11 +50,12 @@ body[data-orb-layout][data-orb-reveal=true] #orbStrip {
   transition: opacity 165ms ease, transform 180ms ease;
 }
 body[data-orb-layout][data-orb-side=left] #orbStrip {
-  left: var(--orb-row); right: 14px;
+  left: var(--orb-row); right: var(--orb-strip-inset);
 }
 body[data-orb-layout][data-orb-reveal=false] #orbStrip * { pointer-events: none; }
 body[data-orb-layout] :is(sp-action-button, sp-button, sp-picker, sp-switch) { -webkit-app-region: no-drag; }
 body[data-orb-layout] #orbStrip > * { flex: none; }
+body[data-orb-layout] #orbSettingsToggle { margin-inline-start: 8px; }
 body[data-orb-layout] .orb-panel {
   position: absolute; z-index: 2; top: calc(var(--orb-row) + 2px); right: 6px; left: 6px;
   display: grid; gap: 8px; padding: 10px;
