@@ -8,3 +8,6 @@ skills/
 voicetest_*.log
 .worktrees/
 .superpowers/
+
+# Local-only notes and correspondence; never committed (the repo is public)
+docs-local/

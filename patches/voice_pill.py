@@ -30,6 +30,7 @@ Installed as voice_mode/voice_pill.py by patches/apply.sh.
 import errno
 import importlib.util
 import json
+import math
 import os
 import platform as _platform
 import queue
@@ -479,10 +480,14 @@ def _stuck(status) -> bool:
     return isinstance(lag, (int, float)) and not isinstance(lag, bool) and lag > NOT_RESPONDING_S
 
 
+STILL_LISTENING_DEFAULT = 30.0
+
+
 def build_snapshot(status, sessions, conch, *, paused=False, ptt=False, closed=False,
                    last_floor=None, overrides=None, barge=None, ui=None, platform=None, beeps=False,
                    default_voice=st.FALLBACK_VOICE, play=None, wake=None,
-                   german=True, ptt_listener=None, german_list=None, voices=None) -> dict:
+                   german=True, ptt_listener=None, german_list=None, voices=None,
+                   still_after_s=STILL_LISTENING_DEFAULT, now=None) -> dict:
     overrides = overrides or {}
     floor, is_holder = _floor(sessions, conch, last_floor)
     visible = bool(sessions or ptt) and not closed
@@ -504,6 +509,13 @@ def build_snapshot(status, sessions, conch, *, paused=False, ptt=False, closed=F
         phase = "stopped"
     else:
         phase = "working" if sessions else "idle"
+    # FELIX #2107: a long listen gets a note (the page says "press Done"), never a sound and
+    # never an end. listening_since is the wall-clock start of the recording in progress
+    # (patch_turn_stats); upstream's listen_started_at is set only on a barge-in.
+    started = status.get("listening_since")
+    still = (phase == "listening" and still_after_s > 0 and isinstance(started, (int, float))
+             and not isinstance(started, bool)
+             and (time.time() if now is None else now) - started >= still_after_s)
     positions = {w["pid"]: i + 1 for i, w in enumerate(conch.get("waiters", []))}
     rows = []
     for s in sessions:
@@ -525,6 +537,7 @@ def build_snapshot(status, sessions, conch, *, paused=False, ptt=False, closed=F
     language = language or voice_language(voice)
     platform = platform or detect_platform()
     return {"visible": visible, "phase": phase, "floor": floor, "sessions": rows,
+            "still_listening": bool(still),
             "voice": voice, "language": language,
             "barge": barge or {"enabled": False, "available": False, "count": 0},
             "beeps": beeps,
@@ -644,7 +657,20 @@ def gather(ctx) -> dict:
         default_voice=st.default_voice(ctx.home),
         play={"label": play.label} if play else None, wake=wake_view(ctx), platform=platform,
         german=german_available(ctx.home), ptt_listener=ptt_listening(platform, ctx.home),
-        german_list=german_voices(ctx.home), voices=voices_by_language(ctx.home, wait=False))
+        german_list=german_voices(ctx.home), voices=voices_by_language(ctx.home, wait=False),
+        still_after_s=still_after(ctx.home))
+
+
+STILL_LISTENING_SETTING = "VOICEMODE_PILL_STILL_LISTENING_S"
+
+
+def still_after(home=None) -> float:
+    """Seconds of listening before the pill says "still listening, press Done" (0 = never)."""
+    try:
+        v = float(st.setting(STILL_LISTENING_SETTING, "", home) or "x")
+    except (TypeError, ValueError):
+        return STILL_LISTENING_DEFAULT
+    return v if math.isfinite(v) and v >= 0 else STILL_LISTENING_DEFAULT
 
 
 # -- voice preview (2026-11-17) ----------------------------------------------------------------
@@ -900,9 +926,12 @@ def handle_command(msg, ctx=None):
         # The pill's Done (FELIX #2094): ends the user's turn and sends what was said
         # (skip_forward while recording). Only while the server is listening: skip_forward is
         # sticky, so a Done landing just after listening ended would skip the next reply.
-        status = st._status(ctx.sock)
-        if status.get("listening") and not status.get("speaking"):
-            st.send_control(ctx.sock, "skip_forward")
+        # The server decides that under its own lock (vml_done); an older voice server
+        # without it gets the old check-then-send, which has a small window (Talos, #2104).
+        if st.request_done(ctx.sock) is None:
+            status = st._status(ctx.sock)
+            if status.get("listening") and not status.get("speaking"):
+                st.send_control(ctx.sock, "skip_forward")
     elif cmd == "pause":
         # Our own pid owns the pause (mic held closed); the socket pause holds TTS.
         # Upstream stops a paused turn after VOICEMODE_CONTROL_PAUSE_TIMEOUT (300 s).

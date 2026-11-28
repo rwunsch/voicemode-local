@@ -75,6 +75,8 @@ def work(tmp_path_factory):
         _patch("patch_voice_barge.py", d / f)
     for f in PILL_FILES:
         _patch("patch_voice_pill.py", d / f)
+    for f in ("control_channel.py", "control_socket.py"):
+        _patch("patch_pill_done.py", d / f)   # manifest order: after the pill and barge patches
     return d
 
 
@@ -700,3 +702,67 @@ def test_manifest_installs_the_modules_before_patching_code_that_imports_them():
     pill = _manifest_index(patch="patch_voice_pill.py", targets="control_channel.py")
     for module in ("voice_pill_state.py", "voice_barge.py", "control_transport.py"):
         assert _manifest_index(copy=module) < pill
+
+
+# Talos on FELIX #2104 (3): the pill's Done checked "listening" and sent skip_forward in two
+# exchanges; a recording ending between them left a sticky skip_forward for the next reply.
+# request_done checks and requests under the control state's own lock.
+def test_request_done_only_while_listening_and_not_speaking(control):
+    s = control.ControlState()
+    assert s.request_done() is False and not s.snapshot().is_skip_forward
+    s.set_listening(True)
+    s.set_speaking(True)
+    assert s.request_done() is False and not s.snapshot().is_skip_forward
+    s.set_speaking(False)
+    assert s.request_done() is True and s.snapshot().is_skip_forward
+
+
+def test_request_done_holds_the_lock_set_listening_needs(control):
+    s = control.ControlState()
+    s.set_listening(True)
+    with s._cond:   # while Done decides, the recording cannot report its end
+        t = threading.Thread(target=s.set_listening, args=(False,))
+        t.start()
+        t.join(0.2)
+        assert t.is_alive()
+        assert s.request_done() is True
+    t.join(2)
+    assert s.snapshot().is_skip_forward   # set before listening ended: converse consumes it
+
+
+class _Conn:
+    def __init__(self):
+        self.sent = b""
+
+    def sendall(self, b):
+        self.sent += b
+
+
+def _socket_answer(work):
+    import json as _json
+    import socket as _socket
+    ns = {"json": _json, "COMMAND_STATUS": "status", "Any": typing.Any, "socket": _socket}
+    return _lift(work, "control_socket.py", ["_answer_if_status_query"], ns)["_answer_if_status_query"]
+
+
+@pytest.mark.parametrize("listening, applied", [(True, True), (False, False)])
+def test_socket_answers_vml_done(work, control, listening, applied):
+    import json as _json
+    answer = _socket_answer(work)
+    state = control.ControlState()
+    state.set_listening(listening)
+    me = types.SimpleNamespace(_state=state, _write_status=lambda *a: None)
+    conn = _Conn()
+    assert answer(me, '{"command": "vml_done", "request_id": 7}', conn) is True
+    reply = _json.loads(conn.sent.decode())
+    assert reply == {"ok": True, "action": "vml_done", "request_id": 7, "applied": applied}
+    assert state.snapshot().is_skip_forward is applied
+
+
+def test_socket_status_and_commands_are_unchanged(work, control):
+    answer = _socket_answer(work)
+    seen = []
+    me = types.SimpleNamespace(_state=control.ControlState(), _write_status=lambda c, r: seen.append(r))
+    assert answer(me, '{"command": "status", "request_id": 3}', _Conn()) is True and seen == [3]
+    assert answer(me, '{"command": "skip_forward"}', _Conn()) is False
+    assert answer(me, "not json", _Conn()) is False
