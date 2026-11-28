@@ -134,9 +134,20 @@ def _vml_fallback_seconds(max_duration):
     return max_duration
 
 
+def _vml_fallback_done():
+    """Was Done (skip_forward) pressed? The fixed-length recording reads no control state of
+    its own (Talos on FELIX #2104). Left set: converse consumes it after the recording."""
+    try:
+        from voice_mode.control_channel import get_control_state
+        return bool(get_control_state().snapshot().is_skip_forward)
+    except Exception:
+        return False
+
+
 def _vml_fallback_record(max_duration, stop_event):
     """record_audio for the error fallback: capped by VOICEMODE_FALLBACK_RECORD_MAX_S, and
-    its stream is stopped when stop_event is set (checked every 0.1 s)."""
+    its stream is stopped when stop_event is set or Done is pressed (checked every 0.1 s).
+    After Done only what was recorded is returned, not the rest of the sd.rec buffer."""
     duration = _vml_fallback_seconds(max_duration)
     if stop_event is None:
         return record_audio(duration)
@@ -148,28 +159,39 @@ def _vml_fallback_record(max_duration, stop_event):
     except Exception:
         before = None
     done = threading.Event()
+    ended_by_done = []
 
     def _watch():
         said = False
         while not done.wait(0.1):
-            if not stop_event.is_set():
+            cancelled = stop_event.is_set()
+            if not cancelled and not _vml_fallback_done():
                 continue
             try:
                 stream = sd.get_stream()
                 if stream is before or stream.closed:
                     continue
                 if not said:
-                    logger.info("Fixed duration fallback recording stopped: caller was cancelled")
+                    if cancelled:
+                        logger.info("Fixed duration fallback recording stopped: caller was cancelled")
+                    else:
+                        logger.info("Fixed duration fallback recording ended by skip_forward (Done)")
+                        ended_by_done.append(time.monotonic())
                     said = True
                 stream.stop()
             except Exception:
                 pass
 
     threading.Thread(target=_watch, name="vml-fallback-stop", daemon=True).start()
+    started = time.monotonic()
     try:
-        return record_audio(duration)
+        audio = record_audio(duration)
     finally:
         done.set()
+    if ended_by_done and len(audio):
+        keep = int((ended_by_done[0] - started + 0.2) * SAMPLE_RATE)   # a little extra, never less
+        audio = audio[:max(1, keep)]
+    return audio
 
 '''
 

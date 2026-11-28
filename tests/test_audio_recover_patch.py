@@ -585,3 +585,53 @@ def test_whole_manifest_applies(tmp_path, native):
     assert "while sd.get_stream().active:" in text
     assert "def record_audio_with_silence_detection_inner(" in text
     assert "_vml_silence_threshold_ms" in _function(text)   # the VAD override is intact
+
+
+# Talos on FELIX #2104 (2): in the fixed-length fallback the pill shows Listening and offers
+# Done, but nothing read skip_forward: the person waited up to max_duration.
+class _Snap:
+    def __init__(self, fwd):
+        self.is_skip_forward = fwd
+
+
+class _CtlState:
+    def __init__(self):
+        self.forward = False
+
+    def snapshot(self):
+        return _Snap(self.forward)
+
+
+def _control(monkeypatch):
+    state = _CtlState()
+    cc = type(sys)("voice_mode.control_channel")
+    cc.get_control_state = lambda: state
+    monkeypatch.setitem(sys.modules, "voice_mode.control_channel", cc)
+    return state
+
+
+def test_done_ends_the_fallback_and_keeps_only_what_was_recorded(patched, monkeypatch):
+    state = _control(monkeypatch)
+    fake = FakeSD([RuntimeError("no start")])
+    m = _load(patched, fake)
+    t, out, started = _record_in_thread(m, 120.0, threading.Event())
+    deadline = time.monotonic() + 5
+    while not fake.streams and time.monotonic() < deadline:
+        time.sleep(0.01)
+    time.sleep(0.3)
+    state.forward = True
+    t.join(5)
+    assert not t.is_alive(), "Done did not end the fallback recording"
+    assert time.monotonic() - started < 5
+    audio, _ = out["result"]
+    assert 0 < len(audio) < 3 * m.SAMPLE_RATE      # not the 120 s buffer
+    assert state.forward, "converse consumes skip_forward after the recording, not the watcher"
+    assert any("skip_forward" in line for line in m.LOG)
+
+
+def test_without_a_control_channel_the_fallback_is_as_before(patched, monkeypatch):
+    monkeypatch.delitem(sys.modules, "voice_mode.control_channel", raising=False)
+    fake = FakeSD([RuntimeError("no start")])
+    m = _load(patched, fake)
+    audio, _ = m.record_audio_with_silence_detection(0.3, stop_event=threading.Event())
+    assert len(audio) == int(0.3 * m.SAMPLE_RATE)
