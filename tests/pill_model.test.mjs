@@ -39,6 +39,18 @@ test("pause button reads Resume when paused", () => {
   assert.equal(q.cmd, "pause");
 });
 
+test("the Orb pauses during listening independently of the classic Done action", () => {
+  const listening = viewModel(snap({ phase: "listening", orb: true }), 0, 0);
+  assert.equal(listening.primary.cmd, "done");
+  assert.equal(listening.orbControls.pause.cmd, "pause");
+  assert.equal(listening.orbControls.pause.enabled, true);
+  assert.equal(listening.orbControls.end.cmd, "end_voice");
+  const muted = viewModel(snap({ phase: "mic-muted", orb: true }), 0, 0);
+  assert.equal(muted.inTurn, true);
+  assert.equal(muted.orbControls.pause.enabled, true);
+  assert.equal(viewModel(snap({ phase: "paused", orb: true }), 0, 0).orbControls.pause.cmd, "resume");
+});
+
 test("stop needs a floor holder", () => {
   assert.equal(viewModel(snap({ floor: null }), 0, 0).stop.enabled, false);
   assert.equal(viewModel(snap(), 0, 0).stop.enabled, true);

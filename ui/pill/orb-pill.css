@@ -1,0 +1,150 @@
+/* The same anchor is used by the native compact and wide frames. */
+#pillTheme { display: block; }
+#orbStrip { display: none; }
+body[data-orb-layout] {
+  --orb-row: 56px;
+  --orb-strip-inset: 12px;
+}
+body[data-orb-layout] #pillTheme {
+  --orb-panel-bg: var(--spectrum-background-elevated-color, var(--bg));
+  --orb-panel-border: var(--spectrum-gray-300, var(--line));
+  color: var(--spectrum-neutral-content-color-default, var(--t));
+}
+body[data-orb-layout] #card {
+  position: relative; width: 100%; min-height: var(--orb-row);
+  padding: 0; background: transparent; border: 0;
+}
+body[data-orb-layout] :is(.edge, #tab, .top > :not(#drag), #drag > :not(#orbAction), #more) { display: none; }
+body[data-orb-layout] .top {
+  position: absolute; left: 0; right: 0; top: 0; height: var(--orb-row);
+  border-radius: 29px;
+}
+body[data-orb-layout] .top::before {
+  position: absolute; content: ""; inset: 4px; border-radius: 25px;
+  background: var(--orb-panel-bg);
+  border: 1px solid var(--orb-panel-border);
+  opacity: 0; pointer-events: none; transition: opacity 180ms ease;
+}
+body[data-orb-layout][data-orb-reveal=true] .top::before { opacity: 1; }
+body[data-orb-layout] #drag {
+  position: absolute; top: 0; right: 0;
+  width: var(--orb-row); height: var(--orb-row);
+  justify-content: center; gap: 0;
+}
+body[data-orb-layout][data-orb-side=left] #drag { right: auto; left: 0; }
+body[data-orb-layout] .orb-action { width: 46px; height: 46px; }
+body[data-orb-floating] .orb-action { cursor: grab; }
+body[data-orb-floating] #card[data-dragging] .orb-action { cursor: grabbing; }
+body[data-orb-layout] #card[data-keyboard=true] .orb-action:focus { outline: 2px solid var(--a); outline-offset: 1px; }
+body[data-orb-layout] .orb { width: 40px; height: 40px; border: 0; }
+body[data-orb-layout] #orbStrip {
+  position: absolute; z-index: 1; top: 0; left: var(--orb-strip-inset); right: var(--orb-row);
+  height: var(--orb-row); display: flex;
+  align-items: center; justify-content: center; gap: 4px;
+  opacity: 0; visibility: hidden; pointer-events: none;
+  transform: translateX(4px);
+  transition: opacity 165ms ease, transform 180ms ease, visibility 165ms;
+}
+body[data-orb-layout][data-orb-reveal=true] #orbStrip {
+  opacity: 1; visibility: visible; pointer-events: auto; transform: none;
+  transition: opacity 165ms ease, transform 180ms ease;
+}
+body[data-orb-layout][data-orb-side=left] #orbStrip {
+  left: var(--orb-row); right: var(--orb-strip-inset);
+}
+body[data-orb-layout][data-orb-reveal=false] #orbStrip * { pointer-events: none; }
+body[data-orb-layout] :is(sp-action-button, sp-button, sp-picker, sp-switch) { -webkit-app-region: no-drag; }
+body[data-orb-layout] #orbStrip > * { flex: none; }
+body[data-orb-layout] #orbSettingsToggle {
+  --mod-actionbutton-height: 28px;
+  --mod-actionbutton-min-width: 28px;
+  --mod-actionbutton-icon-size: 18px;
+  margin-inline-start: 4px;
+}
+body[data-orb-layout] .orb-panel {
+  position: absolute; z-index: 2; top: calc(var(--orb-row) + 2px); right: 6px; left: 6px;
+  display: grid; gap: 8px; padding: 10px;
+  max-height: calc(100% - var(--orb-row) - 5px); overflow-y: auto;
+  border-radius: var(--spectrum-corner-radius-300, 14px);
+  border: 1px solid var(--orb-panel-border);
+  background: var(--orb-panel-bg);
+}
+body[data-orb-layout][data-orb-above=true] :is(.top, #orbStrip) { top: auto; bottom: 0; }
+body[data-orb-layout][data-orb-above=true] .orb-panel { top: auto; bottom: calc(var(--orb-row) + 2px); }
+body[data-orb-layout] :is(#card, #pillTheme) { height: 100%; }
+#orbSettings sp-picker { width: 100%; }
+#orbSettings .row sp-picker { flex: 1 1 auto; min-width: 0; }
+#orbSettings .row > :not(sp-picker) { flex: none; }
+#orbPreviewStatus { color: var(--spectrum-neutral-subdued-content-color-default, var(--m)); font-size: 12px; }
+#orbPreviewStatus:empty { display: none; }
+html.windows:has(body[data-orb-layout]) { background: transparent; }
+
+/* Mask the composited face and the moving layers themselves. WebKit can paint
+   an animated child beyond a parent's rounded clip as the Pill resizes. */
+[data-orb-layout] .orb {
+  --orb-circle: radial-gradient(circle closest-side, #000 calc(100% - .4px), transparent 100%);
+  clip-path: circle(50%);
+  -webkit-mask-image: var(--orb-circle);
+  mask-image: var(--orb-circle);
+}
+[data-orb-layout] :is(.orb-blue, .orb-stars),
+[data-orb-layout] .orb-pigment:not(.orb-blue)::after {
+  -webkit-mask-image: var(--orb-circle);
+  mask-image: var(--orb-circle);
+}
+[data-orb-layout][data-orb-palette=listening] .orb::after {
+  content: ""; position: absolute; inset: 0; border-radius: inherit;
+  box-shadow: inset 0 0 0 1px #e1d9ff94; pointer-events: none;
+}
+[data-orb-layout] .orb-pigment {
+  inset: 0;
+  transition: opacity 340ms ease;
+}
+/* Use the approved exports at the real 40 pt face size. Never tint the still. */
+body[data-orb-layout] .orb-pigment:not(.orb-blue) {
+  background: url(orb-felix.png) center / 100% 100% no-repeat;
+  animation: none;
+}
+body[data-orb-layout] .orb-pigment:not(.orb-blue)::after {
+  content: ""; position: absolute; inset: 0; background-image: url(orb-felix-motion.webp);
+  background-size: 1000% 600%; background-repeat: no-repeat;
+  opacity: 0; transition: opacity 180ms ease;
+  animation: felix-frame-column 800ms steps(10, jump-none) infinite,
+             felix-frame-row 4800ms steps(6, jump-none) infinite;
+  animation-play-state: paused;
+}
+body[data-orb-layout][data-felix-frames=true] .orb-pigment:not(.orb-blue)::after { opacity: 1; }
+body[data-orb-layout][data-felix-frames=true][data-orb-motion=true] .orb-pigment:not(.orb-blue)::after {
+  animation-play-state: running;
+}
+@keyframes felix-frame-column { from { background-position-x: 0%; } to { background-position-x: 100%; } }
+@keyframes felix-frame-row { from { background-position-y: 0%; } to { background-position-y: 100%; } }
+.orb-blue, .orb-shade { display: none; }
+body[data-orb-layout][data-orb=animated] .orb-blue {
+  display: block;
+  clip-path: circle(50%);
+  background:
+    radial-gradient(ellipse at 47% 39%, #141b51 0%, #153592c2 29%, transparent 60%),
+    radial-gradient(ellipse at 69% 80%, #a1eeff 4%, #3b95eb 32%, transparent 64%),
+    radial-gradient(ellipse at 24% 39%, #657eff 7%, #414de3 34%, transparent 63%), #262886;
+  opacity: 0;
+}
+body[data-orb-layout][data-orb-palette=listening]:is([data-tone=listening], [data-tone=muted]) .orb-blue { opacity: 1; }
+body[data-orb-layout]:not([data-orb-palette=listening]) .orb-stars { display: none; }
+body[data-orb-layout] .orb-shade {
+  display: block; position: absolute; inset: 0; opacity: 0; pointer-events: none;
+  background:
+    radial-gradient(ellipse 65% 40% at 50% 104%, #a2a4be69, transparent 94%),
+    radial-gradient(ellipse 91% 94% at 65% 111%, #282d42 15%, #34374ded 36%, #414557a4 54%, #49475b30 73%, transparent 94%);
+  transition: opacity 360ms cubic-bezier(.24,.65,.3,1);
+}
+body[data-orb-layout][data-mic-muted=true] .orb-shade { opacity: 1; }
+body[data-orb-layout][data-mic-muted=true]:not([data-tone=speaking]) .orb {
+  background: radial-gradient(ellipse at 42% 25%, #9a9db3, #5e627f 46%, #252838 88%);
+}
+body[data-orb-layout][data-mic-muted=true]:not([data-tone=speaking]) :is(.orb-pigment, .orb-stars) { opacity: 0; }
+@media (prefers-reduced-motion: reduce) {
+  body[data-orb-layout] .orb-pigment:not(.orb-blue)::after { display: none; }
+  body[data-orb-layout] :is(#orbStrip, .orb-pigment, .orb-shade),
+  body[data-orb-layout] .top::before { animation: none; transition: none; }
+}

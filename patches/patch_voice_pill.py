@@ -82,6 +82,12 @@ RECORD_SIG = (
 )
 
 CONVERSE = [
+    ("prevent fixed recorder from opening a muted mic",
+     '    """Record audio from microphone"""\n',
+     '    """Record audio from microphone"""\n'
+     "    if voice_pill_state.mic_muted():\n"
+     "        _voice_pill_discard.set()\n"
+     "        return np.array([], dtype=np.int16)\n"),
     ("beeps switch",
      "    # Use parameter override if provided, otherwise use global setting\n"
      "    if enabled is False:\n",
@@ -101,8 +107,8 @@ CONVERSE = [
      "            dtype=np.int16\n        )\n"
      f"        # {MARKER}: poll rather than block, so Pause closes this mic too.\n"
      "        while sd.get_stream().active:\n"
-     "            if voice_pill_state.is_paused():\n"
-     '                logger.info("Recording ended by Pause -- discarding it")\n'
+     "            if voice_pill_state.is_paused() or voice_pill_state.mic_muted():\n"
+     '                logger.info("Recording ended by Pause or mic mute -- discarding it")\n'
      "                sd.stop()\n"
      "                _voice_pill_discard.set()\n"
      "                return np.array([])\n"
@@ -152,6 +158,9 @@ CONVERSE = [
      "def record_audio_with_silence_detection" + RECORD_SIG +
      "    control_state = get_control_state()\n"
      "    _voice_pill_discard.clear()\n"
+     "    if voice_pill_state.mic_muted():\n"
+     "        _voice_pill_discard.set()\n"
+     "        return np.array([], dtype=np.int16), False\n"
      "    control_state.set_listening(True)\n"
      "    try:\n"
      f"        return record_audio_with_silence_detection_inner({RECORD_ARGS})\n"
@@ -169,8 +178,8 @@ CONVERSE = [
      "                        break\n"
      f"                    # {MARKER}: Pause closes the mic now. listen_and_transcribe\n"
      "                    # discards what was captured and listens again after resume.\n"
-     "                    if voice_pill_state.is_paused():\n"
-     '                        logger.info("Recording ended by Pause -- discarding it")\n'
+     "                    if voice_pill_state.is_paused() or voice_pill_state.mic_muted():\n"
+     '                        logger.info("Recording ended by Pause or mic mute -- discarding it")\n'
      "                        _voice_pill_discard.set()\n"
      "                        break\n"),
     ("audio operation start",
@@ -182,17 +191,19 @@ CONVERSE = [
     ("listen start",
      "    timings: Dict[str, float] = {}\n\n    # voicemode-local voice barge:",
      "    timings: Dict[str, float] = {}\n\n"
-     f"    # {MARKER}: Pause keeps the mic closed. A stop during the wait ends this.\n"
-     f"    await voice_pill_state.wait_while_paused({UNTIL_STOPPED})\n"
+     f"    # {MARKER}: wait for input without pausing the playback channel.\n"
+     f"    await voice_pill_state.wait_for_mic({UNTIL_STOPPED})\n"
      "    if control_state.snapshot().is_stopped:\n"
      '        return ListenResult(outcome="stopped", control=control_state.snapshot(), timings=timings)\n'
+     "    capture_mute_state = voice_pill_state.mic_mute_state()\n"
      "\n"
      "    # voicemode-local voice barge:"),
     ("discard and relisten",
      "    # VM-1676: a control-channel stop that arrived while we were listening ends\n",
      f"    # {MARKER}: nothing recorded under Pause reaches speech-to-text. The\n"
      "    # relisten waits for resume at its start. Barge state was consumed above.\n"
-     "    if _voice_pill_discard.is_set() or voice_pill_state.is_paused():\n"
+     "    if (_voice_pill_discard.is_set() or voice_pill_state.is_paused() or\n"
+     "            capture_mute_state != voice_pill_state.mic_mute_state() or capture_mute_state[0]):\n"
      "        _voice_pill_discard.clear()\n"
      "        if not control_state.snapshot().is_stopped:\n"
      "            return await listen_and_transcribe(\n"
@@ -210,6 +221,19 @@ CONVERSE = [
      "            )\n"
      "\n"
      "    # VM-1676: a control-channel stop that arrived while we were listening ends\n"),
+    ("discard on a mute during the finished cue",
+     "    if len(audio_data) == 0:\n"
+     "        # VM-1754: under skip_forward",
+     "    if capture_mute_state != voice_pill_state.mic_mute_state():\n"
+     "        return await listen_and_transcribe(\n"
+     "            control_state, listen_duration_max=listen_duration_max,\n"
+     "            listen_duration_min=listen_duration_min, disable_silence_detection=disable_silence_detection,\n"
+     "            vad_aggressiveness=vad_aggressiveness, chime_enabled=chime_enabled,\n"
+     "            chime_leading_silence=chime_leading_silence, chime_trailing_silence=chime_trailing_silence,\n"
+     "            transport=transport, event_logger=event_logger, pre_listen_pause=pre_listen_pause)\n"
+     "\n"
+     "    if len(audio_data) == 0:\n"
+     "        # VM-1754: under skip_forward"),
     ("enter the turn",
      "    # Convert string booleans to actual booleans\n"
      "    if isinstance(wait_for_response, str):\n",

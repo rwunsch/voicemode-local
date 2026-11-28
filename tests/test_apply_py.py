@@ -32,7 +32,7 @@ SOURCES = {
     "control_socket.py": "control_socket.py",
     "core.py": "core.py",
     "simple_failover.py": "simple_failover.py",
-    "streaming.py": "streaming.py",
+    "streaming.py": "streaming.py", "audio_player.py": "audio_player.py",
     "server.py": "server.py",
     "tools/converse.py": "converse.py",
     "conch_notify.py": "conch_notify.py",
@@ -91,6 +91,9 @@ def current_modules(old):
     for name in {s["copy"] for s in steps if "copy" in s}:
         (old / name).parent.mkdir(parents=True, exist_ok=True)  # "../ui/pill/..." leave patches/
         shutil.copyfile(PATCHES / name, old / name)
+    # The shell path and the manifest both invoke the same recorder patch. It
+    # now also applies the input-only mute gate to that seam.
+    shutil.copyfile(PATCHES / "patch_voice_pill.py", old / "patch_voice_pill.py")
     return old
 
 
@@ -114,6 +117,8 @@ INTENDED_SINCE_BASELINE = [
     ("patch_load_scipy_early.py", ["tools/converse.py"]),   # 2026-11-17: scipy.signal loaded before the stall backstop starts
     ("patch_vad_override.py", ["tools/converse.py"]),   # 2026-11-18: VAD aggressiveness and silence length resolved per recording
     ("patch_audio_recover.py", ["tools/converse.py"]),   # 2026-11-18: a failed stream start is retried once; the fallback ends on cancel
+    ("patch_voice_orb.py", ["control_channel.py", "control_socket.py", "tools/converse.py",
+                            "streaming.py", "audio_player.py", "core.py"]),
     ("patch_audio_deadline.py", ["core.py", "tools/converse.py", "control_socket.py"]),   # 2026-11-27: FELIX #2095
     ("patch_turn_stats.py", ["tools/converse.py", "control_socket.py"]),   # 2026-11-28: FELIX #2107 per-turn numbers
     ("patch_pill_done.py", ["control_channel.py", "control_socket.py"]),   # 2026-11-28: Talos #2104 atomic Done
@@ -131,6 +136,9 @@ INTENDED_COPIES_SINCE_BASELINE += ["turn_stats.py"]   # 2026-11-28: FELIX #2107
 INTENDED_COPIES_SINCE_BASELINE += ["tts_chunks.py"]   # 2026-11-14
 INTENDED_COPIES_SINCE_BASELINE += ["voice_languages.py", "voice_fallback.py"]   # 2026-11-17
 INTENDED_COPIES_SINCE_BASELINE += ["voice_sensitivity.py"]   # 2026-11-18
+INTENDED_COPIES_SINCE_BASELINE += ["ui/pill/orb-pill.css", "ui/pill/orb-pill.js",
+                                  "ui/pill/spectrum.js", "ui/pill/spectrum.NOTICES.txt",
+                                  "ui/pill/orb-felix.png", "ui/pill/orb-felix-motion.webp"]
 
 
 def apply_intended(pkg: Path) -> None:
@@ -151,6 +159,7 @@ def without_intended_log(out: str) -> str:
     return "".join(line for line in out.splitlines(keepends=True)
                    if "(ptt instant)" not in line and "(tts timeout knob)" not in line
                    and "(tts chunks)" not in line and "(tts no double synthesis)" not in line
+                   and "(voice orb)" not in line
                    and "(voice fallback)" not in line and "(echo labels)" not in line and "(stt language)" not in line and "(vad override)" not in line and "(audio recover)" not in line and not line.strip().startswith(copied))
 
 

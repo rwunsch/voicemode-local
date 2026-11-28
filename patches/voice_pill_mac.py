@@ -8,10 +8,10 @@ pill-windows.ps1 does. Page -> wrapper: {"cmd":...} goes to the backend, {"windo
 is handled here. The top half of this file is pure logic with no GUI import, so pytest
 covers it on Linux. pywebview and pyobjc are imported lazily in main().
 
-Never takes focus and has no Dock icon. pywebview asks for the Regular policy on import and
+Does not take focus automatically and has no Dock icon. pywebview asks for the Regular policy on import and
 activates itself at start, so quiet_app() installs an application class that refuses both, before
 pywebview loads. use_panel() swaps pywebview's window for a non-activating panel, so a click on
-the pill leaves the frontmost app and its keyboard focus alone.
+the pill leaves the frontmost app and its keyboard focus alone unless the person chooses Focus controls.
 """
 import argparse
 import fcntl
@@ -28,7 +28,13 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 WIDTH, MARGIN, DEFAULT_H = 350, 16, 68
 MIN_WIDTH, MAX_WIDTH = 320, 640
-TAB_W, TAB_H, RAIL_W = 22, 64, 76
+TAB_W, TAB_H, RAIL_W, MINI_SIZE = 22, 64, 76, 68
+ORB_ROW = 56
+ORB_OPEN_WIDTH = 328
+ORB_DOCK_MARGIN = 14
+ORB_SURFACES = {"compact": (ORB_ROW, ORB_ROW), "strip": (ORB_OPEN_WIDTH, ORB_ROW),
+                "menu": (ORB_OPEN_WIDTH, 180), "settings": (ORB_OPEN_WIDTH, 433)}
+ORB_MODES = ("orb-docked", "orb-floating")
 BACKOFF_CAP_S = 30
 NONACTIVATING_PANEL = 1 << 7  # NSWindowStyleMaskNonactivatingPanel
 WINDOW_BEHAVIOUR = 1 << 0  # canJoinAllSpaces
@@ -104,6 +110,7 @@ class WindowState:
     dismissed: bool = False
     visible: bool = False  # last snapshot's flag
     phase: str = ""
+    orb_surface: str = "compact"
 
     @property
     def shown(self):
@@ -131,12 +138,17 @@ class WindowState:
             return "phase"
         h = w.get("height")
         if isinstance(h, int) and not isinstance(h, bool):
+            if self.mode in ORB_MODES:
+                return None  # their height comes from the surface, not the old card observer
             self.css_height = h
             return "changed"
         if isinstance(w.get("mode"), str):
             self.dismissed = w["mode"] == "hidden"
             if not self.dismissed:
                 self.mode = w["mode"]
+            surface = w.get("surface")
+            if isinstance(surface, str) and surface in ORB_SURFACES:
+                self.orb_surface = surface
             self.side = "left" if w.get("side") == "left" else "right"
             return "changed"
         return None
@@ -147,6 +159,46 @@ class WindowState:
         return changed
 
 
+def orb_drop_side(x, y, display):
+    """Only a drop at the physical side edge chooses a new dock position."""
+    left, bottom, width, height = display
+    if not bottom <= y < bottom + height:
+        return None
+    if abs(x - left) <= ORB_DOCK_MARGIN:
+        return "left"
+    if abs(x - (left + width - 1)) <= ORB_DOCK_MARGIN:
+        return "right"
+    return None
+
+
+def orb_geometry(state, area, pos=None):
+    """(window frame, panel opens above). The row keeps its original screen coordinates."""
+    ax, ay, aw, ah = area
+    w, h = ORB_SURFACES[state.orb_surface]
+    w, h = min(w, aw), min(h, ah)
+    left = state.side == "left"
+    if state.mode == "orb-docked":
+        anchor_x = ax if left else ax + aw - ORB_ROW
+        anchor_y = (state.dock_y if state.dock_y is not None else ay + ah // 2) - ORB_ROW // 2
+    elif pos is not None:
+        anchor_x, anchor_y = pos
+    else:
+        anchor_x = ax + MARGIN if left else ax + aw - ORB_ROW - MARGIN
+        anchor_y = (state.dock_y if state.dock_y is not None else ay + ah // 2) - ORB_ROW // 2
+    if state.mode == "orb-floating":
+        widest = min(aw, ORB_SURFACES["settings"][0])
+        lo = ax if left else ax + widest - ORB_ROW
+        hi = ax + aw - (widest if left else ORB_ROW)
+        anchor_x = max(lo, min(anchor_x, hi))
+    anchor_y = max(ay, min(anchor_y, ay + ah - ORB_ROW))
+    below_room, above_room = ay + ah - anchor_y, anchor_y + ORB_ROW - ay
+    above = h > below_room and above_room > below_room
+    h = min(h, above_room if above else below_room)
+    x = anchor_x if left else anchor_x + ORB_ROW - w
+    y = anchor_y + ORB_ROW - h if above else anchor_y
+    return (max(ax, min(x, ax + aw - w)), max(ay, min(y, ay + ah - h)), w, h), above
+
+
 def geometry(state, area, pos=None):
     """(x, y, w, h) in points, y down. `area` is the usable screen (x, y, w, h).
 
@@ -154,12 +206,14 @@ def geometry(state, area, pos=None):
     panel, and "tab" is what is left of it after sliding away. Both sit at dock_y, or the middle of the screen.
     """
     ax, ay, aw, ah = area
+    if state.mode in ORB_MODES:
+        return orb_geometry(state, area, pos)[0]
     if state.mode in ("docked", "rail", "tab"):
         w = {"tab": TAB_W, "rail": RAIL_W}.get(state.mode, state.css_width)
         h = TAB_H if state.mode == "tab" else state.css_height
         cy = ay + ah // 2 if state.dock_y is None else state.dock_y
         return (ax if state.side == "left" else ax + aw - w, max(ay, min(cy - h // 2, ay + ah - h)), w, h)
-    w, h = state.css_width, state.css_height
+    w, h = (MINI_SIZE, MINI_SIZE) if state.mode == "mini" else (state.css_width, state.css_height)
     x, y = pos if pos else (ax + aw - w - MARGIN, ay + ah - DEFAULT_H - MARGIN)
     return (max(ax, min(x, ax + aw - w)), max(ay, min(y, ay + ah - h)), w, h)
 
@@ -264,7 +318,7 @@ HANDLER = "pill"
 BRIDGE = """
 window.pillTransport={send:function(j){window.webkit.messageHandlers.pill.postMessage(j)}};
 document.addEventListener('DOMContentLoaded',function(){var c=document.getElementById('card');
-new ResizeObserver(function(){if(c.offsetHeight)window.pillTransport.send(JSON.stringify({window:{height:c.offsetHeight}}))}).observe(c)});
+new ResizeObserver(function(){if(c.offsetHeight&&!document.body.hasAttribute('data-orb-layout'))window.pillTransport.send(JSON.stringify({window:{height:c.offsetHeight}}))}).observe(c)});
 """
 
 
@@ -423,7 +477,7 @@ def quiet_app():
 
 
 def use_panel():
-    """Before create_window: pywebview builds a non-activating panel that never becomes key."""
+    """Before create_window: pywebview builds a non-activating panel that only becomes key on explicit request."""
     import objc
     from AppKit import NSPanel
     from webview.platforms.cocoa import BrowserView
@@ -434,7 +488,7 @@ def use_panel():
                 rect, mask | NONACTIVATING_PANEL, backing, defer)
 
         def canBecomeKeyWindow(self):
-            return False
+            return bool(getattr(self, "_pill_keyboard", False))
 
     class WebKitHost(objc.Category(BrowserView.WebKitHost)):  # PyObjC requires this name
         def acceptsFirstMouse_(self, _event):  # the window is never key, so every click is a first
@@ -467,6 +521,7 @@ class App:
         self.pos = None
         self.lock = threading.Lock()
         self.proc = self.stdin = self.win = self.tray = self.tray_target = None
+        self.orb_menu_monitor = None
         self.slide_gen = 0
         self.sliding = False
         self.closing = self.had_output = self.dragging = False
@@ -660,6 +715,12 @@ class App:
                 if not self.closing:
                     self.to_page(json.dumps({"window": {"dropped": cmd_name}}))
             return
+        if type(r[1].get("orbMenuOpen")) is bool:
+            self.watch_orb_menu(r[1]["orbMenuOpen"])
+            return
+        if type(r[1].get("keyboard")) is bool:
+            self.focus_controls(r[1]["keyboard"])
+            return
         prev = self.state.mode
         if "mode" in r[1]:
             self.slide_gen += 1  # a slide still running must not carry the window past the screen edge
@@ -669,7 +730,10 @@ class App:
         what = self.state.on_window(r[1])
         self.note_state()
         if what == "drag":
-            self.drag()
+            if r[1].get("fromOrb") is True and self.state.mode == "orb-floating":
+                self.drag(from_orb=True)
+            else:
+                self.drag()
         elif what == "resize":
             self.resize(r[1]["resize"])
         elif what == "phase":
@@ -709,14 +773,79 @@ class App:
             return
         self.update_tray()
         if not self.state.on_screen:
+            self.watch_orb_menu(False)
+            self.focus_controls(False)
+            self.set_surface_visible(False)
             return AppHelper.callAfter(native.orderOut_, None)
 
         def go():
             area, full_h = self.screen()  # inline: already on the main thread
-            x, y, w, h = to_cocoa(geometry(self.state, area, self.pos), full_h)
+            if self.state.mode in ORB_MODES:
+                frame, above = orb_geometry(self.state, area, self.pos)
+                wv = self.webview()
+                if wv is not None:
+                    wv.evaluateJavaScript_completionHandler_("window.pillOrbAbove?.(" + json.dumps(above) + ")", None)
+            else:
+                frame = geometry(self.state, area, self.pos)
+            x, y, w, h = to_cocoa(frame, full_h)
             native.setFrame_display_(NSMakeRect(x, y, w, h), True)
             native.orderFrontRegardless()  # pywebview's own show() makes it key
+            self.set_surface_visible(True)
         AppHelper.callAfter(go)
+
+    def watch_orb_menu(self, watching):
+        """A nonactivating panel does not lose focus when another app is clicked."""
+        if not watching and self.orb_menu_monitor is None:
+            return
+        from AppKit import NSEvent, NSEventMaskLeftMouseDown, NSEventMaskOtherMouseDown, NSEventMaskRightMouseDown
+
+        def update():
+            if watching and self.state.on_screen and not self.closing:
+                if self.orb_menu_monitor is None:
+                    self.orb_menu_monitor = NSEvent.addGlobalMonitorForEventsMatchingMask_handler_(
+                        NSEventMaskLeftMouseDown | NSEventMaskOtherMouseDown | NSEventMaskRightMouseDown,
+                        outside)
+            elif self.orb_menu_monitor is not None:
+                NSEvent.removeMonitor_(self.orb_menu_monitor)
+                self.orb_menu_monitor = None
+
+        def outside(_event):
+            if self.orb_menu_monitor is None:
+                return
+            self.watch_orb_menu(False)
+            wv = self.webview()
+            if wv is not None:
+                wv.evaluateJavaScript_completionHandler_("window.pillOrbDismissMenu?.()", None)
+
+        run_on_main(update)
+
+    def focus_controls(self, enabled):
+        native = self.win.native if self.win else None
+        if native is None:
+            return
+
+        def change():
+            if enabled:
+                if not self.state.on_screen:
+                    return
+                native._pill_keyboard = True
+                native.makeKeyWindow()
+                wv = self.webview()
+                if wv is not None:
+                    native.makeFirstResponder_(wv)
+                    wv.evaluateJavaScript_completionHandler_("window.pillFocusControls?.()", None)
+            elif getattr(native, "_pill_keyboard", False):
+                native._pill_keyboard = False
+                if native.isKeyWindow():
+                    native.resignKeyWindow()
+        run_on_main(change)
+
+    def set_surface_visible(self, visible):
+        wv = self.webview()
+        if wv is not None and self.page_ready:
+            from PyObjCTools import AppHelper
+            AppHelper.callAfter(wv.evaluateJavaScript_completionHandler_,
+                                "window.pillSurfaceVisible?.(" + json.dumps(visible) + ")", None)
 
     def update_tray(self):
         from PyObjCTools import AppHelper
@@ -772,45 +901,79 @@ class App:
         edge = x is not None and on_resize_edge(x, size.width, self.state.mode)
         (NSCursor.resizeLeftRightCursor() if edge else NSCursor.arrowCursor()).set()
 
-    def drag(self):
+    def drag(self, from_orb=False):
         if self.dragging or self.state.mode == "tab":
             return
         self.dragging = True
-        threading.Thread(target=self.drag_loop, daemon=True).start()
+        threading.Thread(target=self.drag_loop, args=(from_orb,), daemon=True).start()
 
-    def drag_loop(self):
-        from AppKit import NSEvent, NSMakePoint
+    def drag_loop(self, from_orb=False):
+        from AppKit import NSEvent, NSMakePoint, NSScreen
         from PyObjCTools import AppHelper
+        moved = False
+
+        def notify(script):
+            def go():
+                wv = self.webview()
+                if wv is not None:
+                    wv.evaluateJavaScript_completionHandler_(script, None)
+            AppHelper.callAfter(go)
+
         try:
             native = self.win.native
             c0, o0 = NSEvent.mouseLocation(), run_on_main(lambda: native.frame().origin)
-            moved = False
-            vertical = self.state.mode in ("docked", "rail")  # docked: up and down the screen edge only
+            vertical = self.state.mode in ("docked", "rail", "orb-docked")
             while NSEvent.pressedMouseButtons() & 1:
                 c = NSEvent.mouseLocation()
-                x = o0.x if vertical else o0.x + c.x - c0.x
-                AppHelper.callAfter(native.setFrameOrigin_, NSMakePoint(x, o0.y + c.y - c0.y))
-                moved = moved or c.x != c0.x or c.y != c0.y
+                dx, dy = c.x - c0.x, c.y - c0.y
+                if from_orb and not moved:
+                    if max(abs(dx), abs(dy)) < 5:
+                        time.sleep(0.016)
+                        continue
+                    notify("window.pillOrbDragging?.(true)")
+                x = o0.x if vertical else o0.x + dx
+                AppHelper.callAfter(native.setFrameOrigin_, NSMakePoint(x, o0.y + dy))
+                moved = moved or bool(dx or dy)
                 time.sleep(0.016)
             if moved:
+                edge = None
+                if from_orb and self.state.mode == "orb-floating":
+                    pointer = NSEvent.mouseLocation()
+                    bounds = run_on_main(lambda: NSScreen.screens()[0].frame())
+                    edge = orb_drop_side(pointer.x, pointer.y, (
+                        bounds.origin.x, bounds.origin.y, bounds.size.width, bounds.size.height))
                 time.sleep(0.05)  # let the last move land
                 fr = run_on_main(lambda: native.frame())
                 o, size = fr.origin, fr.size
                 top = self.screen()[1] - o.y - size.height
+                orb_mode = self.state.mode in ORB_MODES
+                if orb_mode and orb_geometry(self.state, self.screen()[0], self.pos)[1]:
+                    top += size.height - ORB_ROW
+                if edge:
+                    top += c.y - pointer.y  # use the release height even between drag polls
                 if vertical:
-                    self.state.dock_y = int(top + size.height / 2)
+                    self.state.dock_y = int(top + (ORB_ROW if orb_mode else size.height) / 2)
                 else:
-                    self.pos = (int(o.x), int(top))
+                    anchor_x = o.x + size.width - ORB_ROW if orb_mode and self.state.side == "right" else o.x
+                    self.pos = (int(anchor_x), int(top))
+                    if edge:
+                        self.state.dock_y = int(top + ORB_ROW / 2)
+                        self.state.mode, self.state.side = "orb-docked", edge
+                        notify("window.pillOrbDocked?.(" + json.dumps(edge) + ")")
                 self.save_position()
                 self.apply()
         finally:
             self.dragging = False
+            if from_orb and moved:
+                notify("window.pillOrbDragging?.(false)")
 
     def save_position(self):
         try:
             pos = f"{self.pos[0]} {self.pos[1]}" if self.pos else "- -"
             dock = "-" if self.state.dock_y is None else self.state.dock_y
-            self.pos_file.write_text(f"{pos} {self.state.css_width} {dock}")
+            path = self.pos_file
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(f"{pos} {self.state.css_width} {dock}")
         except OSError as e:
             self.log(f"position not saved: {e}")
 
@@ -854,7 +1017,7 @@ class App:
             self.apply()  # the height may have changed on the way in
 
     def resize(self, edge):
-        if self.dragging or self.state.mode in ("docked", "rail"):
+        if self.dragging or self.state.mode in ("docked", "rail", *ORB_MODES):
             return
         self.dragging = True
         threading.Thread(target=self.resize_loop, args=(edge,), daemon=True).start()
@@ -881,6 +1044,7 @@ class App:
         if self.closing:
             return
         self.closing = True
+        self.watch_orb_menu(False)
         try:
             if self.stdin:
                 self.stdin.close()  # EOF ends the backend and lifts its Pause

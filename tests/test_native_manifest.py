@@ -26,7 +26,7 @@ FELIX_THREE = ["patch_no_ffmpeg_gate.py", "patch_no_ffmpeg_warning.py", "patch_l
 NATIVE_OURS = ["patch_windows_tempfile.py", "patch_native_client_folder.py"]
 SOURCES = {
     "control_channel.py": "control_channel.py", "control_socket.py": "control_socket.py",
-    "core.py": "core.py", "simple_failover.py": "simple_failover.py", "streaming.py": "streaming.py",
+    "core.py": "core.py", "simple_failover.py": "simple_failover.py", "streaming.py": "streaming.py", "audio_player.py": "audio_player.py",
     "server.py": "server.py", "tools/converse.py": "converse.py", "conch_notify.py": "conch_notify.py",
     "conch_queue.py": "conch_queue.py", "conch.py": "conch.py",
     "config.py": "config.py",
@@ -164,6 +164,17 @@ INTENDED_COPIES += ["voice_sensitivity.py"]
 # 2026-11-18: a mic stream that fails to start is retried once; the fallback ends on cancel.
 INTENDED_STEP_LINES.append(b'    {"patch": "patch_audio_recover.py", "targets": ["tools/converse.py"], "why": "a mic stream that fails to start (Wait timed out, -9987) is re-initialised and retried once with silence detection; the fixed-length fallback ends on cancel and VOICEMODE_FALLBACK_RECORD_MAX_S caps it"},\n')
 INTENDED_PATCHES.append(("patch_audio_recover.py", ["tools/converse.py"]))
+# 2026-11-27: measured orb levels and a playback-scoped interrupt.
+ORB_ASSETS = ["orb-pill.css", "orb-pill.js", "orb-felix.png", "orb-felix-motion.webp",
+              "spectrum.js", "spectrum.NOTICES.txt"]
+for asset in ORB_ASSETS:
+    path = f"ui/pill/{asset}"
+    INTENDED_STEP_LINES.append(f'    {{"copy": "../{path}", "to": "{path}"}},\n'.encode())
+    INTENDED_COPIES.append(path)
+INTENDED_STEP_LINES.append(b'    {"patch": "patch_voice_orb.py", "targets": ["control_channel.py", "control_socket.py", "tools/converse.py", "streaming.py", "audio_player.py", "core.py"],\n'
+                           b'     "why": "measure speaker levels and bind Pill interrupt clicks to one playback"},\n')
+INTENDED_PATCHES.append(("patch_voice_orb.py", ["control_channel.py", "control_socket.py", "tools/converse.py",
+                                              "streaming.py", "audio_player.py", "core.py"]))
 # 2026-11-27 (FELIX #2095): audio-device calls get a deadline; a stuck voice server exits.
 INTENDED_STEP_LINES.append(b'    {"copy": "audio_deadline.py", "to": "audio_deadline.py"},\n')
 INTENDED_STEP_LINES.append(
@@ -180,6 +191,7 @@ INTENDED_PATCHES.append(("patch_pill_done.py", ["control_channel.py", "control_s
 INTENDED_COPIES += ["turn_stats.py"]
 # Text edits those additions force on lines that were already there: (now, before).
 INTENDED_EDITS = [
+    (b'    "audio_player.py",\n', b''),
     (b'    "streaming.py",\n    "conch_notify.py",\n    "conch_queue.py",\n    "conch.py",\n    "config.py",\n    "tools/configuration_management.py"\n', b'    "streaming.py"\n'),
     (b'"why": "MCP tool for switching voice barge-in"},\n', b'"why": "MCP tool for switching voice barge-in"}\n'),
 ]
@@ -200,6 +212,9 @@ def test_default_manifest_file_is_unchanged():
 
 def test_default_output_is_byte_identical_to_before(tmp_path):
     old = _patches_at(BEFORE, tmp_path / "old")
+    # Mic mute intentionally extends the existing recorder patch. Run that version
+    # at the same point in the baseline, before the later audio patches.
+    shutil.copyfile(PATCHES / "patch_voice_pill.py", old / "patch_voice_pill.py")
     before, now = _tree(tmp_path / "a"), _tree(tmp_path / "b")
     _apply(old / "apply.py", before)
     for script, targets in INTENDED_PATCHES:

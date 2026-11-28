@@ -302,7 +302,9 @@ def test_snapshot_shape_and_json_serialisable():
     assert json.loads(json.dumps(s)) == s
     assert set(s) == {"visible", "phase", "floor", "sessions", "voice", "language",
                       "barge", "beeps", "platform", "ui", "play", "wake", "german_available", "german_voices", "ptt",
-                      "voices_by_language", "still_listening"}
+                      "voices_by_language", "orb", "audio_level", "playback_id", "mic_muted",
+                      "still_listening"}
+    assert s["mic_muted"] is False
     assert s["play"] is None and s["wake"] is None
     assert s["platform"] == "mac" and s["ui"] == {"docked": True}
     assert s["barge"] == {"enabled": True, "available": False, "count": 2}
@@ -1761,6 +1763,60 @@ def test_the_preview_does_its_network_io_off_the_command_thread(ctx, monkeypatch
     assert vp._preview(ctx, "af_sky") is None
     ctx.preview_thread.join(5)
     assert names == ["voice-pill-preview"]
+
+
+def test_orb_snapshot_uses_only_the_current_audio_direction():
+    status = {"speaking": True, "pill_playback_id": "125",
+              "pill_levels": {"speaking": .4, "listening": .9}}
+    args = (status, [], {"waiters": []})
+    assert vp.build_snapshot(*args)["audio_level"] == .4
+    assert vp.build_snapshot(*args)["playback_id"] == "125"
+    assert vp.build_snapshot(*args, paused=True)["audio_level"] is None
+    assert vp.build_snapshot(*args, paused=True)["playback_id"] is None
+    status["pill_levels"]["speaking"] = float("nan")
+    assert vp.build_snapshot(*args)["audio_level"] is None
+    assert vp.build_snapshot({"speaking": True}, [], {})["playback_id"] is None
+
+
+def test_orb_click_sends_only_a_playback_scoped_interrupt(monkeypatch, tmp_path):
+    sent = []
+    monkeypatch.setattr(st, "send_control", lambda path, cmd, **kw: sent.append((cmd, kw)))
+    ctx = vp.Context(base=tmp_path, sock=tmp_path / "control.sock")
+    for bad in (None, 123, "invalid", "9" * 33):
+        vp.handle_command({"cmd": "interrupt_playback", "playback_id": bad}, ctx)
+    vp.handle_command({"cmd": "interrupt_playback", "playback_id": "123"}, ctx)
+    assert sent == [("pill_interrupt", {"message": "123"})]
+
+
+def test_mute_command_leaves_speaker_and_playback_untouched(ctx, monkeypatch):
+    monkeypatch.setattr(st, "send_control", lambda *a, **k: pytest.fail("mute is not a playback command"))
+    vp.handle_command({"cmd": "set_mic_muted", "on": "yes"}, ctx)
+    assert not st.mic_muted(ctx.base)
+    vp.handle_command({"cmd": "set_mic_muted", "on": True}, ctx)
+    assert st.mic_muted(ctx.base)
+    status = {"speaking": True, "pill_playback_id": "140", "pill_levels": {"speaking": .35}}
+    speaking = vp.build_snapshot(status, [], {}, mic_muted=True)
+    assert (speaking["mic_muted"], speaking["phase"], speaking["audio_level"]) == (True, "speaking", .35)
+    hearing = vp.build_snapshot({"listening": True, "pill_levels": {"listening": .7}}, [], {}, mic_muted=True)
+    assert (hearing["phase"], hearing["audio_level"]) == ("mic-muted", None)
+    vp.handle_command({"cmd": "set_mic_muted", "on": False}, ctx)
+    assert not st.mic_muted(ctx.base)
+
+
+def test_end_voice_hides_only_its_own_pill_until_a_new_turn(ctx, monkeypatch):
+    p = os.getpid()
+    st.register_session(p, "current", None, ctx.base)
+    conch = {"holder": {"pid": p, "label": "current"}}
+    monkeypatch.setattr(vp, "read_conch", lambda home: conch)
+    sent = []
+    monkeypatch.setattr(st, "send_control", lambda path, cmd: sent.append(cmd) or True)
+    vp.handle_command({"cmd": "end_voice", "pid": p + 1}, ctx)
+    assert not sent and vp.build_snapshot({}, st.live_sessions(ctx.base), conch)["visible"]
+    vp.handle_command({"cmd": "end_voice", "pid": p}, ctx)
+    assert sent == ["stop"]
+    assert not vp.build_snapshot({}, st.live_sessions(ctx.base), conch)["visible"]
+    st.mark_stopped(p, False, ctx.base)
+    assert vp.build_snapshot({}, st.live_sessions(ctx.base), conch)["visible"]
 
 
 # FELIX #2095 (2026-11-27): the voice server's loop was stuck for minutes while its control

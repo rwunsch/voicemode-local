@@ -2,18 +2,23 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'none'; connect-src 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self'; connect-src 'none'">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Voice pill</title>
 <link rel="stylesheet" href="pill.css">
+<link rel="stylesheet" href="orb-pill.css">
 </head>
 <body data-mode="pill" data-phase="disconnected" data-tone="off">
 <button id="tab" class="tab" title="Bring back" aria-label="Bring back">&#x2039;</button>
 <div id="edgeL" class="edge left"></div>
 <div id="edgeR" class="edge right"></div>
+<sp-theme id="pillTheme" system="spectrum-two" color="dark" scale="medium">
 <main id="card" class="card">
   <div class="row top">
-    <div id="drag" class="drag"><div id="orb" class="orb" role="img" aria-label="Disconnected"></div><b id="sub" class="name"></b><span id="waiting" class="waiting"></span></div>
+    <div id="drag" class="drag"><button id="orbAction" class="orb-action" type="button" aria-label="Reveal voice controls">
+      <span class="orb-bubble" aria-hidden="true"></span><span id="orb" class="orb" role="img" aria-label="Disconnected">
+        <span class="orb-pigment" aria-hidden="true"></span><span class="orb-pigment orb-blue" aria-hidden="true"></span><span class="orb-stars" aria-hidden="true"></span><span class="orb-shade" aria-hidden="true"></span>
+      </span></button><b id="sub" class="name"></b><span id="waiting" class="waiting"></span></div>
     <div id="label" class="state">Disconnected</div>
     <button id="main" class="btn pic main" title="Pause" aria-label="Pause"><span id="mainStop">&#x25A0;&#xFE0E;</span><span id="mainWake" class="wakeicon" hidden><svg class="sun" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M3 19h18"/><path d="M7 19a5 5 0 0 1 10 0"/><path d="M12 7.5v2.5"/><path d="M5.6 11.6l1.8 1.8"/><path d="M18.4 11.6l-1.8 1.8"/></svg></span></button>
     <button id="pause" class="btn pic" data-kind="voiceoff" title="Voice off: continue in text" aria-label="Voice off: continue in text" hidden>&#x25A0;&#xFE0E;</button>
@@ -22,6 +27,41 @@
     <button id="minimize" class="btn icon" title="Minimize; right-click the icon to quit" aria-label="Minimize; right-click the icon to quit">_</button>
     <button id="tuck" class="btn icon tuck" title="Slide out of view" aria-label="Slide out of view">&#x203A;</button>
   </div>
+  <div id="orbStrip" aria-label="Voice controls" role="group">
+    <sp-action-button id="orbMute" size="s">Mute mic</sp-action-button>
+    <sp-action-button id="orbPause" size="s" aria-label="Pause voice">Pause</sp-action-button>
+    <sp-button id="orbEnd" size="s" variant="negative" treatment="fill">End voice</sp-button>
+    <sp-action-button id="orbSettingsToggle" size="s" quiet label="Settings" title="Settings" aria-expanded="false" aria-controls="orbMenu">
+      <sp-icon-settings slot="icon" aria-hidden="true"></sp-icon-settings>
+    </sp-action-button>
+  </div>
+  <section id="orbMenu" class="orb-panel" aria-label="Orb settings" hidden>
+    <sp-action-button id="orbOpenSettings" size="s" quiet>Voice settings</sp-action-button>
+    <sp-divider size="s"></sp-divider>
+    <sp-action-button id="orbDock" size="s" quiet>Undock</sp-action-button>
+    <sp-action-button id="orbTray" size="s" quiet hidden>Move to system tray</sp-action-button>
+    <sp-action-button id="orbKeyboard" size="s" quiet aria-controls="orbKeyboardHelp">Keyboard controls</sp-action-button>
+  </section>
+  <section id="orbSettings" class="orb-panel" aria-labelledby="orbSettingsTitle" hidden>
+    <div class="row between"><strong id="orbSettingsTitle">Voice settings</strong>
+      <sp-button size="s" variant="secondary" id="orbSettingsDone">Done</sp-button></div>
+    <div><sp-field-label for="orbLanguage">Language</sp-field-label>
+      <sp-picker id="orbLanguage" label="Language" size="s" force-popover></sp-picker></div>
+    <div><sp-field-label for="orbVoice">Voice</sp-field-label>
+      <div class="row"><sp-picker id="orbVoice" label="Voice" size="s" force-popover></sp-picker>
+        <sp-action-button size="s" id="orbPreview">Preview voice</sp-action-button></div></div>
+    <sp-divider size="s"></sp-divider>
+    <sp-switch id="orbBarge" size="s">Interrupt by voice</sp-switch>
+    <sp-switch id="orbBeeps" size="s">Feedback sounds</sp-switch>
+    <div id="orbPreviewStatus" role="status" aria-live="polite"></div>
+  </section>
+  <section id="orbKeyboardHelp" class="orb-panel" aria-labelledby="orbKeyboardTitle" hidden>
+    <div class="row between"><strong id="orbKeyboardTitle">Keyboard controls</strong>
+      <sp-button size="s" variant="secondary" id="orbKeyboardDone">Done</sp-button></div>
+    <div class="row"><kbd>Tab</kbd> / <kbd>Shift</kbd> + <kbd>Tab</kbd> Move between controls</div>
+    <div class="row"><kbd>Enter</kbd> / <kbd>Space</kbd> Use the focused control</div>
+    <div class="row"><kbd>Esc</kbd> Return to your app</div>
+  </section>
   <section id="more" class="more">
     <div id="controls" class="row controls" role="group" aria-label="Voice controls">
       <button id="ctlPause" class="btn ctl" data-kind="pause" aria-label="Pause: hold voice; the mic closes and the reply waits" aria-pressed="false"><span id="ctlPauseIcon" class="ic" aria-hidden="true">&#x23F8;&#xFE0E;</span><span id="ctlPauseText">Pause</span></button>
@@ -43,10 +83,15 @@
     <div id="keys" class="m"></div>
     <div class="row between foot">
       <button id="dock" class="btn">Dock</button>
+      <button id="tray" class="btn" hidden>Minimize to menu bar</button>
+      <button id="keyboard" class="btn" hidden title="Use the keyboard here; Escape returns to your app">Focus controls</button>
     </div>
   </section>
 </main>
+</sp-theme>
+<script src="spectrum.js"></script>
 <script src="model.js"></script>
+<script src="orb-pill.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

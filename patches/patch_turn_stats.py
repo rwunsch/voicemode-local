@@ -56,7 +56,7 @@ EDITS = [
      "                                    stop_recording = True\n", 1),
     _ended('                        logger.info("🛑 Recording stopped: caller was cancelled")\n', "cancel"),
     _ended('                        logger.info("🛑 Recording stopped via control channel")\n', "stop"),
-    _ended('                        logger.info("Recording ended by Pause -- discarding it")\n', "pause"),
+    _ended('                        logger.info("Recording ended by Pause or mic mute -- discarding it")\n', "pause"),
     _ended('                        logger.info("⏮  Recording ended early by skip_back -- handing off to replay")\n', "skip_back"),
     _ended('                        logger.info("⏭  Recording ended early by skip_forward -- transcribing what we have")\n', "done"),
     _ended('                        logger.info("🎤 PTT hold released -- transcribing what we have")\n', "ptt_release"),

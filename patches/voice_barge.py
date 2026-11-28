@@ -54,12 +54,12 @@ import numpy as np
 
 try:
     from voice_mode.voice_pill_state import (  # noqa: F401  (re-exported for callers)
-        _exchange, _retrying, _status, barge_control, control_socket_path, is_paused,
+        _exchange, _retrying, _status, barge_control, control_socket_path, is_paused, mic_muted,
         barge_mode, barge_state, capture_backend, read_env_file, record_interruption, voicemode_base)
 except ImportError:  # run straight from the repo, not the installed package
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from voice_pill_state import (  # noqa: F401
-        _exchange, _retrying, _status, barge_control, control_socket_path, is_paused,
+        _exchange, _retrying, _status, barge_control, control_socket_path, is_paused, mic_muted,
         barge_mode, barge_state, capture_backend, read_env_file, record_interruption, voicemode_base)
 
 logger = logging.getLogger("voicemode.voice_barge")
@@ -1488,11 +1488,11 @@ def main() -> int:
         open_capture=lambda: open_capture(backend, device, echo=echo, vp_probe=vp_probe),
         vad=SileroVad(model),
         detector=BargeDetector(gate_db, need),
-        send_barge=lambda: send_barge_in(path),
+        send_barge=lambda: not mic_muted() and send_barge_in(path),
         poll_listen_started=lambda: _status(path).get("listen_started_at"),
-        preroll_sink=lambda samples, start_t: write_preroll(preroll_path(), samples, start_t),
+        preroll_sink=lambda samples, start_t: not mic_muted() and write_preroll(preroll_path(), samples, start_t),
         preroll_discard=lambda: preroll_path().unlink(missing_ok=True),
-        is_paused=(lambda: is_paused() or gate.closed()) if gate is not None else is_paused,
+        is_paused=lambda: mic_muted() or is_paused() or (gate is not None and gate.closed()),
         on_fired=lambda ms: record_interruption(time.time(), latency_ms=ms),
     )
     logger.info("stopped")

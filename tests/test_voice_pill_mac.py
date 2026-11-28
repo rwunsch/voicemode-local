@@ -55,6 +55,27 @@ def test_shown_needs_snapshot_visible_and_not_dismissed():
     assert not s.shown
 
 
+def test_orb_anchor_does_not_move_when_revealing_controls():
+    for side in ("left", "right"):
+        for cy in (120, 405, 770):
+            state = m.WindowState(mode="orb-docked", side=side, dock_y=cy)
+            x0, y0, row, _ = m.geometry(state, AREA)
+            for surface in ("strip", "menu", "settings"):
+                state.on_window({"mode": "orb-docked", "side": side, "surface": surface})
+                (x, y, w, h), above = m.orb_geometry(state, AREA)
+                assert (x if side == "left" else x + w - row) == x0
+                assert (y + h - row if above else y) == y0
+                assert m.on_resize_edge(0, w, state.mode) is False
+
+
+def test_orb_drop_chooses_a_side_only_at_the_display_edge():
+    display = (-1020, 40, 1000, 800)
+    assert m.orb_drop_side(-1018, 500, display) == "left"
+    assert m.orb_drop_side(-23, 500, display) == "right"
+    assert m.orb_drop_side(-600, 500, display) is None
+    assert m.orb_drop_side(-1018, 900, display) is None
+
+
 def test_geometry_per_mode():
     s = m.WindowState(visible=True)
     assert m.geometry(s, AREA) == (1440 - 350 - 16, 25 + 800 - 68 - 16, 350, 68)
@@ -64,6 +85,15 @@ def test_geometry_per_mode():
     assert m.geometry(s, AREA) == (1090, 325, 350, 200)  # centred on the edge, its own height
     s.side = "left"
     assert m.geometry(s, AREA) == (0, 325, 350, 200)
+
+
+def test_mini_orb_preserves_the_window_position_and_saved_width():
+    s = m.WindowState(visible=True, css_width=411, css_height=102)
+    assert s.on_window({"mode": "mini"}) == "changed"
+    assert m.geometry(s, AREA, pos=(100, 100)) == (100, 100, 68, 68)
+    assert not s.in_tray and s.on_screen
+    assert s.on_window({"mode": "pill"}) == "changed"
+    assert m.geometry(s, AREA, pos=(100, 100)) == (100, 100, 411, 102)
 
 
 def test_saved_position_is_clamped_onto_the_screen():
@@ -597,12 +627,12 @@ def test_panel_is_set_before_the_window_is_created():
     assert src.index("import webview") < src.index("use_panel()") < src.index("create_window")
 
 
-def test_panel_is_nonactivating_from_birth_and_never_key():
+def test_panel_is_nonactivating_and_allows_explicit_keyboard_focus():
     src = (REPO / "patches/voice_pill_mac.py").read_text()
     body = src[src.index("def use_panel("):src.index("class App:")]
     assert m.NONACTIVATING_PANEL == 1 << 7
     assert "mask | NONACTIVATING_PANEL" in body
-    assert "def canBecomeKeyWindow" in body and "return False" in body
+    assert "def canBecomeKeyWindow" in body and 'getattr(self, "_pill_keyboard", False)' in body
     assert "def acceptsFirstMouse_" in body and "return True" in body
     # PyObjC refuses a Category whose name differs from its class, and the app then exits at launch
     assert "class WebKitHost(objc.Category(BrowserView.WebKitHost)):" in body
@@ -696,8 +726,8 @@ def test_resize_log_shows_whole_pixels():
 
 def test_a_mode_change_clears_a_stale_hover():
     js = (REPO / "ui/pill/app.js").read_text()
-    body = js[js.index("if (vm.mode !== lastMode)"):]
-    assert "window.pillHover(-1, -1)" in body[:body.index("\n")]
+    body = js.split("if (vm.mode !== lastMode)", 1)[1].split("window.pillReceive", 1)[0]
+    assert body.index("window.pillHover(-1, -1)") < body.index("send({ window: { mode:")
 
 
 def test_pill_page_has_one_main_button_and_no_skip():

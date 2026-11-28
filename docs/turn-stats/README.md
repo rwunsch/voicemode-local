@@ -30,7 +30,7 @@ fields are always present, and null when unknown:
 | `cap` | speech went on to `listen_duration_max` + `VOICEMODE_LISTEN_OVERRUN` (up to 420 s by default) |
 | `no_speech` | no speech within `listen_duration_max` |
 | `stop` | Voice off / a control stop |
-| `pause` | the pill's Pause / Pause mic (the recording is discarded) |
+| `pause` | the pill's Pause, Pause mic, or Mute mic (the recording is discarded) |
 | `skip_back` | skip back (replay) |
 | `cancel` | the caller was cancelled (ESC) |
 | `stall` | no audio arrived for 5 s (dead stream) |

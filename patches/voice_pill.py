@@ -486,24 +486,29 @@ STILL_LISTENING_DEFAULT = 30.0
 def build_snapshot(status, sessions, conch, *, paused=False, ptt=False, closed=False,
                    last_floor=None, overrides=None, barge=None, ui=None, platform=None, beeps=False,
                    default_voice=st.FALLBACK_VOICE, play=None, wake=None,
-                   german=True, ptt_listener=None, german_list=None, voices=None,
-                   still_after_s=STILL_LISTENING_DEFAULT, now=None) -> dict:
+                   german=True, ptt_listener=None, german_list=None, voices=None, orb=True,
+                   mic_muted=False, still_after_s=STILL_LISTENING_DEFAULT, now=None) -> dict:
     overrides = overrides or {}
     floor, is_holder = _floor(sessions, conch, last_floor)
     visible = bool(sessions or ptt) and not closed
+    if floor and any(s["pid"] == floor["pid"] and s.get("hide_after_end") for s in sessions):
+        visible = False
     if _stuck(status):
         # The server's event loop has not turned for a while (FELIX #2095): its socket
         # thread still says speaking/listening, which is no longer true.
         phase = "not_responding"
     elif paused:
         phase = "paused"
-    elif status.get("holding"):
+    elif status.get("holding") and not mic_muted:
         # The push-to-talk key is down (patch_ptt_instant's status field): the press
         # has cut the reply, so this outranks speaking and listening.
         phase = "holding"
     elif status.get("speaking"):
         phase = "speaking"
-    elif status.get("listening"):
+    elif mic_muted and (status.get("holding") or status.get("listening") or
+                        (is_holder and status.get("state") == "running")):
+        phase = "mic-muted"
+    elif status.get("listening") and not mic_muted:
         phase = "listening"
     elif floor and any(s["pid"] == floor["pid"] and s.get("stopped") for s in sessions):
         phase = "stopped"
@@ -536,7 +541,14 @@ def build_snapshot(status, sessions, conch, *, paused=False, ptt=False, closed=F
     voice = voice or default_voice          # nobody has chosen: the configured default
     language = language or voice_language(voice)
     platform = platform or detect_platform()
+    levels = status.get("pill_levels")
+    level = levels.get(phase) if isinstance(levels, dict) and phase in ("speaking", "listening") else None
+    if type(level) not in (int, float) or not 0 <= level <= 1:
+        level = None
+    playback_id = status.get("pill_playback_id") if phase == "speaking" else None
     return {"visible": visible, "phase": phase, "floor": floor, "sessions": rows,
+            "orb": orb, "mic_muted": mic_muted, "audio_level": level,
+            "playback_id": playback_id if isinstance(playback_id, str) else None,
             "still_listening": bool(still),
             "voice": voice, "language": language,
             "barge": barge or {"enabled": False, "available": False, "count": 0},
@@ -647,7 +659,7 @@ def gather(ctx) -> dict:
     platform = detect_platform()
     return build_snapshot(
         st._status(ctx.sock), sessions, conch, paused=st.is_paused(ctx.base),
-        ptt=ptt, closed=st.pill_closed(ctx.base),
+        ptt=ptt, closed=st.pill_closed(ctx.base), mic_muted=st.mic_muted(ctx.base),
         last_floor=_remember_floor(ctx, conch),
         # The choice in force, as the voice and the recognition language resolve it: without
         # an override, the remembered one (Talos on FELIX #1910). A turn whose caller voice of
@@ -658,6 +670,7 @@ def gather(ctx) -> dict:
         play={"label": play.label} if play else None, wake=wake_view(ctx), platform=platform,
         german=german_available(ctx.home), ptt_listener=ptt_listening(platform, ctx.home),
         german_list=german_voices(ctx.home), voices=voices_by_language(ctx.home, wait=False),
+        orb=(st.setting("VOICEMODE_PILL_APPEARANCE", "", ctx.home) or "").lower().strip() != "classic",
         still_after_s=still_after(ctx.home))
 
 
@@ -922,6 +935,13 @@ def handle_command(msg, ctx=None):
     cmd = msg.get("cmd")
     if cmd == "interrupt":
         st.send_control(ctx.sock, "skip_forward")
+    elif cmd == "interrupt_playback":
+        # The server checks this playback ID under the state lock before cutting audio.
+        playback_id = msg.get("playback_id")
+        if isinstance(playback_id, str) and playback_id.isascii() and playback_id.isdecimal() and len(playback_id) <= 32:
+            st.send_control(ctx.sock, "pill_interrupt", message=playback_id)
+    elif cmd == "set_mic_muted" and type(msg.get("on")) is bool:
+        st.set_mic_muted(msg["on"], ctx.base)
     elif cmd == "done":
         # The pill's Done (FELIX #2094): ends the user's turn and sends what was said
         # (skip_forward while recording). Only while the server is listening: skip_forward is
@@ -940,12 +960,14 @@ def handle_command(msg, ctx=None):
     elif cmd == "resume":
         st.set_paused(False, os.getpid(), ctx.base)
         st.send_control(ctx.sock, "resume")
-    elif cmd == "stop":
+    elif cmd in ("stop", "end_voice"):
         floor, is_holder = _floor(st.live_sessions(ctx.base), read_conch(ctx.home),
                                   st._read_json(ctx.base / "last_floor.json"))
+        if cmd == "end_voice" and (not floor or type(msg.get("pid")) is not int or msg["pid"] != floor["pid"]):
+            return  # a delayed click must not end the next session
         if floor:
             # A live socket belongs to the holder's turn; only a holder may be cut by it.
-            st.mark_stopped(floor["pid"], True, ctx.base)  # first: the cut turn's result reads it
+            st.mark_stopped(floor["pid"], True, ctx.base, hide=(cmd == "end_voice"))
             if not (is_holder and st.send_control(ctx.sock, "stop")):
                 st.request_stop(floor["pid"], ctx.base)
     elif cmd == "dismiss":

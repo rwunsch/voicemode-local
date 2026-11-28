@@ -44,7 +44,7 @@
       : "Minimize; right-click the icon to quit";
   }
   var LABELS = { speaking: "Speaking", listening: "Listening", holding: "Holding\u2026", working: "Between turns",
-    idle: "Not in a voice turn", paused: "Paused",
+    idle: "Not in a voice turn", paused: "Paused", "mic-muted": "Waiting with microphone muted",
     stopped: "Voice off", disconnected: "Disconnected", not_responding: "Not responding" };
   // The status line's longer text where the short label would leave the user guessing.
   // FELIX #2107: the backend sets still_listening after N s of listening (VOICEMODE_PILL_STILL_LISTENING_S).
@@ -104,6 +104,18 @@
     return [{ keys: ["Ctrl", "Space"], text: "tap: voice off, hold: talk" }];
   }
 
+  function presentation(ui, orb) {
+    if (ui.minimized) return "dot";
+    if (ui.mini && orb) return "mini";
+    return ui.docked ? (ui.tucked ? "tab" : ui.dockOpen ? "docked" : "rail") : ui.expanded ? "expanded" : "pill";
+  }
+
+  function orbLevel(snapshot, phase, lastSeenMs, nowMs) {
+    var level = snapshot && snapshot.audio_level;
+    return (phase === "speaking" || phase === "listening") && lastSeenMs != null &&
+      nowMs - lastSeenMs <= 500 && Number.isFinite(level) && level >= 0 && level <= 1 ? level : null;
+  }
+
   function viewModel(snapshot, lastSeenMs, nowMs, extra) {
     var connected = !!snapshot && lastSeenMs != null && nowMs - lastSeenMs <= STALE_MS;
     var off = { enabled: false };
@@ -111,6 +123,7 @@
       // Never show the last known state: a stale "Listening" is worse than none.
       return { connected: false, phase: "disconnected", label: LABELS.disconnected, mode: "pill", side: null,
         primary: HIDDEN, end: button("voiceoff", "stop", "Voice off", STOP, false), mic: HIDDEN, stop: off,
+        orbControls: { pause: HIDDEN, end: HIDDEN },
         close: { action: "minimize", hint: closeHint(snapshot && snapshot.platform) },
         indicator: indicatorFor("disconnected", "", false),
         inTurn: false, pickersEnabled: false, minimizeEnabled: true, queue: [], queueMore: "", voice: null, language: null, keys: [], session: "", stateText: LABELS.disconnected, waitingText: "",
@@ -144,7 +157,8 @@
       base = german && language === "German" ? germanList : VOICES;
     }
     var voices = s.voice && base.indexOf(s.voice) < 0 ? base.concat([s.voice]) : base;
-    var inTurn = phase === "speaking" || phase === "listening" || phase === "holding" || phase === "paused";
+    var inTurn = phase === "speaking" || phase === "listening" || phase === "holding" ||
+      phase === "paused" || phase === "mic-muted";
     var wakeable = !!s.play && (phase === "idle" || phase === "working" || phase === "stopped");
     var floorOn = !!s.floor;
     var wakeTitle = "Wake " + (s.play && s.play.label || "the last session");
@@ -161,12 +175,19 @@
     var end = endShown ? button("voiceoff", "stop", "Voice off", STOP, floorOn) : HIDDEN;
     var wakeText = s.wake && s.wake.text ? s.wake.text : "";
     var interrupted = !!(extra && extra.interruptedUntil != null && nowMs < extra.interruptedUntil);
-    var mode = ui.minimized ? "dot" : ui.docked ? (ui.tucked ? "tab" : ui.dockOpen ? "docked" : "rail") : ui.expanded ? "expanded" : "pill";
+    // The Orb has independent Pause and End actions. The classic primary can change
+    // to Done while listening, which must never replace the Orb's Pause command.
+    var orbPause = phase === "paused" ? button("resume", "resume", "Resume", RESUME, true, { pressed: true })
+      : button("pause", "pause", "Pause", PAUSE, inTurn);
+    var orbEnd = wakeable ? button("wake", "wake", "Start voice", "", true)
+      : button("endvoice", "end_voice", "End voice", STOP, floorOn && phase !== "stopped");
+    var mode = presentation(ui, s.orb === true);
     return {
       connected: true, phase: phase, inTurn: inTurn, label: LABELS[phase] || LABELS.idle, mode: mode,
       side: mode === "docked" || mode === "rail" || mode === "tab" ? (ui.side === "left" ? "left" : "right") : null,
       primary: primary,
       end: end,
+      orbControls: { pause: orbPause, end: orbEnd },
       // Panel only (Robert 2026-11-27): while you talk, Pause is the mute for an interruption.
       mic: phase === "listening" ? button("pausemic", "pause", "Pause mic", PAUSE, floorOn) : HIDDEN,
       // The close button shrinks to the tray / menu bar; Quit is in that icon's menu.
@@ -268,7 +289,7 @@
   }
 
   var api = { previewView: previewView, PREVIEW_SHOW_MS: PREVIEW_SHOW_MS, PREVIEW_PENDING_MS: PREVIEW_PENDING_MS,
-    interruptFlash: interruptFlash, FLASH_MS: FLASH_MS, GUARD_MS: GUARD_MS, STILL_LISTENING_TEXT: STILL_LISTENING_TEXT, clickBarge: clickBarge, bargeShown: bargeShown, PENDING_MS: PENDING_MS, incomingKind: incomingKind, nextHidden: nextHidden, viewModel: viewModel, languageOf: languageOf, voiceForLanguage: voiceForLanguage, VOICES: VOICES, GERMAN_VOICES: GERMAN_VOICES, LANGUAGES: LANGUAGES, STALE_MS: STALE_MS };
+    interruptFlash: interruptFlash, FLASH_MS: FLASH_MS, GUARD_MS: GUARD_MS, STILL_LISTENING_TEXT: STILL_LISTENING_TEXT, clickBarge: clickBarge, bargeShown: bargeShown, PENDING_MS: PENDING_MS, incomingKind: incomingKind, nextHidden: nextHidden, presentation: presentation, orbLevel: orbLevel, viewModel: viewModel, languageOf: languageOf, voiceForLanguage: voiceForLanguage, VOICES: VOICES, GERMAN_VOICES: GERMAN_VOICES, LANGUAGES: LANGUAGES, STALE_MS: STALE_MS };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   if (typeof window !== "undefined") window.PillModel = api;
 })();
