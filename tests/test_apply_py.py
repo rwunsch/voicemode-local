@@ -116,6 +116,7 @@ INTENDED_SINCE_BASELINE = [
     ("patch_audio_recover.py", ["tools/converse.py"]),   # 2026-11-18: a failed stream start is retried once; the fallback ends on cancel
     ("patch_audio_deadline.py", ["core.py", "tools/converse.py", "control_socket.py"]),   # 2026-11-27: FELIX #2095
     ("patch_turn_stats.py", ["tools/converse.py", "control_socket.py"]),   # 2026-11-28: FELIX #2107 per-turn numbers
+    ("patch_pill_done.py", ["control_channel.py", "control_socket.py"]),   # 2026-11-28: Talos #2104 atomic Done
 ]
 # Modules added as "copy" steps since the baseline (2026-11-07: session_wake.py).
 INTENDED_COPIES_SINCE_BASELINE = ["session_wake.py"]

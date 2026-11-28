@@ -86,6 +86,7 @@
      "why": "audio-device calls off the event loop with a deadline; loop watchdog exits a stuck server (FELIX #2095)"},
     {"copy": "turn_stats.py", "to": "turn_stats.py"},
     {"patch": "patch_turn_stats.py", "targets": ["tools/converse.py", "control_socket.py"], "why": "RECORDING_END carries per-turn numbers and how the recording ended, no audio or text; the status reply carries listening_since for the pill (FELIX #2107); needs turn_stats.py"},
+    {"patch": "patch_pill_done.py", "targets": ["control_channel.py", "control_socket.py"], "why": "the pill's Done in one exchange: skip_forward only while a recording runs, decided under the control state's lock (Talos on FELIX #2104); needs voice pill and voice barge"},
     {"patch": "patch_env_provider_keys.py", "targets": ["config.py", "tools/configuration_management.py"], "why": "optional: the two provider keys upstream reads may also come from voicemode.env; not in the Windows manifest or FELIX"}
   ]
 }

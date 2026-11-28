@@ -926,9 +926,12 @@ def handle_command(msg, ctx=None):
         # The pill's Done (FELIX #2094): ends the user's turn and sends what was said
         # (skip_forward while recording). Only while the server is listening: skip_forward is
         # sticky, so a Done landing just after listening ended would skip the next reply.
-        status = st._status(ctx.sock)
-        if status.get("listening") and not status.get("speaking"):
-            st.send_control(ctx.sock, "skip_forward")
+        # The server decides that under its own lock (vml_done); an older voice server
+        # without it gets the old check-then-send, which has a small window (Talos, #2104).
+        if st.request_done(ctx.sock) is None:
+            status = st._status(ctx.sock)
+            if status.get("listening") and not status.get("speaking"):
+                st.send_control(ctx.sock, "skip_forward")
     elif cmd == "pause":
         # Our own pid owns the pause (mic held closed); the socket pause holds TTS.
         # Upstream stops a paused turn after VOICEMODE_CONTROL_PAUSE_TIMEOUT (300 s).

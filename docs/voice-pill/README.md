@@ -174,7 +174,11 @@ run: a native converse turn through Claude Code, and macOS.
 
   Done: the backend forwards `done` as `skip_forward` (which ends the recording and
   transcribes it, upstream VM-1754) only while the server's status says listening and not
-  speaking; skip_forward is sticky, so a late Done must not skip the next reply. Stefan's case:
+  speaking; skip_forward is sticky, so a late Done must not skip the next reply. The server
+  decides that in one exchange (`vml_done`, `patches/patch_pill_done.py`, under the control
+  state's lock; Talos on FELIX #2104); a voice server without it gets the old status-then-send
+  check, which has a short window. Done also ends the fixed-length fallback recording
+  (`docs/audio-recover/README.md`). Stefan's case:
   his recording never ended in a noisy room, he reached for the only button (Stop = voice off).
   The compact pill shows the two as 32 px icons; expanded or docked, only the labelled buttons
   show (no second set of icons). **Hover hints** go to the status line, because a Mac panel

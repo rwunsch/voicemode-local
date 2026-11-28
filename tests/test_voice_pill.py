@@ -64,8 +64,9 @@ def ctx(tmp_path, sock_dir, monkeypatch):
 class FakeControl:
     """A control socket that records command lines and answers `status`."""
 
-    def __init__(self, path, status=None):
-        self.path, self.status, self.received = path, status or {}, []
+    def __init__(self, path, status=None, done=None):
+        # done: None = an older server without vml_done (no reply); else the "applied" value
+        self.path, self.status, self.received, self.done = path, status or {}, [], done
         self._srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self._srv.bind(str(path))
         self._srv.listen(8)
@@ -83,6 +84,10 @@ class FakeControl:
                 msg = json.loads(line)
                 if msg.get("command") == "status":
                     conn.sendall((json.dumps(self.status) + "\n").encode())
+                elif msg.get("command") == "vml_done" and self.done is not None:
+                    self.received.append("vml_done")
+                    conn.sendall((json.dumps({"ok": True, "action": "vml_done",
+                                              "applied": self.done}) + "\n").encode())
                 else:
                     self.received.append(msg["command"])
 
@@ -1782,7 +1787,7 @@ def test_done_while_listening_sends_skip_forward(ctx, control, monkeypatch):
     monkeypatch.setattr(st, "_status", lambda path: {"listening": True, "speaking": False})
     vp.handle_command({"cmd": "done"}, ctx)
     time.sleep(0.1)
-    assert control.received == ["skip_forward"]
+    assert control.received == ["vml_done", "skip_forward"]   # older server: the old check
 
 
 @pytest.mark.parametrize("status", [{"listening": False, "speaking": True}, {}, {"listening": True, "speaking": True}])
@@ -1790,11 +1795,24 @@ def test_done_when_not_listening_does_nothing(ctx, control, monkeypatch, status)
     monkeypatch.setattr(st, "_status", lambda path: status)
     vp.handle_command({"cmd": "done"}, ctx)
     time.sleep(0.1)
-    assert control.received == []
+    assert control.received == ["vml_done"]   # older server: the old check sends nothing
 
 
 def test_done_with_no_socket_is_harmless(ctx):
     vp.handle_command({"cmd": "done"}, ctx)
+
+
+# Talos on FELIX #2104 (3): with a server that knows vml_done, Done is one exchange and the
+# pill never sends skip_forward itself, whatever the server decides.
+@pytest.mark.parametrize("applied", [True, False])
+def test_done_uses_the_servers_atomic_done(ctx, applied):
+    c = FakeControl(ctx.sock, status={"listening": True, "speaking": False}, done=applied)
+    try:
+        vp.handle_command({"cmd": "done"}, ctx)
+        time.sleep(0.1)
+        assert c.received == ["vml_done"]
+    finally:
+        c.close()
 
 
 # FELIX #2107: a turn that keeps listening gets a note in the pill after N seconds ("still
