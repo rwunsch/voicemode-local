@@ -16,6 +16,7 @@ import subprocess
 import sys
 import threading
 import time
+import types
 import uuid
 from pathlib import Path
 
@@ -231,10 +232,21 @@ class FakeSD:
     def query_devices(self, kind=None):
         return {"name": "Fake mic"}
 
+    written_s = None   # set: rec's buffer holds garbage past this many seconds (np.empty)
+    callback = True    # False: no sd._last_callback, as when sounddevice's private name changes
+
     def rec(self, frames, samplerate, channels, dtype):
         self.recs.append(frames / samplerate)
-        self.streams.append(FakeStream(frames / samplerate))
-        return np.zeros((frames, channels), dtype=np.int16)
+        stream = FakeStream(frames / samplerate)
+        self.streams.append(stream)
+        if self.written_s is None:
+            return np.zeros((frames, channels), dtype=np.int16)
+        written = int(self.written_s * samplerate)
+        buf = np.full((frames, channels), 7777, dtype=np.int16)   # what np.empty may hold
+        buf[:written] = 1
+        if self.callback:
+            self._last_callback = types.SimpleNamespace(stream=stream, frame=written)
+        return buf
 
     def wait(self):
         stream = self.streams[-1]
@@ -627,6 +639,40 @@ def test_done_ends_the_fallback_and_keeps_only_what_was_recorded(patched, monkey
     assert 0 < len(audio) < 3 * m.SAMPLE_RATE      # not the 120 s buffer
     assert state.forward, "converse consumes skip_forward after the recording, not the watcher"
     assert any("skip_forward" in line for line in m.LOG)
+
+
+def _done_after(m, fake, state, wait_s):
+    t, out, started = _record_in_thread(m, 120.0, threading.Event())
+    deadline = time.monotonic() + 5
+    while not fake.streams and time.monotonic() < deadline:
+        time.sleep(0.01)
+    time.sleep(wait_s)
+    state.forward = True
+    t.join(5)
+    assert not t.is_alive(), "Done did not end the fallback recording"
+    return out["result"][0], time.monotonic() - started
+
+
+# Review of the Talos fix: sd.rec allocates with np.empty, so past the frames written the
+# buffer is whatever memory held. After Done, cut at the frames written, never past them.
+def test_after_done_the_unwritten_tail_is_never_returned(patched, monkeypatch):
+    state = _control(monkeypatch)
+    fake = FakeSD([RuntimeError("no start")])
+    fake.written_s = 0.25
+    m = _load(patched, fake)
+    audio, _ = _done_after(m, fake, state, 0.6)
+    assert len(audio) == int(0.25 * m.SAMPLE_RATE)
+    assert (audio == 1).all(), "garbage from the unwritten buffer reached the transcription"
+
+
+def test_without_the_frame_count_done_keeps_no_more_than_was_recorded(patched, monkeypatch):
+    state = _control(monkeypatch)
+    fake = FakeSD([RuntimeError("no start")])
+    fake.written_s, fake.callback = 0.6, False      # recording runs; no sd._last_callback
+    m = _load(patched, fake)
+    audio, _ = _done_after(m, fake, state, 0.5)
+    assert 0 < len(audio) <= int(0.6 * m.SAMPLE_RATE)
+    assert (audio == 1).all(), "the time-based cut went past what was recorded"
 
 
 def test_without_a_control_channel_the_fallback_is_as_before(patched, monkeypatch):
