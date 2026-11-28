@@ -78,9 +78,13 @@ from voice_mode.control_channel import get_control_state
 since = []
 if ACTION == "since":
     from voice_mode import control_socket
-    def sample():
-        time.sleep(0.2)
-        since.append(control_socket._vml_listening_since())
+    def sample():   # poll: the recording starts only after the device refresh (~0.7 s, varies)
+        while True:
+            v = control_socket._vml_listening_since()
+            if v is not None:
+                since.append(v)
+                return
+            time.sleep(0.01)
     threading.Thread(target=sample, daemon=True).start()
 elif ACTION != "none":
     def later():
@@ -176,6 +180,6 @@ def test_silence_detection_off_is_no_vad(tree, tmp_path):
 # Review of a51c406 (F3): the pill's note needs the start of every recording, not upstream's
 # barge-only listen_started_at. The status reply's listening_since is set while recording.
 def test_listening_since_is_set_while_recording(tree, tmp_path):
-    f = _record(tree, tmp_path, "S", action="since", max_s=0.6)
+    f = _record(tree, tmp_path, "S", action="since", max_s=1.0)
     assert f["_since_during"] is not None and abs(f["_since_during"] - f["_t0"]) < 2
     assert f["_since_after"] is None
