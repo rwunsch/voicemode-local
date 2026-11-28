@@ -182,6 +182,13 @@ INTENDED_STEP_LINES.append(
     b'     "why": "audio-device calls off the event loop with a deadline; loop watchdog exits a stuck server (FELIX #2095)"},\n')
 INTENDED_PATCHES.append(("patch_audio_deadline.py", ["core.py", "tools/converse.py", "control_socket.py"]))
 INTENDED_COPIES += ["audio_deadline.py"]
+# 2026-11-28 (FELIX #2107): RECORDING_END carries per-turn numbers and how the recording ended.
+INTENDED_STEP_LINES.append(b'    {"copy": "turn_stats.py", "to": "turn_stats.py"},\n')
+INTENDED_STEP_LINES.append(b'    {"patch": "patch_turn_stats.py", "targets": ["tools/converse.py", "control_socket.py"], "why": "RECORDING_END carries per-turn numbers and how the recording ended, no audio or text; the status reply carries listening_since for the pill (FELIX #2107); needs turn_stats.py"},\n')
+INTENDED_PATCHES.append(("patch_turn_stats.py", ["tools/converse.py", "control_socket.py"]))
+INTENDED_STEP_LINES.append(b'    {"patch": "patch_pill_done.py", "targets": ["control_channel.py", "control_socket.py"], "why": "the pill\'s Done in one exchange: skip_forward only while a recording runs, decided under the control state\'s lock (Talos on FELIX #2104); needs voice pill and voice barge"},\n')
+INTENDED_PATCHES.append(("patch_pill_done.py", ["control_channel.py", "control_socket.py"]))
+INTENDED_COPIES += ["turn_stats.py"]
 # Text edits those additions force on lines that were already there: (now, before).
 INTENDED_EDITS = [
     (b'    "audio_player.py",\n', b''),

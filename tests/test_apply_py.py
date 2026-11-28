@@ -120,6 +120,8 @@ INTENDED_SINCE_BASELINE = [
     ("patch_voice_orb.py", ["control_channel.py", "control_socket.py", "tools/converse.py",
                             "streaming.py", "audio_player.py", "core.py"]),
     ("patch_audio_deadline.py", ["core.py", "tools/converse.py", "control_socket.py"]),   # 2026-11-27: FELIX #2095
+    ("patch_turn_stats.py", ["tools/converse.py", "control_socket.py"]),   # 2026-11-28: FELIX #2107 per-turn numbers
+    ("patch_pill_done.py", ["control_channel.py", "control_socket.py"]),   # 2026-11-28: Talos #2104 atomic Done
 ]
 # Modules added as "copy" steps since the baseline (2026-11-07: session_wake.py).
 INTENDED_COPIES_SINCE_BASELINE = ["session_wake.py"]
@@ -130,6 +132,7 @@ INTENDED_COPIES_SINCE_BASELINE += ["pill_autostart.py", "pill-windows.ps1", "voi
 INTENDED_COPIES_SINCE_BASELINE += ["conch_wakers.py"]   # 2026-11-11
 INTENDED_COPIES_SINCE_BASELINE += ["conch_hold.py", "mcp_progress.py"]   # 2026-11-11
 INTENDED_COPIES_SINCE_BASELINE += ["audio_deadline.py"]   # 2026-11-27: FELIX #2095
+INTENDED_COPIES_SINCE_BASELINE += ["turn_stats.py"]   # 2026-11-28: FELIX #2107
 INTENDED_COPIES_SINCE_BASELINE += ["tts_chunks.py"]   # 2026-11-14
 INTENDED_COPIES_SINCE_BASELINE += ["voice_languages.py", "voice_fallback.py"]   # 2026-11-17
 INTENDED_COPIES_SINCE_BASELINE += ["voice_sensitivity.py"]   # 2026-11-18

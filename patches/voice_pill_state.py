@@ -1104,6 +1104,21 @@ def _status(path: Path) -> dict:
     return reply if isinstance(reply, dict) else {}
 
 
+def request_done(path: Path):
+    """The pill's Done in one exchange (Talos on FELIX #2104): True if the server applied it,
+    False if it refused (no recording running, or speaking), None if this server has no
+    vml_done (older voice server: no reply), so the caller falls back to the old check."""
+    if not _use_pipe() and not path.exists():
+        return False
+    try:
+        reply = _exchange(path, {"command": "vml_done"}, want_reply=True)
+    except (OSError, ValueError):
+        return None
+    if isinstance(reply, dict) and reply.get("action") == "vml_done":
+        return bool(reply.get("applied"))
+    return None
+
+
 def send_control(path: Path, command: str, *, message: str | None = None) -> bool:
     """Fire-and-forget control command. True if it was delivered to a live socket."""
     if not _use_pipe() and not path.exists():

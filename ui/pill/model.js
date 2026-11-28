@@ -47,6 +47,8 @@
     idle: "Not in a voice turn", paused: "Paused", "mic-muted": "Waiting with microphone muted",
     stopped: "Voice off", disconnected: "Disconnected", not_responding: "Not responding" };
   // The status line's longer text where the short label would leave the user guessing.
+  // FELIX #2107: the backend sets still_listening after N s of listening (VOICEMODE_PILL_STILL_LISTENING_S).
+  var STILL_LISTENING_TEXT = "Still listening. Press \u21B5\uFE0E Done when you have finished";
   var STATE_TEXT = { stopped: "Voice off: continuing in text. Ask for voice to resume",
     // It ends itself after VOICEMODE_LOOP_STALL_EXIT_S; whether the host starts a new one is
     // not known (Copilot desktop unmeasured, FELIX's launch.js does not respawn): no promise.
@@ -205,7 +207,9 @@
       beeps: { on: !!s.beeps },
       voices: voices, languages: languages,
       session: name,
-      stateText: interrupted ? TONE_TEXT.interrupted : wakeText || STATE_TEXT[phase] || LABELS[phase] || LABELS.idle,
+      stateText: interrupted ? TONE_TEXT.interrupted : wakeText
+        || (phase === "listening" && s.still_listening ? STILL_LISTENING_TEXT : "")
+        || STATE_TEXT[phase] || LABELS[phase] || LABELS.idle,
       wakeText: wakeText,
       waitingText: waiting ? "+" + waiting + " waiting" : "",
     };
@@ -285,7 +289,7 @@
   }
 
   var api = { previewView: previewView, PREVIEW_SHOW_MS: PREVIEW_SHOW_MS, PREVIEW_PENDING_MS: PREVIEW_PENDING_MS,
-    interruptFlash: interruptFlash, FLASH_MS: FLASH_MS, GUARD_MS: GUARD_MS, clickBarge: clickBarge, bargeShown: bargeShown, PENDING_MS: PENDING_MS, incomingKind: incomingKind, nextHidden: nextHidden, presentation: presentation, orbLevel: orbLevel, viewModel: viewModel, languageOf: languageOf, voiceForLanguage: voiceForLanguage, VOICES: VOICES, GERMAN_VOICES: GERMAN_VOICES, LANGUAGES: LANGUAGES, STALE_MS: STALE_MS };
+    interruptFlash: interruptFlash, FLASH_MS: FLASH_MS, GUARD_MS: GUARD_MS, STILL_LISTENING_TEXT: STILL_LISTENING_TEXT, clickBarge: clickBarge, bargeShown: bargeShown, PENDING_MS: PENDING_MS, incomingKind: incomingKind, nextHidden: nextHidden, presentation: presentation, orbLevel: orbLevel, viewModel: viewModel, languageOf: languageOf, voiceForLanguage: voiceForLanguage, VOICES: VOICES, GERMAN_VOICES: GERMAN_VOICES, LANGUAGES: LANGUAGES, STALE_MS: STALE_MS };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   if (typeof window !== "undefined") window.PillModel = api;
 })();

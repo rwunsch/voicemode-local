@@ -134,9 +134,36 @@ def _vml_fallback_seconds(max_duration):
     return max_duration
 
 
+def _vml_fallback_done():
+    """Was Done (skip_forward) pressed? The fixed-length recording reads no control state of
+    its own (Talos on FELIX #2104). Left set: converse consumes it after the recording."""
+    try:
+        from voice_mode.control_channel import get_control_state
+        return bool(get_control_state().snapshot().is_skip_forward)
+    except Exception:
+        return False
+
+
+def _vml_fallback_written(stopped, seen, total):
+    """Frames sd.rec wrote before Done stopped its stream. Its buffer comes from np.empty, so
+    the rest is whatever memory held and must not reach the transcription. sounddevice counts
+    the frames written in its callback context (private, so guarded, and used only when it
+    belongs to the stream that was stopped); else the time since the watcher first saw the
+    stream, which started before that and so never counts past what was recorded."""
+    stream, at = stopped
+    cb = getattr(sd, "_last_callback", None)
+    frame = getattr(cb, "frame", None)
+    if getattr(cb, "stream", None) is stream and isinstance(frame, int) and 0 < frame <= total:
+        return frame
+    if seen:
+        return max(1, min(total, int((at - seen[0]) * SAMPLE_RATE)))
+    return 1
+
+
 def _vml_fallback_record(max_duration, stop_event):
     """record_audio for the error fallback: capped by VOICEMODE_FALLBACK_RECORD_MAX_S, and
-    its stream is stopped when stop_event is set (checked every 0.1 s)."""
+    its stream is stopped when stop_event is set or Done is pressed (checked every 0.1 s).
+    After Done only what was recorded is returned, not the rest of the sd.rec buffer."""
     duration = _vml_fallback_seconds(max_duration)
     if stop_event is None:
         return record_audio(duration)
@@ -148,18 +175,30 @@ def _vml_fallback_record(max_duration, stop_event):
     except Exception:
         before = None
     done = threading.Event()
+    seen = []      # when the watcher first saw this recording's stream (it started earlier)
+    stopped = []   # the stream Done stopped
 
     def _watch():
         said = False
         while not done.wait(0.1):
-            if not stop_event.is_set():
-                continue
             try:
                 stream = sd.get_stream()
-                if stream is before or stream.closed:
-                    continue
+            except Exception:
+                continue
+            if stream is before or stream.closed:
+                continue
+            if not seen:
+                seen.append(time.monotonic())
+            cancelled = stop_event.is_set()
+            if not cancelled and not _vml_fallback_done():
+                continue
+            try:
                 if not said:
-                    logger.info("Fixed duration fallback recording stopped: caller was cancelled")
+                    if cancelled:
+                        logger.info("Fixed duration fallback recording stopped: caller was cancelled")
+                    else:
+                        logger.info("Fixed duration fallback recording ended by skip_forward (Done)")
+                        stopped.append((stream, time.monotonic()))
                     said = True
                 stream.stop()
             except Exception:
@@ -167,9 +206,12 @@ def _vml_fallback_record(max_duration, stop_event):
 
     threading.Thread(target=_watch, name="vml-fallback-stop", daemon=True).start()
     try:
-        return record_audio(duration)
+        audio = record_audio(duration)
     finally:
         done.set()
+    if stopped and len(audio):
+        audio = audio[:_vml_fallback_written(stopped[0], seen, len(audio))]
+    return audio
 
 '''
 

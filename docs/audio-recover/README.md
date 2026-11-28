@@ -62,6 +62,15 @@ fixed-length recording; old behaviour via `VOICEMODE_AUDIO_RECOVER=false`.
 within about 0.1 s instead of letting it run to `max_duration`. No switch: the old
 behaviour only kept a thread recording for a caller that had already gone.
 
+**behaviour change (Talos on FELIX #2104):** Done (the pill's Done, or any `skip_forward`)
+now also ends a fixed-length fallback recording within about 0.1 s, and only the audio
+recorded until then is transcribed, not the rest of the `max_duration` buffer: the cut is at
+the frames sounddevice wrote (`sd.rec` allocates with `np.empty`, so the rest is not audio),
+or, if sounddevice's private frame count is not there, at the time since the stream was
+first seen, which never counts past what was recorded.
+Before, the pill showed Listening and offered Done, but nothing read it until `max_duration`.
+No switch: Done that does nothing is the bug.
+
 `VOICEMODE_FALLBACK_RECORD_MAX_S` changes nothing until set.
 
 ## Tests
