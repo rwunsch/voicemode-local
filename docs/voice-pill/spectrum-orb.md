@@ -33,6 +33,10 @@ The separate voice-interrupt detector also keeps its input closed while muted.
 Ending voice hides the Pill for that floor until its next turn; it does not dismiss
 an unrelated conversation if the active floor changed before the click arrived.
 
+On macOS, `./install-mac.sh --yes --pill` sets up the local voice services and enables
+the Pill. The real Orb appears when a voice session starts. `Preview voice` uses
+the selected local voice between turns; it is disabled during an active turn.
+
 Spectrum Web Components 1.12.6 run from a checked-in local bundle so no browser
 network access or Node installation is needed at runtime. To regenerate the bundle
 and its notices: `cd scripts/pill-spectrum && npm ci && npm run build`.
