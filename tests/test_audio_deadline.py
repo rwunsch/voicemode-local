@@ -350,3 +350,35 @@ def test_backstop_rearm_is_not_every_beat(ad, monkeypatch):
         dog.stamp()
         clock.t += 1
     assert len(calls) == 3   # at 0, 10 and 20 s
+
+
+# Talos on FELIX #2104 (1): the retention prune counted live servers' files too, so with more
+# than KEEP_DUMPS other backstop files the oldest LIVE server's open file was unlinked.
+def test_the_retention_prune_never_removes_a_live_servers_file(ad, monkeypatch, tmp_path):
+    d = tmp_path / "logs" / "stall"
+    d.mkdir(parents=True)
+    live = [d / f"backstop-{100000 + i}.txt" for i in range(ad.KEEP_DUMPS + 1)]
+    fired = [d / f"backstop-{900000 + i}.txt" for i in range(ad.KEEP_DUMPS + 2)]
+    for n, p in enumerate(live + fired):
+        p.write_text("" if p in live else "Current thread")
+        os.utime(p, (1000 + n, 1000 + n))   # the live ones are the oldest
+    monkeypatch.setattr(ad, "_pid_alive", lambda raw: int(raw) < 900000)
+    f = ad.open_backstop()
+    f.close()
+    assert all(p.exists() for p in live)
+    kept = [p for p in fired if p.exists()]
+    assert kept == fired[-ad.KEEP_DUMPS:]   # fired files of dead runs: the newest KEEP_DUMPS
+
+
+def test_on_windows_the_prune_relies_on_open_files_being_undeletable(ad, monkeypatch, tmp_path):
+    # Windows cannot ask whether a pid runs; the delete is tried and an open file refuses it.
+    d = tmp_path / "logs" / "stall"
+    d.mkdir(parents=True)
+    fired = [d / f"backstop-{900000 + i}.txt" for i in range(ad.KEEP_DUMPS + 2)]
+    for n, p in enumerate(fired):
+        p.write_text("Current thread")
+        os.utime(p, (1000 + n, 1000 + n))
+    monkeypatch.setattr(ad, "_keep_as_live", lambda raw: False)   # as on Windows
+    f = ad.open_backstop()
+    f.close()
+    assert [p for p in fired if p.exists()] == fired[-ad.KEEP_DUMPS:]

@@ -255,6 +255,13 @@ def write_dump(why: str, lag=None):
         return None
 
 
+def _keep_as_live(raw) -> bool:
+    """Skip this file as a running server's? POSIX asks _pid_alive. Windows cannot ask (see
+    there), but it refuses to delete a file another process holds open, so the unlink below
+    is tried and a live server's file survives it (the OSError is ignored)."""
+    return os.name != "nt" and _pid_alive(raw)
+
+
 def _pid_alive(raw) -> bool:
     """Is that voice server still running? True when unsure, so its file is kept. On Windows
     os.kill(pid, 0) would TERMINATE the process, so it is never called there; an open file
@@ -282,14 +289,24 @@ def open_backstop():
         folder = stall_dir()
         folder.mkdir(parents=True, exist_ok=True)
         mine = folder / f"backstop-{os.getpid()}.txt"
+        fired = []   # files of servers no longer running that hold a dump
         for old in folder.glob("backstop-*.txt"):
-            if old != mine:
-                try:
-                    if old.stat().st_size == 0 and not _pid_alive(old.stem.split("-", 1)[1]):
-                        old.unlink()   # one per voice server: never another live server's file
-                except OSError:
-                    pass
-        _prune(folder, "backstop-*.txt", KEEP_DUMPS)
+            if old == mine or _keep_as_live(old.stem.split("-", 1)[1]):
+                continue   # one per voice server: never another live server's file
+            try:
+                if old.stat().st_size == 0:
+                    old.unlink()
+                else:
+                    fired.append((old.stat().st_mtime, old))
+            except OSError:
+                pass
+        # Keep the last KEEP_DUMPS that fired. Live servers' files do not count and are never
+        # pruned (Talos on FELIX #2104: a seventh server unlinked the oldest live one's file).
+        for _, old in sorted(fired)[:max(0, len(fired) - KEEP_DUMPS)]:
+            try:
+                old.unlink()
+            except OSError:
+                pass
         return open(mine, "w", encoding="utf-8")
     except Exception:
         return None
