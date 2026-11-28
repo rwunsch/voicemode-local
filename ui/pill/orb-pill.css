@@ -55,7 +55,12 @@ body[data-orb-layout][data-orb-side=left] #orbStrip {
 body[data-orb-layout][data-orb-reveal=false] #orbStrip * { pointer-events: none; }
 body[data-orb-layout] :is(sp-action-button, sp-button, sp-picker, sp-switch) { -webkit-app-region: no-drag; }
 body[data-orb-layout] #orbStrip > * { flex: none; }
-body[data-orb-layout] #orbSettingsToggle { margin-inline-start: 8px; }
+body[data-orb-layout] #orbSettingsToggle {
+  --mod-actionbutton-height: 28px;
+  --mod-actionbutton-min-width: 28px;
+  --mod-actionbutton-icon-size: 18px;
+  margin-inline-start: 4px;
+}
 body[data-orb-layout] .orb-panel {
   position: absolute; z-index: 2; top: calc(var(--orb-row) + 2px); right: 6px; left: 6px;
   display: grid; gap: 8px; padding: 10px;
