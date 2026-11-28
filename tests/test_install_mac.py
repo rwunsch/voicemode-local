@@ -170,9 +170,11 @@ class Box:
         self.state, self.log = tmp / "state", tmp / "calls.log"
         for d in (self.repo, self.home, self.bin, self.state):
             d.mkdir(parents=True, exist_ok=True)
-        shutil.copy(INSTALLER, self.repo / "install-mac.sh")
+        # Keep the absolute Homebrew fallback inside the fixture on Apple Silicon too.
+        homebrew_bin = self.root / "opt/homebrew/bin"
+        _write(self.repo / "install-mac.sh",
+               INSTALLER.read_text().replace("/opt/homebrew/bin", str(homebrew_bin)))
         shutil.copy(REPO / "kokoro-onnx-server.py", self.repo / "kokoro-onnx-server.py")
-        (self.repo / "install-mac.sh").chmod(0o755)
         _write(self.repo / "voicemode-switch", STUB_SWITCH)
         _write(self.repo / "voicemode-mcp", "#!/bin/bash\n")
         _write(self.repo / "patches/apply.sh", STUB_APPLY)

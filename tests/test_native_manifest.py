@@ -205,6 +205,9 @@ def test_default_manifest_file_is_unchanged():
 
 def test_default_output_is_byte_identical_to_before(tmp_path):
     old = _patches_at(BEFORE, tmp_path / "old")
+    # Mic mute intentionally extends the existing recorder patch. Run that version
+    # at the same point in the baseline, before the later audio patches.
+    shutil.copyfile(PATCHES / "patch_voice_pill.py", old / "patch_voice_pill.py")
     before, now = _tree(tmp_path / "a"), _tree(tmp_path / "b")
     _apply(old / "apply.py", before)
     for script, targets in INTENDED_PATCHES:
